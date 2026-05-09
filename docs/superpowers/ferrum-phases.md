@@ -57,7 +57,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | # | Name | What it produces | Depends on | Spec doc | Status |
 |---|---|---|---|---|---|
 | **1** | Build & packaging skeleton | Cargo workspace + maturin backend + `ferrum._core.add()` compiles and imports | — | [`2026-05-09-rust-skeleton-design.md`](specs/2026-05-09-rust-skeleton-design.md) | **done** |
-| **2** | Python↔Rust data-handoff layer | Arrow CDI bridge (pyo3-arrow): DataFrame → RecordBatch in → transformed RecordBatch out via C Data Interface; no row-level Python after handoff | 1 | [`2026-05-09-arrow-ipc-design.md`](specs/2026-05-09-arrow-ipc-design.md) | pending |
+| **2** | Python↔Rust data-handoff layer | Arrow CDI bridge (pyo3-arrow): DataFrame → RecordBatch in → transformed RecordBatch out via C Data Interface; no row-level Python after handoff | 1 | [`2026-05-09-arrow-ipc-design.md`](specs/2026-05-09-arrow-ipc-design.md) | **done** |
 | **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | *(not yet written)* | pending |
 | **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | *(not yet written)* | pending |
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | *(not yet written)* | pending |
@@ -82,10 +82,10 @@ A phase is `done` when all of the following are true:
 - [x] `Cargo.toml` (workspace), `crates/ferrum-core/Cargo.toml`, `crates/ferrum-core/src/lib.rs`, `src/ferrum/__init__.py`, `src/ferrum/_core.pyi` all committed to `main`
 
 ### Phase 2 — Data-handoff layer
-- [ ] A polars DataFrame and a pyarrow RecordBatch each cross the PyO3 boundary via the Arrow C Data Interface (pyo3-arrow crate)
-- [ ] Rust receives a `RecordBatch`, applies a trivial transform (column rename), returns a `RecordBatch` via CDI
-- [ ] Python receives the result with zero row-level access in between
-- [ ] `cargo test` passes in `crates/ferrum-core` (tests the Arrow round-trip on the Rust side)
+- [x] A polars DataFrame and a pyarrow RecordBatch each cross the PyO3 boundary via the Arrow C Data Interface (pyo3-arrow crate)
+- [x] Rust receives a `RecordBatch`, applies a trivial transform (column rename), returns a `RecordBatch` via CDI
+- [x] Python receives the result with zero row-level access in between
+- [x] `cargo test` passes in `crates/ferrum-core` (tests the Arrow round-trip on the Rust side)
 
 ### Phase 3 — Chart spec IR
 - [ ] A `ChartSpec` Rust struct exists with enough fields to represent a single-layer scatter plot (data ref, x/y encoding, mark type)
