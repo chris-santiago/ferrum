@@ -60,7 +60,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **1** | Build & packaging skeleton | Cargo workspace + maturin backend + `ferrum._core.add()` compiles and imports | — | [`2026-05-09-rust-skeleton-design.md`](specs/2026-05-09-rust-skeleton-design.md) | **done** |
 | **2** | Python↔Rust data-handoff layer | Arrow CDI bridge (pyo3-arrow): DataFrame → RecordBatch in → transformed RecordBatch out via C Data Interface; no row-level Python after handoff | 1 | [`2026-05-09-arrow-ipc-design.md`](specs/2026-05-09-arrow-ipc-design.md) | **done** |
 | **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | [`2026-05-09-chart-spec-ir-design.md`](specs/2026-05-09-chart-spec-ir-design.md) | **done** |
-| **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | *(not yet written)* | pending |
+| **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | [`2026-05-09-scale-engine-design.md`](specs/2026-05-09-scale-engine-design.md) | **done** |
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | *(not yet written)* | pending |
 | **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | *(not yet written)* | pending |
 | **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | *(not yet written)* | pending |
@@ -95,11 +95,11 @@ A phase is `done` when all of the following are true:
 - [x] `cargo test` covers at least one round-trip case
 
 ### Phase 4 — Scale engine
-- [ ] All seven scale types are implemented in Rust and exposed via `ferrum._core`
-- [ ] Domain/range mapping is correct for boundary values (including log(0), symlog threshold, ordinal padding)
-- [ ] Tick generation passes the spec's "Sturges floor" requirement for binning
-- [ ] Python-facing type stubs in `_core.pyi` cover all scale constructors
-- [ ] `cargo test` covers at least one inversion test per scale type
+- [x] All seven scale types are implemented in Rust and exposed via `ferrum._core`
+- [x] Domain/range mapping is correct for boundary values (including log(0), symlog threshold, ordinal padding)
+- [x] Tick generation passes the spec's "Sturges floor" requirement for binning
+- [x] Python-facing type stubs in `_core.pyi` cover all scale constructors
+- [x] `cargo test` covers at least one inversion test per scale type
 
 ### Phase 5 — Stat engine
 - [ ] KDE, bootstrap CI, linear regression, LOESS, binning, and basic aggregation implemented in Rust
