@@ -59,7 +59,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 |---|---|---|---|---|---|
 | **1** | Build & packaging skeleton | Cargo workspace + maturin backend + `ferrum._core.add()` compiles and imports | — | [`2026-05-09-rust-skeleton-design.md`](specs/2026-05-09-rust-skeleton-design.md) | **done** |
 | **2** | Python↔Rust data-handoff layer | Arrow CDI bridge (pyo3-arrow): DataFrame → RecordBatch in → transformed RecordBatch out via C Data Interface; no row-level Python after handoff | 1 | [`2026-05-09-arrow-ipc-design.md`](specs/2026-05-09-arrow-ipc-design.md) | **done** |
-| **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | *(not yet written)* | pending |
+| **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | [`2026-05-09-chart-spec-ir-design.md`](specs/2026-05-09-chart-spec-ir-design.md) | **done** |
 | **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | *(not yet written)* | pending |
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | *(not yet written)* | pending |
 | **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | *(not yet written)* | pending |
@@ -89,10 +89,10 @@ A phase is `done` when all of the following are true:
 - [x] `cargo test` passes in `crates/ferrum-core` (tests the Arrow round-trip on the Rust side)
 
 ### Phase 3 — Chart spec IR
-- [ ] A `ChartSpec` Rust struct exists with enough fields to represent a single-layer scatter plot (data ref, x/y encoding, mark type)
-- [ ] Python can construct it via a `ferrum._core.ChartSpec` binding and pass it to Rust
-- [ ] Rust can round-trip serialize/deserialize `ChartSpec` to/from JSON via `serde_json` (decision 2026-05-09 — see locked-decisions table)
-- [ ] `cargo test` covers at least one round-trip case
+- [x] A `ChartSpec` Rust struct exists with enough fields to represent a single-layer scatter plot (data ref, x/y encoding, mark type)
+- [x] Python can construct it via a `ferrum._core.ChartSpec` binding and pass it to Rust
+- [x] Rust can round-trip serialize/deserialize `ChartSpec` to/from JSON via `serde_json` (decision 2026-05-09 — see locked-decisions table)
+- [x] `cargo test` covers at least one round-trip case
 
 ### Phase 4 — Scale engine
 - [ ] All seven scale types are implemented in Rust and exposed via `ferrum._core`
