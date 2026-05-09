@@ -262,6 +262,8 @@ EncodingSpec(
 
 Both short (`"Q"`) and long (`"quantitative"`) forms are accepted at the boundary. Internal storage is the long form. The `_core.pyi` stub advertises a `Literal[...]` of valid values so IDEs autocomplete.
 
+> **Implementation note (2026-05-09):** Field access on `EncodingSpec` is provided by hand-written `#[getter]` methods rather than PyO3's `get_all` derive. Reason: `Option<DataType>` is not `IntoPyObject` (because the internal `DataType` enum is intentionally not a `#[pyclass]`), so `get_all` won't compile. The hand-written getters return `field: &str` and `type_: Option<&'static str>` — `type_` returns the lowercase long-form string (`"quantitative"`, etc.) at the Python boundary, which matches the `Optional[str]` Python attribute type advertised in `_core.pyi`. Behavior from a Python user's perspective is identical to what `get_all` would have produced.
+
 ### `ChartSpec` constructor — Phase 3 sugar form
 
 ```python

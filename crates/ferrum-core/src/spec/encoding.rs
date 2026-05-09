@@ -67,6 +67,15 @@ pub struct EncodingSpec {
     pub type_: Option<DataType>,
 }
 
+impl EncodingSpec {
+    pub(crate) fn repr_string(&self) -> String {
+        match &self.type_ {
+            None => format!("EncodingSpec(field='{}')", self.field),
+            Some(t) => format!("EncodingSpec(field='{}', type_='{}')", self.field, t.as_str()),
+        }
+    }
+}
+
 #[pymethods]
 impl EncodingSpec {
     #[new]
@@ -96,10 +105,7 @@ impl EncodingSpec {
     }
 
     fn __repr__(&self) -> String {
-        match &self.type_ {
-            None => format!("EncodingSpec(field='{}')", self.field),
-            Some(t) => format!("EncodingSpec(field='{}', type_='{}')", self.field, t.as_str()),
-        }
+        self.repr_string()
     }
 }
 

@@ -89,11 +89,11 @@ impl ChartSpec {
         };
         let x = match &self.encoding.x {
             None => "None".to_string(),
-            Some(e) => format!("EncodingSpec(field='{}')", e.field),
+            Some(e) => e.repr_string(),
         };
         let y = match &self.encoding.y {
             None => "None".to_string(),
-            Some(e) => format!("EncodingSpec(field='{}')", e.field),
+            Some(e) => e.repr_string(),
         };
         format!("ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}')")
     }

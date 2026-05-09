@@ -115,3 +115,13 @@ def test_repr_contains_fields():
     assert "mark='point'" in r
     assert "price" in r
     assert "weight" in r
+
+
+def test_repr_preserves_encoding_type():
+    spec = ChartSpec(
+        mark="point",
+        x=EncodingSpec(field="price", type_="Q"),
+        y="weight",
+    )
+    r = repr(spec)
+    assert "type_='quantitative'" in r, f"type_ missing from repr: {r}"
