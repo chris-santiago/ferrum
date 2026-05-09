@@ -1,6 +1,6 @@
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -43,9 +43,7 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
 
     match spec.method {
         SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n),
-        SmoothMethod::Loess => Err(PyNotImplementedError::new_err(
-            "stat_smooth(method=loess) lands in Task 13/15"
-        )),
+        SmoothMethod::Loess => loess_fit(&xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed),
     }
 }
 
@@ -196,6 +194,113 @@ fn inv_normal_cdf(p: f64) -> f64 {
     }
 }
 
+fn loess_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64],
+    bandwidth: f64, degree: u8, ci: Option<f64>, n_grid: usize, seed: u64,
+) -> PyResult<RecordBatch> {
+    let n = xs.len();
+    let k = ((bandwidth * n as f64).ceil() as usize).max((degree as usize) + 1);
+    let k = k.min(n);
+
+    let y_fit: Vec<f64> = grid.iter().map(|&x0|
+        loess_at_point(xs, ys, x0, k, degree)
+    ).collect();
+
+    let (lo, hi) = match ci {
+        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
+        Some(level) => loess_bootstrap_ci(xs, ys, grid, k, degree, level, seed),
+    };
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi)
+}
+
+fn loess_at_point(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) -> f64 {
+    let n = xs.len();
+    if n == 0 || k == 0 { return f64::NAN; }
+    let mut order: Vec<(usize, f64)> = (0..n).map(|i| (i, (xs[i] - x0).abs())).collect();
+    order.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let take = order.iter().take(k).copied().collect::<Vec<_>>();
+    if take.len() < (degree as usize) + 1 { return f64::NAN; }
+    let h = take.last().unwrap().1;
+
+    if degree == 1 {
+        let mut sw = 0.0; let mut swx = 0.0; let mut swxx = 0.0;
+        let mut swy = 0.0; let mut swxy = 0.0;
+        for (i, dist) in &take {
+            let w = if h == 0.0 { 1.0 } else {
+                let u = (dist / h).abs();
+                if u >= 1.0 { 0.0 } else { let v = 1.0 - u.powi(3); v * v * v }
+            };
+            let xi = xs[*i]; let yi = ys[*i];
+            sw += w; swx += w * xi; swxx += w * xi * xi;
+            swy += w * yi; swxy += w * xi * yi;
+        }
+        let det = sw * swxx - swx * swx;
+        if det.abs() < 1e-15 { return f64::NAN; }
+        let a = (swxx * swy - swx * swxy) / det;
+        let b = (sw * swxy - swx * swy) / det;
+        a + b * x0
+    } else {
+        // degree=2 lands in Task 15 (uses linalg::solve_3x3_spd).
+        f64::NAN
+    }
+}
+
+fn loess_bootstrap_ci(
+    xs: &[f64], ys: &[f64], grid: &[f64], k: usize, degree: u8, level: f64, seed: u64,
+) -> (Vec<f64>, Vec<f64>) {
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    use rand::Rng;
+
+    let n = xs.len();
+    if n < 2 || level <= 0.0 || level >= 1.0 {
+        return (vec![f64::NAN; grid.len()], vec![f64::NAN; grid.len()]);
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let n_boot: usize = 200;
+    let mut samples: Vec<Vec<f64>> = Vec::with_capacity(grid.len());
+    samples.resize_with(grid.len(), Vec::new);
+
+    let mut bx = vec![0.0; n];
+    let mut by = vec![0.0; n];
+    for _ in 0..n_boot {
+        for i in 0..n {
+            let j = rng.gen_range(0..n);
+            bx[i] = xs[j];
+            by[i] = ys[j];
+        }
+        for (gi, &x0) in grid.iter().enumerate() {
+            let v = loess_at_point(&bx, &by, x0, k, degree);
+            samples[gi].push(v);
+        }
+    }
+    let alpha = 1.0 - level;
+    let lo_q = alpha / 2.0; let hi_q = 1.0 - alpha / 2.0;
+    let mut lo_out = Vec::with_capacity(grid.len());
+    let mut hi_out = Vec::with_capacity(grid.len());
+    for s in samples.iter_mut() {
+        s.retain(|v| v.is_finite());
+        if s.len() < 4 {
+            lo_out.push(f64::NAN); hi_out.push(f64::NAN);
+            continue;
+        }
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        lo_out.push(percentile_sorted(s, lo_q));
+        hi_out.push(percentile_sorted(s, hi_q));
+    }
+    (lo_out, hi_out)
+}
+
+fn percentile_sorted(s: &[f64], p: f64) -> f64 {
+    let n = s.len();
+    let h = p * (n as f64 - 1.0);
+    let lo = h.floor() as usize;
+    let hi = (h.ceil() as usize).min(n - 1);
+    let frac = h - h.floor();
+    s[lo] * (1.0 - frac) + s[hi] * frac
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +412,60 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SmoothSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_loess_deg1_against_fixtures() {
+        use serde::Deserialize;
+        const FIXTURES: &str = include_str!("fixtures/stat_refs.json");
+        #[derive(Deserialize)]
+        struct LoessCase {
+            name: String, x: Vec<f64>, y: Vec<f64>,
+            bandwidth: f64, degree: u8, n: usize,
+            x_grid: Vec<f64>, y_fit: Vec<f64>,
+        }
+        #[derive(Deserialize)]
+        struct F { loess: Vec<LoessCase> }
+        let cases: F = serde_json::from_str(FIXTURES).unwrap();
+        for case in cases.loess {
+            if case.degree != 1 { continue; }
+            let batch = xy_batch(case.x.clone(), case.y.clone());
+            let spec = SmoothSpec {
+                x: "x".into(), y: "y".into(),
+                method: SmoothMethod::Loess, ci: None,
+                bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+            };
+            let out = apply(&spec, &batch).unwrap();
+            let xg = col(&out, "x");
+            let yf = col(&out, "y");
+            for i in 0..case.n {
+                assert!((xg[i] - case.x_grid[i]).abs() < 1e-9, "x grid {} vs {}", xg[i], case.x_grid[i]);
+                assert!((yf[i] - case.y_fit[i]).abs() < 1e-9, "case {}: y_fit[{i}] = {} vs {}", case.name, yf[i], case.y_fit[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_loess_deg1_bootstrap_ci_is_reproducible_under_seed() {
+        let xs: Vec<f64> = (0..40).map(|i| i as f64 / 10.0).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| (x).sin()).collect();
+        let batch = xy_batch(xs, ys);
+        let spec1 = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Loess,
+            ci: Some(0.95),
+            bandwidth: 0.5, degree: 1, n: 20, seed: 42,
+        };
+        let spec2 = spec1.clone();
+        let out1 = apply(&spec1, &batch).unwrap();
+        let out2 = apply(&spec2, &batch).unwrap();
+        let lo1 = col(&out1, "ci_lower");
+        let lo2 = col(&out2, "ci_lower");
+        let hi1 = col(&out1, "ci_upper");
+        let hi2 = col(&out2, "ci_upper");
+        for i in 0..lo1.len() {
+            assert_eq!(lo1[i].to_bits(), lo2[i].to_bits(), "ci_lower not deterministic at {i}");
+            assert_eq!(hi1[i].to_bits(), hi2[i].to_bits(), "ci_upper not deterministic at {i}");
+        }
     }
 }
