@@ -13,5 +13,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::log::LogScale>()?;
     m.add_class::<scale::symlog::SymlogScale>()?;
     m.add_class::<scale::time::TimeScale>()?;
+    m.add_class::<scale::ordinal::OrdinalScale>()?;
     Ok(())
 }

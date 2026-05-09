@@ -8,12 +8,23 @@ use super::ticks::{nice_step, nice_ticks};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Scale {
-    Linear { domain: [f64; 2], range: [f64; 2], clamp: bool },
-    Log    { domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool },
-    Symlog { domain: [f64; 2], range: [f64; 2], constant: f64, clamp: bool },
+    Linear  { domain: [f64; 2], range: [f64; 2], clamp: bool },
+    Log     { domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool },
+    Symlog  { domain: [f64; 2], range: [f64; 2], constant: f64, clamp: bool },
+    Ordinal { domain: Vec<String>, range: Vec<f64>, padding: f64 },
 }
 
 impl Scale {
+    fn ordinal_layout(domain: &[String], range: &[f64], padding: f64) -> (f64, f64, f64) {
+        let r_lo = *range.first().unwrap();
+        let r_hi = *range.last().unwrap();
+        let n = domain.len() as f64;
+        let step = (r_hi - r_lo) / n;
+        let half_band = step.abs() * (1.0 - padding) / 2.0;
+        let first_center = r_lo + step / 2.0;
+        (first_center, step, half_band)
+    }
+
     fn symlog_fwd(x: f64, c: f64) -> f64 {
         x.signum() * (x.abs() / c).ln_1p()
     }
@@ -77,6 +88,7 @@ impl Scale {
                     mapped
                 }
             }
+            Scale::Ordinal { .. } => f64::NAN,
         }
     }
 
@@ -135,6 +147,7 @@ impl Scale {
                     mapped
                 }
             }
+            Scale::Ordinal { .. } => f64::NAN,
         }
     }
 
@@ -170,6 +183,7 @@ impl Scale {
             Scale::Symlog { domain, .. } => {
                 nice_ticks(domain[0], domain[1], count.unwrap_or(10))
             }
+            Scale::Ordinal { range, .. } => range.clone(),
         }
     }
 
@@ -224,6 +238,43 @@ impl Scale {
                 };
                 Scale::Symlog { domain: new_domain, range, constant, clamp }
             }
+            Scale::Ordinal { domain, range, padding } => {
+                Scale::Ordinal { domain, range, padding }
+            }
+        }
+    }
+
+    pub(crate) fn scale_str(&self, s: &str) -> f64 {
+        match self {
+            Scale::Ordinal { domain, range, padding } => {
+                let idx = match domain.iter().position(|c| c == s) {
+                    Some(i) => i,
+                    None => return f64::NAN,
+                };
+                let (first_center, step, _half_band) = Self::ordinal_layout(domain, range, *padding);
+                first_center + (idx as f64) * step
+            }
+            _ => f64::NAN,
+        }
+    }
+
+    pub(crate) fn invert_band(&self, y: f64) -> Option<String> {
+        match self {
+            Scale::Ordinal { domain, range, padding } => {
+                if y.is_nan() { return None; }
+                let (first_center, step, half_band) = Self::ordinal_layout(domain, range, *padding);
+                if step == 0.0 { return None; }
+                let raw = (y - first_center) / step;
+                let idx = raw.round() as i64;
+                if idx < 0 || idx as usize >= domain.len() { return None; }
+                let center = first_center + (idx as f64) * step;
+                if (y - center).abs() <= half_band {
+                    Some(domain[idx as usize].clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -235,6 +286,33 @@ pub(crate) fn validate_finite(name: &str, values: &[f64]) -> PyResult<()> {
         if !v.is_finite() {
             return Err(PyValueError::new_err(format!(
                 "{name} must contain only finite values; found {v}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -> PyResult<()> {
+    if domain.is_empty() {
+        return Err(PyValueError::new_err("domain must be non-empty"));
+    }
+    if range.len() < 2 {
+        return Err(PyValueError::new_err(format!(
+            "range must have length >= 2 (extent endpoints); got {}",
+            range.len()
+        )));
+    }
+    validate_finite("range", range)?;
+    if !padding.is_finite() || !(0.0..=1.0).contains(&padding) {
+        return Err(PyValueError::new_err(format!(
+            "padding must be in [0, 1]; got {padding}"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for c in domain {
+        if !seen.insert(c.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate category in domain: '{c}'"
             )));
         }
     }
@@ -415,5 +493,73 @@ mod tests {
         // Both must be in (0.5, 1.0) since 50 is in the positive half of [-100, 100]
         assert!(y1 > 0.5 && y1 < 1.0, "y1={y1} out of (0.5,1.0)");
         assert!(y2 > 0.5 && y2 < 1.0, "y2={y2} out of (0.5,1.0)");
+    }
+
+    #[test]
+    fn test_ordinal_band_centers_no_padding() {
+        let s = Scale::Ordinal {
+            domain: vec!["a".into(), "b".into(), "c".into()],
+            range: vec![0.0, 30.0],
+            padding: 0.0,
+        };
+        assert!((s.scale_str("a") - 5.0).abs() < 1e-12);
+        assert!((s.scale_str("b") - 15.0).abs() < 1e-12);
+        assert!((s.scale_str("c") - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ordinal_invert_round_trip() {
+        let s = Scale::Ordinal {
+            domain: vec!["a".into(), "b".into(), "c".into()],
+            range: vec![0.0, 30.0],
+            padding: 0.0,
+        };
+        for cat in ["a", "b", "c"] {
+            let y = s.scale_str(cat);
+            let back = s.invert_band(y);
+            assert_eq!(back.as_deref(), Some(cat), "round-trip failed for {cat}");
+        }
+    }
+
+    #[test]
+    fn test_ordinal_invert_outside_band_returns_none() {
+        let s = Scale::Ordinal {
+            domain: vec!["a".into(), "b".into(), "c".into()],
+            range: vec![0.0, 30.0],
+            padding: 0.5,
+        };
+        assert!(s.invert_band(10.0).is_none());
+    }
+
+    #[test]
+    fn test_ordinal_unknown_category_returns_nan() {
+        let s = Scale::Ordinal {
+            domain: vec!["a".into()],
+            range: vec![0.0, 10.0],
+            padding: 0.0,
+        };
+        assert!(s.scale_str("z").is_nan());
+    }
+
+    #[test]
+    fn test_validate_ordinal_rejects_empty_domain() {
+        let r = validate_ordinal(&[], &[0.0, 10.0], 0.0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_validate_ordinal_rejects_duplicates() {
+        let r = validate_ordinal(
+            &["a".to_string(), "a".to_string()],
+            &[0.0, 10.0],
+            0.0,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_validate_ordinal_rejects_bad_padding() {
+        let r = validate_ordinal(&["a".to_string()], &[0.0, 10.0], 1.5);
+        assert!(r.is_err());
     }
 }
