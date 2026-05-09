@@ -33,6 +33,7 @@ These were settled in the brainstorming session on 2026-05-09. They affect every
 | ABI target | `abi3-py310` | One wheel per platform-arch for all Python ≥ 3.10 |
 | `extension-module` | Feature-gated (`[features] extension-module = ["pyo3/extension-module"]`) | Allows `cargo test` to link libpython; maturin enables the gate at build time |
 | Data transport | Arrow C Data Interface via `pyo3-arrow` (phase 2) | Zero row-level Python access after initial handoff; CDI chosen over IPC bytes for zero-copy polars support (polars implements `__arrow_c_stream__` natively); spec §"Zero unnecessary copies" |
+| ChartSpec serialization | JSON via `serde` + `serde_json` (phase 3) | Tree-structured config; matches public `chart.to_json()` API; schema-evolves cleanly as phases 4–10 add fields; human-readable for debugging and Vega-Lite interop. Arrow schema rejected as a category mismatch (describes columns, not config trees); binary codec rejected (size class makes perf gains irrelevant; loses readability and interop) |
 | Release profile | `lto = "thin"`, `codegen-units = 1` | Set once in workspace root; all future crates inherit |
 | Python version | `requires-python = ">=3.10"` | `.python-version` = 3.10 |
 
@@ -90,7 +91,7 @@ A phase is `done` when all of the following are true:
 ### Phase 3 — Chart spec IR
 - [ ] A `ChartSpec` Rust struct exists with enough fields to represent a single-layer scatter plot (data ref, x/y encoding, mark type)
 - [ ] Python can construct it via a `ferrum._core.ChartSpec` binding and pass it to Rust
-- [ ] Rust can round-trip serialize/deserialize `ChartSpec` to/from a canonical format (JSON or Arrow schema)
+- [ ] Rust can round-trip serialize/deserialize `ChartSpec` to/from JSON via `serde_json` (decision 2026-05-09 — see locked-decisions table)
 - [ ] `cargo test` covers at least one round-trip case
 
 ### Phase 4 — Scale engine
