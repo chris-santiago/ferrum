@@ -11,7 +11,8 @@ pub(crate) enum Scale {
     Linear  { domain: [f64; 2], range: [f64; 2], clamp: bool },
     Log     { domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool },
     Symlog  { domain: [f64; 2], range: [f64; 2], constant: f64, clamp: bool },
-    Ordinal { domain: Vec<String>, range: Vec<f64>, padding: f64 },
+    Ordinal    { domain: Vec<String>, range: Vec<f64>, padding: f64 },
+    Threshold  { domain: Vec<f64>, range: Vec<f64> },
 }
 
 impl Scale {
@@ -89,6 +90,11 @@ impl Scale {
                 }
             }
             Scale::Ordinal { .. } => f64::NAN,
+            Scale::Threshold { domain, range } => {
+                if x.is_nan() { return f64::NAN; }
+                let idx = domain.partition_point(|t| *t <= x);
+                range[idx]
+            }
         }
     }
 
@@ -148,6 +154,7 @@ impl Scale {
                 }
             }
             Scale::Ordinal { .. } => f64::NAN,
+            Scale::Threshold { .. } => f64::NAN,
         }
     }
 
@@ -184,6 +191,7 @@ impl Scale {
                 nice_ticks(domain[0], domain[1], count.unwrap_or(10))
             }
             Scale::Ordinal { range, .. } => range.clone(),
+            Scale::Threshold { domain, .. } => domain.clone(),
         }
     }
 
@@ -241,6 +249,7 @@ impl Scale {
             Scale::Ordinal { domain, range, padding } => {
                 Scale::Ordinal { domain, range, padding }
             }
+            Scale::Threshold { domain, range } => Scale::Threshold { domain, range },
         }
     }
 
@@ -275,6 +284,22 @@ impl Scale {
                 }
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn invert_extent(&self, y: f64) -> (f64, f64) {
+        match self {
+            Scale::Threshold { domain, range } => {
+                if y.is_nan() { return (f64::NAN, f64::NAN); }
+                let idx = match range.iter().position(|r| *r == y) {
+                    Some(i) => i,
+                    None => return (f64::NAN, f64::NAN),
+                };
+                let lo = if idx == 0 { f64::NEG_INFINITY } else { domain[idx - 1] };
+                let hi = if idx >= domain.len() { f64::INFINITY } else { domain[idx] };
+                (lo, hi)
+            }
+            _ => (f64::NAN, f64::NAN),
         }
     }
 }
@@ -314,6 +339,29 @@ pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -
             return Err(PyValueError::new_err(format!(
                 "duplicate category in domain: '{c}'"
             )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_threshold(domain: &[f64], range: &[f64]) -> PyResult<()> {
+    if range.is_empty() {
+        return Err(PyValueError::new_err("range must be non-empty"));
+    }
+    if domain.len() + 1 != range.len() {
+        return Err(PyValueError::new_err(format!(
+            "range length must equal domain length + 1; got domain={}, range={}",
+            domain.len(),
+            range.len()
+        )));
+    }
+    validate_finite("domain", domain)?;
+    validate_finite("range", range)?;
+    for w in domain.windows(2) {
+        if w[0] >= w[1] {
+            return Err(PyValueError::new_err(
+                "domain must be strictly sorted ascending",
+            ));
         }
     }
     Ok(())
@@ -560,6 +608,57 @@ mod tests {
     #[test]
     fn test_validate_ordinal_rejects_bad_padding() {
         let r = validate_ordinal(&["a".to_string()], &[0.0, 10.0], 1.5);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_threshold_scale_basic() {
+        let s = Scale::Threshold {
+            domain: vec![0.0, 10.0],
+            range: vec![1.0, 2.0, 3.0],
+        };
+        assert_eq!(s.scale_f64(-1.0), 1.0);
+        assert_eq!(s.scale_f64(0.0), 2.0);   // partition_point with <= places 0.0 into bin 1
+        assert_eq!(s.scale_f64(5.0), 2.0);
+        assert_eq!(s.scale_f64(10.0), 3.0);
+        assert_eq!(s.scale_f64(20.0), 3.0);
+    }
+
+    #[test]
+    fn test_threshold_invert_extent_round_trip() {
+        let s = Scale::Threshold {
+            domain: vec![0.0, 10.0],
+            range: vec![1.0, 2.0, 3.0],
+        };
+        let (lo, hi) = s.invert_extent(2.0);
+        assert_eq!((lo, hi), (0.0, 10.0));
+        let (lo, hi) = s.invert_extent(1.0);
+        assert!(lo.is_infinite() && lo.is_sign_negative());
+        assert_eq!(hi, 0.0);
+        let (lo, hi) = s.invert_extent(3.0);
+        assert_eq!(lo, 10.0);
+        assert!(hi.is_infinite() && hi.is_sign_positive());
+    }
+
+    #[test]
+    fn test_threshold_invert_extent_unknown_returns_nan() {
+        let s = Scale::Threshold {
+            domain: vec![0.0],
+            range: vec![1.0, 2.0],
+        };
+        let (lo, hi) = s.invert_extent(99.0);
+        assert!(lo.is_nan() && hi.is_nan());
+    }
+
+    #[test]
+    fn test_validate_threshold_rejects_arity_mismatch() {
+        let r = validate_threshold(&[0.0, 10.0], &[1.0, 2.0]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_validate_threshold_rejects_unsorted_domain() {
+        let r = validate_threshold(&[10.0, 0.0], &[1.0, 2.0, 3.0]);
         assert!(r.is_err());
     }
 }
