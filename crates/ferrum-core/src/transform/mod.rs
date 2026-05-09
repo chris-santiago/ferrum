@@ -1,0 +1,11 @@
+//! Phase 5 — stat engine. Mirrors the layout of `crate::scale`:
+//! `core.rs` holds the sealed `TransformSpec` enum; per-variant files
+//! own their `apply` math; `linalg.rs` is a small shared utility.
+
+pub(crate) mod core;
+pub(crate) mod bin;
+pub(crate) mod kde;
+pub(crate) mod smooth;
+pub(crate) mod aggregate;
+pub(crate) mod summary;
+pub(crate) mod linalg;

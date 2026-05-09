@@ -25,6 +25,11 @@ pyo3-arrow = { version = "0.17", default-features = false }
 arrow      = { version = "58", default-features = false, features = ["ipc"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
+# Phase 5 (stat-engine) — seeded reproducible RNG for bootstrap CI.
+# rand provides RNG traits; rand_chacha provides ChaCha8Rng (deterministic, seeded,
+# reproducible across platforms — required for committed numeric-reference fixtures).
+rand        = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+rand_chacha = { version = "0.3", default-features = false }
 
 [profile.release]
 lto = "thin"

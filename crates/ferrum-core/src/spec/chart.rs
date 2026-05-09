@@ -18,17 +18,20 @@ pub struct ChartSpec {
     pub mark: Mark,
     #[serde(default)]
     pub encoding: Encoding,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<crate::transform::core::TransformSpec>,
 }
 
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, data = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, data = None, transforms = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
         y: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
+        transforms: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -44,10 +47,16 @@ impl ChartSpec {
             Some(name) => DataRef::Named { name: name.to_string() },
         };
 
+        let transforms = match transforms {
+            None => Vec::new(),
+            Some(obj) => coerce_transforms(obj)?,
+        };
+
         Ok(ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y },
+            transforms,
         })
     }
 
@@ -73,6 +82,27 @@ impl ChartSpec {
         }
     }
 
+    #[getter]
+    fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let mut out: Vec<Py<PyAny>> = Vec::with_capacity(self.transforms.len());
+        for t in &self.transforms {
+            let obj: Py<PyAny> = match t {
+                crate::transform::core::TransformSpec::Bin(_) =>
+                    pyo3::Py::new(py, crate::transform::bin::PyBin(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Kde(_) =>
+                    pyo3::Py::new(py, crate::transform::kde::PyKde(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Smooth(_) =>
+                    pyo3::Py::new(py, crate::transform::smooth::PySmooth(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Aggregate(_) =>
+                    pyo3::Py::new(py, crate::transform::aggregate::PyAggregate(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Summary(_) =>
+                    pyo3::Py::new(py, crate::transform::summary::PySummary(t.clone()))?.into_any(),
+            };
+            out.push(obj);
+        }
+        Ok(out)
+    }
+
     fn to_json(&self) -> PyResult<String> {
         serde_json::to_string(self).map_err(|e| PyValueError::new_err(e.to_string()))
     }
@@ -95,7 +125,14 @@ impl ChartSpec {
             None => "None".to_string(),
             Some(e) => e.repr_string(),
         };
-        format!("ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}')")
+        if self.transforms.is_empty() {
+            format!("ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}')")
+        } else {
+            format!(
+                "ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}', transforms=[{} item(s)])",
+                self.transforms.len()
+            )
+        }
     }
 }
 
@@ -114,6 +151,39 @@ fn coerce_encoding(obj: &Bound<'_, PyAny>) -> PyResult<EncodingSpec> {
     ))
 }
 
+fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::core::TransformSpec>> {
+    use pyo3::types::PyList;
+    let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
+    let mut out = Vec::with_capacity(list.len());
+    for (i, item) in list.iter().enumerate() {
+        if let Ok(b) = item.extract::<crate::transform::bin::PyBin>() {
+            out.push(b.0);
+            continue;
+        }
+        if let Ok(k) = item.extract::<crate::transform::kde::PyKde>() {
+            out.push(k.0);
+            continue;
+        }
+        if let Ok(s) = item.extract::<crate::transform::smooth::PySmooth>() {
+            out.push(s.0);
+            continue;
+        }
+        if let Ok(a) = item.extract::<crate::transform::aggregate::PyAggregate>() {
+            out.push(a.0);
+            continue;
+        }
+        if let Ok(s) = item.extract::<crate::transform::summary::PySummary>() {
+            out.push(s.0);
+            continue;
+        }
+        return Err(PyValueError::new_err(format!(
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary"
+        )));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +200,7 @@ mod tests {
                     type_: Some(DataType::Quantitative),
                 }),
             },
+            transforms: Vec::new(),
         }
     }
 
@@ -206,11 +277,54 @@ mod tests {
                     type_: Some(DataType::Quantitative),
                 }),
             },
+            transforms: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
             json,
             r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"price"},"y":{"field":"weight","type":"quantitative"}}}"#,
         );
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_default_when_omitted() {
+        // Phase 3 JSON shape (no `transforms` field) must still deserialize.
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.transforms.is_empty(), "expected empty transforms by default");
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_omitted_in_canonical_json_when_empty() {
+        let spec = ChartSpec {
+            data: DataRef::Named { name: "default".into() },
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_round_trip_with_one_bin() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        let spec = ChartSpec {
+            data: DataRef::Named { name: "default".into() },
+            mark: Mark::Bar,
+            encoding: Encoding::default(),
+            transforms: vec![TransformSpec::Bin(BinSpec {
+                field: "x".into(),
+                bin_count: Some(10),
+                bin_width: None,
+                extent: None,
+                nice: true,
+            })],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
     }
 }

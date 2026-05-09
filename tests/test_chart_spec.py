@@ -125,3 +125,157 @@ def test_repr_preserves_encoding_type():
     )
     r = repr(spec)
     assert "type_='quantitative'" in r, f"type_ missing from repr: {r}"
+
+
+def test_chart_spec_with_bin_transform_round_trips():
+    from ferrum._core import ChartSpec, Bin
+    spec = ChartSpec(mark="bar", x="x", transforms=[Bin(field="x", bin_count=10)])
+    j = spec.to_json()
+    assert "bin" in j
+    parsed = ChartSpec.from_json(j)
+    assert parsed == spec
+
+
+def test_bin_construct_rejects_empty_field():
+    from ferrum._core import Bin
+    import pytest
+    with pytest.raises(ValueError, match="non-empty"):
+        Bin(field="")
+
+
+def test_bin_construct_rejects_zero_bin_count():
+    from ferrum._core import Bin
+    import pytest
+    with pytest.raises(ValueError, match="bin_count"):
+        Bin(field="x", bin_count=0)
+
+
+def test_chart_spec_with_kde_round_trips():
+    from ferrum._core import ChartSpec, Kde
+    spec = ChartSpec(mark="line", x="x", transforms=[Kde(field="x", bandwidth="silverman")])
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_kde_construct_rejects_unknown_bandwidth():
+    from ferrum._core import Kde
+    import pytest
+    with pytest.raises(ValueError, match="bandwidth"):
+        Kde(field="x", bandwidth="garbage")
+
+
+def test_kde_construct_accepts_float_bandwidth():
+    from ferrum._core import Kde
+    spec = Kde(field="x", bandwidth=0.5)
+    assert "0.5" in repr(spec)
+
+
+def test_chart_spec_with_smooth_lm_round_trips():
+    from ferrum._core import ChartSpec, Smooth
+    spec = ChartSpec(mark="line", x="x", transforms=[Smooth(x="x", y="y", method="lm", ci=0.95)])
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_smooth_construct_rejects_invalid_loess_bandwidth():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="bandwidth"):
+        Smooth(x="x", y="y", method="loess", bandwidth=1.5)
+
+
+def test_smooth_construct_rejects_invalid_degree():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="degree"):
+        Smooth(x="x", y="y", method="loess", degree=3)
+
+
+def test_smooth_construct_rejects_unknown_method():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="method"):
+        Smooth(x="x", y="y", method="poly")
+
+
+def test_chart_spec_with_aggregate_round_trips():
+    from ferrum._core import ChartSpec, Aggregate, AggregateOp
+    spec = ChartSpec(
+        mark="bar", x="x",
+        transforms=[Aggregate(
+            ops=[AggregateOp("price", "mean", "avg_price")],
+            groupby=["region"],
+        )],
+    )
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_aggregate_construct_rejects_unknown_fn():
+    from ferrum._core import AggregateOp
+    import pytest
+    with pytest.raises(ValueError, match="unknown fn"):
+        AggregateOp("price", "vibe", "v")
+
+
+def test_aggregate_construct_rejects_empty_ops():
+    from ferrum._core import Aggregate
+    import pytest
+    with pytest.raises(ValueError, match="non-empty"):
+        Aggregate(ops=[])
+
+
+def test_aggregate_construct_rejects_duplicate_groupby():
+    from ferrum._core import Aggregate, AggregateOp
+    import pytest
+    with pytest.raises(ValueError, match="duplicate"):
+        Aggregate(
+            ops=[AggregateOp("v", "sum", "s")],
+            groupby=["g", "g"],
+        )
+
+
+def test_chart_spec_with_summary_round_trips():
+    from ferrum._core import ChartSpec, Summary
+    spec = ChartSpec(
+        mark="point", x="x",
+        transforms=[Summary(field="v", groupby=["g"], error_fn="ci", ci=0.95, n_boot=500, seed=42)],
+    )
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_summary_construct_rejects_unknown_error_fn():
+    from ferrum._core import Summary
+    import pytest
+    with pytest.raises(ValueError, match="error_fn"):
+        Summary(field="v", error_fn="vibes")
+
+
+def test_summary_construct_rejects_zero_n_boot_with_ci():
+    from ferrum._core import Summary
+    import pytest
+    with pytest.raises(ValueError, match="n_boot"):
+        Summary(field="v", error_fn="ci", n_boot=0)
+
+
+def test_chart_spec_transforms_getter_returns_list_of_correct_classes():
+    from ferrum._core import ChartSpec, Bin, Kde, Smooth, Aggregate, AggregateOp, Summary
+    spec = ChartSpec(
+        mark="point", x="x",
+        transforms=[
+            Bin(field="x"),
+            Kde(field="x"),
+            Smooth(x="x", y="y"),
+            Aggregate(ops=[AggregateOp("v", "sum", "s")], groupby=["g"]),
+            Summary(field="v"),
+        ],
+    )
+    ts = spec.transforms
+    assert isinstance(ts, list)
+    assert len(ts) == 5
+    assert isinstance(ts[0], Bin)
+    assert isinstance(ts[1], Kde)
+    assert isinstance(ts[2], Smooth)
+    assert isinstance(ts[3], Aggregate)
+    assert isinstance(ts[4], Summary)
