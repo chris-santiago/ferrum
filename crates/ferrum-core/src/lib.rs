@@ -18,5 +18,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::threshold::ThresholdScale>()?;
     m.add_class::<scale::quantile::QuantileScale>()?;
     m.add_class::<transform::bin::PyBin>()?;
+    m.add_class::<transform::kde::PyKde>()?;
     Ok(())
 }

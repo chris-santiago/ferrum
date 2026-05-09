@@ -162,6 +162,85 @@ fn trapezoidal_cumulative(grid: &[f64], y: &[f64]) -> Vec<f64> {
     out
 }
 
+use pyo3::prelude::*;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "Kde")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PyKde(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PyKde {
+    #[new]
+    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false))]
+    fn new(
+        field: &str,
+        bandwidth: Option<&Bound<'_, PyAny>>,
+        n: usize,
+        extent: Option<(f64, f64)>,
+        cumulative: bool,
+    ) -> PyResult<Self> {
+        if field.is_empty() {
+            return Err(PyValueError::new_err("Kde: field must be non-empty"));
+        }
+        if n == 0 {
+            return Err(PyValueError::new_err("Kde: n must be > 0"));
+        }
+        let bw = match bandwidth {
+            None => BandwidthSpec::Scott,
+            Some(obj) => {
+                if let Ok(s) = obj.extract::<String>() {
+                    match s.as_str() {
+                        "scott" => BandwidthSpec::Scott,
+                        "silverman" => BandwidthSpec::Silverman,
+                        other => return Err(PyValueError::new_err(format!(
+                            "Kde: unknown bandwidth '{other}'; expected 'scott' | 'silverman' | float"
+                        ))),
+                    }
+                } else if let Ok(v) = obj.extract::<f64>() {
+                    if !v.is_finite() || v <= 0.0 {
+                        return Err(PyValueError::new_err(
+                            "Kde: numeric bandwidth must be a positive finite number",
+                        ));
+                    }
+                    BandwidthSpec::Fixed { value: v }
+                } else {
+                    return Err(PyValueError::new_err(
+                        "Kde: bandwidth must be 'scott', 'silverman', or a positive float",
+                    ));
+                }
+            }
+        };
+        if let Some((a, b)) = extent {
+            if !a.is_finite() || !b.is_finite() || a >= b {
+                return Err(PyValueError::new_err(
+                    "Kde: extent must be (lo, hi) with lo < hi and both finite",
+                ));
+            }
+        }
+        Ok(PyKde(TransformSpec::Kde(KdeSpec {
+            field: field.to_string(),
+            bandwidth: bw,
+            n,
+            extent,
+            cumulative,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Kde(s) => format!(
+                "Kde(field='{}', bandwidth={:?}, n={}, extent={:?}, cumulative={})",
+                s.field, s.bandwidth, s.n, s.extent,
+                if s.cumulative { "True" } else { "False" },
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

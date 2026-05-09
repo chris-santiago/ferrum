@@ -138,8 +138,13 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(b.0);
             continue;
         }
+        if let Ok(k) = item.extract::<crate::transform::kde::PyKde>() {
+            out.push(k.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected a Bin (more variants land in subsequent tasks)"
+            "transforms[{i}]: unrecognized transform; expected Bin | Kde \
+             (more variants land in subsequent tasks)"
         )));
     }
     Ok(out)

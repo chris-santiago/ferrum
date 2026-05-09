@@ -148,3 +148,23 @@ def test_bin_construct_rejects_zero_bin_count():
     import pytest
     with pytest.raises(ValueError, match="bin_count"):
         Bin(field="x", bin_count=0)
+
+
+def test_chart_spec_with_kde_round_trips():
+    from ferrum._core import ChartSpec, Kde
+    spec = ChartSpec(mark="line", x="x", transforms=[Kde(field="x", bandwidth="silverman")])
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_kde_construct_rejects_unknown_bandwidth():
+    from ferrum._core import Kde
+    import pytest
+    with pytest.raises(ValueError, match="bandwidth"):
+        Kde(field="x", bandwidth="garbage")
+
+
+def test_kde_construct_accepts_float_bandwidth():
+    from ferrum._core import Kde
+    spec = Kde(field="x", bandwidth=0.5)
+    assert "0.5" in repr(spec)
