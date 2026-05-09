@@ -197,19 +197,34 @@ pub fn layout_x_axis(
             .collect();
         (ticks, None)
     } else {
-        // Filled in by Tasks 11 (rotation) and 12 (elision).
+        // Rotated projection: |L * cos(angle)|. Spec §6 step 7c.
+        let cos_factor = (angle.to_radians()).cos().abs();
+        let any_still_colliding = widths.iter().any(|w| *w * cos_factor > slot_w);
+        let mut elided_count: u32 = 0;
         let ticks: Vec<TickLayout> = input
             .tick_labels
             .iter()
             .enumerate()
-            .map(|(i, label)| TickLayout {
-                position: panel_area.x + (i as f64 + 0.5) * slot_w,
-                label: label.clone(),
-                label_angle: angle,
-                elided: false,
+            .map(|(i, label)| {
+                let w = widths[i];
+                let needs_elide = any_still_colliding && (w * cos_factor > slot_w);
+                if needs_elide { elided_count += 1; }
+                TickLayout {
+                    position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                    // Actual string elision happens in Task 12; here we just
+                    // pass through the flat label and set the flag.
+                    label: label.clone(),
+                    label_angle: angle,
+                    elided: needs_elide,
+                }
             })
             .collect();
-        (ticks, None)
+        let warning = if elided_count > 0 {
+            Some(XAxisWarning::LabelsElided { count: elided_count })
+        } else {
+            None
+        };
+        (ticks, warning)
     };
 
     let axis_line = Rect {
@@ -365,5 +380,55 @@ mod tests {
         assert!((axis.ticks[1].position - (100.0 + 150.0)).abs() < 1e-9);
         assert!((axis.ticks[2].position - (100.0 + 250.0)).abs() < 1e-9);
         assert!((axis.ticks[3].position - (100.0 + 350.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn x_axis_collision_triggers_default_45_rotation() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: (0..8).map(|i| format!("L{}", i)).collect(),
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -45.0);
+        }
+    }
+
+    #[test]
+    fn x_axis_rotates_at_custom_angle_override() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: (0..8).map(|i| format!("L{}", i)).collect(),
+            label_angle_override: Some(-90.0),
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -90.0);
+        }
+    }
+
+    #[test]
+    fn x_axis_rotation_only_no_elision_when_rotated_fits() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: (0..6).map(|i| format!("L{}", i)).collect(),
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 95.0, line_h_factor: 1.2 };
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -45.0);
+            assert!(!t.elided, "rotated projection should fit; no elision");
+        }
+        assert!(warning.is_none());
     }
 }
