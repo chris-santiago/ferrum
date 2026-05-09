@@ -66,4 +66,4 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 - **ABI:** `abi3-py310` — one wheel per platform-arch, works for Python ≥ 3.10
 - **`extension-module` feature:** feature-gated (not unconditional) so `cargo test` can link libpython
 - **PyO3 version:** pinned in `[workspace.dependencies]`; re-verify against crates.io at the start of any session that adds a new PyO3 API
-- **Data transport:** Arrow IPC (phase 2+); before phase 2, no DataFrames cross the boundary
+- **Data transport:** Arrow C Data Interface via `pyo3-arrow` crate (phase 2+); NOT Arrow IPC bytes. Polars DataFrames implement `__arrow_c_stream__` natively — CDI hands off the buffer pointer directly with zero copies. Before phase 2, no DataFrames cross the boundary. (Decision made 2026-05-09: spec originally said "Arrow IPC" but CDI was chosen for zero-copy polars support.)

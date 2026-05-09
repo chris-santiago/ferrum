@@ -22,7 +22,9 @@ Computing a KDE, bootstrapping a confidence interval, or fitting a LOESS curve s
 You should not need to learn a different API to make a chart interactive. `.interactive()` switches the render target from SVG to a WASM canvas. Selections, zoom, pan, and linked views are declared in the chart spec and handled by the renderer. Plotly's fatal flaw is that interactive charts and static charts are different objects. Ferrum has one chart object.
 
 #### Zero unnecessary copies
-Python is the declaration layer. Rust is the computation layer. Data moves between them once, over Arrow IPC. Stat transforms, layout, binning, and aggregation happen in Rust. The Python process never touches row-level data again after the initial handoff.
+Python is the declaration layer. Rust is the computation layer. Data moves between them once, over the Arrow C Data Interface (CDI). Stat transforms, layout, binning, and aggregation happen in Rust. The Python process never touches row-level data again after the initial handoff.
+
+> **Amendment 2026-05-09:** Original spec said "Arrow IPC" (byte-serialized stream format). After design review for Phase 2, we chose the Arrow C Data Interface instead. Polars DataFrames implement `__arrow_c_stream__` natively — CDI passes the buffer pointer directly with zero copies, whereas IPC would serialize to bytes and deserialize on the Rust side. The `pyo3-arrow` crate mediates the CDI boundary in PyO3. The spirit of the constraint ("data moves once, no row-level Python access after handoff") is preserved; only the wire format changed.
 
 #### Defaults should be correct, not just pretty
 Default color schemes are perceptually uniform and colorblind-safe (OKabe-Ito for categorical, Viridis for sequential). Default font sizes pass WCAG contrast. Default bin counts follow Sturges' rule as a floor. These are not aesthetic opinions — they are epistemically correct starting points.
@@ -69,7 +71,7 @@ The Python package imports as `ferrum`. Internal Rust crate: `ferrum-core`. WASM
 │                     Python Layer                        │
 │  Chart spec builder · Encoding DSL · Convenience API   │
 └────────────────────┬────────────────────────────────────┘
-                     │  PyO3 + Arrow IPC
+                     │  PyO3 + Arrow CDI (pyo3-arrow)
 ┌────────────────────▼────────────────────────────────────┐
 │                    Rust Core                            │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
