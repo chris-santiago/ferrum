@@ -3,3 +3,4 @@ pub(crate) mod ticks;
 pub(crate) mod linear;
 pub(crate) mod log;
 pub(crate) mod symlog;
+pub(crate) mod time;
