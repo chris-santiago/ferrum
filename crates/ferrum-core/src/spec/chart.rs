@@ -18,17 +18,20 @@ pub struct ChartSpec {
     pub mark: Mark,
     #[serde(default)]
     pub encoding: Encoding,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<crate::transform::core::TransformSpec>,
 }
 
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, data = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, data = None, transforms = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
         y: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
+        transforms: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -44,10 +47,16 @@ impl ChartSpec {
             Some(name) => DataRef::Named { name: name.to_string() },
         };
 
+        let transforms = match transforms {
+            None => Vec::new(),
+            Some(obj) => coerce_transforms(obj)?,
+        };
+
         Ok(ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y },
+            transforms,
         })
     }
 
@@ -71,6 +80,11 @@ impl ChartSpec {
         match &self.data {
             DataRef::Named { name } => name,
         }
+    }
+
+    #[getter]
+    fn transforms_len(&self) -> usize {
+        self.transforms.len()
     }
 
     fn to_json(&self) -> PyResult<String> {
@@ -114,6 +128,18 @@ fn coerce_encoding(obj: &Bound<'_, PyAny>) -> PyResult<EncodingSpec> {
     ))
 }
 
+fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::core::TransformSpec>> {
+    use pyo3::types::PyList;
+    let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
+    if !list.is_empty() {
+        return Err(PyValueError::new_err(
+            "transforms list must be empty until pyclass wrappers are registered",
+        ));
+    }
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +156,7 @@ mod tests {
                     type_: Some(DataType::Quantitative),
                 }),
             },
+            transforms: Vec::new(),
         }
     }
 
@@ -206,11 +233,54 @@ mod tests {
                     type_: Some(DataType::Quantitative),
                 }),
             },
+            transforms: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
             json,
             r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"price"},"y":{"field":"weight","type":"quantitative"}}}"#,
         );
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_default_when_omitted() {
+        // Phase 3 JSON shape (no `transforms` field) must still deserialize.
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.transforms.is_empty(), "expected empty transforms by default");
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_omitted_in_canonical_json_when_empty() {
+        let spec = ChartSpec {
+            data: DataRef::Named { name: "default".into() },
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
+    }
+
+    #[test]
+    fn test_chart_spec_transforms_round_trip_with_one_bin() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        let spec = ChartSpec {
+            data: DataRef::Named { name: "default".into() },
+            mark: Mark::Bar,
+            encoding: Encoding::default(),
+            transforms: vec![TransformSpec::Bin(BinSpec {
+                field: "x".into(),
+                bin_count: Some(10),
+                bin_width: None,
+                extent: None,
+                nice: true,
+            })],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
     }
 }
