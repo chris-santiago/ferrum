@@ -17,7 +17,7 @@ def test_polars_round_trip():
 def test_pyarrow_round_trip():
     table = pa.table({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
     result = process_batch(table)
-    out = pa.Table.from_batches(list(result))
+    out = pa.RecordBatchReader.from_stream(result).read_all()
     assert out.schema.field(0).name == "x_renamed"
     assert out.schema.field(1).name == "y"
     assert len(out) == 3
@@ -28,7 +28,7 @@ def test_pyarrow_multichunk_round_trip():
     batch2 = pa.record_batch({"x": [5, 6], "y": [7.0, 8.0]})
     table = pa.Table.from_batches([batch1, batch2])
     result = process_batch(table)
-    out = pa.Table.from_batches(list(result))
+    out = pa.RecordBatchReader.from_stream(result).read_all()
     assert out.schema.field(0).name == "x_renamed"
     assert len(out) == 4
 
