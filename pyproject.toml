@@ -1,0 +1,14 @@
+[project]
+name = "ferrum"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "chris-santiago", email = "cjsantiago@gatech.edu" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
