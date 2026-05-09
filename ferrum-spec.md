@@ -1,0 +1,906 @@
+# Ferrum
+## A Statistical Visualization Library — Concept & API Specification
+
+> *Fast. Composable. Statistically honest.*
+
+---
+
+## Part I: Philosophy
+
+### 1. Core Beliefs
+
+#### Grammar first, convenience second
+Every visualization — from a scatter plot to a SHAP beeswarm — is a composition of the same primitives: data, encodings, marks, scales, and coordinate systems. Ferrum commits to this without compromise. High-level convenience functions (`displot`, `lmplot`, `roc_chart`) exist, but they are sugar over the grammar, not parallel universes with different rules.
+
+#### Model artifacts are data
+A confusion matrix is a cross-tabulation. A ROC curve is a sorted transformation of predicted probabilities. A SHAP value is a column. There is no reason these should require a separate API or a different mental model. Ferrum treats model outputs as data sources that feed into the standard grammar. This eliminates the Yellowbrick problem: diagnostic plots are composable, themeable, and interactive because they are charts, not special objects.
+
+#### Statistics belong in the rendering pipeline, not in userspace
+Computing a KDE, bootstrapping a confidence interval, or fitting a LOESS curve should not require the user to call SciPy before plotting. These are stat transforms: first-class operations declared in the chart spec and executed in the Rust engine before rendering. The user declares intent; Ferrum computes.
+
+#### Interactivity is a renderer, not a rewrite
+You should not need to learn a different API to make a chart interactive. `.interactive()` switches the render target from SVG to a WASM canvas. Selections, zoom, pan, and linked views are declared in the chart spec and handled by the renderer. Plotly's fatal flaw is that interactive charts and static charts are different objects. Ferrum has one chart object.
+
+#### Zero unnecessary copies
+Python is the declaration layer. Rust is the computation layer. Data moves between them once, over Arrow IPC. Stat transforms, layout, binning, and aggregation happen in Rust. The Python process never touches row-level data again after the initial handoff.
+
+#### Defaults should be correct, not just pretty
+Default color schemes are perceptually uniform and colorblind-safe (OKabe-Ito for categorical, Viridis for sequential). Default font sizes pass WCAG contrast. Default bin counts follow Sturges' rule as a floor. These are not aesthetic opinions — they are epistemically correct starting points.
+
+---
+
+### 2. Design Constraints
+
+- **No matplotlib dependency.** Ever. Not as a fallback, not for "legacy support."
+- **No mutable global state.** No `rcParams`, no `set_theme()` that mutates a module-level object. Themes are values passed to charts.
+- **No magic inference that silently fails.** If Ferrum infers a scale or encoding type incorrectly, it raises a descriptive error with a suggested fix.
+- **Sklearn-compatible, not sklearn-dependent.** The model diagnostics layer works with any object that implements `predict`, `predict_proba`, or `transform`. Sklearn is not imported unless the user's model is from sklearn.
+- **One output format per render call.** A chart produces SVG, PNG, HTML (WASM bundle), or a Vega-Lite JSON spec. Producing all four from the same spec is supported; producing ambiguous mixed output is not.
+
+---
+
+### 3. Relationship to Prior Art
+
+| Library | What Ferrum Inherits | What Ferrum Rejects |
+|---|---|---|
+| **plotnine / ggplot2** | Grammar of Graphics layering, explicit scales, faceting primitives | matplotlib backend, R-centric defaults |
+| **Altair** | Typed encoding channels, selection API, `\|` / `&` composition operators | Vega-Lite JSON as the primary data format (too slow at scale), 5000-row default limit |
+| **Seaborn** | Statistical vocabulary, figure-level functions, automatic facet label handling | matplotlib coupling, inconsistent axes-level vs figure-level API surface |
+| **Plotly** | Interactivity as a first-class feature, hover tooltips, WASM/HTML output | Separate static and interactive APIs, heavy JavaScript bundle for simple charts |
+| **Yellowbrick** | sklearn-protocol visualizers, diagnostic vocabulary | matplotlib coupling, non-composable outputs, parallel API surface |
+| **scikit-plot** | Lift/gain curves, calibration curve conventions | Function-level API with no composability |
+
+---
+
+### 4. Naming
+
+The library is named **Ferrum** (Latin: iron). Iron is the substrate of Rust. It is also load-bearing, structural, and unglamorous — which is what a visualization engine should be.
+
+The Python package imports as `ferrum`. Internal Rust crate: `ferrum-core`. WASM renderer: `ferrum-wasm`.
+
+---
+
+---
+
+## Part II: Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Python Layer                        │
+│  Chart spec builder · Encoding DSL · Convenience API   │
+└────────────────────┬────────────────────────────────────┘
+                     │  PyO3 + Arrow IPC
+┌────────────────────▼────────────────────────────────────┐
+│                    Rust Core                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │  Stat Engine │  │Layout Engine │  │ Scale Engine │  │
+│  │  KDE · CI    │  │Constraint    │  │Domain/Range  │  │
+│  │  Regression  │  │solver ·      │  │mapping ·     │  │
+│  │  Binning     │  │Facet layout  │  │Tick gen      │  │
+│  │  Aggregation │  │Legend place  │  │              │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │               Render Pipeline                    │   │
+│  │   SVG renderer · PNG rasterizer · Spec emitter  │   │
+└──┴──────────────────────────────────────────────────┴───┘
+                     │
+       ┌─────────────┼─────────────┐
+       ▼             ▼             ▼
+    SVG/PNG      HTML+WASM     JSON spec
+   (static)    (interactive)  (interop)
+```
+
+---
+
+---
+
+## Part III: API Specification
+
+---
+
+### 3.1 Top-Level Entry Points
+
+#### `ferrum.Chart`
+The primary chart constructor. All single-view charts begin here.
+
+```
+Chart(data=None, *, width=None, height=None, title=None, description=None)
+```
+
+**Parameters**
+- `data` — Any of: `pandas.DataFrame`, `polars.DataFrame`, `polars.LazyFrame`, Arrow `Table`, `ModelSource`, or `None` (data supplied per-layer).
+- `width` / `height` — Integer pixels, or `"container"` for responsive sizing.
+- `title` — String or `Title` object.
+- `description` — Accessible alt-text string; included in SVG and HTML output.
+
+**Methods** (all return `self` unless noted)
+- `.encode(**channels)` — Bind encoding channels. Channels inherited by all layers unless overridden.
+- `.layer(*layers)` — Add one or more `Layer` objects.
+- `.mark_*(...)` — Shorthand: creates a single-layer chart with the given mark. Equivalent to `.layer(Layer(mark=mark_*(...)))`.
+- `.transform(*transforms)` — Add data transforms applied before any stat computation.
+- `.stat(*stats)` — Add stat transforms (computed per-layer if applied at layer level).
+- `.facet(field=None, *, row=None, col=None, ncols=None, nrows=None)` — Wrap chart in a `FacetSpec`.
+- `.add_selection(*selections)` — Bind `Selection` objects.
+- `.conditional(selection, **true_encodings, **false_encodings)` — Conditional encoding based on selection state.
+- `.properties(**kwargs)` — Set chart-level metadata (title, width, height, description).
+- `.theme(theme)` — Apply a `Theme` object.
+- `.interactive()` — Switch render target to WASM. Returns `InteractiveChart`.
+- `.resolve(scale=None, axis=None, legend=None)` — Override shared/independent resolution in compound views.
+- `.save(path, *, format=None, scale=2.0)` — Render and write to disk.
+- `.show()` — Display in current environment (notebook, terminal sixel, or browser).
+- `.to_spec()` — Return the internal `ChartSpec` dataclass (serializable).
+- `.to_json()` — Return JSON string of the chart spec.
+- `__or__(other)` → `HConcatChart`
+- `__and__(other)` → `VConcatChart`
+
+---
+
+#### `ferrum.Layer`
+
+Explicit layer constructor. Used when multiple layers need independent data, marks, or encodings.
+
+```
+Layer(data=None, mark=None, *, encoding=None, stat=None, transform=None)
+```
+
+Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` directly.
+
+---
+
+#### `ferrum.ModelSource`
+
+Wraps a fitted estimator and a dataset; exposes derived data sources as Arrow tables.
+
+```
+ModelSource(model, X, y=None, *, feature_names=None, class_names=None, sample_weight=None)
+```
+
+**Methods** (all return `polars.DataFrame` unless noted)
+- `.predictions()` — `y_true`, `y_pred`, `residual`, `studentized_residual`
+- `.probabilities()` — `y_true`, one column per class with predicted probability
+- `.roc_curve(*, average=None, drop_intermediate=True)` — `fpr`, `tpr`, `threshold`, `class`, `auc`
+- `.pr_curve(*, average=None)` — `precision`, `recall`, `threshold`, `class`, `ap`
+- `.confusion_matrix(*, normalize=None)` — `actual`, `predicted`, `value`, `value_fmt`
+- `.calibration_curve(*, n_bins=10, strategy="uniform")` — `mean_predicted`, `fraction_positive`, `count`
+- `.cumulative_gain()` — `percent_population`, `gain`, `class`
+- `.lift_curve()` — `percent_population`, `lift`, `class`
+- `.importances(*, method="builtin", n_repeats=30, scoring=None, random_state=None)` — `feature`, `importance`, `std`, `rank`
+- `.shap_values(*, background=None, max_evals=500)` — `sample_id`, `feature`, `shap_value`, `feature_value`, `feature_value_normalized`
+- `.partial_dependence(features, *, grid_resolution=100, kind="average")` — `feature`, `feature_value`, `pd_value`, `sample_id` (if `kind="individual"`)
+- `.silhouette(k)` — `sample_id`, `cluster`, `silhouette_value`
+- `.embeddings(*, method="umap", n_components=2, **method_kwargs)` — `dim_0`, `dim_1`, (`dim_2`), `label`
+- `.learning_curve(*, cv=5, scoring=None, train_sizes=None)` — `train_size`, `split`, `score`, `mean_score`, `std_score`, `lower`, `upper`
+- `.validation_curve(param, values, *, cv=5, scoring=None)` — `param_value`, `split`, `score`, `mean_score`, `lower`, `upper`
+
+**Class method**
+- `ModelSource.compare(models: dict[str, estimator], X, y, **kwargs)` → `ComparedModelSource`
+  - All derived methods return the same schemas with an additional `model` column.
+
+---
+
+### 3.2 Encoding Channels
+
+Encoding channels are typed objects passed as keyword arguments to `.encode()`. All channels accept a field name string as a shorthand.
+
+#### Positional
+
+| Class | Shorthand alias | Description |
+|---|---|---|
+| `X(field, *, type=None, bin=False, aggregate=None, scale=None, axis=None, title=None, stack=None, sort=None, impute=None)` | `"fieldname"` | Horizontal position |
+| `Y(...)` | `"fieldname"` | Vertical position |
+| `X2(field)` | — | Horizontal span end (for `mark_rect`, `mark_rule`) |
+| `Y2(field)` | — | Vertical span end |
+| `XError(field)` | — | Symmetric error bar extent on X |
+| `YError(field)` | — | Symmetric error bar extent on Y |
+| `XError2(field)` | — | Asymmetric error upper bound on X |
+| `YError2(field)` | — | Asymmetric error upper bound on Y |
+| `Theta(field, *, stack=True)` | — | Angular position (arc/pie marks) |
+| `Radius(field)` | — | Radial position |
+
+#### Appearance
+
+| Class | Description |
+|---|---|
+| `Color(field, *, type=None, scheme=None, scale=None, legend=None, title=None)` | Fill and stroke color |
+| `Fill(field, ...)` | Fill only (overrides Color fill) |
+| `Stroke(field, ...)` | Stroke only |
+| `Opacity(field, *, scale=None, legend=None)` | Overall opacity |
+| `FillOpacity(field, ...)` | Fill opacity |
+| `StrokeOpacity(field, ...)` | Stroke opacity |
+| `StrokeWidth(field, *, scale=None)` | Stroke width |
+| `StrokeDash(field, *, scale=None)` | Dash pattern |
+| `Size(field, *, scale=None, legend=None)` | Point size or line width |
+| `Shape(field, *, scale=None, legend=None)` | Point shape (circle, square, cross, diamond, triangle-*) |
+| `Angle(field, *, scale=None)` | Point rotation angle |
+
+#### Text / Detail / Tooltip
+
+| Class | Description |
+|---|---|
+| `Text(field, *, format=None, formatType=None)` | Text label content |
+| `Detail(field)` | Group-by without a visual channel |
+| `Tooltip(*fields)` | Hover tooltip fields; accepts strings or `TooltipField` objects |
+| `TooltipField(field, *, title=None, format=None, formatType=None)` | Tooltip field with formatting |
+| `Href(field)` | URL for click-through on interactive charts |
+| `Description(field)` | Accessible description per mark |
+| `Key(field)` | Identity key for animated transitions |
+
+#### Facet (used with `.facet()`)
+
+| Class | Description |
+|---|---|
+| `Facet(field, *, type=None, sort=None, title=None)` | Single facet dimension |
+| `FacetRow(field, ...)` | Row facet dimension |
+| `FacetCol(field, ...)` | Column facet dimension |
+
+---
+
+**Channel shorthand strings**
+
+All positional and appearance channels accept:
+- `"fieldname"` — bare field
+- `"aggregate(fieldname)"` — e.g. `"mean(price)"`, `"count()"`, `"q50(latency)"`
+- `"fieldname:Q"` / `":N"` / `":O"` / `":T"` — inline type annotation (Quantitative, Nominal, Ordinal, Temporal)
+
+---
+
+### 3.3 Marks
+
+Marks are constructors that accept visual property overrides as keyword arguments. All marks inherit from `MarkBase`.
+
+#### Primitive Marks
+
+| Mark | Description | Key Parameters |
+|---|---|---|
+| `mark_point(...)` | Scatter / dot plot | `size`, `shape`, `filled`, `stroke_width` |
+| `mark_line(...)` | Line chart | `interpolate`, `stroke_width`, `stroke_cap`, `stroke_join` |
+| `mark_area(...)` | Area chart | `interpolate`, `line`, `opacity` |
+| `mark_bar(...)` | Bar chart | `orient`, `corner_radius`, `width`, `bin_spacing` |
+| `mark_rect(...)` | Filled rectangle; heatmaps | `corner_radius` |
+| `mark_rule(...)` | Horizontal or vertical reference line | `stroke_dash`, `stroke_width` |
+| `mark_text(...)` | Text labels | `align`, `baseline`, `dx`, `dy`, `font_size`, `font_weight`, `angle`, `limit` |
+| `mark_tick(...)` | Rug / tick marks | `band_size`, `orient` |
+| `mark_arc(...)` | Arc / pie / donut | `inner_radius`, `outer_radius`, `pad_angle`, `corner_radius` |
+| `mark_image(...)` | Image at point | `width`, `height`, `align`, `baseline` |
+| `mark_geoshape(...)` | Choropleth / geographic shape | `projection` |
+
+#### Composite Marks (expand to multiple primitive layers)
+
+| Mark | Expands To | Key Parameters |
+|---|---|---|
+| `mark_boxplot(...)` | box + whisker + outlier points | `extent` (`"min-max"` or float IQR multiplier), `size`, `outliers` |
+| `mark_errorbar(...)` | rule + tick | `extent` (`"ci"`, `"stderr"`, `"stdev"`, `"iqr"`), `ticks` |
+| `mark_errorband(...)` | area + line | `extent`, `borders` |
+| `mark_ribbon(...)` | area between Y and Y2 | `opacity`, `interpolate` |
+
+#### Statistical Marks (trigger stat engine)
+
+| Mark | Stat Computed | Key Parameters |
+|---|---|---|
+| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`), `ci`, `bandwidth`, `degree`, `n` |
+| `mark_density(...)` | KDE | `bandwidth` (`"scott"`, `"silverman"`, float), `kernel`, `extent`, `cumulative` |
+| `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right` |
+| `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
+| `mark_violin(...)` | KDE + optional boxplot overlay | `bandwidth`, `inner` (`"box"`, `"quartile"`, `"point"`, `None`) |
+| `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, or `scipy.stats` dist), `dequantize` |
+
+#### Model Diagnostic Marks
+
+| Mark | Description | Key Parameters |
+|---|---|---|
+| `mark_residuals(...)` | Residuals vs fitted | `kind` (`"raw"`, `"studentized"`, `"scaled"`), `reference_line`, `cook_threshold` |
+| `mark_prediction_error(...)` | Actual vs predicted | `identity_line`, `ci`, `reference_band` |
+| `mark_confusion(...)` | Confusion matrix heatmap + text | `normalize` (`None`, `"true"`, `"pred"`, `"all"`), `text_fmt` |
+| `mark_roc(...)` | ROC curve line | `average` (`None`, `"micro"`, `"macro"`, `"weighted"`), `reference_line`, `annotate_auc` |
+| `mark_pr(...)` | Precision-recall curve | `average`, `annotate_ap`, `iso_lines` |
+| `mark_calibration(...)` | Calibration curve | `n_bins`, `strategy`, `reference_line` |
+| `mark_gain(...)` | Cumulative gain curve | `reference_lines` |
+| `mark_lift(...)` | Lift curve | `reference_line` |
+| `mark_importance(...)` | Feature importance bar | `orient`, `error_bars`, `top_k` |
+| `mark_shap_beeswarm(...)` | SHAP beeswarm | `max_display`, `color_bar`, `order` (`"abs_mean"`, `"max_abs"`) |
+| `mark_shap_bar(...)` | SHAP mean absolute bar | `max_display`, `layered` |
+| `mark_shap_waterfall(...)` | SHAP waterfall (single prediction) | `max_display`, `show_data` |
+| `mark_pdp(...)` | Partial dependence + ICE | `kind` (`"average"`, `"individual"`, `"both"`), `ice_alpha`, `center` |
+| `mark_silhouette(...)` | Silhouette plot per cluster | `line_width`, `zero_line` |
+| `mark_learning_curve(...)` | Learning curve with CI band | `ci_style` (`"band"`, `"errorbar"`) |
+| `mark_validation_curve(...)` | Validation curve with CI band | `log_scale`, `ci_style` |
+| `mark_decision_boundary(...)` | 2D classification boundary | `grid_resolution`, `alpha`, `background`, `contour_levels` |
+
+---
+
+### 3.4 Stat Transforms
+
+Stat transforms are applied before rendering, in the Rust engine. They receive a column-oriented Arrow table and return a transformed table. Applied via `.stat()` at the chart or layer level, or implicitly by statistical marks.
+
+| Class | Description | Key Parameters |
+|---|---|---|
+| `stat_bin(field, *, bin_count=None, bin_width=None, extent=None, nice=True)` | Bin a field; add `bin_start`, `bin_end`, `count`, `density` | |
+| `stat_bin_2d(x, y, *, bin_count_x=None, bin_count_y=None)` | 2D binning | |
+| `stat_kde(field, *, bandwidth="scott", kernel="gaussian", n=512, extent=None, cumulative=False)` | Kernel density estimate | |
+| `stat_kde_2d(x, y, *, bandwidth="scott", n=128)` | 2D KDE | |
+| `stat_smooth(x, y, *, method="loess", ci=0.95, bandwidth=0.75, degree=2, n=200)` | Smoothing line + CI | |
+| `stat_summary(field, *, fun="mean", error_fn="ci", ci=0.95, n_boot=1000)` | Aggregate with uncertainty | |
+| `stat_aggregate(field, fn, *, groupby=None)` | Arbitrary aggregation | |
+| `stat_ecdf(field, *, complementary=False)` | Empirical CDF | |
+| `stat_qq(field, *, distribution="normal", line=True)` | Quantile–quantile data | |
+| `stat_contour(x, y, *, bandwidth="scott", thresholds=6, smooth=True)` | 2D contour levels | |
+| `stat_identity()` | No-op; explicit passthrough | |
+
+**Model stat transforms** (accept `ModelSource` or raw arrays)
+
+| Class | Description |
+|---|---|
+| `stat_roc(y_true, y_score, *, average=None)` | Compute ROC curve data |
+| `stat_pr(y_true, y_score, *, average=None)` | Compute PR curve data |
+| `stat_confusion(y_true, y_pred, *, normalize=None, labels=None)` | Compute confusion matrix |
+| `stat_calibration(y_true, y_prob, *, n_bins=10, strategy="uniform")` | Compute calibration curve |
+| `stat_lift(y_true, y_score)` | Compute lift/gain curve |
+| `stat_importance(model, X, y, *, method="builtin", n_repeats=30)` | Compute feature importance |
+| `stat_shap(model, X, *, background=None)` | Compute SHAP values |
+| `stat_pdp(model, X, features, *, grid_resolution=100, kind="average")` | Compute partial dependence |
+| `stat_residuals(model, X, y, *, kind="studentized")` | Compute residual diagnostics |
+| `stat_learning_curve(model, X, y, *, cv=5, scoring=None, train_sizes=None)` | Compute learning curve |
+| `stat_validation_curve(model, X, y, param, values, *, cv=5, scoring=None)` | Compute validation curve |
+
+---
+
+### 3.5 Data Transforms
+
+Data transforms are applied before stat transforms, in the Rust engine. They reshape or filter the input data.
+
+| Class | Description | Key Parameters |
+|---|---|---|
+| `transform_filter(predicate)` | Row filter | Predicate string (Vega expression), dict, or `Selection` |
+| `transform_calculate(as_, expr)` | Derived column | Expression string or callable |
+| `transform_aggregate(*aggregates, groupby=None)` | Group-by aggregation | `Aggregate` objects |
+| `transform_bin(field, *, as_=None, **bin_kwargs)` | Bin a field | |
+| `transform_fold(fields, *, as_=("key", "value"))` | Wide → long (melt) | |
+| `transform_pivot(field, value, *, groupby=None, limit=None, op="sum")` | Long → wide | |
+| `transform_join_aggregate(*aggregates, groupby=None)` | Add aggregate columns without collapsing rows | |
+| `transform_window(*window_transforms, *, sort=None, groupby=None, frame=None, ignore_peers=False)` | Window functions (rolling mean, rank, cumsum, etc.) | |
+| `transform_density(field, *, bandwidth="scott", groupby=None, extent=None, minsteps=None, steps=None, cumulative=False, as_=("value", "density"))` | KDE transform | |
+| `transform_regression(x, y, *, method="linear", order=3, groupby=None, extent=None, params=False, as_=("x","y"))` | Regression transform | |
+| `transform_loess(x, y, *, bandwidth=0.3, groupby=None, as_=("x","y"))` | LOESS transform | |
+| `transform_impute(field, *, method="value", value=None, groupby=None, key=None, keyvals=None)` | Fill missing values | |
+| `transform_flatten(fields, *, as_=None)` | Expand list-typed columns | |
+| `transform_sample(n)` | Random row sample | |
+| `transform_top_k(n, *, field, op="mean", sort="descending")` | Keep top-k by aggregate | |
+| `transform_stack(field, *, groupby, sort=None, as_=("start","end"), offset="zero")` | Stacking transform for area/bar | |
+| `transform_timeunit(field, unit, *, utc=False, as_=None)` | Temporal unit extraction | |
+
+---
+
+### 3.6 Scales
+
+Scales map data domain values to visual range values. Attached to encoding channels via the `scale=` parameter.
+
+#### Scale Classes
+
+| Class | Description |
+|---|---|
+| `Scale(type=None, domain=None, range=None, nice=None, zero=None, padding=None, clamp=None, reverse=None, round=None)` | Base / linear scale |
+| `ScaleLog(base=10, *, domain=None, ...)` | Logarithmic |
+| `ScalePow(exponent=2, *, domain=None, ...)` | Power |
+| `ScaleSqrt(...)` | Square root (power with exponent=0.5) |
+| `ScaleSymlog(constant=1, ...)` | Symmetric log (handles zero) |
+| `ScaleTime(...)` | Temporal |
+| `ScaleUtc(...)` | UTC temporal |
+| `ScaleOrdinal(domain=None, range=None)` | Categorical |
+| `ScalePoint(domain=None, *, padding=0.5, align=0.5, reverse=False)` | Ordinal point scale (for dot plots) |
+| `ScaleBand(domain=None, *, padding=0.1, padding_inner=None, padding_outer=None, align=0.5)` | Ordinal band scale (for bar plots) |
+| `ScaleSequential(scheme=None, *, domain=None, reverse=False, interpolate=None)` | Sequential color |
+| `ScaleDiverging(scheme=None, *, domain=None, domainMid=None)` | Diverging color |
+| `ScaleThreshold(domain, range)` | Threshold / bin color |
+| `ScaleQuantile(domain, range, *, quantiles=None)` | Quantile |
+| `ScaleQuantize(domain, range)` | Quantize |
+| `ScaleBinOrdinal(bins, scheme=None)` | Binned ordinal |
+
+#### Color Scheme Constants (`ferrum.schemes`)
+
+**Categorical:** `okabe_ito` *(default)*, `tableau10`, `set1`, `set2`, `paired`, `pastel`, `dark2`
+
+**Sequential:** `viridis` *(default)*, `plasma`, `inferno`, `magma`, `cividis`, `blues`, `greens`, `oranges`, `reds`, `purples`, `greys`, `tealblues`
+
+**Diverging:** `redblue`, `redgrey`, `pinkgreen`, `purplegreen`, `brownbluegreen`, `spectral`
+
+**Cyclical:** `rainbow`, `sinebow`
+
+---
+
+### 3.7 Axes and Legends
+
+#### `Axis`
+
+```
+Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, tick_min_step=None,
+     grid=True, grid_dash=None, grid_width=None, grid_color=None, grid_opacity=None,
+     labels=True, label_angle=None, label_flush=True, label_overlap="parity",
+     label_format=None, label_format_type=None, label_font_size=None, label_color=None,
+     domain=True, domain_width=None, domain_color=None,
+     offset=None, translate=None, min_extent=None, max_extent=None,
+     title_orient=None, title_font_size=None, title_color=None, title_padding=None,
+     values=None, encode=None, zindex=None)
+```
+
+#### `Legend`
+
+```
+Legend(title=None, *, orient="right", direction="vertical", type=None,
+       tick_count=None, tick_min_step=None, values=None,
+       format=None, format_type=None,
+       label_font_size=None, label_color=None, label_limit=None,
+       symbol_size=None, symbol_stroke_width=None, symbol_type=None,
+       gradient_length=None, gradient_thickness=None,
+       columns=None, column_padding=None, row_padding=None,
+       clip_height=None, title_font_size=None, title_padding=None,
+       offset=None, padding=None, zindex=None)
+```
+
+Set `legend=None` on any channel to suppress the legend for that channel.
+
+---
+
+### 3.8 Coordinate Systems
+
+Applied via `.coord()` on `Chart`.
+
+| Class | Description | Key Parameters |
+|---|---|---|
+| `CoordCartesian(xlim=None, ylim=None, expand=True, clip=True)` | Default Cartesian | |
+| `CoordFlip()` | Flipped Cartesian (swap X/Y roles) | |
+| `CoordPolar(theta="x", radius="y", *, start_angle=0, end_angle=None, direction="clockwise")` | Polar (pie, radar) | |
+| `CoordGeo(projection=None, *, center=None, scale=None, translate=None, rotate=None, precision=None, clip_angle=None, clip_extent=None)` | Geographic | Any D3 projection name |
+
+---
+
+### 3.9 Faceting
+
+#### `FacetSpec`
+
+Wraps a `Chart` and repeats it across values of a facet field. Created by `.facet()` on `Chart`.
+
+```
+FacetSpec(spec, facet, *, ncols=None, nrows=None, spacing=None, bounds="full",
+          columns=None, resolve=None)
+```
+
+#### `RepeatSpec`
+
+Repeat a chart across a list of fields (e.g., pairwise matrix).
+
+```
+RepeatSpec(spec, *, row=None, column=None, layer=None, spacing=None, columns=None)
+```
+
+#### Resolution
+
+```
+Resolve(scale=None, axis=None, legend=None)
+```
+
+`scale` / `axis` / `legend` each accept a dict mapping channel name (`"x"`, `"y"`, `"color"`, etc.) to `"shared"` or `"independent"`.
+
+---
+
+### 3.10 Selections (Interactivity)
+
+Selections define interactive state. They are declared in the spec and resolved by the WASM renderer. In SVG/PNG mode, selections are silently ignored.
+
+| Class | Description | Key Parameters |
+|---|---|---|
+| `selection_point(*, fields=None, encodings=None, nearest=False, toggle="event.shiftKey", on="click", clear="mouseout", resolve="global")` | Single or multi-point selection | |
+| `selection_interval(*, fields=None, encodings=None, translate=True, zoom=True, mark=None, resolve="global")` | Brush / rectangular interval selection | |
+| `selection_single(...)` | Alias for `selection_point` with toggle disabled | |
+| `selection_multi(...)` | Alias for `selection_point` with shift-toggle enabled | |
+| `SelectionMark(fill=None, stroke=None, fill_opacity=None, stroke_opacity=None, stroke_width=None, stroke_dash=None)` | Style the brush rectangle | |
+
+**Using selections in encodings:**
+
+```
+Color(field="category", condition=selection.when(Color("category")).otherwise(value("#aaa")))
+```
+
+Or via chart-level `.conditional(sel, color=..., else_color=...)`.
+
+---
+
+### 3.11 Annotations
+
+Annotations are lightweight overlays that don't participate in scale domain calculation.
+
+| Class | Description | Key Parameters |
+|---|---|---|
+| `annotate_hline(y, *, label=None, label_position="right", stroke=None, stroke_dash=None)` | Horizontal reference line | |
+| `annotate_vline(x, *, label=None, stroke=None, stroke_dash=None)` | Vertical reference line | |
+| `annotate_rect(x1, x2, y1, y2, *, fill=None, opacity=0.1, label=None)` | Shaded rectangle region | |
+| `annotate_text(x, y, text, *, dx=0, dy=0, align="center", baseline="middle", font_size=None, color=None, angle=None)` | Free text annotation | |
+| `annotate_arrow(x1, y1, x2, y2, *, label=None, label_side="start", stroke=None)` | Arrow with optional label | |
+| `AUCLabel(*, position="end", format=".3f", prefix="AUC = ")` | Auto-placed AUC annotation on ROC curves | |
+| `OutlierLabel(*, threshold=3.0, field=None, label_field=None, max_labels=10)` | Label high-leverage or high-residual points | |
+
+---
+
+### 3.12 Compound Views
+
+| Class / Operator | Description | Key Parameters |
+|---|---|---|
+| `HConcatChart(*charts)` / `chart1 \| chart2` | Horizontal concatenation | `spacing`, `resolve`, `title` |
+| `VConcatChart(*charts)` / `chart1 & chart2` | Vertical concatenation | `spacing`, `resolve`, `title` |
+| `LayerChart(*charts)` | Layer overlay (same axes) | `resolve`, `title` |
+| `ConcatChart(*charts, columns=None)` | General wrapping concatenation | `spacing`, `resolve`, `columns` |
+| `RepeatChart(spec, row=None, column=None, layer=None)` | Repeat across field lists | `spacing`, `columns`, `resolve` |
+
+All compound views accept `.theme()`, `.properties()`, `.save()`, `.show()`.
+
+---
+
+### 3.13 Themes
+
+A `Theme` is an immutable value object. All properties are optional; unset properties fall back to the Ferrum defaults.
+
+```
+Theme(
+    # Canvas
+    background=None, width=None, height=None, padding=None,
+
+    # Typography
+    font_family=None, font_size=None, font_weight=None, font_color=None,
+    title_font_family=None, title_font_size=None, title_font_weight=None,
+    title_color=None, title_anchor=None, title_offset=None,
+    label_font_family=None, label_font_size=None, label_color=None,
+
+    # Grid
+    grid=True, grid_color=None, grid_dash=None, grid_width=None, grid_opacity=None,
+
+    # Axes
+    axis_line=True, axis_line_width=None, axis_line_color=None,
+    tick_size=None, tick_width=None, tick_color=None,
+
+    # Marks
+    point_size=None, point_opacity=None,
+    line_stroke_width=None, bar_corner_radius=None,
+    area_opacity=None, opacity=None,
+
+    # Colors
+    color_scheme=None, mark_color=None, background_color=None,
+
+    # Legend
+    legend_orient=None, legend_direction=None, legend_title_font_size=None,
+
+    # Spacing
+    axis_title_padding=None, column_padding=None, row_padding=None,
+)
+```
+
+**Built-in themes** (`ferrum.themes`)
+
+| Name | Description |
+|---|---|
+| `default` | Ferrum defaults: light background, subtle grid, OKabe-Ito |
+| `minimal` | No grid lines, no axis lines, generous whitespace |
+| `dark` | Dark background (#1a1a2e), light text, neon-adjacent accents |
+| `publication` | Print-ready: no background, high-contrast, Tableau10 |
+| `economist` | Red accent, left-axis labels, horizontal grid only |
+| `fivethirtyeight` | Grey background, red/blue diverging, no axis lines |
+| `solarized_light` | Solarized palette |
+| `solarized_dark` | Solarized dark palette |
+
+**Theme composition:**
+
+```python
+my_theme = fr.themes.minimal.update(
+    font_family="Berkeley Mono",
+    grid=fr.Grid(major=True, minor=False, color="#f5f5f5"),
+    title_font_weight="bold",
+)
+```
+
+`Theme.update(**kwargs)` returns a new `Theme`; source is unchanged.
+
+**Global default** (process-scoped, not module-level mutable):
+
+```python
+ferrum.set_default_theme(my_theme)  # returns a context manager
+# or
+with ferrum.theme_context(my_theme):
+    ...
+```
+
+---
+
+### 3.14 Figure-Level Functions
+
+Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
+
+#### Distribution
+
+```
+ferrum.displot(data, *, x=None, y=None, hue=None, col=None, row=None,
+               kind="hist",          # "hist" | "kde" | "ecdf" | "rug"
+               fill=True, cumulative=False, log_scale=False, stat="count",
+               bins="sturges", bandwidth="scott", bw_adjust=1.0,
+               multiple="layer",     # "layer" | "stack" | "fill" | "dodge"
+               kde=False, rug=False, height=None, aspect=None, theme=None)
+```
+
+#### Categorical
+
+```
+ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
+               kind="strip",         # "strip" | "swarm" | "box" | "violin" |
+                                     # "boxen" | "point" | "bar" | "count"
+               order=None, hue_order=None, orient=None,
+               dodge=False, jitter=True, native_scale=False,
+               ci=95, n_boot=1000, seed=None, theme=None)
+```
+
+#### Regression
+
+```
+ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
+              method="lm",           # "lm" | "logistic" | "glm" | "loess" | "robust"
+              ci=95, order=1, scatter=True, scatter_kws=None, line_kws=None,
+              truncate=False, x_bins=None, x_estimator=None, x_jitter=None,
+              logx=False, theme=None)
+
+ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
+                 dropna=True, label=None, color=None, theme=None)
+```
+
+#### Matrix / Pairwise
+
+```
+ferrum.pairplot(data, *, vars=None, x_vars=None, y_vars=None,
+                hue=None, kind="scatter",     # off-diagonal
+                diag_kind="auto",             # "hist" | "kde" | None
+                markers=None, height=None, aspect=None,
+                corner=False, dropna=False, theme=None)
+
+ferrum.heatmap(data, *, annot=True, fmt=".2f", cmap="blues",
+               linewidths=0.5, linecolor="white",
+               vmin=None, vmax=None, center=None, robust=False,
+               square=False, mask=None, theme=None)
+
+ferrum.clustermap(data, *, method="ward", metric="euclidean",
+                  cmap="viridis", z_score=None, standard_scale=None,
+                  figsize=None, dendrogram_ratio=0.2, theme=None)
+```
+
+#### Model Diagnostics (figure-level)
+
+```
+ferrum.roc_chart(model_or_source, X=None, y=None, *, per_class=True,
+                 average="macro", annotate_auc=True,
+                 compare=None,     # dict[str, estimator] for multi-model overlay
+                 theme=None)
+
+ferrum.pr_chart(model_or_source, X=None, y=None, *, per_class=True,
+                annotate_ap=True, iso_lines=True, compare=None, theme=None)
+
+ferrum.confusion_matrix_chart(model_or_source, X=None, y=None, *,
+                               normalize="true", cmap="blues", theme=None)
+
+ferrum.calibration_chart(*model_or_sources, X=None, y=None, *,
+                          n_bins=10, theme=None)
+
+ferrum.gain_chart(model_or_source, X=None, y=None, *, theme=None)
+
+ferrum.lift_chart(model_or_source, X=None, y=None, *, theme=None)
+
+ferrum.residuals_chart(model_or_source, X=None, y=None, *,
+                        kind="studentized", panels="auto",
+                        # panels: "auto" | list of "residuals_vs_fitted" |
+                        #         "qq" | "scale_location" | "residuals_vs_leverage"
+                        theme=None)
+
+ferrum.importance_chart(model_or_source, X=None, y=None, *,
+                         method="builtin", top_k=20, orient="horizontal",
+                         error_bars=True, theme=None)
+
+ferrum.shap_chart(model_or_source, X=None, *,
+                   kind="beeswarm",   # "beeswarm" | "bar" | "waterfall" | "force" | "heatmap"
+                   max_display=20, sample_idx=None, theme=None)
+
+ferrum.learning_curve_chart(model, X, y, *, cv=5, scoring=None,
+                              train_sizes=None, ci_style="band",
+                              n_jobs=None, theme=None)
+
+ferrum.validation_curve_chart(model, X, y, param, values, *,
+                                cv=5, scoring=None, log_scale="auto",
+                                ci_style="band", theme=None)
+
+ferrum.cluster_diagnostics(X, *, ks, method="kmeans", scoring="both",
+                             # scoring: "elbow" | "silhouette" | "both"
+                             n_init=10, random_state=None, theme=None)
+
+ferrum.decision_boundary_chart(model, X, y, *,
+                                 features=(0, 1),    # column indices or names
+                                 grid_resolution=200,
+                                 proba=False,         # plot probability surface if True
+                                 scatter=True, theme=None)
+```
+
+---
+
+### 3.15 Sklearn-Protocol Visualizers
+
+Visualizers implement `fit` / `score` / `show` for drop-in compatibility with sklearn workflows. Unlike Yellowbrick, `.show()` always returns a `Chart` object — not a matplotlib figure.
+
+**Base class:**
+
+```
+class FerrumVisualizer:
+    def fit(self, X, y=None) -> self
+    def score(self, X, y) -> float        # computes metric; populates chart state
+    def show(self) -> Chart
+    def __repr__(self) -> str             # summary string with key metrics
+```
+
+**Concrete visualizers:**
+
+| Class | Wraps |
+|---|---|
+| `ROCVisualizer(model, *, micro=True, macro=True, per_class=True, theme=None)` | ROC chart |
+| `PRVisualizer(model, *, theme=None)` | PR chart |
+| `ConfusionMatrixVisualizer(model, *, normalize="true", theme=None)` | Confusion matrix |
+| `ClassificationReportVisualizer(model, *, theme=None)` | Heatmap of precision/recall/F1 per class |
+| `CalibrationVisualizer(*models, *, n_bins=10, theme=None)` | Calibration chart |
+| `ResidualsVisualizer(model, *, kind="studentized", theme=None)` | Residuals diagnostic |
+| `PredictionErrorVisualizer(model, *, identity_line=True, theme=None)` | Prediction error |
+| `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, theme=None)` | Importance chart |
+| `LearningCurveVisualizer(model, *, cv=5, scoring=None, train_sizes=None, theme=None)` | Learning curve |
+| `ValidationCurveVisualizer(model, param, values, *, cv=5, scoring=None, theme=None)` | Validation curve |
+| `SilhouetteVisualizer(model, *, theme=None)` | Silhouette chart (clusterers) |
+| `ElbowVisualizer(model_class, *, ks, metric="distortion", theme=None)` | Elbow chart |
+| `ManifoldVisualizer(model, *, method="umap", theme=None)` | Embedding projection |
+| `ClassBalanceVisualizer(*, theme=None)` | Class frequency bar chart |
+| `CooksDistanceVisualizer(model, *, threshold=None, theme=None)` | Cook's distance |
+| `SHAPVisualizer(model, *, kind="beeswarm", background=None, theme=None)` | SHAP chart |
+
+---
+
+### 3.16 Output and Rendering
+
+#### `RenderConfig`
+
+```
+RenderConfig(
+    format="svg",         # "svg" | "png" | "html" | "json"
+    scale=2.0,            # pixel density multiplier for PNG
+    embed_fonts=True,     # embed fonts in SVG/HTML
+    background=None,      # override chart background for export
+    width=None, height=None,
+    engine="ferrum",      # "ferrum" | "vega-lite"  (vega-lite emits JSON spec)
+)
+```
+
+#### Chart output methods
+
+```
+chart.show(*, renderer=None)                  # auto-detect environment
+chart.show_svg() -> str
+chart.show_png() -> bytes
+chart.show_html() -> str
+chart.to_spec() -> ChartSpec                  # internal dataclass
+chart.to_json(*, indent=None) -> str
+chart.save(path, *, format=None, **render_kwargs)
+chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
+```
+
+#### Environment detection order for `.show()`
+
+1. Jupyter / IPython → inline SVG (static) or WASM widget (if `.interactive()`)
+2. VS Code notebook → same
+3. Terminal with sixel support → PNG via sixel
+4. Otherwise → write temp HTML and open browser
+
+---
+
+### 3.17 Data Source Compatibility
+
+Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level functions:
+
+| Type | Notes |
+|---|---|
+| `polars.DataFrame` | Zero-copy via Arrow |
+| `polars.LazyFrame` | Collected at render time; lazy evaluation where possible |
+| `pandas.DataFrame` | Converted to Arrow once on first access |
+| `pyarrow.Table` | Native |
+| `pyarrow.RecordBatch` | Native |
+| `dict[str, list]` | Converted to Arrow inline |
+| `list[dict]` | Converted to Arrow inline |
+| `numpy.ndarray` (2D) | Columns named `col_0`, `col_1`, ... |
+| `ModelSource` | Wraps an estimator; derived data accessed via `.predictions()` etc. |
+| `ComparedModelSource` | Multi-model wrapper; adds `model` column to all derived data |
+| `str` / `pathlib.Path` | CSV, Parquet, JSON, NDJSON; loaded lazily |
+| `None` | Data supplied per-layer |
+
+---
+
+### 3.18 Utilities
+
+```
+ferrum.data.sample_datasets()              # list available built-in datasets
+ferrum.data.load(name) -> polars.DataFrame # load a named sample dataset
+
+ferrum.color.palette(scheme, n)            # return n colors from a scheme as hex list
+ferrum.color.to_hex(color)                 # normalize color string to hex
+ferrum.color.diverging_palette(low, mid, high, n)
+
+ferrum.config.set_max_rows(n)              # raise/lower data size guard (default: None)
+ferrum.config.set_renderer(renderer)       # default renderer for .show()
+ferrum.config.set_default_width(n)
+ferrum.config.set_default_height(n)
+
+ferrum.Title(text, *, subtitle=None, anchor="start", offset=None,
+             font_size=None, font_weight=None, color=None,
+             subtitle_font_size=None, subtitle_color=None)
+
+ferrum.Grid(major=True, minor=False, *,
+            major_color=None, minor_color=None,
+            major_dash=None, minor_dash=None,
+            major_width=None, minor_width=None,
+            major_opacity=None, minor_opacity=None)
+
+ferrum.Aggregate(fn, field, *, as_=None)   # used in transform_aggregate
+ferrum.WindowTransform(fn, *, field=None, param=None, as_=None, peer=False)
+```
+
+---
+
+---
+
+## Part IV: Extension Points
+
+### Custom Marks
+
+Implement the `MarkProtocol`:
+
+```
+class MyMark:
+    def to_primitive_layers(self, data: ArrowTable, encodings: Encodings) -> list[PrimitiveLayer]:
+        ...
+```
+
+Register: `ferrum.register_mark("mark_my_mark", MyMark)`
+
+### Custom Stat Transforms
+
+Implement `StatProtocol`:
+
+```
+class MyStat:
+    def apply(self, data: ArrowTable) -> ArrowTable:
+        ...
+```
+
+Register: `ferrum.register_stat(MyStat)`
+
+### Custom Themes
+
+Themes are plain dataclass instances. No registration needed — pass directly to `.theme()`.
+
+### Renderer Plugins
+
+Implement `RendererProtocol` and register via `ferrum.register_renderer(name, RendererClass)`. The built-in renderers (`"svg"`, `"png"`, `"html"`, `"json"`) cannot be overridden, only supplemented.
+
+---
+
+---
+
+## Appendix: Version Target
+
+This document describes **Ferrum 1.0 API surface**. Nothing here exists yet.
+
+The intent is that 1.0 be complete enough that a practitioner moving from Altair, Seaborn, or Yellowbrick finds every chart type they reach for without falling back to matplotlib.
+
+Post-1.0 candidates (explicitly out of scope for 1.0):
+
+- `mark_network` / graph layout
+- `mark_gantt` / timeline
+- Geographic tile layers (Mapbox, OpenStreetMap)
+- 3D coordinate system
+- Animation / `frame` encoding
+- Real-time streaming data sources
+- Julia and R bindings
