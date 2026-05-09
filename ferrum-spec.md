@@ -81,17 +81,26 @@ The Python package imports as `ferrum`. Internal Rust crate: `ferrum-core`. WASM
 │  │  Binning     │  │Facet layout  │  │Tick gen      │  │
 │  │  Aggregation │  │Legend place  │  │              │  │
 │  └──────────────┘  └──────────────┘  └──────────────┘  │
-│                                                         │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │               Render Pipeline                    │   │
-│  │   SVG renderer · PNG rasterizer · Spec emitter  │   │
-└──┴──────────────────────────────────────────────────┴───┘
+└─────────────────────────────────────────────────────────┘
+                     │
+  ┌──────────────────────────────────────────────────┐
+  │               Render Pipeline                    │
+  │                                                  │
+  │   Geometry pass → SceneGraph                     │
+  │                       │                          │
+  │          ┌────────────┼────────────┐             │
+  │          ▼            ▼            ▼             │
+  │      SVG backend  tiny-skia    wgpu/WASM         │
+  │      (vector)     (CPU raster) (GPU/interactive) │
+  └──────────────────────────────────────────────────┘
                      │
        ┌─────────────┼─────────────┐
        ▼             ▼             ▼
     SVG/PNG      HTML+WASM     JSON spec
    (static)    (interactive)  (interop)
 ```
+
+SceneGraph is the renderer-agnostic intermediate representation — a flat list of geometric primitives (filled paths, stroked paths, rectangles, circles, glyphs, images) consumed by all three backends.
 
 ---
 
@@ -129,7 +138,7 @@ Chart(data=None, *, width=None, height=None, title=None, description=None)
 - `.theme(theme)` — Apply a `Theme` object.
 - `.interactive()` — Switch render target to WASM. Returns `InteractiveChart`.
 - `.resolve(scale=None, axis=None, legend=None)` — Override shared/independent resolution in compound views.
-- `.save(path, *, format=None, scale=2.0)` — Render and write to disk.
+- `.save(path, *, format=None, scale=2.0, backend=None, **render_kwargs)` — Render and write to disk. `format` inferred from extension if `None`. `backend` overrides auto-selection. `scale` applies to raster backends only.
 - `.show()` — Display in current environment (notebook, terminal sixel, or browser).
 - `.to_spec()` — Return the internal `ChartSpec` dataclass (serializable).
 - `.to_json()` — Return JSON string of the chart spec.
@@ -286,6 +295,21 @@ Marks are constructors that accept visual property overrides as keyword argument
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
 | `mark_violin(...)` | KDE + optional boxplot overlay | `bandwidth`, `inner` (`"box"`, `"quartile"`, `"point"`, `None`) |
 | `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, or `scipy.stats` dist), `dequantize` |
+| `mark_raster(...)` | Aggregates data to a pixel-resolution grid and renders as a colored image | `aggregate` (`"count"`, `"density"`, `"mean"`, `"sum"`, `"any"`), `field` (required if `aggregate` is `"mean"` or `"sum"`), `cmap`, `resolution` (`"screen"`, `int`, `tuple[int, int]`), `blend` (`"alpha"`, `"additive"`), `min_count`, `log_scale` |
+
+**Auto-raster (`mark_raster` as a policy):**
+
+`mark_raster` is the explicit form of density rasterization. Auto-raster is a policy layer that implicitly substitutes `mark_raster` for the original mark when the per-layer mark count exceeds a threshold (`raster_threshold`, see §3.16 and §3.18).
+
+When auto-raster fires:
+- Color encodings on the original layer are dropped and replaced with a density colormap.
+- Tooltip encodings are dropped.
+- A warning is emitted (configurable via `raster_behavior`).
+- A density colorbar legend replaces the original legend.
+
+Auto-raster will **not** fire if the chart has an active color encoding — doing so would silently discard user intent. Either remove the color encoding or use `mark_raster` explicitly.
+
+Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), `"silent"`, or `"error"`.
 
 #### Model Diagnostic Marks
 
@@ -774,8 +798,30 @@ RenderConfig(
     background=None,      # override chart background for export
     width=None, height=None,
     engine="ferrum",      # "ferrum" | "vega-lite"  (vega-lite emits JSON spec)
+
+    # Auto-raster policy (see §3.3 and §3.17)
+    raster_threshold=500_000,   # int | None — mark count above which auto-raster
+                                # is triggered. None disables auto-raster entirely.
+                                # Overrides ferrum.config.set_raster_threshold()
+                                # for this render call.
+    raster_behavior="warn",     # "warn" | "silent" | "error" — controls whether
+                                # a warning is emitted when auto-raster
+                                # substitution occurs.
+    raster_aggregate="count",   # default aggregate for auto-raster substitution
+    raster_cmap="viridis",      # default colormap for auto-raster substitution
+
+    # Backend selection (see §3.17)
+    backend=None,               # "svg" | "tiny-skia" | "wgpu" | None (auto-select)
+    tile_parallel=False,        # enable Rayon tile parallelism in the tiny-skia
+                                # backend. Increases memory usage; recommended
+                                # for charts with > 500k marks.
+    font_path=None,             # str | list[str] | None — override font search
+                                # paths for the tiny-skia backend. None = use
+                                # bundled Ferrum fonts with system font fallback.
 )
 ```
+
+`raster_threshold=None` and `raster_behavior="silent"` are not equivalent: `None` disables auto-raster entirely (the chart renders all marks through the requested backend, even if performance suffers); `"silent"` keeps auto-raster active but suppresses the substitution warning.
 
 #### Chart output methods
 
@@ -799,7 +845,60 @@ chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
 
 ---
 
-### 3.17 Data Source Compatibility
+### 3.17 Rendering Backends
+
+Ferrum has three rendering backends. The backend used for a given output is determined by the call (`.save()` vs `.show()` vs `.interactive()`), the file extension or format, the mark count, and any explicit override in `RenderConfig` or `ferrum.config`.
+
+#### SVG Backend
+
+- Default for static output when mark count is below threshold.
+- Resolution-independent, text-searchable, scalable.
+- Not viable above ~50k marks.
+- Output: `.svg` files; inline SVG in notebooks.
+
+#### tiny-skia Backend (CPU Rasterizer)
+
+- Pure Rust, zero system dependencies (no Cairo, no libpng, no X11).
+- Bundled in the wheel; works on Linux, macOS, Windows, ARM.
+- Text rendering via `fontdue` (rasterization) + `rustybuzz` (shaping); fonts bundled or resolved from system font paths.
+- Default for `.save("chart.png")` and `.show()` when mark count exceeds threshold.
+- Not used for interactive output.
+- Performance: ~200–800 ms for 1M antialiased marks (CPU-bound, SIMD-optimized); tile-based Rayon parallelism available as opt-in via `RenderConfig`.
+- Default output scale: `2.0` (retina); configurable in `RenderConfig`.
+- Limitations: no vector output; zoom invalidates raster and requires re-render.
+
+#### wgpu / WASM Backend (GPU Interactive)
+
+- Used only when `.interactive()` is called.
+- `wgpu` targets WebGPU (Chrome 113+, Edge 113+, Safari 17+) with automatic WebGL2 fallback for broader compatibility.
+- Vello is not used; its compute-shader-based approach is incompatible with the WebGL2 fallback path. Instanced draws for simple marks (points, bars) and tessellation for curves and areas require no compute shaders and work across both WebGPU and WebGL2.
+- Text and axis labels rendered via CSS overlay (real DOM text; accessible, no font bundling required in browser context).
+- Pan and zoom are GPU matrix transforms — no Python round-trip, no re-render.
+- Selections that trigger Python-side recomputation require a Python kernel round-trip (~50–200 ms in local notebooks); managed via the `anywidget` protocol.
+- Jupyter integration via `anywidget`; browser integration via standalone HTML bundle.
+- WASM bundle size: ~2–4 MB compressed (CDN-hosted recommended).
+- On macOS including M-series, the native `wgpu` backend targets Metal; unified memory architecture reduces GPU buffer upload latency vs. discrete GPUs.
+- Viewport changes (zoom, resize) trigger re-rasterization of `mark_raster` layers at the new resolution.
+
+#### Backend selection
+
+The threshold column refers to `raster_threshold` (default `500_000`), configurable in `RenderConfig` and `ferrum.config`.
+
+| Call                                            | Backend                            |
+|-------------------------------------------------|------------------------------------|
+| `.save("chart.svg")`                            | SVG (warns if `mark_count > 50k`)  |
+| `.save("chart.png")`                            | tiny-skia                          |
+| `.show()` — `mark_count < threshold` (def 500k) | SVG inline                         |
+| `.show()` — `mark_count >= threshold`           | tiny-skia PNG                      |
+| `.show()` in headless / no display              | tiny-skia PNG (always)             |
+| `.show()` in terminal with sixel support        | tiny-skia → sixel                  |
+| `.interactive()`                                | wgpu / WASM                        |
+
+Per-call `RenderConfig` takes precedence over global `ferrum.config` settings for all threshold and backend parameters.
+
+---
+
+### 3.18 Data Source Compatibility
 
 Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level functions:
 
@@ -820,7 +919,7 @@ Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level func
 
 ---
 
-### 3.18 Utilities
+### 3.19 Utilities
 
 ```
 ferrum.data.sample_datasets()              # list available built-in datasets
@@ -834,6 +933,14 @@ ferrum.config.set_max_rows(n)              # raise/lower data size guard (defaul
 ferrum.config.set_renderer(renderer)       # default renderer for .show()
 ferrum.config.set_default_width(n)
 ferrum.config.set_default_height(n)
+
+ferrum.config.set_raster_threshold(n)      # mark count threshold for auto-raster
+                                           # substitution. Pass None to disable.
+                                           # Default: 500_000.
+ferrum.config.set_raster_behavior(mode)    # "warn" (default), "silent", "error"
+ferrum.config.set_default_backend(backend) # "svg", "tiny-skia", "wgpu", or None (auto)
+ferrum.config.set_font_paths(*paths)       # prepend paths to the font search list
+                                           # used by the tiny-skia backend
 
 ferrum.Title(text, *, subtitle=None, anchor="start", offset=None,
              font_size=None, font_weight=None, color=None,
