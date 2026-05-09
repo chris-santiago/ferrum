@@ -44,6 +44,60 @@ pub struct FacetGrid {
     pub origin: Rect,
 }
 
+impl FacetGrid {
+    /// Wrap mode: ncols is fixed; nrows = ceil(n_panels / ncols).
+    pub fn compute_wrap(
+        ncols: u32,
+        n_panels: u32,
+        origin: Rect,
+        gutter_x: f64,
+        gutter_y: f64,
+    ) -> FacetGrid {
+        let ncols = ncols.max(1);
+        let nrows = (n_panels + ncols - 1) / ncols;
+        let nrows = nrows.max(1);
+        let total_x_gutter = gutter_x * (ncols.saturating_sub(1) as f64);
+        let total_y_gutter = gutter_y * (nrows.saturating_sub(1) as f64);
+        let cell_w = ((origin.w - total_x_gutter) / ncols as f64).max(0.0);
+        let cell_h = ((origin.h - total_y_gutter) / nrows as f64).max(0.0);
+        FacetGrid {
+            mode: FacetMode::Wrap { ncols },
+            n_panels,
+            cell_w,
+            cell_h,
+            gutter_x,
+            gutter_y,
+            origin,
+        }
+    }
+
+    pub fn cell_rect(&self, row: u32, col: u32) -> Rect {
+        Rect {
+            x: self.origin.x + col as f64 * (self.cell_w + self.gutter_x),
+            y: self.origin.y + row as f64 * (self.cell_h + self.gutter_y),
+            w: self.cell_w,
+            h: self.cell_h,
+        }
+    }
+
+    /// Returns the (row, col) for each of the `n_panels` panels, in panel-index
+    /// order. For wrap mode: row-major. For grid mode (Task 7): same row-major
+    /// order, capped at nrows*ncols.
+    pub fn panel_positions(&self) -> Vec<(u32, u32)> {
+        let ncols = match self.mode {
+            FacetMode::Wrap { ncols } => ncols,
+            FacetMode::Grid { ncols, .. } => ncols,
+        };
+        let cap = match self.mode {
+            FacetMode::Wrap { .. } => self.n_panels,
+            FacetMode::Grid { nrows, ncols } => self.n_panels.min(nrows * ncols),
+        };
+        (0..cap)
+            .map(|i| (i / ncols, i % ncols))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +138,59 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("spacing"));
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn facet_grid_wrap_exact_fit() {
+        // viewport 600x400, ncols=3, n_panels=3, gutter=0
+        // → 1 row of 3 cells, each 200x400.
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, 0.0, 0.0);
+        assert_eq!(grid.cell_w, 200.0);
+        assert_eq!(grid.cell_h, 400.0);
+        assert_eq!(grid.cell_rect(0, 0), rect(0.0, 0.0, 200.0, 400.0));
+        assert_eq!(grid.cell_rect(0, 1), rect(200.0, 0.0, 200.0, 400.0));
+        assert_eq!(grid.cell_rect(0, 2), rect(400.0, 0.0, 200.0, 400.0));
+    }
+
+    #[test]
+    fn facet_grid_wrap_ragged() {
+        // ncols=3, n_panels=5, gutter=0 → 2 rows; last row has 2 cells.
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 5, origin, 0.0, 0.0);
+        assert_eq!(grid.cell_w, 200.0);
+        assert_eq!(grid.cell_h, 200.0);
+        assert_eq!(grid.cell_rect(0, 0), rect(0.0, 0.0, 200.0, 200.0));
+        assert_eq!(grid.cell_rect(0, 1), rect(200.0, 0.0, 200.0, 200.0));
+        assert_eq!(grid.cell_rect(0, 2), rect(400.0, 0.0, 200.0, 200.0));
+        assert_eq!(grid.cell_rect(1, 0), rect(0.0, 200.0, 200.0, 200.0));
+        assert_eq!(grid.cell_rect(1, 1), rect(200.0, 200.0, 200.0, 200.0));
+    }
+
+    #[test]
+    fn facet_grid_wrap_with_gutters() {
+        // viewport 620x420, ncols=3, n_panels=5, gutter_x=10, gutter_y=10
+        // cell_w = (620 - 2*10) / 3 = 200
+        // cell_h = (420 - 1*10) / 2 = 205
+        let origin = rect(0.0, 0.0, 620.0, 420.0);
+        let grid = FacetGrid::compute_wrap(3, 5, origin, 10.0, 10.0);
+        assert_eq!(grid.cell_w, 200.0);
+        assert_eq!(grid.cell_h, 205.0);
+        assert_eq!(grid.cell_rect(0, 0), rect(0.0, 0.0, 200.0, 205.0));
+        assert_eq!(grid.cell_rect(0, 1), rect(210.0, 0.0, 200.0, 205.0));
+        assert_eq!(grid.cell_rect(0, 2), rect(420.0, 0.0, 200.0, 205.0));
+        assert_eq!(grid.cell_rect(1, 0), rect(0.0, 215.0, 200.0, 205.0));
+    }
+
+    #[test]
+    fn facet_grid_wrap_panel_index_to_row_col() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 5, origin, 0.0, 0.0);
+        let panels = grid.panel_positions();
+        assert_eq!(panels, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)]);
     }
 }
