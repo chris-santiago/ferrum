@@ -6,6 +6,7 @@ use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
 use crate::transform::kde::KdeSpec;
 use crate::transform::smooth::SmoothSpec;
+use crate::transform::summary::SummarySpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -14,6 +15,7 @@ pub(crate) enum TransformSpec {
     Kde(KdeSpec),
     Smooth(SmoothSpec),
     Aggregate(AggregateSpec),
+    Summary(SummarySpec),
 }
 
 impl TransformSpec {
@@ -23,6 +25,7 @@ impl TransformSpec {
             Self::Kde(s)       => crate::transform::kde::apply(s, batch),
             Self::Smooth(s)    => crate::transform::smooth::apply(s, batch),
             Self::Aggregate(s) => crate::transform::aggregate::apply(s, batch),
+            Self::Summary(s)   => crate::transform::summary::apply(s, batch),
         }
     }
 }
