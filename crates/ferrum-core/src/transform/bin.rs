@@ -1,3 +1,6 @@
+use arrow::array::RecordBatch;
+use pyo3::exceptions::PyNotImplementedError;
+use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -14,3 +17,7 @@ pub(crate) struct BinSpec {
 }
 
 fn default_true() -> bool { true }
+
+pub(crate) fn apply(_spec: &BinSpec, _batch: &RecordBatch) -> PyResult<RecordBatch> {
+    Err(PyNotImplementedError::new_err("stat_bin::apply lands in Task 6"))
+}
