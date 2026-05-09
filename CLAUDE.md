@@ -22,7 +22,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Release build | `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` |
 | Run tests | `uv run pytest` |
 | Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
-| Verify skeleton | `uv run --no-sync python -c "import ferrum; assert ferrum.add(2,3)==5; print('OK')"` |
+| Verify skeleton | `unset CONDA_PREFIX && uv run --no-sync python -c "import ferrum; print('OK')"` |
 
 > **Note:** `--no-sync` is required for `maturin` commands to avoid a conflict between
 > conda's `CONDA_PREFIX` and uv's `VIRTUAL_ENV`. Miniforge base sets `CONDA_PREFIX` even
