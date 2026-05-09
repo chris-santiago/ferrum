@@ -240,8 +240,28 @@ fn loess_at_point(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) -> f64 
         let a = (swxx * swy - swx * swxy) / det;
         let b = (sw * swxy - swx * swy) / det;
         a + b * x0
+    } else if degree == 2 {
+        let mut xtwx = [[0.0_f64; 3]; 3];
+        let mut xtwy = [0.0_f64; 3];
+        for (i, dist) in &take {
+            let w = if h == 0.0 { 1.0 } else {
+                let u = (dist / h).abs();
+                if u >= 1.0 { 0.0 } else { let v = 1.0 - u.powi(3); v * v * v }
+            };
+            let xi = xs[*i];
+            let row = [1.0, xi, xi * xi];
+            for r in 0..3 {
+                for c in 0..3 {
+                    xtwx[r][c] += w * row[r] * row[c];
+                }
+                xtwy[r] += w * row[r] * ys[*i];
+            }
+        }
+        match crate::transform::linalg::solve_3x3_spd(xtwx, xtwy) {
+            Some(beta) => beta[0] + beta[1] * x0 + beta[2] * x0 * x0,
+            None => f64::NAN,
+        }
     } else {
-        // degree=2 lands in Task 15 (uses linalg::solve_3x3_spd).
         f64::NAN
     }
 }
@@ -443,6 +463,69 @@ mod tests {
                 assert!((yf[i] - case.y_fit[i]).abs() < 1e-9, "case {}: y_fit[{i}] = {} vs {}", case.name, yf[i], case.y_fit[i]);
             }
         }
+    }
+
+    #[test]
+    fn test_loess_deg2_against_fixtures() {
+        use serde::Deserialize;
+        const FIXTURES: &str = include_str!("fixtures/stat_refs.json");
+        #[derive(Deserialize)]
+        struct LoessCase {
+            name: String, x: Vec<f64>, y: Vec<f64>,
+            bandwidth: f64, degree: u8, n: usize,
+            x_grid: Vec<f64>, y_fit: Vec<f64>,
+        }
+        #[derive(Deserialize)]
+        struct F { loess: Vec<LoessCase> }
+        let cases: F = serde_json::from_str(FIXTURES).unwrap();
+        for case in cases.loess {
+            if case.degree != 2 { continue; }
+            let batch = xy_batch(case.x.clone(), case.y.clone());
+            let spec = SmoothSpec {
+                x: "x".into(), y: "y".into(),
+                method: SmoothMethod::Loess, ci: None,
+                bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+            };
+            let out = apply(&spec, &batch).unwrap();
+            let xg = col(&out, "x");
+            let yf = col(&out, "y");
+            for i in 0..case.n {
+                assert!((xg[i] - case.x_grid[i]).abs() < 1e-9);
+                assert!((yf[i] - case.y_fit[i]).abs() < 1e-9,
+                    "case {}: y_fit[{i}] = {} vs {} (diff {})",
+                    case.name, yf[i], case.y_fit[i], (yf[i] - case.y_fit[i]).abs());
+            }
+        }
+    }
+
+    #[test]
+    fn test_loess_deg2_local_window_too_small_emits_nan() {
+        // Only 3 points but degree=2 requires k >= 3 — when bandwidth*n rounds to <3 the impl
+        // floors k to degree+1=3 (so this test verifies the floor and that we don't panic).
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 1.0, 4.0];
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Loess, ci: None,
+            bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
+            degree: 2, n: 5, seed: 0,
+        };
+        // Primary goal: no panic with k == n == degree+1.
+        // With k=n=3 and tricube weights, the farthest neighbor's weight is exactly 0 for grid
+        // endpoints, making X'WX rank-deficient → solve_3x3_spd returns None → NaN.
+        // Interior grid points may have better conditioning and return finite values.
+        // We assert: apply succeeds (no panic), output has 5 rows, each value is NaN or finite.
+        let out = apply(&spec, &batch).unwrap();
+        let yf = col(&out, "y");
+        assert_eq!(yf.len(), 5);
+        for (i, &v) in yf.iter().enumerate() {
+            assert!(v.is_nan() || v.is_finite(), "y[{i}]={v} is neither NaN nor finite");
+        }
+        // The extreme endpoints (x=0 and x=2) should emit NaN: h==max_dist, u=1 → w=0 for
+        // the farthest point, leaving rank-2 system.
+        assert!(yf[0].is_nan(), "y[0]={} should be NaN (rank-deficient at left endpoint)", yf[0]);
+        assert!(yf[4].is_nan(), "y[4]={} should be NaN (rank-deficient at right endpoint)", yf[4]);
     }
 
     #[test]
