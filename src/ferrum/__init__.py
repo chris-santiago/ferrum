@@ -16,6 +16,7 @@ from ferrum._core import (
     Smooth,
     Summary,
     ThresholdScale,
+    compute_layout,
     process_batch,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "Smooth",
     "Summary",
     "ThresholdScale",
+    "compute_layout",
     "process_batch",
 ]

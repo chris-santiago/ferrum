@@ -1,0 +1,531 @@
+//! Phase 6 — layout engine. Pure function: ChartSpec + Theme + Viewport ->
+//! pixel rectangles for panels, axes, legend. No I/O, no rendering, no data
+//! values touched. See docs/superpowers/specs/2026-05-09-layout-engine-design.md.
+
+pub(crate) mod geometry;
+pub(crate) mod text_metrics;
+pub(crate) mod panel;
+pub(crate) mod facet;
+pub(crate) mod axis;
+pub(crate) mod legend;
+pub(crate) mod binding;
+
+// Spec §6.1 constants.
+pub const LABEL_OVERLAP_TOLERANCE: f64 = 0.10;
+pub const DEFAULT_LABEL_ANGLE: f64 = -45.0;
+pub const DEFAULT_HEURISTIC_K: f64 = 0.6;
+pub const MIN_PANEL_DIM: f64 = 1.0;
+pub const DEFAULT_PADDING: f64 = 8.0;
+pub const DEFAULT_LABEL_FONT_SIZE: f64 = 11.0;
+pub const DEFAULT_TITLE_FONT_SIZE: f64 = 13.0;
+pub const DEFAULT_AXIS_TITLE_PADDING: f64 = 4.0;
+
+use serde::{Deserialize, Serialize};
+
+pub use self::axis::{
+    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout,
+};
+pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
+pub use self::geometry::{Inset, Rect, Viewport};
+pub use self::legend::{
+    LegendDirection, LegendEntry, LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
+};
+pub use self::panel::{FacetKey, PanelLayout};
+pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutResult {
+    pub viewport: Rect,
+    pub panels: Vec<PanelLayout>,
+    pub axes: Vec<AxisLayout>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub legend: Option<LegendLayout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<LayoutWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutWarning {
+    PanelCollapsed { panel_index: usize },
+    LabelsElided { axis: usize, count: u32 },
+    LegendOverflowed { entries_dropped: u32 },
+    PanelsDropped { count: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutError {
+    InvalidViewport { width: f64, height: f64 },
+    InvalidFacetSpec(String),
+    PaddingExceedsViewport { padding: f64, viewport_dim: f64 },
+    EmptyFacetGroups,
+}
+
+impl std::fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutError::InvalidViewport { width, height } =>
+                write!(f, "invalid viewport: width={width}, height={height} (both must be > 0)"),
+            LayoutError::InvalidFacetSpec(s) =>
+                write!(f, "invalid facet spec: {s}"),
+            LayoutError::PaddingExceedsViewport { padding, viewport_dim } =>
+                write!(f, "padding {padding} exceeds viewport dimension {viewport_dim}"),
+            LayoutError::EmptyFacetGroups =>
+                write!(f, "facet specified but facet_groups input is empty"),
+        }
+    }
+}
+
+impl std::error::Error for LayoutError {}
+
+/// Theme fields actually read by Phase 6. Keeps the layout engine decoupled
+/// from a full Theme type (which lives in Phase 8 grammar). Phase 7+ will
+/// translate `ferrum.Theme` into this shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThemeInputs {
+    pub padding: f64,
+    pub column_padding: f64,
+    pub row_padding: f64,
+    pub axis_title_padding: f64,
+    pub label_font_size: f64,
+    pub title_font_size: f64,
+    pub legend_orient: LegendOrient,
+}
+
+impl Default for ThemeInputs {
+    fn default() -> Self {
+        Self {
+            padding: DEFAULT_PADDING,
+            column_padding: DEFAULT_PADDING,
+            row_padding: DEFAULT_PADDING,
+            axis_title_padding: DEFAULT_AXIS_TITLE_PADDING,
+            label_font_size: DEFAULT_LABEL_FONT_SIZE,
+            title_font_size: DEFAULT_TITLE_FONT_SIZE,
+            legend_orient: LegendOrient::Right,
+        }
+    }
+}
+
+pub fn compute_layout(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    axes: &AxesInput,
+    facet_groups: &[FacetGroup],
+    legend_entries: &[LegendEntry],
+    metrics: &dyn TextMetrics,
+) -> Result<LayoutResult, LayoutError> {
+    // 1. Validate inputs.
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(LayoutError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+    if let Some(facet) = &spec.facet {
+        match &facet.mode {
+            FacetMode::Wrap { ncols } if *ncols == 0 => {
+                return Err(LayoutError::InvalidFacetSpec("ncols must be > 0".into()));
+            }
+            FacetMode::Grid { nrows, ncols } if *nrows == 0 || *ncols == 0 => {
+                return Err(LayoutError::InvalidFacetSpec("nrows and ncols must be > 0".into()));
+            }
+            _ => {}
+        }
+        if facet_groups.is_empty() {
+            return Err(LayoutError::EmptyFacetGroups);
+        }
+    }
+
+    // 2. Apply outer padding.
+    let viewport_rect = viewport.into_rect();
+    let inner = viewport_rect.shrink(Inset::uniform(theme.padding));
+    if inner.w <= 0.0 || inner.h <= 0.0 {
+        let dim = viewport.width.min(viewport.height);
+        return Err(LayoutError::PaddingExceedsViewport {
+            padding: theme.padding,
+            viewport_dim: dim,
+        });
+    }
+
+    // 3. Reserve legend strip.
+    let (legend_layout, inner_after_legend) = legend::layout_legend(
+        legend_entries,
+        theme.legend_orient,
+        inner,
+        theme.label_font_size,
+        metrics,
+    );
+    let legend_dropped = legend_entries
+        .len()
+        .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
+        as u32;
+
+    // 4 + 5. Reserve y-axis title gutter + label band; reserve x-axis label band.
+    let y_title_gutter = axis::compute_y_title_width(
+        &axes.y,
+        theme.title_font_size,
+        theme.axis_title_padding,
+        metrics,
+    );
+    let y_label_band = axis::compute_y_label_band_width(&axes.y, theme.label_font_size, metrics);
+    let x_label_band = metrics.line_height(theme.label_font_size);
+    let x_title_gutter = if axes.x.title.is_some() {
+        metrics.line_height(theme.title_font_size) + theme.axis_title_padding
+    } else {
+        0.0
+    };
+
+    let plot_region = inner_after_legend.shrink(Inset {
+        top: 0.0,
+        right: 0.0,
+        bottom: x_label_band + x_title_gutter,
+        left: y_label_band + y_title_gutter,
+    });
+
+    // 6. Split into facet cells (or a single panel).
+    let mut panels: Vec<PanelLayout> = Vec::new();
+    let mut warnings: Vec<LayoutWarning> = Vec::new();
+    if legend_dropped > 0 {
+        warnings.push(LayoutWarning::LegendOverflowed { entries_dropped: legend_dropped });
+    }
+
+    let panel_rects: Vec<(u32, u32, Rect, Option<FacetKey>)> = if let Some(facet) = &spec.facet {
+        let n_panels = facet_groups.len() as u32;
+        let (gx, gy) = facet
+            .spacing
+            .map(|s| (s, s))
+            .unwrap_or((theme.column_padding, theme.row_padding));
+        let grid = match facet.mode {
+            FacetMode::Wrap { ncols } => {
+                facet::FacetGrid::compute_wrap(ncols, n_panels, plot_region, gx, gy)
+            }
+            FacetMode::Grid { nrows, ncols } => {
+                facet::FacetGrid::compute_grid(nrows, ncols, n_panels, plot_region, gx, gy)
+            }
+        };
+        if grid.dropped_count() > 0 {
+            warnings.push(LayoutWarning::PanelsDropped { count: grid.dropped_count() });
+        }
+        grid.panel_positions()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (row, col))| {
+                let rect = grid.cell_rect(row, col);
+                let key = facet_groups.get(i).map(|g| g.key.clone());
+                (row, col, rect, key)
+            })
+            .collect()
+    } else {
+        vec![(0, 0, plot_region, None)]
+    };
+
+    // 7. Per-panel: clamp degenerate rects, collect axes.
+    let mut axis_layouts: Vec<AxisLayout> = Vec::new();
+    for (panel_index, (row, col, mut rect, facet_key)) in panel_rects.into_iter().enumerate() {
+        if rect.w <= MIN_PANEL_DIM || rect.h <= MIN_PANEL_DIM {
+            warnings.push(LayoutWarning::PanelCollapsed { panel_index });
+            rect = Rect::ZERO;
+        }
+        panels.push(PanelLayout { plot_area: rect, facet_key, row, col });
+
+        if rect != Rect::ZERO {
+            let y_axis = axis::layout_y_axis(
+                &axes.y,
+                rect,
+                panel_index,
+                theme.label_font_size,
+                theme.title_font_size,
+                theme.axis_title_padding,
+                metrics,
+            );
+            axis_layouts.push(y_axis);
+
+            let (x_axis, xwarn) = axis::layout_x_axis(
+                &axes.x,
+                rect,
+                panel_index,
+                theme.label_font_size,
+                theme.title_font_size,
+                theme.axis_title_padding,
+                metrics,
+            );
+            if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {
+                warnings.push(LayoutWarning::LabelsElided {
+                    axis: axis_layouts.len(),
+                    count,
+                });
+            }
+            axis_layouts.push(x_axis);
+        }
+    }
+
+    Ok(LayoutResult {
+        viewport: viewport_rect,
+        panels,
+        axes: axis_layouts,
+        legend: legend_layout,
+        warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_result_round_trip_empty() {
+        let r = LayoutResult {
+            viewport: Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 },
+            panels: vec![],
+            axes: vec![],
+            legend: None,
+            warnings: vec![],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, r);
+        assert!(!json.contains("legend"));
+        assert!(!json.contains("warnings"));
+    }
+
+    #[test]
+    fn layout_warning_round_trip_each_variant() {
+        for w in [
+            LayoutWarning::PanelCollapsed { panel_index: 2 },
+            LayoutWarning::LabelsElided { axis: 0, count: 5 },
+            LayoutWarning::LegendOverflowed { entries_dropped: 3 },
+            LayoutWarning::PanelsDropped { count: 1 },
+        ] {
+            let json = serde_json::to_string(&w).unwrap();
+            let parsed: LayoutWarning = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, w);
+        }
+    }
+
+    use crate::layout::axis::{AxesInput, AxisInput, AxisOrient};
+    use crate::layout::facet::FacetGroup;
+    use crate::layout::text_metrics::{fixed_width, MockMetrics};
+    use crate::spec::chart::ChartSpec;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    fn minimal_chart_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), type_: None }),
+                y: Some(EncodingSpec { field: "b".into(), type_: None }),
+            },
+            transforms: Vec::new(),
+            facet: None,
+        }
+    }
+
+    fn dummy_axes() -> AxesInput {
+        AxesInput {
+            x: AxisInput {
+                orient: AxisOrient::Bottom,
+                title: None,
+                tick_labels: vec!["0".into(), "1".into(), "2".into(), "3".into()],
+                label_angle_override: None,
+            },
+            y: AxisInput {
+                orient: AxisOrient::Left,
+                title: None,
+                tick_labels: vec!["0".into(), "5".into(), "10".into()],
+                label_angle_override: None,
+            },
+        }
+    }
+
+    fn default_theme_inputs() -> ThemeInputs {
+        ThemeInputs::default()
+    }
+
+    #[test]
+    fn compute_layout_single_chart_no_facet_no_legend() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            viewport,
+            &axes,
+            &[],
+            &[],
+            &m,
+        )
+        .expect("layout should succeed on minimal spec");
+
+        assert_eq!(result.viewport, viewport.into_rect());
+        assert_eq!(result.panels.len(), 1);
+        assert_eq!(result.axes.len(), 2);
+        assert!(result.legend.is_none());
+        assert!(result.warnings.is_empty());
+
+        let panel = &result.panels[0];
+        assert!(panel.plot_area.w > 0.0 && panel.plot_area.h > 0.0);
+        assert_eq!(panel.row, 0);
+        assert_eq!(panel.col, 0);
+        assert!(panel.facet_key.is_none());
+    }
+
+    #[test]
+    fn compute_layout_invalid_viewport_errors() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let err = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 0.0, height: 400.0 },
+            &axes,
+            &[],
+            &[],
+            &m,
+        )
+        .unwrap_err();
+        match err {
+            LayoutError::InvalidViewport { width, .. } => assert_eq!(width, 0.0),
+            other => panic!("expected InvalidViewport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_layout_padding_exceeds_viewport_errors() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = ThemeInputs { padding: 100.0, ..ThemeInputs::default() };
+        let err = compute_layout(
+            &spec,
+            &theme,
+            Viewport { width: 50.0, height: 50.0 },
+            &axes,
+            &[],
+            &[],
+            &m,
+        )
+        .unwrap_err();
+        match err {
+            LayoutError::PaddingExceedsViewport { .. } => {}
+            other => panic!("expected PaddingExceedsViewport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_layout_serde_round_trip() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 600.0, height: 400.0 },
+            &axes,
+            &[],
+            &[],
+            &m,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, result);
+    }
+
+    use crate::layout::facet::{FacetMode, FacetSpec};
+    use crate::layout::panel::FacetKey;
+
+    fn faceted_spec(ncols: u32) -> ChartSpec {
+        let mut s = minimal_chart_spec();
+        s.facet = Some(FacetSpec {
+            field: "species".into(),
+            mode: FacetMode::Wrap { ncols },
+            spacing: None,
+        });
+        s
+    }
+
+    fn three_groups() -> Vec<FacetGroup> {
+        vec![
+            FacetGroup { key: FacetKey { field: "species".into(), value: "setosa".into() }, n_rows: 50 },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "versicolor".into() }, n_rows: 50 },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "virginica".into() }, n_rows: 50 },
+        ]
+    }
+
+    #[test]
+    fn compute_layout_faceted_three_panels_one_legend() {
+        let spec = faceted_spec(3);
+        let groups = three_groups();
+        let legend = vec![
+            LegendEntry { label: "setosa".into(), symbol: SymbolKind::Circle },
+            LegendEntry { label: "versicolor".into(), symbol: SymbolKind::Circle },
+            LegendEntry { label: "virginica".into(), symbol: SymbolKind::Circle },
+        ];
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &legend,
+            &m,
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        assert_eq!(result.axes.len(), 6);
+        assert!(result.legend.is_some());
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+
+        assert_eq!(
+            result.panels[0].facet_key.as_ref().unwrap().value,
+            "setosa"
+        );
+        assert_eq!(
+            result.panels[2].facet_key.as_ref().unwrap().value,
+            "virginica"
+        );
+    }
+
+    #[test]
+    fn compute_layout_facet_grid_overflow_warns() {
+        let mut spec = minimal_chart_spec();
+        spec.facet = Some(FacetSpec {
+            field: "species".into(),
+            mode: FacetMode::Grid { nrows: 1, ncols: 2 },
+            spacing: None,
+        });
+        let groups = three_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            &m,
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 2);
+        let dropped = result.warnings.iter().any(|w| matches!(
+            w,
+            LayoutWarning::PanelsDropped { count: 1 }
+        ));
+        assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+    }
+}

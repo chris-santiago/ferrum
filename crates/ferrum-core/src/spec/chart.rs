@@ -20,6 +20,8 @@ pub struct ChartSpec {
     pub encoding: Encoding,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<crate::transform::core::TransformSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<crate::layout::facet::FacetSpec>,
 }
 
 #[pymethods]
@@ -57,6 +59,7 @@ impl ChartSpec {
             mark,
             encoding: Encoding { x, y },
             transforms,
+            facet: None,
         })
     }
 
@@ -201,6 +204,7 @@ mod tests {
                 }),
             },
             transforms: Vec::new(),
+            facet: None,
         }
     }
 
@@ -278,6 +282,7 @@ mod tests {
                 }),
             },
             transforms: Vec::new(),
+            facet: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -301,6 +306,7 @@ mod tests {
             mark: Mark::Point,
             encoding: Encoding::default(),
             transforms: Vec::new(),
+            facet: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -321,9 +327,40 @@ mod tests {
                 extent: None,
                 nice: true,
             })],
+            facet: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_facet_default_when_omitted() {
+        // Pre-Phase-6 JSON shape (no `facet` field) must still deserialize.
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.facet.is_none());
+    }
+
+    #[test]
+    fn test_chart_spec_facet_omitted_in_canonical_json_when_none() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("facet"), "facet=None should be skipped: {json}");
+    }
+
+    #[test]
+    fn test_chart_spec_facet_round_trip() {
+        use crate::layout::facet::{FacetMode, FacetSpec};
+        let mut spec = minimal_scatter();
+        spec.facet = Some(FacetSpec {
+            field: "species".into(),
+            mode: FacetMode::Wrap { ncols: 3 },
+            spacing: None,
+        });
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""facet":{"#));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
     }
