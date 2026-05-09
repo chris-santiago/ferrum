@@ -141,6 +141,98 @@ pub fn layout_y_axis(
     }
 }
 
+use crate::layout::{LABEL_OVERLAP_TOLERANCE, DEFAULT_LABEL_ANGLE};
+
+/// Per-x-axis warning the orchestrator may emit. Internal — consumers translate
+/// to `LayoutWarning`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum XAxisWarning {
+    LabelsElided { count: u32 },
+}
+
+/// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
+/// Tick positions are uniformly spaced across `panel_area.w` (spec §14.3 step 7a).
+/// Collision policy: rotate labels then elide if still colliding (spec §14.4).
+pub fn layout_x_axis(
+    input: &AxisInput,
+    panel_area: Rect,
+    panel_index: usize,
+    label_font_size: f64,
+    title_font_size: f64,
+    axis_title_padding: f64,
+    metrics: &dyn TextMetrics,
+) -> (AxisLayout, Option<XAxisWarning>) {
+    let n = input.tick_labels.len();
+    let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
+
+    // Step 1: measure all labels flat.
+    let widths: Vec<f64> = input
+        .tick_labels
+        .iter()
+        .map(|s| metrics.measure_width(s, label_font_size))
+        .collect();
+
+    // Step 2: decide whether any label exceeds slot * (1 - tolerance).
+    let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
+    let any_collision = widths.iter().any(|w| *w > threshold);
+    let angle = if any_collision {
+        input.label_angle_override.unwrap_or(DEFAULT_LABEL_ANGLE)
+    } else {
+        0.0
+    };
+
+    // Step 3: collision recovery — rotation, then elision (Tasks 11 + 12).
+    // Phase 1 of this task: produce flat ticks if no collision.
+    let (ticks, warning) = if !any_collision {
+        let ticks: Vec<TickLayout> = input
+            .tick_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| TickLayout {
+                position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                label: label.clone(),
+                label_angle: 0.0,
+                elided: false,
+            })
+            .collect();
+        (ticks, None)
+    } else {
+        // Filled in by Tasks 11 (rotation) and 12 (elision).
+        let ticks: Vec<TickLayout> = input
+            .tick_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| TickLayout {
+                position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                label: label.clone(),
+                label_angle: angle,
+                elided: false,
+            })
+            .collect();
+        (ticks, None)
+    };
+
+    let axis_line = Rect {
+        x: panel_area.x,
+        y: panel_area.y + panel_area.h,
+        w: panel_area.w,
+        h: 1.0,
+    };
+
+    let title = input.title.as_ref().map(|text| {
+        let title_h = metrics.line_height(title_font_size);
+        let label_h = metrics.line_height(label_font_size);
+        AxisTitleLayout {
+            text: text.clone(),
+            anchor_x: panel_area.x + panel_area.w / 2.0,
+            anchor_y: panel_area.y + panel_area.h + label_h + axis_title_padding + title_h / 2.0,
+            angle: 0.0,
+        }
+    });
+
+    (AxisLayout { orient: AxisOrient::Bottom, panel_index, axis_line, ticks, title }, warning)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +329,41 @@ mod tests {
         let title = axis.title.unwrap();
         assert_eq!(title.text, "Price");
         assert!((title.angle - (-90.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn x_axis_no_collision_keeps_labels_flat() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 50.0, line_h_factor: 1.2 };
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        assert_eq!(axis.ticks.len(), 4);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, 0.0);
+            assert!(!t.elided);
+        }
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn x_axis_uniform_tick_positions_along_axis() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        assert!((axis.ticks[0].position - (100.0 + 50.0)).abs() < 1e-9);
+        assert!((axis.ticks[1].position - (100.0 + 150.0)).abs() < 1e-9);
+        assert!((axis.ticks[2].position - (100.0 + 250.0)).abs() < 1e-9);
+        assert!((axis.ticks[3].position - (100.0 + 350.0)).abs() < 1e-9);
     }
 }
