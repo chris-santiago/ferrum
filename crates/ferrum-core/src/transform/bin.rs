@@ -77,6 +77,22 @@ pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         }
     };
 
+    // Optional "nice" rounding of the extent. Only applies when extent is
+    // auto-derived (not when the caller explicitly set extent), and only when
+    // bin_count is fixed (or both bin_count and bin_width are unset, in which
+    // case Sturges runs after nicing).
+    let (lo, hi) = if spec.nice && spec.extent.is_none() {
+        let target = spec.bin_count.unwrap_or_else(|| sturges_floor(clean.len())).max(1);
+        let step = crate::scale::ticks::nice_step(lo, hi, target);
+        if step.is_finite() && step > 0.0 {
+            ((lo / step).floor() * step, (hi / step).ceil() * step)
+        } else {
+            (lo, hi)
+        }
+    } else {
+        (lo, hi)
+    };
+
     let n_bins: usize = match (spec.bin_count, spec.bin_width) {
         (Some(c), _) if c > 0 => c,
         (None, Some(w)) if w > 0.0 => ((hi - lo) / w).ceil().max(1.0) as usize,
@@ -314,5 +330,36 @@ mod tests {
         let err = apply(&spec, &batch).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Float64") || msg.contains("dtype"), "err: {msg}");
+    }
+
+    #[test]
+    fn test_bin_nice_extent_rounds_outward() {
+        // x in [0.13, 9.7], 10 bins, nice=true → extent should round to a "nice"
+        // outer bound (e.g. [0, 10] for step=1.0). The exact result depends on
+        // nice_step's algorithm but lo ≤ 0.13 and hi ≥ 9.7 must hold, and
+        // (hi - lo) must be a clean multiple of step.
+        let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let starts = col_f64(&out, "bin_start");
+        let ends   = col_f64(&out, "bin_end");
+        let lo = starts.value(0);
+        let hi = ends.value(out.num_rows() - 1);
+        // nice_step(0.13, 9.7, 10) = 1.0 → floor(0.13/1.0)*1.0 = 0.0, ceil(9.7/1.0)*1.0 = 10.0
+        assert_eq!(lo, 0.0, "nice lo should be exactly 0.0 (step=1.0 rounds 0.13 down)");
+        assert_eq!(hi, 10.0, "nice hi should be exactly 10.0 (step=1.0 rounds 9.7 up)");
+        // bin width = (10.0 - 0.0) / 10 bins = 1.0 exactly
+        let bin_width = ends.value(0) - starts.value(0);
+        assert!((bin_width - 1.0).abs() < 1e-12, "bin width should be exactly 1.0, got {bin_width}");
+        // total count must equal n=5
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 5);
     }
 }
