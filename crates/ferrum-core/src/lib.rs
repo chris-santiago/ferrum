@@ -39,13 +39,13 @@ fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
     let reader = reader.into_reader()?;
     let schema = reader.schema();
 
-    let first_col_name = schema
+    let old_name = schema
         .fields()
         .first()
         .ok_or_else(|| PyValueError::new_err("input has zero columns"))?
         .name()
         .clone();
-    let new_name = format!("{}_renamed", first_col_name);
+    let renamed_col = format!("{}_renamed", old_name);
 
     let out_schema = Arc::new(Schema::new(
         schema
@@ -54,7 +54,7 @@ fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
             .enumerate()
             .map(|(i, f)| {
                 if i == 0 {
-                    Field::new(&new_name, f.data_type().clone(), f.is_nullable())
+                    Field::new(&renamed_col, f.data_type().clone(), f.is_nullable())
                 } else {
                     (**f).clone()
                 }
@@ -68,7 +68,7 @@ fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
 
     let transformed: Vec<RecordBatch> = batches
         .into_iter()
-        .map(|b| rename_column(b, &first_col_name, &new_name))
+        .map(|b| rename_column(b, &old_name, &renamed_col))
         .collect::<Result<_, _>>()
         .map_err(|e: ArrowError| PyValueError::new_err(e.to_string()))?;
 
