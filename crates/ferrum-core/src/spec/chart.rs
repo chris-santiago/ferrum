@@ -132,12 +132,17 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
     use pyo3::types::PyList;
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
-    if !list.is_empty() {
-        return Err(PyValueError::new_err(
-            "transforms list must be empty until pyclass wrappers are registered",
-        ));
+    let mut out = Vec::with_capacity(list.len());
+    for (i, item) in list.iter().enumerate() {
+        if let Ok(b) = item.extract::<crate::transform::bin::PyBin>() {
+            out.push(b.0);
+            continue;
+        }
+        return Err(PyValueError::new_err(format!(
+            "transforms[{i}]: unrecognized transform; expected a Bin (more variants land in subsequent tasks)"
+        )));
     }
-    Ok(Vec::new())
+    Ok(out)
 }
 
 #[cfg(test)]

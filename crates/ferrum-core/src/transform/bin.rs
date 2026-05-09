@@ -161,6 +161,69 @@ fn single_unit_bin(v: f64, count: u64) -> PyResult<RecordBatch> {
     build_bin_batch(vec![start], vec![end], vec![count], vec![density])
 }
 
+use pyo3::prelude::*;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "Bin")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PyBin(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PyBin {
+    #[new]
+    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true))]
+    fn new(
+        field: &str,
+        bin_count: Option<usize>,
+        bin_width: Option<f64>,
+        extent: Option<(f64, f64)>,
+        nice: bool,
+    ) -> PyResult<Self> {
+        if field.is_empty() {
+            return Err(PyValueError::new_err("Bin: field must be non-empty"));
+        }
+        if let Some(c) = bin_count {
+            if c == 0 {
+                return Err(PyValueError::new_err("Bin: bin_count must be > 0"));
+            }
+        }
+        if let Some(w) = bin_width {
+            if !w.is_finite() || w <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "Bin: bin_width must be a positive finite number",
+                ));
+            }
+        }
+        if let Some((a, b)) = extent {
+            if !a.is_finite() || !b.is_finite() || a >= b {
+                return Err(PyValueError::new_err(
+                    "Bin: extent must be (lo, hi) with lo < hi and both finite",
+                ));
+            }
+        }
+        Ok(PyBin(TransformSpec::Bin(BinSpec {
+            field: field.to_string(),
+            bin_count,
+            bin_width,
+            extent,
+            nice,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Bin(s) => format!(
+                "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={})",
+                s.field, s.bin_count, s.bin_width, s.extent,
+                if s.nice { "True" } else { "False" },
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

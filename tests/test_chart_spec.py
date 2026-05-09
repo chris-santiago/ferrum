@@ -125,3 +125,26 @@ def test_repr_preserves_encoding_type():
     )
     r = repr(spec)
     assert "type_='quantitative'" in r, f"type_ missing from repr: {r}"
+
+
+def test_chart_spec_with_bin_transform_round_trips():
+    from ferrum._core import ChartSpec, Bin
+    spec = ChartSpec(mark="bar", x="x", transforms=[Bin(field="x", bin_count=10)])
+    j = spec.to_json()
+    assert "bin" in j
+    parsed = ChartSpec.from_json(j)
+    assert parsed == spec
+
+
+def test_bin_construct_rejects_empty_field():
+    from ferrum._core import Bin
+    import pytest
+    with pytest.raises(ValueError, match="non-empty"):
+        Bin(field="")
+
+
+def test_bin_construct_rejects_zero_bin_count():
+    from ferrum._core import Bin
+    import pytest
+    with pytest.raises(ValueError, match="bin_count"):
+        Bin(field="x", bin_count=0)
