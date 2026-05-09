@@ -21,7 +21,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Install / rebuild Rust extension | `unset CONDA_PREFIX && uv run --no-sync maturin develop` |
 | Release build | `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` |
 | Run tests | `uv run pytest` |
-| Rust-side tests | `cargo test` (from repo root) |
+| Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
 | Verify skeleton | `uv run --no-sync python -c "import ferrum; assert ferrum.add(2,3)==5; print('OK')"` |
 
 > **Note:** `--no-sync` is required for `maturin` commands to avoid a conflict between
@@ -29,6 +29,11 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 > outside conda envs, which maturin rejects when uv also sets `VIRTUAL_ENV`. The
 > `unset CONDA_PREFIX` prefix clears it for that shell invocation only. Source
 > `~/.cargo/env` first if `cargo` is not on your PATH (`source ~/.cargo/env`).
+
+> **macOS `cargo test` note:** On macOS with uv-managed Python, the test binary cannot
+> resolve `@rpath/libpython3.10.dylib` at runtime without `DYLD_LIBRARY_PATH` pointing to
+> the Python lib directory. The command above uses `sysconfig` to find the path dynamically.
+> This is a macOS SIP + uv RPATH constraint; it does not affect `maturin develop` or pytest.
 
 `pip install -e .` will **not** compile the Rust extension. Always use `maturin develop`.
 

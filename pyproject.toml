@@ -7,7 +7,10 @@ authors = [
     { name = "chris-santiago", email = "cjsantiago@gatech.edu" }
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "polars>=1.0",
+    "pyarrow>=15.0",
+]
 
 [build-system]
 requires = ["maturin>=1.7,<2.0"]
