@@ -438,4 +438,94 @@ mod tests {
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, result);
     }
+
+    use crate::layout::facet::{FacetMode, FacetSpec};
+    use crate::layout::panel::FacetKey;
+
+    fn faceted_spec(ncols: u32) -> ChartSpec {
+        let mut s = minimal_chart_spec();
+        s.facet = Some(FacetSpec {
+            field: "species".into(),
+            mode: FacetMode::Wrap { ncols },
+            spacing: None,
+        });
+        s
+    }
+
+    fn three_groups() -> Vec<FacetGroup> {
+        vec![
+            FacetGroup { key: FacetKey { field: "species".into(), value: "setosa".into() }, n_rows: 50 },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "versicolor".into() }, n_rows: 50 },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "virginica".into() }, n_rows: 50 },
+        ]
+    }
+
+    #[test]
+    fn compute_layout_faceted_three_panels_one_legend() {
+        let spec = faceted_spec(3);
+        let groups = three_groups();
+        let legend = vec![
+            LegendEntry { label: "setosa".into(), symbol: SymbolKind::Circle },
+            LegendEntry { label: "versicolor".into(), symbol: SymbolKind::Circle },
+            LegendEntry { label: "virginica".into(), symbol: SymbolKind::Circle },
+        ];
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &legend,
+            &m,
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        assert_eq!(result.axes.len(), 6);
+        assert!(result.legend.is_some());
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+
+        assert_eq!(
+            result.panels[0].facet_key.as_ref().unwrap().value,
+            "setosa"
+        );
+        assert_eq!(
+            result.panels[2].facet_key.as_ref().unwrap().value,
+            "virginica"
+        );
+    }
+
+    #[test]
+    fn compute_layout_facet_grid_overflow_warns() {
+        let mut spec = minimal_chart_spec();
+        spec.facet = Some(FacetSpec {
+            field: "species".into(),
+            mode: FacetMode::Grid { nrows: 1, ncols: 2 },
+            spacing: None,
+        });
+        let groups = three_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            &m,
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 2);
+        let dropped = result.warnings.iter().any(|w| matches!(
+            w,
+            LayoutWarning::PanelsDropped { count: 1 }
+        ));
+        assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+    }
 }
