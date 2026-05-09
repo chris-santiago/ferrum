@@ -8,7 +8,7 @@ repository.workspace = true
 
 [lib]
 name = "_core"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [features]
 extension-module = ["pyo3/extension-module"]
