@@ -56,7 +56,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 
 | # | Name | What it produces | Depends on | Spec doc | Status |
 |---|---|---|---|---|---|
-| **1** | Build & packaging skeleton | Cargo workspace + maturin backend + `ferrum._core.add()` compiles and imports | — | [`2026-05-09-rust-skeleton-design.md`](specs/2026-05-09-rust-skeleton-design.md) | **in progress** |
+| **1** | Build & packaging skeleton | Cargo workspace + maturin backend + `ferrum._core.add()` compiles and imports | — | [`2026-05-09-rust-skeleton-design.md`](specs/2026-05-09-rust-skeleton-design.md) | **done** |
 | **2** | Python↔Rust data-handoff layer | Arrow IPC bridge: DataFrame → Arrow RecordBatch in → transformed RecordBatch out; no row-level Python after handoff | 1 | *(not yet written)* | pending |
 | **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | *(not yet written)* | pending |
 | **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | *(not yet written)* | pending |
