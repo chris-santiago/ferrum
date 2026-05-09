@@ -529,3 +529,85 @@ A phase-6-done PR must show all four boxes ticked, `cargo test -p ferrum-core` �
 
 - `cargo test -p ferrum-core`: 121 passing
 - `uv run pytest`: 72 passing
+
+---
+
+## §14 Spec refinements (post-approval, plan-stage)
+
+These items refine §3.3 / §5 / §6 by resolving questions that surfaced during plan
+drafting. They do not change scope or any locked decision in §11; they make
+under-specified inputs concrete.
+
+### 14.1 Input contract — explicit axis inputs
+
+The spec sketched "tick generation is delegated to Phase 4 scales, called inside
+`compute_layout`," which leaves unanswered where the scale comes from (ChartSpec
+has no `scales` field). The simpler, data-blind contract: **the caller pre-computes
+tick labels via Phase 4 scales and passes them in**, just like `facet_groups` and
+`legend_entries`. The layout engine never touches Phase 4 internals.
+
+The function signature becomes:
+
+```rust
+pub fn compute_layout(
+    spec: &ChartSpec,
+    theme: &Theme,
+    viewport: Viewport,
+    axes: &AxesInput,
+    facet_groups: &[FacetGroup],
+    legend_entries: &[LegendEntry],
+    metrics: &dyn TextMetrics,
+) -> Result<LayoutResult, LayoutError>;
+
+pub struct AxesInput { pub x: AxisInput, pub y: AxisInput }
+
+pub struct AxisInput {
+    pub orient: AxisOrient,                // Bottom for x, Left for y typically
+    pub title: Option<String>,             // axis title text, e.g. "Price"
+    pub tick_labels: Vec<String>,          // caller-pre-generated labels (uniform-spaced)
+    pub label_angle_override: Option<f64>, // overrides DEFAULT_LABEL_ANGLE if set
+}
+```
+
+`AxesInput` is required (not optional) — every chart has two axes in Phase 6 scope.
+Empty `tick_labels` means "no tick marks rendered for that axis"; layout still
+reserves the worst-case label band based on title alone.
+
+### 14.2 ChartSpec change is unchanged from §3.3
+
+Only `facet: Option<FacetSpec>` is added to `ChartSpec`. **`EncodingSpec` is not
+extended** in Phase 6. Per-encoding axis configuration (title, label_angle) is a
+caller concern that flows in via `AxesInput`; Phase 8 (grammar API) will own the
+ergonomic wiring from `Encoding` channels to `AxesInput`.
+
+### 14.3 Algorithm refinements (replaces §6 step 5 and 7)
+
+**Step 5 (worst-case label band reservation):** The y-axis label band is reserved
+using `axes.y.tick_labels` directly — not via "domain-endpoint estimation," since
+the caller has already generated the labels. Take the longest label by char count,
+measure with `metrics`, that is the gutter.
+
+**Step 7a (per-panel tick layout):** For each axis side:
+- `n_ticks = axes.<side>.tick_labels.len()`
+- `slot_width = panel_dim / max(1, n_ticks)` where `panel_dim = panel.w` for x-axis,
+  `panel.h` for y-axis
+- Tick positions are uniformly spaced at slot centers: `position[i] = slot_start_pixel + (i + 0.5) * slot_width`
+
+This **uniform-spacing assumption** is correct for the Phase 6 scope (linear and
+ordinal scales, both of which produce uniform tick positions in their pixel range).
+Log/symlog/quantile scales are out of scope for Phase 6; when they enter the
+renderer (Phase 7+), this contract may need extending to caller-provided pixel
+positions per tick.
+
+### 14.4 Collision policy applies to x-axis only
+
+Y-axis labels are placed at uniform line-height intervals stacked vertically; they
+do not collide horizontally. Phase 6's rotation-then-elision policy fires only on
+the x-axis. The y-axis algorithm is: measure each label, take the max width, that
+is the left gutter — no rotation, no elision.
+
+### 14.5 Updated §11 row 12
+
+Row 12 ("Tick generation: Phase 6 calls Phase 4 scales internally") is **superseded**
+by §14.1: tick labels are caller-provided. Phase 6 has zero dependency on Phase 4's
+internal `Scale` enum.
