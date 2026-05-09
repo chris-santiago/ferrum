@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional, Sequence, Union
+from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
 
 DataTypeStr = Literal[
     "Q", "N", "O", "T",
@@ -25,6 +25,7 @@ class ChartSpec:
     x: Optional[EncodingSpec]
     y: Optional[EncodingSpec]
     data: str
+    transforms: List[object]
 
     def __init__(
         self,
@@ -33,6 +34,7 @@ class ChartSpec:
         x: Union[str, EncodingSpec, None] = None,
         y: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
+        transforms: Optional[List[object]] = None,
     ) -> None: ...
     def to_json(self) -> str: ...
     @classmethod
@@ -179,3 +181,60 @@ class QuantileScale:
     def nice(self) -> "QuantileScale": ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
+
+
+# ---------- Stat engine transforms (Phase 5) ----------
+
+class Bin:
+    def __init__(
+        self,
+        field: str,
+        *,
+        bin_count: Optional[int] = None,
+        bin_width: Optional[float] = None,
+        extent: Optional[Tuple[float, float]] = None,
+        nice: bool = True,
+    ) -> None: ...
+
+class Kde:
+    def __init__(
+        self,
+        field: str,
+        *,
+        bandwidth: object = "scott",   # str ("scott"|"silverman") or float
+        n: int = 512,
+        extent: Optional[Tuple[float, float]] = None,
+        cumulative: bool = False,
+    ) -> None: ...
+
+class Smooth:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        method: str = "loess",
+        ci: Optional[float] = 0.95,
+        bandwidth: float = 0.75,
+        degree: int = 2,
+        n: int = 200,
+        seed: int = 0,
+    ) -> None: ...
+
+class AggregateOp:
+    def __init__(self, field: str, fn_: str, as_: str) -> None: ...
+
+class Aggregate:
+    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None) -> None: ...
+
+class Summary:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: Optional[List[str]] = None,
+        error_fn: str = "ci",
+        ci: float = 0.95,
+        n_boot: int = 1000,
+        seed: int = 0,
+    ) -> None: ...
