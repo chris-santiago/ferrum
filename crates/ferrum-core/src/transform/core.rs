@@ -2,6 +2,7 @@ use arrow::array::RecordBatch;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
+use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
 use crate::transform::kde::KdeSpec;
 use crate::transform::smooth::SmoothSpec;
@@ -12,14 +13,16 @@ pub(crate) enum TransformSpec {
     Bin(BinSpec),
     Kde(KdeSpec),
     Smooth(SmoothSpec),
+    Aggregate(AggregateSpec),
 }
 
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
         match self {
-            Self::Bin(s)    => bin::apply(s, batch),
-            Self::Kde(s)    => crate::transform::kde::apply(s, batch),
-            Self::Smooth(s) => crate::transform::smooth::apply(s, batch),
+            Self::Bin(s)       => bin::apply(s, batch),
+            Self::Kde(s)       => crate::transform::kde::apply(s, batch),
+            Self::Smooth(s)    => crate::transform::smooth::apply(s, batch),
+            Self::Aggregate(s) => crate::transform::aggregate::apply(s, batch),
         }
     }
 }
