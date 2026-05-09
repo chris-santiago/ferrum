@@ -196,3 +196,40 @@ def test_smooth_construct_rejects_unknown_method():
     import pytest
     with pytest.raises(ValueError, match="method"):
         Smooth(x="x", y="y", method="poly")
+
+
+def test_chart_spec_with_aggregate_round_trips():
+    from ferrum._core import ChartSpec, Aggregate, AggregateOp
+    spec = ChartSpec(
+        mark="bar", x="x",
+        transforms=[Aggregate(
+            ops=[AggregateOp("price", "mean", "avg_price")],
+            groupby=["region"],
+        )],
+    )
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_aggregate_construct_rejects_unknown_fn():
+    from ferrum._core import AggregateOp
+    import pytest
+    with pytest.raises(ValueError, match="unknown fn"):
+        AggregateOp("price", "vibe", "v")
+
+
+def test_aggregate_construct_rejects_empty_ops():
+    from ferrum._core import Aggregate
+    import pytest
+    with pytest.raises(ValueError, match="non-empty"):
+        Aggregate(ops=[])
+
+
+def test_aggregate_construct_rejects_duplicate_groupby():
+    from ferrum._core import Aggregate, AggregateOp
+    import pytest
+    with pytest.raises(ValueError, match="duplicate"):
+        Aggregate(
+            ops=[AggregateOp("v", "sum", "s")],
+            groupby=["g", "g"],
+        )

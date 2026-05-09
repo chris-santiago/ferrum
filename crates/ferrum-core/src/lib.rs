@@ -20,5 +20,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::bin::PyBin>()?;
     m.add_class::<transform::kde::PyKde>()?;
     m.add_class::<transform::smooth::PySmooth>()?;
+    m.add_class::<transform::aggregate::PyAggregateOp>()?;
+    m.add_class::<transform::aggregate::PyAggregate>()?;
     Ok(())
 }

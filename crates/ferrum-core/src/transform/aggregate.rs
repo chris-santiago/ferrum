@@ -208,6 +208,96 @@ fn aggregate(vals: &[f64], fn_: AggFn, group_size_including_nulls: usize) -> f64
     }
 }
 
+use pyo3::prelude::*;
+use pyo3::types::PyList;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "AggregateOp")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PyAggregateOp(pub(crate) AggregateOp);
+
+#[pymethods]
+impl PyAggregateOp {
+    #[new]
+    #[pyo3(signature = (field, fn_, as_))]
+    fn new(field: &str, fn_: &str, as_: &str) -> PyResult<Self> {
+        if field.is_empty() {
+            return Err(PyValueError::new_err("AggregateOp: field must be non-empty"));
+        }
+        if as_.is_empty() {
+            return Err(PyValueError::new_err("AggregateOp: as_ must be non-empty"));
+        }
+        let parsed = match fn_ {
+            "mean" => AggFn::Mean, "sum" => AggFn::Sum, "count" => AggFn::Count,
+            "min" => AggFn::Min, "max" => AggFn::Max, "median" => AggFn::Median,
+            other => return Err(PyValueError::new_err(format!(
+                "AggregateOp: unknown fn '{other}'; expected mean|sum|count|min|max|median"
+            ))),
+        };
+        Ok(PyAggregateOp(AggregateOp {
+            field: field.to_string(), fn_: parsed, as_: as_.to_string(),
+        }))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("AggregateOp(field='{}', fn='{:?}', as_='{}')",
+            self.0.field, self.0.fn_, self.0.as_)
+    }
+}
+
+#[pyclass(eq, module = "ferrum._core", name = "Aggregate")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PyAggregate(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PyAggregate {
+    #[new]
+    #[pyo3(signature = (ops, *, groupby = None))]
+    fn new(
+        ops: &Bound<'_, PyAny>,
+        groupby: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let ops_list: &Bound<'_, PyList> = ops.downcast::<PyList>()
+            .map_err(|_| PyValueError::new_err("Aggregate: ops must be a list of AggregateOp"))?;
+        if ops_list.is_empty() {
+            return Err(PyValueError::new_err("Aggregate: ops must be non-empty"));
+        }
+        let mut parsed_ops = Vec::with_capacity(ops_list.len());
+        for (i, item) in ops_list.iter().enumerate() {
+            let op = item.extract::<PyAggregateOp>().map_err(|_| {
+                PyValueError::new_err(format!("Aggregate: ops[{i}] must be an AggregateOp"))
+            })?;
+            parsed_ops.push(op.0);
+        }
+        let gb = groupby.unwrap_or_default();
+        // Reject duplicate field names within groupby per spec §6.
+        let mut seen = std::collections::HashSet::new();
+        for g in &gb {
+            if !seen.insert(g.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "Aggregate: duplicate groupby field '{g}'"
+                )));
+            }
+        }
+        Ok(PyAggregate(TransformSpec::Aggregate(AggregateSpec {
+            ops: parsed_ops,
+            groupby: gb,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Aggregate(s) => format!(
+                "Aggregate(ops=[{} ops], groupby={:?})",
+                s.ops.len(), s.groupby,
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
