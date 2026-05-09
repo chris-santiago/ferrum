@@ -76,10 +76,10 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 A phase is `done` when all of the following are true:
 
 ### Phase 1 — Build & packaging skeleton
-- [ ] `rustup` installed, `cargo --version` works in the project shell
-- [ ] `uv run python -c "import ferrum; assert ferrum.add(2, 3) == 5; print('OK')"` outputs `OK`
-- [ ] `uv run pytest` passes the smoke test in `tests/test_smoke.py`
-- [ ] `Cargo.toml` (workspace), `crates/ferrum-core/Cargo.toml`, `crates/ferrum-core/src/lib.rs`, `src/ferrum/__init__.py`, `src/ferrum/_core.pyi` all committed to `main`
+- [x] `rustup` installed, `cargo --version` works in the project shell
+- [x] `uv run python -c "import ferrum; assert ferrum.add(2, 3) == 5; print('OK')"` outputs `OK`
+- [x] `uv run pytest` passes the smoke test in `tests/test_smoke.py`
+- [x] `Cargo.toml` (workspace), `crates/ferrum-core/Cargo.toml`, `crates/ferrum-core/src/lib.rs`, `src/ferrum/__init__.py`, `src/ferrum/_core.pyi` all committed to `main`
 
 ### Phase 2 — Data-handoff layer
 - [ ] A Python DataFrame (pandas or polars) crosses the PyO3 boundary via Arrow IPC
