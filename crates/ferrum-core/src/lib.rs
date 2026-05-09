@@ -11,5 +11,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<spec::encoding::EncodingSpec>()?;
     m.add_class::<scale::linear::LinearScale>()?;
     m.add_class::<scale::log::LogScale>()?;
+    m.add_class::<scale::symlog::SymlogScale>()?;
     Ok(())
 }
