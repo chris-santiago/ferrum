@@ -150,6 +150,35 @@ pub enum XAxisWarning {
     LabelsElided { count: u32 },
 }
 
+/// Truncate `label` by char prefix until the measured width plus the ellipsis
+/// width fits in `max_width`. Returns the truncated label with "…" appended.
+/// If even "…" alone exceeds max_width, returns "…" anyway (caller is already
+/// in a degenerate state).
+fn elide_to_fit(
+    label: &str,
+    max_width: f64,
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> String {
+    let ellipsis = '…';
+    let ellipsis_w = metrics.measure_width(&ellipsis.to_string(), font_size);
+    if ellipsis_w >= max_width {
+        return ellipsis.to_string();
+    }
+    let budget = max_width - ellipsis_w;
+    let mut out = String::new();
+    for ch in label.chars() {
+        let mut tentative = out.clone();
+        tentative.push(ch);
+        if metrics.measure_width(&tentative, font_size) > budget {
+            break;
+        }
+        out = tentative;
+    }
+    out.push(ellipsis);
+    out
+}
+
 /// Build the AxisLayout for the x-axis (Bottom orient) of a single panel.
 /// Tick positions are uniformly spaced across `panel_area.w` (spec §14.3 step 7a).
 /// Collision policy: rotate labels then elide if still colliding (spec §14.4).
@@ -208,12 +237,18 @@ pub fn layout_x_axis(
             .map(|(i, label)| {
                 let w = widths[i];
                 let needs_elide = any_still_colliding && (w * cos_factor > slot_w);
-                if needs_elide { elided_count += 1; }
+                let final_label = if needs_elide {
+                    elided_count += 1;
+                    // Available pixel budget for the rotated label projection is slot_w;
+                    // the actual measured width budget is slot_w / cos(|angle|).
+                    let budget = slot_w / cos_factor.max(1e-6);
+                    elide_to_fit(label, budget, label_font_size, metrics)
+                } else {
+                    label.clone()
+                };
                 TickLayout {
                     position: panel_area.x + (i as f64 + 0.5) * slot_w,
-                    // Actual string elision happens in Task 12; here we just
-                    // pass through the flat label and set the flag.
-                    label: label.clone(),
+                    label: final_label,
                     label_angle: angle,
                     elided: needs_elide,
                 }
@@ -430,5 +465,44 @@ mod tests {
             assert!(!t.elided, "rotated projection should fit; no elision");
         }
         assert!(warning.is_none());
+    }
+
+    #[test]
+    fn x_axis_elides_with_ellipsis_when_rotated_still_collides() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: (0..20).map(|i| format!("Label_{}", i)).collect(),
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -45.0);
+            assert!(t.elided, "expected all 20 labels to be elided");
+            assert!(t.label.ends_with('…'), "expected ellipsis suffix; got {:?}", t.label);
+        }
+        match warning {
+            Some(XAxisWarning::LabelsElided { count }) => assert_eq!(count, 20),
+            other => panic!("expected LabelsElided{{count: 20}}, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn x_axis_elision_unicode_safe() {
+        let input = AxisInput {
+            orient: AxisOrient::Bottom,
+            title: None,
+            tick_labels: vec!["héllo wörld".into(); 20],
+            label_angle_override: None,
+        };
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert!(t.elided);
+            assert!(t.label.is_char_boundary(t.label.len()));
+        }
     }
 }
