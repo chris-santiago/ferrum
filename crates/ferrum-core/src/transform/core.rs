@@ -4,19 +4,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::transform::bin::{self, BinSpec};
 use crate::transform::kde::KdeSpec;
+use crate::transform::smooth::SmoothSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum TransformSpec {
     Bin(BinSpec),
     Kde(KdeSpec),
+    Smooth(SmoothSpec),
 }
 
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
         match self {
-            Self::Bin(s) => bin::apply(s, batch),
-            Self::Kde(s) => crate::transform::kde::apply(s, batch),
+            Self::Bin(s)    => bin::apply(s, batch),
+            Self::Kde(s)    => crate::transform::kde::apply(s, batch),
+            Self::Smooth(s) => crate::transform::smooth::apply(s, batch),
         }
     }
 }
