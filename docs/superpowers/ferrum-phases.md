@@ -62,7 +62,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **3** | Chart spec IR + serialization | Internal Rust representation of a `Chart`; Python builds it, Rust consumes it; round-trip tests | 2 | [`2026-05-09-chart-spec-ir-design.md`](specs/2026-05-09-chart-spec-ir-design.md) | **done** |
 | **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | [`2026-05-09-scale-engine-design.md`](specs/2026-05-09-scale-engine-design.md) | **done** |
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | [`2026-05-09-stat-engine-design.md`](specs/2026-05-09-stat-engine-design.md) | **done** |
-| **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | *(not yet written)* | pending |
+| **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | [`2026-05-09-layout-engine-design.md`](specs/2026-05-09-layout-engine-design.md) | **done** |
 | **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | *(not yet written)* | pending |
 | **8** | Grammar API surface (Python) | `Chart`, `Layer`, encoding channels (`X`, `Y`, `Color`, `Size`, etc.), `+`/`\|`/`&` composition operators, `Facet`, `Repeat`, themes-as-values | 7 | *(not yet written)* | pending |
 | **9** | Convenience / figure-level API | `displot`, `lmplot`, `roc_chart`, `pairplot`, etc. as sugar over the grammar — they must desugar to valid `Chart` specs, not bypass the engine | 8 | *(not yet written)* | pending |
@@ -107,10 +107,10 @@ A phase is `done` when all of the following are true:
 - [x] `cargo test` covers numeric correctness against a reference (scipy/numpy values computed offline)
 
 ### Phase 6 — Layout engine
-- [ ] Facet grid sizes computed correctly for `wrap` and `grid` facet modes
-- [ ] Legend placement does not overlap chart area for a 1-layer scatter plot
-- [ ] Axis label collision avoidance (rotation or elision) fires at a configurable threshold
-- [ ] `cargo test` covers basic facet layout arithmetic
+- [x] Facet grid sizes computed correctly for `wrap` and `grid` facet modes
+- [x] Legend placement does not overlap chart area for a 1-layer scatter plot
+- [x] Axis label collision avoidance (rotation or elision) fires at a configurable threshold
+- [x] `cargo test` covers basic facet layout arithmetic
 
 ### Phase 7 — Static renderer
 - [ ] A scatter plot from a spec file renders to a valid SVG file
