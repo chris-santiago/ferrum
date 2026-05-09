@@ -23,6 +23,8 @@ pyo3-arrow = { version = "0.17", default-features = false }
 # lean — we pull only core types plus IPC support. RecordBatch, Schema, and
 # RecordBatchIterator are available without additional features.
 arrow      = { version = "58", default-features = false, features = ["ipc"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
 
 [profile.release]
 lto = "thin"
