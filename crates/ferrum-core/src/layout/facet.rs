@@ -96,6 +96,44 @@ impl FacetGrid {
             .map(|i| (i / ncols, i % ncols))
             .collect()
     }
+
+    /// Grid mode: nrows and ncols both fixed. Panels beyond nrows*ncols are
+    /// dropped (caller should emit `LayoutWarning::PanelsDropped`).
+    pub fn compute_grid(
+        nrows: u32,
+        ncols: u32,
+        n_panels: u32,
+        origin: Rect,
+        gutter_x: f64,
+        gutter_y: f64,
+    ) -> FacetGrid {
+        let nrows = nrows.max(1);
+        let ncols = ncols.max(1);
+        let total_x_gutter = gutter_x * (ncols.saturating_sub(1) as f64);
+        let total_y_gutter = gutter_y * (nrows.saturating_sub(1) as f64);
+        let cell_w = ((origin.w - total_x_gutter) / ncols as f64).max(0.0);
+        let cell_h = ((origin.h - total_y_gutter) / nrows as f64).max(0.0);
+        FacetGrid {
+            mode: FacetMode::Grid { nrows, ncols },
+            n_panels,
+            cell_w,
+            cell_h,
+            gutter_x,
+            gutter_y,
+            origin,
+        }
+    }
+
+    /// In grid mode, returns max(0, n_panels - nrows*ncols). Always 0 in wrap mode.
+    pub fn dropped_count(&self) -> u32 {
+        match self.mode {
+            FacetMode::Grid { nrows, ncols } => {
+                let cap = nrows * ncols;
+                if self.n_panels > cap { self.n_panels - cap } else { 0 }
+            }
+            FacetMode::Wrap { .. } => 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +230,34 @@ mod tests {
         let grid = FacetGrid::compute_wrap(3, 5, origin, 0.0, 0.0);
         let panels = grid.panel_positions();
         assert_eq!(panels, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn facet_grid_mode_exact_fit() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(2, 3, 6, origin, 0.0, 0.0);
+        assert_eq!(grid.cell_w, 200.0);
+        assert_eq!(grid.cell_h, 200.0);
+        assert_eq!(grid.panel_positions().len(), 6);
+        assert_eq!(grid.cell_rect(1, 2), rect(400.0, 200.0, 200.0, 200.0));
+        assert_eq!(grid.dropped_count(), 0);
+    }
+
+    #[test]
+    fn facet_grid_mode_overflow_drops_panels() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(2, 3, 8, origin, 0.0, 0.0);
+        assert_eq!(grid.panel_positions().len(), 6);
+        assert_eq!(grid.dropped_count(), 2);
+    }
+
+    #[test]
+    fn facet_grid_mode_underfill_does_not_panic() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(2, 3, 4, origin, 0.0, 0.0);
+        assert_eq!(grid.cell_w, 200.0);
+        assert_eq!(grid.cell_h, 200.0);
+        assert_eq!(grid.panel_positions().len(), 4);
+        assert_eq!(grid.dropped_count(), 0);
     }
 }
