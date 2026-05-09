@@ -15,7 +15,10 @@ pyo3       = { version = "0.28", features = ["abi3-py310"] }
 # It internally uses arrow-* = "^58", so arrow must also be 58.x.
 # Note: PyRecordBatchReader::into_reader() in 0.17.0 does NOT require a Python<'_> GIL
 # token — it returns a plain arrow RecordBatchReader. Task 6 implementer: no GIL token needed.
-pyo3-arrow = { version = "0.17" }
+pyo3-arrow = { version = "0.17", default-features = false }
+# default-features = false disables pyo3-arrow's `buffer_protocol` feature, which uses
+# pyo3::buffer — unavailable under Py_LIMITED_API (abi3-py310). CDI via PyCapsule
+# (__arrow_c_stream__) is unaffected; it does not use the buffer protocol.
 # arrow 58.x is the apache/arrow-rs meta-crate; default-features = false keeps the binary
 # lean — we pull only core types plus IPC support. RecordBatch, Schema, and
 # RecordBatchIterator are available without additional features.
