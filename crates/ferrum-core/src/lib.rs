@@ -24,5 +24,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
     m.add_class::<transform::aggregate::PyAggregate>()?;
     m.add_class::<transform::summary::PySummary>()?;
+    m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     Ok(())
 }

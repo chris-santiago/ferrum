@@ -238,3 +238,18 @@ class Summary:
         n_boot: int = 1000,
         seed: int = 0,
     ) -> None: ...
+
+
+def compute_layout(
+    spec,
+    *,
+    viewport: tuple[float, float],
+    x_tick_labels: list[str],
+    y_tick_labels: list[str],
+    x_title: str | None = None,
+    y_title: str | None = None,
+    facet_groups: list[tuple[str, str, int]] | None = None,
+    legend_entries: list[tuple[str, str]] | None = None,
+    legend_orient: str = "right",
+    label_angle: float | None = None,
+) -> dict: ...
