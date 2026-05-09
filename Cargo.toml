@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/ferrum-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Santiago <cjsantiago@gatech.edu>"]
+repository = "https://github.com/chris-santiago/ferrum"
+
+[workspace.dependencies]
+pyo3 = { version = "0.28", features = ["abi3-py310"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
