@@ -321,6 +321,73 @@ fn percentile_sorted(s: &[f64], p: f64) -> f64 {
     s[lo] * (1.0 - frac) + s[hi] * frac
 }
 
+use pyo3::prelude::*;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "Smooth")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PySmooth(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PySmooth {
+    #[new]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0))]
+    fn new(
+        x: &str, y: &str,
+        method: &str,
+        ci: Option<f64>,
+        bandwidth: f64,
+        degree: u8,
+        n: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        if x.is_empty() || y.is_empty() {
+            return Err(PyValueError::new_err("Smooth: x and y must be non-empty"));
+        }
+        if n == 0 {
+            return Err(PyValueError::new_err("Smooth: n must be > 0"));
+        }
+        if let Some(level) = ci {
+            if !(level > 0.0 && level < 1.0) {
+                return Err(PyValueError::new_err("Smooth: ci must be in (0, 1)"));
+            }
+        }
+        let method = match method {
+            "lm" => SmoothMethod::Lm,
+            "loess" => SmoothMethod::Loess,
+            other => return Err(PyValueError::new_err(format!(
+                "Smooth: unknown method '{other}'; expected 'lm' | 'loess'"
+            ))),
+        };
+        if matches!(method, SmoothMethod::Loess) {
+            if !bandwidth.is_finite() || bandwidth <= 0.0 || bandwidth > 1.0 {
+                return Err(PyValueError::new_err(
+                    "Smooth: LOESS bandwidth must be a finite value in (0, 1]",
+                ));
+            }
+            if degree != 1 && degree != 2 {
+                return Err(PyValueError::new_err("Smooth: LOESS degree must be 1 or 2"));
+            }
+        }
+        Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
+            x: x.to_string(), y: y.to_string(),
+            method, ci, bandwidth, degree, n, seed,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Smooth(s) => format!(
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={})",
+                s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.n, s.seed,
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

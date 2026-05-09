@@ -168,3 +168,31 @@ def test_kde_construct_accepts_float_bandwidth():
     from ferrum._core import Kde
     spec = Kde(field="x", bandwidth=0.5)
     assert "0.5" in repr(spec)
+
+
+def test_chart_spec_with_smooth_lm_round_trips():
+    from ferrum._core import ChartSpec, Smooth
+    spec = ChartSpec(mark="line", x="x", transforms=[Smooth(x="x", y="y", method="lm", ci=0.95)])
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_smooth_construct_rejects_invalid_loess_bandwidth():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="bandwidth"):
+        Smooth(x="x", y="y", method="loess", bandwidth=1.5)
+
+
+def test_smooth_construct_rejects_invalid_degree():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="degree"):
+        Smooth(x="x", y="y", method="loess", degree=3)
+
+
+def test_smooth_construct_rejects_unknown_method():
+    from ferrum._core import Smooth
+    import pytest
+    with pytest.raises(ValueError, match="method"):
+        Smooth(x="x", y="y", method="poly")

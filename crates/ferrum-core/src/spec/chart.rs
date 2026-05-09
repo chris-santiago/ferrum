@@ -142,8 +142,12 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(k.0);
             continue;
         }
+        if let Ok(s) = item.extract::<crate::transform::smooth::PySmooth>() {
+            out.push(s.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected Bin | Kde \
+            "transforms[{i}]: unrecognized transform; expected Bin | Kde | Smooth \
              (more variants land in subsequent tasks)"
         )));
     }
