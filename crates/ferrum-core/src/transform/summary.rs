@@ -205,10 +205,47 @@ fn summarize(vals: &[f64], spec: &SummarySpec) -> (f64, f64, f64) {
             (mean, mean - se, mean + se)
         }
         ErrorFn::Ci => {
-            // Bootstrap CI lands in Task 20.
-            (mean, f64::NAN, f64::NAN)
+            bootstrap_ci(vals, spec.ci, spec.n_boot, spec.seed)
         }
     }
+}
+
+fn bootstrap_ci(vals: &[f64], level: f64, n_boot: usize, seed: u64) -> (f64, f64, f64) {
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    let n = vals.len();
+    let mean = vals.iter().sum::<f64>() / n as f64;
+    if n < 2 || n_boot == 0 || level <= 0.0 || level >= 1.0 {
+        return (mean, f64::NAN, f64::NAN);
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut boot_means: Vec<f64> = Vec::with_capacity(n_boot);
+    let mut sample = vec![0.0; n];
+    for _ in 0..n_boot {
+        for i in 0..n {
+            let j = rng.gen_range(0..n);
+            sample[i] = vals[j];
+        }
+        let m = sample.iter().sum::<f64>() / n as f64;
+        boot_means.push(m);
+    }
+    boot_means.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let alpha = 1.0 - level;
+    let lo_q = alpha / 2.0;
+    let hi_q = 1.0 - alpha / 2.0;
+    let lo = percentile_sorted(&boot_means, lo_q);
+    let hi = percentile_sorted(&boot_means, hi_q);
+    (mean, lo, hi)
+}
+
+fn percentile_sorted(s: &[f64], p: f64) -> f64 {
+    let n = s.len();
+    let h = p * (n as f64 - 1.0);
+    let lo = h.floor() as usize;
+    let hi = (h.ceil() as usize).min(n - 1);
+    let frac = h - h.floor();
+    s[lo] * (1.0 - frac) + s[hi] * frac
 }
 
 #[cfg(test)]
@@ -363,5 +400,107 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SummarySpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_summary_bootstrap_ci_mean_is_exact() {
+        // The mean column is computed analytically (not from bootstrap), so it must
+        // exactly equal the simple sample mean regardless of n_boot/seed.
+        let batch = batch_value_group(
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec!["a", "a", "a", "a", "a"],
+        );
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Ci,
+            ci: 0.95,
+            n_boot: 500,
+            seed: 42,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let mean = col_f64(&out, "mean");
+        assert!((mean[0] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_summary_bootstrap_ci_brackets_mean() {
+        let batch = batch_value_group(
+            vec![
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                Some(4.0),
+                Some(5.0),
+                Some(6.0),
+                Some(7.0),
+                Some(8.0),
+                Some(9.0),
+                Some(10.0),
+            ],
+            vec!["a"; 10],
+        );
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Ci,
+            ci: 0.95,
+            n_boot: 1000,
+            seed: 42,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let mean = col_f64(&out, "mean");
+        let lower = col_f64(&out, "lower");
+        let upper = col_f64(&out, "upper");
+        assert!(lower[0] < mean[0], "lower {} should be < mean {}", lower[0], mean[0]);
+        assert!(mean[0] < upper[0], "mean {} should be < upper {}", mean[0], upper[0]);
+        // For 10 evenly-spaced values 1..10 mean is 5.5; 95% CI should be roughly within ~3 of mean
+        // (sample std ~ 3, so SE_mean ~ 1; CI width ≈ 4). Loose sanity bounds.
+        assert!((mean[0] - 5.5).abs() < 1e-12);
+        assert!(upper[0] - lower[0] < 6.0, "CI suspiciously wide");
+    }
+
+    #[test]
+    fn test_summary_bootstrap_ci_is_reproducible_under_seed() {
+        let batch = batch_value_group(
+            (0..30).map(|i| Some(i as f64 / 3.0)).collect(),
+            vec!["a"; 30],
+        );
+        let spec1 = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Ci,
+            ci: 0.95,
+            n_boot: 500,
+            seed: 12345,
+        };
+        let spec2 = spec1.clone();
+        let out1 = apply(&spec1, &batch).unwrap();
+        let out2 = apply(&spec2, &batch).unwrap();
+        let lo1 = col_f64(&out1, "lower")[0];
+        let lo2 = col_f64(&out2, "lower")[0];
+        let hi1 = col_f64(&out1, "upper")[0];
+        let hi2 = col_f64(&out2, "upper")[0];
+        assert_eq!(lo1.to_bits(), lo2.to_bits(), "ci_lower not deterministic");
+        assert_eq!(hi1.to_bits(), hi2.to_bits(), "ci_upper not deterministic");
+    }
+
+    #[test]
+    fn test_summary_bootstrap_ci_n_lt_2_emits_nan() {
+        let batch = batch_value_group(vec![Some(7.0)], vec!["a"]);
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Ci,
+            ci: 0.95,
+            n_boot: 1000,
+            seed: 0,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let mean = col_f64(&out, "mean");
+        let lower = col_f64(&out, "lower");
+        let upper = col_f64(&out, "upper");
+        assert!((mean[0] - 7.0).abs() < 1e-12);
+        assert!(lower[0].is_nan() && upper[0].is_nan());
     }
 }
