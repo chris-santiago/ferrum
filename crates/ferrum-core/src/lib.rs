@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 mod transport;
 mod spec;
 mod scale;
+mod transform;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
