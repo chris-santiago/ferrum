@@ -233,3 +233,49 @@ def test_aggregate_construct_rejects_duplicate_groupby():
             ops=[AggregateOp("v", "sum", "s")],
             groupby=["g", "g"],
         )
+
+
+def test_chart_spec_with_summary_round_trips():
+    from ferrum._core import ChartSpec, Summary
+    spec = ChartSpec(
+        mark="point", x="x",
+        transforms=[Summary(field="v", groupby=["g"], error_fn="ci", ci=0.95, n_boot=500, seed=42)],
+    )
+    parsed = ChartSpec.from_json(spec.to_json())
+    assert parsed == spec
+
+
+def test_summary_construct_rejects_unknown_error_fn():
+    from ferrum._core import Summary
+    import pytest
+    with pytest.raises(ValueError, match="error_fn"):
+        Summary(field="v", error_fn="vibes")
+
+
+def test_summary_construct_rejects_zero_n_boot_with_ci():
+    from ferrum._core import Summary
+    import pytest
+    with pytest.raises(ValueError, match="n_boot"):
+        Summary(field="v", error_fn="ci", n_boot=0)
+
+
+def test_chart_spec_transforms_getter_returns_list_of_correct_classes():
+    from ferrum._core import ChartSpec, Bin, Kde, Smooth, Aggregate, AggregateOp, Summary
+    spec = ChartSpec(
+        mark="point", x="x",
+        transforms=[
+            Bin(field="x"),
+            Kde(field="x"),
+            Smooth(x="x", y="y"),
+            Aggregate(ops=[AggregateOp("v", "sum", "s")], groupby=["g"]),
+            Summary(field="v"),
+        ],
+    )
+    ts = spec.transforms
+    assert isinstance(ts, list)
+    assert len(ts) == 5
+    assert isinstance(ts[0], Bin)
+    assert isinstance(ts[1], Kde)
+    assert isinstance(ts[2], Smooth)
+    assert isinstance(ts[3], Aggregate)
+    assert isinstance(ts[4], Summary)

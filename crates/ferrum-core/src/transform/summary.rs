@@ -248,6 +248,74 @@ fn percentile_sorted(s: &[f64], p: f64) -> f64 {
     s[lo] * (1.0 - frac) + s[hi] * frac
 }
 
+use pyo3::prelude::*;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "Summary")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PySummary(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PySummary {
+    #[new]
+    #[pyo3(signature = (field, *, groupby = None, error_fn = "ci", ci = 0.95, n_boot = 1000, seed = 0))]
+    fn new(
+        field: &str,
+        groupby: Option<Vec<String>>,
+        error_fn: &str,
+        ci: f64,
+        n_boot: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        if field.is_empty() {
+            return Err(PyValueError::new_err("Summary: field must be non-empty"));
+        }
+        if !(ci > 0.0 && ci < 1.0) {
+            return Err(PyValueError::new_err("Summary: ci must be in (0, 1)"));
+        }
+        if n_boot == 0 && error_fn == "ci" {
+            return Err(PyValueError::new_err(
+                "Summary: n_boot must be > 0 when error_fn='ci'",
+            ));
+        }
+        let parsed = match error_fn {
+            "ci" => ErrorFn::Ci,
+            "stderr" => ErrorFn::Stderr,
+            "stdev" => ErrorFn::Stdev,
+            other => return Err(PyValueError::new_err(format!(
+                "Summary: unknown error_fn '{other}'; expected ci|stderr|stdev"
+            ))),
+        };
+        let gb = groupby.unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        for g in &gb {
+            if !seen.insert(g.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "Summary: duplicate groupby field '{g}'"
+                )));
+            }
+        }
+        Ok(PySummary(TransformSpec::Summary(SummarySpec {
+            field: field.to_string(),
+            groupby: gb,
+            error_fn: parsed,
+            ci, n_boot, seed,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Summary(s) => format!(
+                "Summary(field='{}', groupby={:?}, error_fn={:?}, ci={}, n_boot={}, seed={})",
+                s.field, s.groupby, s.error_fn, s.ci, s.n_boot, s.seed,
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -83,8 +83,24 @@ impl ChartSpec {
     }
 
     #[getter]
-    fn transforms_len(&self) -> usize {
-        self.transforms.len()
+    fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let mut out: Vec<Py<PyAny>> = Vec::with_capacity(self.transforms.len());
+        for t in &self.transforms {
+            let obj: Py<PyAny> = match t {
+                crate::transform::core::TransformSpec::Bin(_) =>
+                    pyo3::Py::new(py, crate::transform::bin::PyBin(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Kde(_) =>
+                    pyo3::Py::new(py, crate::transform::kde::PyKde(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Smooth(_) =>
+                    pyo3::Py::new(py, crate::transform::smooth::PySmooth(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Aggregate(_) =>
+                    pyo3::Py::new(py, crate::transform::aggregate::PyAggregate(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Summary(_) =>
+                    pyo3::Py::new(py, crate::transform::summary::PySummary(t.clone()))?.into_any(),
+            };
+            out.push(obj);
+        }
+        Ok(out)
     }
 
     fn to_json(&self) -> PyResult<String> {
@@ -109,7 +125,14 @@ impl ChartSpec {
             None => "None".to_string(),
             Some(e) => e.repr_string(),
         };
-        format!("ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}')")
+        if self.transforms.is_empty() {
+            format!("ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}')")
+        } else {
+            format!(
+                "ChartSpec(mark='{mark}', x={x}, y={y}, data='{data}', transforms=[{} item(s)])",
+                self.transforms.len()
+            )
+        }
     }
 }
 
@@ -150,9 +173,12 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(a.0);
             continue;
         }
+        if let Ok(s) = item.extract::<crate::transform::summary::PySummary>() {
+            out.push(s.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected Bin | Kde | Smooth | Aggregate \
-             (more variants land in subsequent tasks)"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary"
         )));
     }
     Ok(out)
