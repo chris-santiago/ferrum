@@ -1,7 +1,9 @@
-use pyo3::prelude::*;
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, RecordBatchIterator};
 use arrow::datatypes::{Field, Schema};
 use arrow::error::ArrowError;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3_arrow::PyRecordBatchReader;
 use std::sync::Arc;
 
 fn rename_column(
@@ -32,6 +34,51 @@ fn rename_column(
     RecordBatch::try_new(Arc::new(Schema::new(new_fields)), batch.columns().to_vec())
 }
 
+#[pyfunction]
+fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
+    let reader = reader.into_reader()?;
+    let schema = reader.schema();
+
+    let first_col_name = schema
+        .fields()
+        .first()
+        .ok_or_else(|| PyValueError::new_err("input has zero columns"))?
+        .name()
+        .clone();
+    let new_name = format!("{}_renamed", first_col_name);
+
+    let out_schema = Arc::new(Schema::new(
+        schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if i == 0 {
+                    Field::new(&new_name, f.data_type().clone(), f.is_nullable())
+                } else {
+                    (**f).clone()
+                }
+            })
+            .collect::<Vec<_>>(),
+    ));
+
+    let batches: Vec<RecordBatch> = reader
+        .collect::<Result<_, _>>()
+        .map_err(|e: ArrowError| PyValueError::new_err(e.to_string()))?;
+
+    let transformed: Vec<RecordBatch> = batches
+        .into_iter()
+        .map(|b| rename_column(b, &first_col_name, &new_name))
+        .collect::<Result<_, _>>()
+        .map_err(|e: ArrowError| PyValueError::new_err(e.to_string()))?;
+
+    let out_reader = RecordBatchIterator::new(
+        transformed.into_iter().map(Ok::<_, ArrowError>),
+        out_schema,
+    );
+    Ok(PyRecordBatchReader::new(Box::new(out_reader)))
+}
+
 /// Sanity check that the Rust↔Python bridge works. Remove once real bindings exist.
 #[pyfunction]
 fn add(a: i64, b: i64) -> i64 {
@@ -41,6 +88,7 @@ fn add(a: i64, b: i64) -> i64 {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add, m)?)?;
+    m.add_function(wrap_pyfunction!(process_batch, m)?)?;
     Ok(())
 }
 
