@@ -67,7 +67,7 @@ Both `ferrum-spec.md` and `CLAUDE.md` have been updated with dated amendment not
 ┌──────────────────────────────────────────────────────────┐
 │  Python: receives PyRecordBatchReader                    │
 │  polars: pl.from_arrow(result)                          │
-│  pyarrow: pa.RecordBatch.from_batches(list(result))     │
+│  pyarrow: pa.Table.from_batches(list(result))           │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -122,9 +122,12 @@ fn rename_column(
 }
 
 /// PyO3 shim — thin boundary layer only.
+/// Trivial transform for Phase 2: renames the first column to "{name}_renamed".
+/// This fixed transform exists solely to prove the round-trip; it is replaced in Phase 3.
 #[pyfunction]
 fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
-    // consume stream, apply rename_column per batch, return new stream
+    // consume stream, apply rename_column(batch, first_col_name, "{first_col_name}_renamed")
+    // per batch, collect into Vec<RecordBatch>, return new PyRecordBatchReader
 }
 
 #[pymodule]
@@ -226,8 +229,8 @@ Rule: **Python validates type; Rust validates content.** No Python code inspects
 | Test | Input | Validates |
 |---|---|---|
 | `test_polars_round_trip` | `pl.DataFrame` | CDI path, polars → Rust → polars |
-| `test_pyarrow_round_trip` | `pa.Table` (single batch) | pyarrow → Rust → pyarrow |
-| `test_pyarrow_multichunk_round_trip` | `pa.Table` with chunked arrays | `RecordBatchReader` multi-batch path |
+| `test_pyarrow_round_trip` | `pa.Table` (single batch) | pyarrow → Rust → `pa.Table.from_batches()` |
+| `test_pyarrow_multichunk_round_trip` | `pa.Table` with chunked arrays | `RecordBatchReader` multi-batch path; result collected via `pa.Table.from_batches()` |
 | `test_invalid_input_raises` | `dict` | `TypeError` with correct message |
 
 The multi-chunk test directly validates the reason `RecordBatchReader` was chosen over `PyRecordBatch`.
