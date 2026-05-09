@@ -4,6 +4,7 @@ mod transport;
 mod spec;
 mod scale;
 pub(crate) mod transform;
+pub(crate) mod layout;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
