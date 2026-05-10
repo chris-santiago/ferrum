@@ -51,6 +51,7 @@ from ferrum.coord import (
 )
 from ferrum.layer import Layer
 from ferrum.composition import HConcatChart, VConcatChart
+from ferrum.repeat import Repeat
 from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
 
 import ferrum.encoding as encoding
@@ -73,6 +74,8 @@ __all__ = [
     "compose_svg_horizontal", "compose_svg_vertical",
     # Phase 8a
     "Chart", "Layer", "HConcatChart", "VConcatChart",
+    # Phase 9
+    "Repeat",
     "CoordFlip", "CoordCartesian", "CoordPolar", "CoordGeo", "CoordFixed",
     "Theme", "themes", "set_default_theme", "get_default_theme", "theme_context",
     "encoding",
