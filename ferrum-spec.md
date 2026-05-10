@@ -261,6 +261,19 @@ All positional and appearance channels accept:
 - `"aggregate(fieldname)"` — e.g. `"mean(price)"`, `"count()"`, `"q50(latency)"`
 - `"fieldname:Q"` / `":N"` / `":O"` / `":T"` — inline type annotation (Quantitative, Nominal, Ordinal, Temporal)
 
+> **2026-05-10 (Phase 8a):** All 31 channel classes are constructible Python
+> value objects. Renderer honors `x`, `y`, `color`, `size`, `shape`, `opacity`
+> in Phase 8a. Other channels (Stroke, Fill, FillOpacity, StrokeOpacity,
+> StrokeWidth, StrokeDash, Angle, Text, Detail, Tooltip, TooltipField, Href,
+> Description, Key, X2, Y2, XError, YError, XError2, YError2, Theta, Radius)
+> are accepted at the API and stored on `EncodingSpec`, but the renderer
+> ignores them with a one-time `UserWarning` per (channel, render call).
+> Phase 9 wires the remaining channels.
+>
+> Channel kwargs honored in 8a: `type`, `bin`, `aggregate`, `scale`, `title`.
+> Other kwargs (`axis`, `legend`, `sort`, `stack`, `impute`, `scheme`, `format`,
+> `formatType`) are accepted, stored typed on `EncodingSpec`, and warn-once.
+
 ---
 
 ### 3.3 Marks
@@ -672,6 +685,12 @@ with ferrum.theme_context(my_theme):
     ...
 ```
 
+> **2026-05-10 (Phase 8a):** `set_default_theme(theme)` is implemented as a
+> contextvars-backed setter that returns a context manager. Per-chart
+> `Chart.theme(t)` always overrides this default. CLAUDE.md §"Hard
+> constraints" documents this as the single sanctioned exception to
+> "no global mutable state."
+
 ---
 
 ### 3.14 Figure-Level Functions
@@ -925,6 +944,13 @@ RenderConfig(
 > Regular regardless of system font availability); future phases may surface
 > the `False` case for size-conscious users.
 
+> **2026-05-10 (Phase 8a):** `.show()` env detection in 8a covers Jupyter
+> inline (`_repr_svg_` / `_repr_html_` rich display) and a browser fallback
+> (writes temp HTML, calls `webbrowser.open`). Sixel terminal output and the
+> standalone HTML wrapper output are deferred to Phase 9. `.save()` honors
+> `.svg` and `.png` extensions; `.html` and `.json` raise
+> `NotImplementedError` pointing to Phase 9.
+
 #### Chart output methods
 
 ```
@@ -1018,6 +1044,13 @@ Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level func
 | `ComparedModelSource` | Multi-model wrapper; adds `model` column to all derived data |
 | `str` / `pathlib.Path` | CSV, Parquet, JSON, NDJSON; loaded lazily |
 | `None` | Data supplied per-layer |
+
+> **2026-05-10 (Phase 8a):** Data input compatibility provided via narwhals
+> (~1.x) for pandas, modin, cuDF, dask, ibis. Polars goes via direct CDI
+> (zero-copy). pyarrow `Table` and `RecordBatch` accepted as native. Dict,
+> list-of-records, and 2D numpy with auto-named columns supported. File path
+> inputs (`Chart("file.csv")`) and `ModelSource`/`ComparedModelSource`
+> deferred to Phases 9 and 10 respectively.
 
 ---
 

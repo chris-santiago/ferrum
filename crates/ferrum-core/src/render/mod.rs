@@ -14,6 +14,10 @@ pub(crate) mod draw;
 pub(crate) mod png;
 pub(crate) mod binding;
 pub(crate) mod marks;
+pub mod compositor;
+pub use compositor::{
+    compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
+};
 
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;
@@ -78,6 +82,7 @@ pub enum RenderWarning {
     Layout(LayoutWarning),
     OutOfDomainRows { mark: String, count: u64 },
     ColorPaletteOverflowed { categories: u32 },
+    ShapePaletteOverflowed { categories: u32 },
     EmptyPanel { panel_index: usize },
 }
 
@@ -109,6 +114,7 @@ mod tests {
             RenderWarning::Layout(LayoutWarning::PanelCollapsed { panel_index: 0 }),
             RenderWarning::OutOfDomainRows { mark: "point".into(), count: 3 },
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
+            RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
         ] {
             let json = serde_json::to_string(&w).unwrap();
@@ -202,11 +208,20 @@ pub fn render_svg(
             continue;
         }
 
+        // Build a rendering spec for scale resolution that uses the first layer's
+        // encoding (which accounts for CoordFlip and chart-level inheritance).
+        // For single-layer non-flipped specs this is structurally identical to spec.
+        let rendering_spec_for_panel = ChartSpec {
+            encoding: prep.layers[0].encoding.clone(),
+            ..spec.clone()
+        };
+
         let (scales, scale_warnings) = scale_resolve::resolve_scales(
-            spec,
+            &rendering_spec_for_panel,
             &panel_batch,
             (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
             (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+            theme,
         )?;
         warnings.extend(scale_warnings);
 
@@ -214,27 +229,43 @@ pub fn render_svg(
         out.clip_open(&clip_id, panel.plot_area);
         out.use_clip_open(&clip_id);
 
-        let mark_style = draw::resolve_mark_style(theme, &spec.mark);
-        let ctx = draw::DrawCtx {
-            spec,
-            panel,
-            theme,
-            scales: &scales,
-            batch: &panel_batch,
-            mark_style: &mark_style,
-        };
-        draw::dispatch_mark(&spec.mark, &ctx, &mut out);
+        // Phase 8a: iterate layers. Single-layer charts have prep.layers.len() == 1.
+        for layer in &prep.layers {
+            // Build a synthetic ChartSpec with the layer's mark + encoding so
+            // mark renderers (which read ctx.spec) see the correct per-layer values.
+            let layer_spec = ChartSpec {
+                mark: layer.mark,
+                encoding: layer.encoding.clone(),
+                ..spec.clone()
+            };
+            let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
+            let ctx = draw::DrawCtx {
+                spec: &layer_spec,
+                panel,
+                theme,
+                scales: &scales,
+                batch: &panel_batch,
+                mark_style: &mark_style,
+            };
+            draw::dispatch_mark(&layer.mark, &ctx, &mut out);
+        }
 
         out.use_clip_close();
     }
 
     if let Some(legend) = &layout.legend {
-        let color_scale = if spec.encoding.color.is_some() {
+        // Use rendering encoding (first layer, accounts for CoordFlip) for legend scale.
+        let rendering_spec_for_legend = ChartSpec {
+            encoding: prep.layers[0].encoding.clone(),
+            ..spec.clone()
+        };
+        let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
             let (gs, _) = scale_resolve::resolve_scales(
-                spec,
+                &rendering_spec_for_legend,
                 &prep.transformed,
                 (0.0, 1.0),
                 (0.0, 1.0),
+                theme,
             )?;
             gs.color
         } else {
@@ -300,12 +331,16 @@ mod orchestration_tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -353,7 +388,7 @@ mod orchestration_tests {
     #[test]
     fn render_svg_unknown_column_errors() {
         let (mut spec, batch) = scatter_3();
-        spec.encoding.x = Some(EncodingSpec { field: "missing".into(), type_: None });
+        spec.encoding.x = Some(EncodingSpec { field: "missing".into(), type_: None, ..Default::default() });
         let result = render_svg(
             &spec,
             &batch,
@@ -384,9 +419,10 @@ mod orchestration_tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
@@ -394,6 +430,9 @@ mod orchestration_tests {
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
+            layers: None,
+            coord: None,
+            mark_style: None,
         };
         let result = render_svg(
             &spec,
@@ -436,11 +475,14 @@ mod png_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -463,11 +505,14 @@ mod png_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -536,11 +581,14 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -580,11 +628,14 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "g".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -608,11 +659,14 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal) }),
-                y: Some(EncodingSpec { field: "v".into(), type_: None }),
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -635,11 +689,14 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -662,11 +719,14 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Area,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -691,9 +751,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
@@ -701,6 +762,9 @@ mod golden_tests {
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
+            layers: None,
+            coord: None,
+            mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

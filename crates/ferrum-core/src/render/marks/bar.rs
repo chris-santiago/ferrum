@@ -73,11 +73,14 @@ mod tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal) }),
-                y: Some(EncodingSpec { field: "v".into(), type_: None }),
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -89,8 +92,8 @@ mod tests {
         ]).unwrap();
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        let mark_style = resolve_mark_style(&theme, &Mark::Bar);
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
         super::draw(&ctx, &mut out);
@@ -103,11 +106,14 @@ mod tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal) }),
-                y: Some(EncodingSpec { field: "v".into(), type_: None }),
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -120,8 +126,8 @@ mod tests {
         let mut theme = ThemeInputs::default();
         theme.bar_corner_radius = 3.0;
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        let mark_style = resolve_mark_style(&theme, &Mark::Bar);
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
         super::draw(&ctx, &mut out);

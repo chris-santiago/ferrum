@@ -5,8 +5,9 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::{PanelLayout, ThemeInputs};
 use crate::spec::mark::Mark;
+use crate::spec::mark_style::MarkKwargsSpec;
 
-use super::color::{with_opacity, Color};
+use super::color::{from_hex_str, with_opacity, Color};
 use super::scale_resolve::ResolvedScales;
 use super::svg::SvgBuffer;
 
@@ -19,6 +20,12 @@ pub struct DrawCtx<'a> {
     pub mark_style: &'a MarkStyle,
 }
 
+/// Per-mark resolved style. Fields are populated from theme defaults (mark-aware)
+/// and then overridden by any `MarkKwargsSpec` present on the layer or chart.
+///
+/// Text-mark-specific fields (`font_size`, `font_weight`, `align`, `baseline`,
+/// `dx`, `dy`, `angle`) are stored here as `Option<>` and default to `None`.
+/// Per-mark draw functions for text marks read them; non-text marks ignore them.
 #[derive(Debug, Clone)]
 pub struct MarkStyle {
     pub fill: Color,
@@ -28,11 +35,31 @@ pub struct MarkStyle {
     pub point_size: f64,
     pub corner_radius: f64,
     pub stroke_dash: Option<Vec<f64>>,
+    // Text-mark-only fields (None = fall back to theme/hardcoded defaults).
+    pub font_size: Option<f64>,
+    pub font_weight: Option<String>,
+    pub align: Option<String>,
+    pub baseline: Option<String>,
+    pub dx: Option<f64>,
+    pub dy: Option<f64>,
+    pub angle: Option<f64>,
 }
 
-pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
+/// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
+///
+/// When `overrides` is `None`, the result is identical to the Phase 7 path
+/// (pure theme defaults, mark-aware) — goldens remain byte-identical.
+///
+/// String color fields (stroke, fill) are parsed via `from_hex_str`; parse
+/// failures are silently skipped (warn at the Python layer per spec).
+pub fn resolve_mark_style(
+    overrides: Option<&MarkKwargsSpec>,
+    theme: &ThemeInputs,
+    mark: &Mark,
+) -> MarkStyle {
+    // --- Mark-aware theme base (preserves Phase 7 behaviour exactly) ---
     let base_fill = with_opacity(theme.mark_color, theme.default_opacity);
-    match mark {
+    let mut style = match mark {
         Mark::Area => MarkStyle {
             fill: with_opacity(theme.mark_color, theme.area_opacity),
             stroke: Some(theme.mark_color),
@@ -41,6 +68,13 @@ pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
             point_size: theme.point_size,
             corner_radius: 0.0,
             stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
         },
         Mark::Line => MarkStyle {
             fill: theme.mark_color,
@@ -50,6 +84,13 @@ pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
             point_size: theme.point_size,
             corner_radius: 0.0,
             stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
         },
         Mark::Bar | Mark::Rect => MarkStyle {
             fill: base_fill,
@@ -59,6 +100,13 @@ pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
             point_size: theme.point_size,
             corner_radius: theme.bar_corner_radius,
             stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
         },
         Mark::Rule => MarkStyle {
             fill: theme.mark_color,
@@ -68,6 +116,13 @@ pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
             point_size: theme.point_size,
             corner_radius: 0.0,
             stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
         },
         Mark::Tick | Mark::Point | Mark::Text => MarkStyle {
             fill: base_fill,
@@ -77,8 +132,47 @@ pub fn resolve_mark_style(theme: &ThemeInputs, mark: &Mark) -> MarkStyle {
             point_size: theme.point_size,
             corner_radius: 0.0,
             stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
         },
+    };
+
+    // --- Apply MarkKwargsSpec overrides (if any) ---
+    let Some(o) = overrides else { return style };
+
+    if let Some(size) = o.size { style.point_size = size; }
+    if let Some(opacity) = o.opacity { style.opacity = opacity; }
+    if let Some(cr) = o.corner_radius { style.corner_radius = cr; }
+    if let Some(sw) = o.stroke_width { style.stroke_width = sw; }
+    if let Some(ref dash) = o.stroke_dash { style.stroke_dash = Some(dash.clone()); }
+
+    if let Some(ref hex) = o.stroke {
+        if let Ok(c) = from_hex_str(hex) {
+            style.stroke = Some(c);
+        }
+        // parse failure: silently skip; warn at Python layer
     }
+    if let Some(ref hex) = o.fill {
+        if let Ok(c) = from_hex_str(hex) {
+            style.fill = c;
+        }
+    }
+
+    // Text-mark-specific fields
+    if let Some(fs) = o.font_size { style.font_size = Some(fs); }
+    if let Some(ref fw) = o.font_weight { style.font_weight = Some(fw.clone()); }
+    if let Some(ref al) = o.align { style.align = Some(al.clone()); }
+    if let Some(ref bl) = o.baseline { style.baseline = Some(bl.clone()); }
+    if let Some(dx) = o.dx { style.dx = Some(dx); }
+    if let Some(dy) = o.dy { style.dy = Some(dy); }
+    if let Some(ang) = o.angle { style.angle = Some(ang); }
+
+    style
 }
 
 /// Try to read a column as `f64`, regardless of whether the underlying type
@@ -139,10 +233,12 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
 mod tests {
     use super::*;
 
+    // --- Phase 7 baseline tests (updated to 3-arg signature; None overrides = same result) ---
+
     #[test]
     fn resolve_style_for_area_uses_area_opacity() {
         let theme = ThemeInputs::default();
-        let style = resolve_mark_style(&theme, &Mark::Area);
+        let style = resolve_mark_style(None, &theme, &Mark::Area);
         assert!((style.fill.alpha as i32 - 102).abs() <= 1);
     }
 
@@ -150,14 +246,52 @@ mod tests {
     fn resolve_style_for_bar_has_corner_radius_from_theme() {
         let mut theme = ThemeInputs::default();
         theme.bar_corner_radius = 4.0;
-        let style = resolve_mark_style(&theme, &Mark::Bar);
+        let style = resolve_mark_style(None, &theme, &Mark::Bar);
         assert_eq!(style.corner_radius, 4.0);
     }
 
     #[test]
     fn resolve_style_for_point_is_opaque_by_default() {
         let theme = ThemeInputs::default();
-        let style = resolve_mark_style(&theme, &Mark::Point);
+        let style = resolve_mark_style(None, &theme, &Mark::Point);
         assert_eq!(style.fill.alpha, 0xFF);
+    }
+
+    // --- Phase 8a Task 7 tests ---
+
+    #[test]
+    fn resolve_mark_style_with_no_overrides_returns_theme_defaults() {
+        let theme = ThemeInputs::default();
+        let style = resolve_mark_style(None, &theme, &Mark::Point);
+        assert_eq!(style.point_size, theme.point_size);
+    }
+
+    #[test]
+    fn resolve_mark_style_overrides_point_size() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { size: Some(100.0), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point);
+        assert_eq!(style.point_size, 100.0);
+    }
+
+    #[test]
+    fn resolve_mark_style_overrides_stroke_color() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { stroke: Some("#ff0000".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point);
+        let stroke = style.stroke.expect("stroke should be set");
+        assert_eq!(stroke.red, 0xff);
+        assert_eq!(stroke.green, 0x00);
+        assert_eq!(stroke.blue, 0x00);
+    }
+
+    #[test]
+    fn resolve_mark_style_invalid_color_silently_skipped() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { stroke: Some("not-a-color".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point);
+        // Mark::Point theme default stroke is None; invalid color does NOT set it
+        let baseline = resolve_mark_style(None, &theme, &Mark::Point);
+        assert_eq!(style.stroke, baseline.stroke);
     }
 }

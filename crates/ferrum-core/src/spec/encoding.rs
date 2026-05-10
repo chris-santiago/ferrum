@@ -59,12 +59,121 @@ impl FromStr for DataType {
     }
 }
 
-#[pyclass(eq, module = "ferrum._core")]
+/// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
+/// Mirrors the Python ScaleLog/ScalePow/etc. classes via tagged enum.
+///
+/// Uses `tag = "type"` (NOT the spec-module convention `tag = "kind"`) for Vega-Lite wire-format
+/// alignment — see design spec §11 row 16 ("Vega-Lite interop stays open without translation").
+/// This is the only tagged enum in this module that uses `"type"`; the choice is intentional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ScaleSpec {
+    Linear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        nice: bool,
+        #[serde(default)]
+        zero: bool,
+        #[serde(default)]
+        clamp: bool,
+    },
+    Log {
+        #[serde(default = "default_log_base")]
+        base: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        nice: bool,
+        #[serde(default)]
+        clamp: bool,
+    },
+    Time {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        nice: bool,
+        #[serde(default)]
+        clamp: bool,
+    },
+    Symlog {
+        #[serde(default = "default_symlog_constant")]
+        constant: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        nice: bool,
+        #[serde(default)]
+        clamp: bool,
+    },
+    Ordinal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        padding: f64,
+    },
+}
+
+fn default_log_base() -> f64 {
+    10.0
+}
+fn default_symlog_constant() -> f64 {
+    1.0
+}
+
+/// Opaque-but-typed axis spec. Round-trips JSON; renderer ignores in 8a.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AxisSpec {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LegendSpec {
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[pyclass(eq, module = "ferrum._core")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EncodingSpec {
     pub field: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none", default)]
     pub type_: Option<DataType>,
+
+    // NEW honored fields (Phase 8a):
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<ScaleSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    // NEW deferred fields (Phase 8a — round-trip + warn-once at Python layer):
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<AxisSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<LegendSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impute: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(rename = "formatType", default, skip_serializing_if = "Option::is_none")]
+    pub format_type: Option<String>,
 }
 
 impl EncodingSpec {
@@ -79,8 +188,27 @@ impl EncodingSpec {
 #[pymethods]
 impl EncodingSpec {
     #[new]
-    #[pyo3(signature = (field, type_ = None))]
-    fn new(field: &str, type_: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (
+        field, type_ = None, *,
+        scale = None, title = None,
+        axis = None, legend = None, sort = None, stack = None,
+        impute = None, scheme = None, format = None, format_type = None,
+    ))]
+    fn new(
+        py: Python,
+        field: &str,
+        type_: Option<&str>,
+        scale: Option<&Bound<'_, PyAny>>,
+        title: Option<String>,
+        axis: Option<&Bound<'_, PyAny>>,
+        legend: Option<&Bound<'_, PyAny>>,
+        sort: Option<&Bound<'_, PyAny>>,
+        stack: Option<String>,
+        impute: Option<&Bound<'_, PyAny>>,
+        scheme: Option<String>,
+        format: Option<String>,
+        format_type: Option<String>,
+    ) -> PyResult<Self> {
         if field.is_empty() {
             return Err(PyValueError::new_err("field must be non-empty"));
         }
@@ -91,7 +219,35 @@ impl EncodingSpec {
             ),
             None => None,
         };
-        Ok(EncodingSpec { field: field.to_string(), type_ })
+
+        fn json_round<T: for<'de> serde::Deserialize<'de>>(
+            py: Python,
+            obj: Option<&Bound<'_, PyAny>>,
+            name: &str,
+        ) -> PyResult<Option<T>> {
+            let Some(o) = obj else { return Ok(None) };
+            let json_module = py.import("json")?;
+            let s: String = json_module.call_method1("dumps", (o,))?.extract()?;
+            Ok(Some(
+                serde_json::from_str(&s)
+                    .map_err(|e| PyValueError::new_err(format!("{name}: {e}")))?,
+            ))
+        }
+
+        Ok(EncodingSpec {
+            field: field.to_string(),
+            type_,
+            scale: json_round(py, scale, "scale")?,
+            title,
+            axis: json_round(py, axis, "axis")?,
+            legend: json_round(py, legend, "legend")?,
+            sort: json_round(py, sort, "sort")?,
+            stack,
+            impute: json_round(py, impute, "impute")?,
+            scheme,
+            format,
+            format_type,
+        })
     }
 
     #[getter]
@@ -102,6 +258,96 @@ impl EncodingSpec {
     #[getter]
     fn type_(&self) -> Option<&'static str> {
         self.type_.as_ref().map(|t| t.as_str())
+    }
+
+    #[getter]
+    fn scale(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.scale {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
+    #[getter]
+    fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    #[getter]
+    fn axis(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.axis {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
+    #[getter]
+    fn legend(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.legend {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
+    #[getter]
+    fn sort(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.sort {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
+    #[getter]
+    fn stack(&self) -> Option<&str> {
+        self.stack.as_deref()
+    }
+
+    #[getter]
+    fn impute(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.impute {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
+    #[getter]
+    fn scheme(&self) -> Option<&str> {
+        self.scheme.as_deref()
+    }
+
+    #[getter]
+    fn format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    #[getter]
+    fn format_type(&self) -> Option<&str> {
+        self.format_type.as_deref()
     }
 
     fn __repr__(&self) -> String {
@@ -117,6 +363,13 @@ pub struct Encoding {
     pub y: Option<EncodingSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub color: Option<EncodingSpec>,
+    // NEW Phase 8a:
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub size: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub shape: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub opacity: Option<EncodingSpec>,
 }
 
 #[cfg(test)]
@@ -146,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_encoding_spec_round_trip_no_type() {
-        let original = EncodingSpec { field: "price".into(), type_: None };
+        let original = EncodingSpec { field: "price".into(), type_: None, ..Default::default() };
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, r#"{"field":"price"}"#);
         let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
@@ -158,6 +411,7 @@ mod tests {
         let original = EncodingSpec {
             field: "weight".into(),
             type_: Some(DataType::Quantitative),
+            ..Default::default()
         };
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, r#"{"field":"weight","type":"quantitative"}"#);
@@ -168,9 +422,14 @@ mod tests {
     #[test]
     fn test_encoding_round_trip_both_axes() {
         let e = Encoding {
-            x: Some(EncodingSpec { field: "price".into(), type_: None }),
-            y: Some(EncodingSpec { field: "weight".into(), type_: Some(DataType::Quantitative) }),
+            x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec {
+                field: "weight".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
             color: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(
@@ -191,9 +450,14 @@ mod tests {
     #[test]
     fn test_encoding_round_trip_with_color() {
         let e = Encoding {
-            x: Some(EncodingSpec { field: "price".into(), type_: None }),
-            y: Some(EncodingSpec { field: "weight".into(), type_: None }),
-            color: Some(EncodingSpec { field: "species".into(), type_: Some(DataType::Nominal) }),
+            x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "weight".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec {
+                field: "species".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(
@@ -207,11 +471,102 @@ mod tests {
     #[test]
     fn test_encoding_omits_color_when_none() {
         let e = Encoding {
-            x: Some(EncodingSpec { field: "a".into(), type_: None }),
-            y: Some(EncodingSpec { field: "b".into(), type_: None }),
+            x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
             color: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(json, r#"{"x":{"field":"a"},"y":{"field":"b"}}"#);
+    }
+
+    // --- Phase 8a new tests ---
+
+    #[test]
+    fn encoding_spec_round_trips_with_scale() {
+        let e = EncodingSpec {
+            field: "price".into(),
+            type_: Some(DataType::Quantitative),
+            scale: Some(ScaleSpec::Log {
+                base: 10.0,
+                domain: None,
+                range: None,
+                nice: true,
+                clamp: false,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(r#""scale":{"type":"log""#));
+        let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn encoding_spec_round_trips_with_title() {
+        let e = EncodingSpec {
+            field: "x".into(),
+            type_: None,
+            title: Some("My X Axis".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(r#""title":"My X Axis""#));
+        let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn encoding_spec_round_trips_with_axis_opaque() {
+        use serde_json::json;
+        let mut axis_extra = serde_json::Map::new();
+        axis_extra.insert("grid".into(), json!(false));
+        axis_extra.insert("orient".into(), json!("bottom"));
+        let e = EncodingSpec {
+            field: "x".into(),
+            type_: None,
+            axis: Some(AxisSpec { extra: axis_extra }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn encoding_spec_phase_7_canonical_json_byte_identical_when_no_new_fields() {
+        let e = EncodingSpec { field: "x".into(), type_: None, ..Default::default() };
+        assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"field":"x"}"#);
+
+        let e2 = EncodingSpec {
+            field: "y".into(),
+            type_: Some(DataType::Quantitative),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&e2).unwrap(),
+            r#"{"field":"y","type":"quantitative"}"#,
+        );
+    }
+
+    #[test]
+    fn encoding_spec_round_trips_pre_phase_8_json() {
+        // Existing JSON without any new fields must deserialize.
+        let json = r#"{"field":"price","type":"quantitative"}"#;
+        let parsed: EncodingSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.field, "price");
+        assert_eq!(parsed.type_, Some(DataType::Quantitative));
+        assert_eq!(parsed.scale, None);
+        assert_eq!(parsed.title, None);
+    }
+
+    #[test]
+    fn scale_spec_log_default_base_is_10() {
+        let json = r#"{"type":"log"}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match parsed {
+            ScaleSpec::Log { base, .. } => assert_eq!(base, 10.0),
+            _ => panic!("expected Log variant"),
+        }
     }
 }

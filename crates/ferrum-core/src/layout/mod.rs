@@ -115,6 +115,12 @@ pub struct ThemeInputs {
     pub font_color: palette::Srgba<u8>,
     pub background_color: palette::Srgba<u8>,
     pub strip_background_color: palette::Srgba<u8>,
+
+    // Phase 8a size/opacity range fields.
+    pub point_size_min: f64,  // default 3.0
+    pub point_size_max: f64,  // default 30.0
+    pub opacity_min: f64,     // default 0.1
+    pub opacity_max: f64,     // default 1.0
 }
 
 impl Default for ThemeInputs {
@@ -158,6 +164,12 @@ impl Default for ThemeInputs {
             font_color: text_222,
             background_color: bg_white,
             strip_background_color: strip_bg,
+
+            // Phase 8a size/opacity ranges.
+            point_size_min: 3.0,
+            point_size_max: 30.0,
+            opacity_min: 0.1,
+            opacity_max: 1.0,
         }
     }
 }
@@ -416,12 +428,16 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "a".into(), type_: None }),
-                y: Some(EncodingSpec { field: "b".into(), type_: None }),
+                x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
         }
     }
 
