@@ -175,12 +175,24 @@ class Chart:
             if x_enc is None:
                 raise ValueError("mark_density() requires .encode(x=...) to specify the density field")
             field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-            mark, transforms, remap = desugar_density(field, **kwargs)
-            new._mark = mark
-            new._transforms = list(new._transforms) + transforms
-            from ferrum.encoding import X, Y
-            new._encoding["x"] = X(remap["x"], type="Q")
-            new._encoding["y"] = Y(remap["y"], type="Q")
+            result = desugar_density(field, chart_encoding=new._encoding, **kwargs)
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # Bivariate density routed through desugar_contour(fill=True).
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(new._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode
+            else:
+                mark, transforms, remap = result
+                new._mark = mark
+                new._transforms = list(new._transforms) + transforms
+                from ferrum.encoding import X, Y
+                new._encoding["x"] = X(remap["x"], type="Q")
+                new._encoding["y"] = Y(remap["y"], type="Q")
         elif kind == "histogram":
             x_enc = new._encoding.get("x")
             if x_enc is None:
@@ -200,9 +212,21 @@ class Chart:
                 raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
             x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
             y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-            mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
-            new._mark = mark
-            new._transforms = list(new._transforms) + transforms
+            result = desugar_smooth(x_field, y_field, **kwargs)
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # ("__layered__", transforms, _, _, layers) — 8b ci-band path
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(new._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode
+            else:
+                mark, transforms, remap = result
+                new._mark = mark
+                new._transforms = list(new._transforms) + transforms
         return new
 
     # ---- Marks (primitives) ----
@@ -226,7 +250,10 @@ class Chart:
     # ---- Marks (statistical) ----
 
     def mark_density(self, **kwargs) -> "Chart":
-        """Density plot (KDE). Can be called before or after .encode(x=...)."""
+        """Density plot. 1D KDE when only x is encoded; bivariate (filled
+        contour over 2D KDE — Phase 8b) when both x and y are encoded.
+        Can be called before or after ``.encode()``.
+        """
         x_enc = self._encoding.get("x")
         if x_enc is None:
             # Encoding not yet set — defer resolution to render time.
@@ -235,13 +262,25 @@ class Chart:
             new._pending_stat_mark = ("density", dict(kwargs))
             return new
         field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-        mark, transforms, remap = desugar_density(field, **kwargs)
+        result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
         new = self._clone()
-        new._mark = mark
-        new._transforms = list(self._transforms) + transforms
-        from ferrum.encoding import X, Y
-        new._encoding["x"] = X(remap["x"], type="Q")
-        new._encoding["y"] = Y(remap["y"], type="Q")
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and result[0] == "__layered__"
+        ):
+            # Bivariate density routed through desugar_contour(fill=True).
+            _, transforms, _ignored1, _ignored2, layers_list = result
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = list(layers_list)
+            new._mark = None  # signals layered mode
+        else:
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + transforms
+            from ferrum.encoding import X, Y
+            new._encoding["x"] = X(remap["x"], type="Q")
+            new._encoding["y"] = Y(remap["y"], type="Q")
         return new
 
     def mark_histogram(self, **kwargs) -> "Chart":
@@ -264,7 +303,10 @@ class Chart:
         return new
 
     def mark_smooth(self, **kwargs) -> "Chart":
-        """Smooth/regression line. Can be called before or after .encode(x=..., y=...)."""
+        """Smooth/regression line. Can be called before or after .encode(x=..., y=...).
+
+        With ``ci=`` set, emits a layered ribbon (CI band) + line (Phase 8b).
+        """
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
@@ -274,10 +316,21 @@ class Chart:
             return new
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-        mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
+        result = desugar_smooth(x_field, y_field, **kwargs)
         new = self._clone()
-        new._mark = mark
-        new._transforms = list(self._transforms) + transforms
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and result[0] == "__layered__"
+        ):
+            _, transforms, _ignored1, _ignored2, layers_list = result
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = list(layers_list)
+            new._mark = None  # signals layered mode
+        else:
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + transforms
         return new
 
     # ---- Marks (deferred) ----

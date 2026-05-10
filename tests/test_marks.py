@@ -55,7 +55,9 @@ def test_desugar_histogram_returns_bar_with_bin_transform():
     assert remap == {"x": "bin_start", "x2": "bin_end", "y": "count"}
 
 
-def test_desugar_smooth_warns_on_ci_kwarg():
+def test_desugar_smooth_with_ci_returns_layered_tuple():
+    """Phase 8b: ci= no longer warns; it returns the layered (__layered__,
+    transforms, _, _, layers) 5-tuple emitting a ribbon CI band + line."""
     import warnings
     from ferrum._warn import reset_warnings
     from ferrum.marks.statistical import desugar_smooth
@@ -63,8 +65,14 @@ def test_desugar_smooth_warns_on_ci_kwarg():
     reset_warnings()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        desugar_smooth("x_col", "y_col", ci=0.95)
-    assert any("ci=" in str(wi.message) and "Phase 8b" in str(wi.message) for wi in w)
+        result = desugar_smooth("x_col", "y_col", ci=0.95)
+    # No ci-deferral warning anymore.
+    assert not any("Phase 8b" in str(wi.message) and "ci" in str(wi.message).lower() for wi in w)
+    # 5-tuple layered output, ribbon + line layers.
+    assert isinstance(result, tuple) and len(result) == 5
+    assert result[0] == "__layered__"
+    layers = result[4]
+    assert [layer["mark"] for layer in layers] == ["ribbon", "line"]
 
 
 # ---------------------------------------------------------------------------
