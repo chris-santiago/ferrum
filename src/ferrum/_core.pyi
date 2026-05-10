@@ -217,6 +217,15 @@ class Bin:
         nice: bool = True,
     ) -> None: ...
 
+class Bin2D:
+    def __init__(self, x: str, y: str, *,
+                 bins_x: Union[str, int, float] = "sturges",
+                 bins_y: Union[str, int, float] = "sturges",
+                 extent_x: Optional[Tuple[float, float]] = None,
+                 extent_y: Optional[Tuple[float, float]] = None,
+                 cumulative: bool = False,
+                 name: Optional[str] = None) -> None: ...
+
 class BoxStats:
     def __init__(
         self,

@@ -8,6 +8,7 @@ use crate::transform::context::TransformContext;
 
 use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
+use crate::transform::bin_2d::{self, Bin2DSpec};
 use crate::transform::contour::{self, ContourSpec};
 use crate::transform::error_extent::{self, ErrorExtentSpec};
 use crate::transform::box_stats::{self, BoxStatsSpec};
@@ -28,6 +29,8 @@ use crate::transform::violin::{self, ViolinSpec};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum TransformSpec {
     Bin(BinSpec),
+    #[serde(rename = "bin_2d")]
+    Bin2D(Bin2DSpec),
     Kde(KdeSpec),
     Smooth(SmoothSpec),
     Aggregate(AggregateSpec),
@@ -50,6 +53,7 @@ impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
         match self {
             Self::Bin(s)       => bin::apply(s, batch),
+            Self::Bin2D(s)     => bin_2d::apply(s, batch),
             Self::Kde(s)       => crate::transform::kde::apply(s, batch),
             Self::Smooth(s)    => crate::transform::smooth::apply(s, batch),
             Self::Aggregate(s) => crate::transform::aggregate::apply(s, batch),
@@ -170,6 +174,7 @@ pub(crate) fn apply_transforms_named(
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
     match spec {
         TransformSpec::Bin(s) => s.name.as_deref(),
+        TransformSpec::Bin2D(s) => s.name.as_deref(),
         TransformSpec::Kde(s) => s.name.as_deref(),
         TransformSpec::Smooth(s) => s.name.as_deref(),
         TransformSpec::Aggregate(s) => s.name.as_deref(),
@@ -309,6 +314,22 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("name"), "name=None must be omitted: {json}");
         assert!(json.contains(r#""type":"bin""#));
+    }
+
+    #[test]
+    fn test_transform_spec_bin_2d_round_trip() {
+        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        let original = TransformSpec::Bin2D(Bin2DSpec {
+            x: "x".into(), y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 10 },
+            bins_y: BinSpec2DAxis::Sturges,
+            extent_x: None, extent_y: None,
+            cumulative: false, name: None,
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains(r#""type":"bin_2d""#), "missing tag: {json}");
+        let parsed: TransformSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
     }
 
     #[test]

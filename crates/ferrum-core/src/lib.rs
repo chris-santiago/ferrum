@@ -20,6 +20,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::threshold::ThresholdScale>()?;
     m.add_class::<scale::quantile::QuantileScale>()?;
     m.add_class::<transform::bin::PyBin>()?;
+    m.add_class::<transform::bin_2d::PyBin2D>()?;
     m.add_class::<transform::kde::PyKde>()?;
     m.add_class::<transform::smooth::PySmooth>()?;
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
