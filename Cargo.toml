@@ -30,6 +30,16 @@ serde_json = { version = "1" }
 # reproducible across platforms — required for committed numeric-reference fixtures).
 rand        = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 rand_chacha = { version = "0.3", default-features = false }
+# Phase 7 (static-renderer) — exact pin per spec §8.
+# fontdue version bumps change glyph advances; refresh goldens via FERRUM_UPDATE_GOLDENS=1.
+fontdue = "=0.9.3"
+# Color type alias + future colorspace conversions. Range pin per spec §11 row 6.
+palette = "~0.7"
+# SVG → typed tree → tiny_skia rasterization. usvg/resvg minor versions must match.
+usvg    = "~0.47"
+resvg   = "~0.47"
+# base64 @font-face data URL emission for Phase 7 SVG embed.
+base64  = "~0.22"
 
 [profile.release]
 lto = "thin"
