@@ -27,9 +27,12 @@ from ferrum.themes import (
 )
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
+from ferrum.chart import Chart
+
 __version__ = "0.1.0"
 
 __all__ = [
+    "Chart",
     "Aggregate",
     "AggregateOp",
     "Bin",
