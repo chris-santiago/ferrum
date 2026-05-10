@@ -455,11 +455,106 @@ pub struct EncodingSpec {
 
 > **Back-compat:** `Default` derive is added so `..Default::default()` works in tests. All new fields default to `None` and `skip_serializing_if = "Option::is_none"` ensures Phase 3-7 JSON outputs stay byte-identical.
 
-- [ ] **Step 3: Update PyO3 constructor**
+- [ ] **Step 3: Extend the PyO3 `__new__` to accept the new kwargs**
 
-The existing `#[new]` for `EncodingSpec` only takes `(field, type_=None)`. Phase 8a keeps this signature unchanged so Python channel-class code works without modification — the new fields are populated via the `ChartSpec` constructor (which accepts pre-built EncodingSpec dicts) or via direct serde deserialization. Leave the `#[new]` alone.
+Phase 8a's Python `Chart.to_spec()` builds `EncodingSpec` instances per encoding channel and passes them to `ChartSpec(...)`. So `EncodingSpec.__new__` must accept all new fields — otherwise `Chart(df).encode(x=X("price", scale=ScaleLog(...))).show_svg()` would silently lose the scale and render with auto-detected linear.
 
-Add getters for the new fields (mirror existing `field` and `type_` getters):
+Replace the existing `#[new]` block with:
+
+```rust
+#[new]
+#[pyo3(signature = (
+    field, type_ = None, *,
+    scale = None, title = None,
+    axis = None, legend = None, sort = None, stack = None,
+    impute = None, scheme = None, format = None, format_type = None,
+))]
+fn new(
+    py: Python,
+    field: &str,
+    type_: Option<&str>,
+    scale: Option<&Bound<'_, PyAny>>,
+    title: Option<String>,
+    axis: Option<&Bound<'_, PyAny>>,
+    legend: Option<&Bound<'_, PyAny>>,
+    sort: Option<&Bound<'_, PyAny>>,
+    stack: Option<String>,
+    impute: Option<&Bound<'_, PyAny>>,
+    scheme: Option<String>,
+    format: Option<String>,
+    format_type: Option<String>,
+) -> PyResult<Self> {
+    if field.is_empty() {
+        return Err(PyValueError::new_err("field must be non-empty"));
+    }
+    let type_ = match type_ {
+        Some(s) => Some(s.parse::<DataType>().map_err(|e| PyValueError::new_err(e.to_string()))?),
+        None => None,
+    };
+
+    fn json_round<T: for<'de> serde::Deserialize<'de>>(
+        py: Python, obj: Option<&Bound<'_, PyAny>>, name: &str,
+    ) -> PyResult<Option<T>> {
+        let Some(o) = obj else { return Ok(None) };
+        let json_module = py.import("json")?;
+        let s: String = json_module.call_method1("dumps", (o,))?.extract()?;
+        Ok(Some(serde_json::from_str(&s).map_err(|e|
+            PyValueError::new_err(format!("{name}: {e}")))?))
+    }
+
+    Ok(EncodingSpec {
+        field: field.to_string(), type_,
+        scale: json_round(py, scale, "scale")?,
+        title,
+        axis: json_round(py, axis, "axis")?,
+        legend: json_round(py, legend, "legend")?,
+        sort: json_round(py, sort, "sort")?,
+        stack,
+        impute: json_round(py, impute, "impute")?,
+        scheme, format, format_type,
+    })
+}
+```
+
+> **Back-compat:** Phase 7 callers passing only `(field, type_)` work unchanged because every new param defaults to `None`. The keyword-only `*` boundary keeps positional usage unambiguous.
+
+Also extend `Encoding` (the wrapper with x/y/color fields) with `size`, `shape`, `opacity` fields — mirror the existing `color` field exactly:
+
+```rust
+pub struct Encoding {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub y: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<EncodingSpec>,
+    // NEW Phase 8a:
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub size: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub shape: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub opacity: Option<EncodingSpec>,
+}
+```
+
+And extend `ChartSpec.__new__` to accept the new positional encoding kwargs (`size`, `shape`, `opacity`) — mirror the existing `color` parsing exactly. (If you prefer, fold this into Task 5's binding extension instead of here; either is fine but BOTH need to happen before Tasks 8/9 reference the new fields.)
+
+Add a `ThemeInputs` extension in `crates/ferrum-core/src/layout/<mod.rs>` (or wherever `ThemeInputs` lives — see Phase 7 spec §5.2 for the precedent):
+
+```rust
+pub struct ThemeInputs {
+    // ... existing Phase 7 fields ...
+    pub point_size_min: f64,   // default 3.0
+    pub point_size_max: f64,   // default 30.0
+    pub opacity_min: f64,      // default 0.1
+    pub opacity_max: f64,      // default 1.0
+}
+```
+
+Default values via `Default` impl. Phase 6 layout tests untouched (these fields don't affect layout arithmetic).
+
+Add getters for the new EncodingSpec fields (mirror existing `field` and `type_` getters):
 
 ```rust
 #[getter] fn scale(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
@@ -823,7 +918,7 @@ pub mod mark_style;
 pub use mark_style::MarkKwargsSpec;
 ```
 
-- [ ] **Step 3: Add mark_style to ChartSpec and Layer**
+- [ ] **Step 3: Add mark_style to ChartSpec and Layer + extend `#[new]` for facet/size/shape/opacity**
 
 In `spec/chart.rs`, add after `coord`:
 
@@ -834,21 +929,90 @@ pub mark_style: Option<MarkKwargsSpec>,
 
 Add `use crate::spec::mark_style::MarkKwargsSpec;`.
 
-In the `#[new]` constructor, add `mark_style: Option<&Bound<'_, PyAny>> = None`. Body:
+`ChartSpec.__new__` is now the consolidator: it accepts `mark_style`, `facet`, `size`, `shape`, `opacity` (alongside the `layers` and `coord` kwargs from Tasks 1 and 4). Without these, Task 27/28 charts using `.facet()` or encoding `size=Size("col")` would silently lose those settings before reaching the renderer.
+
+Replace the existing `#[new]` signature so it becomes the union of all per-task kwargs:
 
 ```rust
-let mark_style = match mark_style {
-    None => None,
-    Some(obj) => {
-        let py = obj.py();
-        let json_module = py.import("json")?;
-        let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-        Some(serde_json::from_str(&s).map_err(|e| PyValueError::new_err(format!("mark_style: {e}")))?)
-    }
-};
-```
+#[new]
+#[pyo3(signature = (
+    *, mark, x = None, y = None, color = None,
+    size = None, shape = None, opacity = None,           // NEW (from Task 3 follow-on)
+    data = None, transforms = None,
+    layers = None,                                        // from Task 1
+    coord = None,                                         // from Task 4
+    facet = None,                                         // NEW here
+    mark_style = None,                                    // NEW here
+))]
+fn new(
+    mark: &str,
+    x: Option<&Bound<'_, PyAny>>,
+    y: Option<&Bound<'_, PyAny>>,
+    color: Option<&Bound<'_, PyAny>>,
+    size: Option<&Bound<'_, PyAny>>,
+    shape: Option<&Bound<'_, PyAny>>,
+    opacity: Option<&Bound<'_, PyAny>>,
+    data: Option<&str>,
+    transforms: Option<&Bound<'_, PyAny>>,
+    layers: Option<&Bound<'_, PyAny>>,
+    coord: Option<&str>,
+    facet: Option<&Bound<'_, PyAny>>,
+    mark_style: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Self> {
+    // ... existing body for mark / x / y / color / data / transforms (unchanged) ...
 
-Add `mark_style,` to constructor body.
+    let size = size.map(coerce_encoding).transpose()?;
+    let shape = shape.map(coerce_encoding).transpose()?;
+    let opacity = opacity.map(coerce_encoding).transpose()?;
+
+    let layers = match layers {
+        None => None,
+        Some(obj) => Some(coerce_layers(obj)?),
+    };
+
+    let coord = match coord {
+        None => None,
+        Some("cartesian") => Some(crate::spec::coord::CoordKind::Cartesian),
+        Some("flip") => Some(crate::spec::coord::CoordKind::Flip),
+        Some(other) => return Err(PyValueError::new_err(format!(
+            "unknown coord kind: '{other}'; expected 'cartesian' or 'flip'"
+        ))),
+    };
+
+    let facet = match facet {
+        None => None,
+        Some(obj) => {
+            let py = obj.py();
+            let json_module = py.import("json")?;
+            let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+            Some(serde_json::from_str(&s).map_err(|e|
+                PyValueError::new_err(format!("facet: {e}")))?)
+        }
+    };
+
+    let mark_style = match mark_style {
+        None => None,
+        Some(obj) => {
+            let py = obj.py();
+            let json_module = py.import("json")?;
+            let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+            Some(serde_json::from_str(&s).map_err(|e|
+                PyValueError::new_err(format!("mark_style: {e}")))?)
+        }
+    };
+
+    Ok(ChartSpec {
+        data,
+        mark,
+        encoding: Encoding { x, y, color, size, shape, opacity },
+        transforms,
+        facet,
+        layers,
+        coord,
+        mark_style,
+    })
+}
+```
 
 In `spec/layer.rs`, replace the struct with:
 
@@ -1901,8 +2065,15 @@ pub fn compose_svg_horizontal(
             r#"<g transform="translate({},{})">"#,
             format_f64(x_offset), format_f64(y_offset),
         ));
-        // Strip the <defs><style>@font-face ...</style></defs> from all but the first
-        let body = if i == 0 { p.body } else { strip_font_defs(p.body) };
+        // Strip the <defs><style>@font-face ...</style></defs> from all but the first.
+        // Allocates only when the marker is found AND i > 0 (every child after the first).
+        let body_owned;
+        let body: &str = if i == 0 {
+            p.body
+        } else {
+            body_owned = strip_font_defs(p.body);
+            &body_owned
+        };
         out.push_str(body);
         out.push_str("</g>");
         x_offset += p.width + spacing;
@@ -1917,37 +2088,20 @@ pub enum VerticalAlign { Top, Center, Bottom }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HorizontalAlign { Left, Center, Right }
 
-fn strip_font_defs(body: &str) -> &str {
-    let Some(start) = body.find(FONT_DEFS_MARKER) else { return body };
-    // Walk back to find <defs and forward to find </defs>
+fn strip_font_defs(body: &str) -> String {
+    let Some(start) = body.find(FONT_DEFS_MARKER) else { return body.to_string() };
     let defs_start = body[..start].rfind("<defs").unwrap_or(start);
     let defs_end_marker = "</defs>";
-    let Some(end_rel) = body[defs_start..].find(defs_end_marker) else { return body };
+    let Some(end_rel) = body[defs_start..].find(defs_end_marker) else { return body.to_string() };
     let defs_end = defs_start + end_rel + defs_end_marker.len();
-    // Return body with the defs slice removed (use a Cow if you need to splice in the middle)
-    // Simpler: return a new String — but this fn returns &str. Switch to returning String.
-    panic!("strip_font_defs needs to return String (see impl below)")
+    let mut out = String::with_capacity(body.len() - (defs_end - defs_start));
+    out.push_str(&body[..defs_start]);
+    out.push_str(&body[defs_end..]);
+    out
 }
 ```
 
-> Replace `strip_font_defs(&str) -> &str` with `String`-returning version (since splicing requires allocation):
-> ```rust
-> fn strip_font_defs(body: &str) -> String {
->     let Some(start) = body.find(FONT_DEFS_MARKER) else { return body.to_string() };
->     let defs_start = body[..start].rfind("<defs").unwrap_or(start);
->     let defs_end_marker = "</defs>";
->     let Some(end_rel) = body[defs_start..].find(defs_end_marker) else { return body.to_string() };
->     let defs_end = defs_start + end_rel + defs_end_marker.len();
->     let mut out = String::with_capacity(body.len() - (defs_end - defs_start));
->     out.push_str(&body[..defs_start]);
->     out.push_str(&body[defs_end..]);
->     out
-> }
-> ```
-> And in `compose_svg_horizontal`'s loop:
-> ```rust
-> let body_owned;
-> let body: &str = if i == 0 { p.body } else { body_owned = strip_font_defs(p.body); &body_owned };
+> The `body_owned` shadow trick keeps `body: &str` valid in both branches without unnecessary allocations on the first child.
 > ```
 
 - [ ] **Step 3: Write `compose_svg_vertical` (analogous)**
@@ -3021,6 +3175,9 @@ _RENDERED_HONORED = frozenset(["type", "scale", "title"])
 
 # Phase 8a renders these (added to scale_resolve in Task 8):
 class Color(ChannelBase):
+    # `scheme` is honored ONLY for Color in Phase 8a (Task 10 wires it through
+    # palette.rs::categorical_palette into the renderer's color-scale construction).
+    # All other channels treat `scheme` as deferred → warn-once.
     _channel_name = "color"
     _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type", "scheme", "scale", "title"])
@@ -3431,7 +3588,9 @@ class Theme:
         return self._props == other._props
 
     def __hash__(self) -> int:
-        return hash(tuple(sorted(self._props.items(), key=lambda kv: kv[0])))
+        # Use repr(v) so non-hashable values (e.g. grid_dash=[5, 3]) don't break hashing.
+        # Mirrors ChannelBase.__hash__ pattern.
+        return hash(tuple(sorted((k, repr(v)) for k, v in self._props.items())))
 
     def __repr__(self) -> str:
         if not self._props:
@@ -4453,14 +4612,21 @@ class Chart:
     # ---- Output (stubs; implemented in Task 32+) ----
 
     def to_spec(self):
-        from ferrum import ChartSpec
-        # Build the EncodingSpec arguments for each registered channel
+        from ferrum import ChartSpec, EncodingSpec
+        # Build full EncodingSpec instances per channel so honored kwargs
+        # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
+        # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": self._mark or "point", "data": "default"}
-        for axis in ("x", "y", "color"):
+        for axis in ("x", "y", "color", "size", "shape", "opacity"):
             if axis in self._encoding:
                 ch = self._encoding[axis]
-                # For Phase 8a, pass field name (Phase 7 ChartSpec accepts str OR EncodingSpec)
-                kw[axis] = ch.field if ch.field is not None else ""
+                if ch.field is None:
+                    continue   # Tooltip(*fields) etc. with no single field
+                d = ch.to_encoding_spec_dict()
+                # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
+                # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
+                field = d.pop("field")
+                kw[axis] = EncodingSpec(field, **d)
         if self._transforms:
             kw["transforms"] = list(self._transforms)
         return ChartSpec(**kw)
@@ -4641,23 +4807,32 @@ In `src/ferrum/chart.py`, add inside the `Chart` class:
         return new
 ```
 
-Update `to_spec()` in the same file to include facet/coord:
+Update `to_spec()` in the same file to include facet/coord. Tasks 1, 4, 5 extended the Rust `ChartSpec.__new__` to accept `layers`, `coord`, `mark_style`, and `facet` kwargs — so we can pass them directly here instead of round-tripping through JSON:
 
 ```python
     def to_spec(self):
-        from ferrum import ChartSpec
+        from ferrum import ChartSpec, EncodingSpec
         kw = {"mark": self._mark or "point", "data": "default"}
-        for axis in ("x", "y", "color"):
+        for axis in ("x", "y", "color", "size", "shape", "opacity"):
             if axis in self._encoding:
                 ch = self._encoding[axis]
-                kw[axis] = ch.field if ch.field is not None else ""
+                if ch.field is None:
+                    continue
+                d = ch.to_encoding_spec_dict()
+                field = d.pop("field")
+                kw[axis] = EncodingSpec(field, **d)
         if self._transforms:
             kw["transforms"] = list(self._transforms)
-        # Phase 7 ChartSpec doesn't currently accept facet/coord/layers/mark_style as kwargs;
-        # this requires extending the PyO3 binding. For Phase 8a, those flow via
-        # JSON round-trip until the binding is widened — see Task 34.
+        if self._facet:
+            kw["facet"] = self._build_facet_dict()
+        if self._coord:
+            kw["coord"] = self._coord
+        if self._mark_kwargs:
+            kw["mark_style"] = dict(self._mark_kwargs)
         return ChartSpec(**kw)
 ```
+
+(`_build_facet_dict` is added in Task 34. The layers field is set in Task 29's `__add__`; once `_layers` is non-empty, also pass `layers=self._build_layers_list()` per Task 34's helper.)
 
 - [ ] **Step 3: Run tests + commit**
 
@@ -5353,53 +5528,20 @@ git commit -m "test(display): show browser fallback + Jupyter rich-display path"
 
 ## Group J — Wiring, broader tests, docs, verification
 
-### Task 34: Widen Rust ChartSpec PyO3 binding to accept facet/coord/layers/mark_style kwargs
+### Task 34: Wire `Chart._build_facet_dict` / `_build_layers_list` helpers + update `_core.pyi`
 
 **Files:**
-- Modify: `crates/ferrum-core/src/spec/chart.rs` (extend `#[new]` keyword args)
-- Modify: `src/ferrum/chart.py::to_spec` (pass new kwargs through)
-- Modify: `src/ferrum/_core.pyi` (extend ChartSpec.__init__ signature)
+- Modify: `src/ferrum/chart.py` (add `_build_facet_dict`, `_build_layers_list` helpers; ensure `to_spec()` passes layers when set)
+- Modify: `src/ferrum/_core.pyi` (extend `ChartSpec.__init__` signature)
 
-This is the bridge that exposes the Group A Rust extensions (Tasks 1, 4, 5) to Python's `ChartSpec(...)` constructor — so Chart's `to_spec()` can pass `facet=`, `coord=`, `layers=`, `mark_style=` directly.
+Tasks 1, 4, 5 already extended Rust `ChartSpec.__new__` to accept all the new kwargs (layers, coord, facet, mark_style, size, shape, opacity). This task wires the Python-side helpers that build the dict/list shapes those kwargs expect, plus updates the Python type stubs.
 
-- [ ] **Step 1: Extend `ChartSpec.__new__` signature**
+- [ ] **Step 1: Add `_build_facet_dict` and `_build_layers_list` helpers to `Chart`**
 
-The Rust `#[new]` was extended in Tasks 1, 4, 5 to take `layers`, `coord`, `mark_style` as `Option<&Bound<'_, PyAny>>` parameters. Add `facet: Option<&Bound<'_, PyAny>> = None` if not already present, and parse it analogously:
-
-```rust
-let facet = match facet {
-    None => None,
-    Some(obj) => {
-        let py = obj.py();
-        let json_module = py.import("json")?;
-        let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-        Some(serde_json::from_str(&s).map_err(|e| PyValueError::new_err(format!("facet: {e}")))?)
-    }
-};
-```
-
-- [ ] **Step 2: Update Python Chart.to_spec**
+Update Task 27's `to_spec` (already amended in this plan revision) to call these helpers when `_facet` / `_layers` are set:
 
 ```python
-    def to_spec(self):
-        from ferrum import ChartSpec
-        kw = {"mark": self._mark or "point", "data": "default"}
-        for axis in ("x", "y", "color"):
-            if axis in self._encoding:
-                ch = self._encoding[axis]
-                kw[axis] = ch.field if ch.field is not None else ""
-        if self._transforms:
-            kw["transforms"] = list(self._transforms)
-        if self._facet:
-            # Convert Python facet dict to the Rust FacetSpec JSON shape
-            kw["facet"] = self._build_facet_dict()
-        if self._coord:
-            kw["coord"] = self._coord  # str: "flip" or "cartesian"
-        if self._layers:
-            kw["layers"] = self._build_layers_list()
-        if self._mark_kwargs:
-            kw["mark_style"] = dict(self._mark_kwargs)
-        return ChartSpec(**kw)
+    # In to_spec() — already added in Task 27's amended body. This task adds the helpers.
 
     def _build_facet_dict(self) -> dict:
         f = self._facet
@@ -5635,18 +5777,45 @@ def test_stroke_warns_once_across_multiple_renders():
 
 In `tests/test_marks.py`, add the NotImplementedError tests:
 ```python
-@pytest.mark.parametrize("method,phase", [
-    ("mark_boxplot", "8b"),
-    ("mark_violin", "8b"),
-    ("mark_qq", "8b"),
-    ("mark_arc", "9"),
+@pytest.mark.parametrize("method,phase,extra_args", [
+    ("mark_boxplot", "8b", ()),
+    ("mark_violin", "8b", ()),
+    ("mark_qq", "8b", ()),
+    ("mark_function", "8b", (lambda x: x,)),   # mark_function takes a positional fn arg
+    ("mark_arc", "9", ()),
 ])
-def test_deferred_mark_methods_raise_with_phase_pointer(method, phase):
+def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):
     import polars as pl
     df = pl.DataFrame({"a": [1]})
     c = Chart(df).encode(x="a", y="a")
     with pytest.raises(NotImplementedError, match=f"Phase {phase}"):
-        getattr(c, method)()
+        getattr(c, method)(*extra_args)
+```
+
+And add an end-to-end log-scale test that proves Task 3's `EncodingSpec.scale` field actually flows from `X(scale=ScaleLog(...))` → Rust → renderer:
+
+```python
+def test_encode_with_explicit_log_scale_renders_log_axis():
+    import polars as pl
+    from ferrum import Chart, X, LogScale
+
+    df = pl.DataFrame({
+        "x": [1.0, 10.0, 100.0, 1000.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+    })
+    svg = Chart(df).mark_point().encode(
+        x=X("x", scale=LogScale(domain=[1.0, 1000.0], range=[0.0, 600.0], base=10.0)),
+        y="y",
+    ).show_svg()
+
+    # Log scale produces tick labels at powers of base (1, 10, 100, 1000),
+    # not linear-spaced labels (1, 250.75, 500.5, 750.25).
+    assert "1000" in svg or "100" in svg, \
+        "log-scale x axis should produce log-spaced tick labels"
+    # Linear scale at this domain would produce labels around 250, 500, 750.
+    # If those appear, the explicit Scale was lost on the way to the renderer.
+    assert "250" not in svg and "750" not in svg, \
+        "explicit ScaleLog was silently dropped — Chart.to_spec → EncodingSpec roundtrip is broken"
 ```
 
 In `tests/test_facet.py`, add the strip-title golden:
