@@ -202,8 +202,16 @@ pub fn render_svg(
             continue;
         }
 
+        // Build a rendering spec for scale resolution that uses the first layer's
+        // encoding (which accounts for CoordFlip and chart-level inheritance).
+        // For single-layer non-flipped specs this is structurally identical to spec.
+        let rendering_spec_for_panel = ChartSpec {
+            encoding: prep.layers[0].encoding.clone(),
+            ..spec.clone()
+        };
+
         let (scales, scale_warnings) = scale_resolve::resolve_scales(
-            spec,
+            &rendering_spec_for_panel,
             &panel_batch,
             (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
             (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
@@ -214,24 +222,40 @@ pub fn render_svg(
         out.clip_open(&clip_id, panel.plot_area);
         out.use_clip_open(&clip_id);
 
-        let mark_style = draw::resolve_mark_style(theme, &spec.mark);
-        let ctx = draw::DrawCtx {
-            spec,
-            panel,
-            theme,
-            scales: &scales,
-            batch: &panel_batch,
-            mark_style: &mark_style,
-        };
-        draw::dispatch_mark(&spec.mark, &ctx, &mut out);
+        // Phase 8a: iterate layers. Single-layer charts have prep.layers.len() == 1.
+        for layer in &prep.layers {
+            // Build a synthetic ChartSpec with the layer's mark + encoding so
+            // mark renderers (which read ctx.spec) see the correct per-layer values.
+            // Task 7 will replace MarkStyle::from_theme with resolve_mark_style(layer.mark_style).
+            let layer_spec = ChartSpec {
+                mark: layer.mark,
+                encoding: layer.encoding.clone(),
+                ..spec.clone()
+            };
+            let mark_style = draw::resolve_mark_style(theme, &layer.mark);
+            let ctx = draw::DrawCtx {
+                spec: &layer_spec,
+                panel,
+                theme,
+                scales: &scales,
+                batch: &panel_batch,
+                mark_style: &mark_style,
+            };
+            draw::dispatch_mark(&layer.mark, &ctx, &mut out);
+        }
 
         out.use_clip_close();
     }
 
     if let Some(legend) = &layout.legend {
-        let color_scale = if spec.encoding.color.is_some() {
+        // Use rendering encoding (first layer, accounts for CoordFlip) for legend scale.
+        let rendering_spec_for_legend = ChartSpec {
+            encoding: prep.layers[0].encoding.clone(),
+            ..spec.clone()
+        };
+        let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
             let (gs, _) = scale_resolve::resolve_scales(
-                spec,
+                &rendering_spec_for_legend,
                 &prep.transformed,
                 (0.0, 1.0),
                 (0.0, 1.0),
