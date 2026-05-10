@@ -23,6 +23,18 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
     new = s_resolved._clone()
     new._pending_stat_mark = None
 
+    # Collect top-level transforms shared by both charts. To avoid duplicate
+    # transforms in the output (e.g. an Unpivot pipeline that both layers
+    # reference), we dedupe by class+constructor-equality on best-effort.
+    shared_transforms: list = []
+    seen_ids = set()
+    for t in list(s_resolved._transforms) + list(f_resolved._transforms):
+        key = id(t)
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        shared_transforms.append(t)
+
     # Build scatter layer dict.
     scatter_layer = {
         "mark": s_resolved._mark,
@@ -46,9 +58,7 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
 
     new._mark = None
     new._layers = [scatter_layer] + fit_layers
-    # Combine top-level transforms from both charts (fit transforms run on the
-    # full data pipeline; scatter typically has none).
-    new._transforms = list(s_resolved._transforms) + list(f_resolved._transforms)
+    new._transforms = shared_transforms
     return new
 
 

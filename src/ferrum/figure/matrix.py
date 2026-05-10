@@ -108,8 +108,121 @@ def pairplot(
     return rc
 
 
-def heatmap(*args, **kwargs):
-    raise NotImplementedError("heatmap — implementation lands in Task 33")
+def heatmap(
+    data: Any, *,
+    annot: bool = True, fmt: str = ".2f",
+    cmap: str = "blues",
+    linewidths: float = 0.5, linecolor: str = "white",
+    vmin: float | None = None, vmax: float | None = None,
+    center: float | None = None, robust: bool = False,
+    square: bool = False, mask: Any = None, theme: Any = None,
+    **encode_kwargs: Any,
+) -> Chart:
+    """2D heatmap of a wide-format DataFrame — see ferrum-spec.md §3.14.
+
+    Each row of ``data`` becomes a row of the heatmap; numeric columns become
+    columns. The id column (first non-numeric column, if any) is used as the
+    row label. The DataFrame is unpivoted to long form, then rendered with
+    ``mark_rect`` + a continuous color scale.
+    """
+    from ferrum import Unpivot
+    from ferrum._coerce import to_arrow_table
+
+    tbl = to_arrow_table(data)
+    # Identify id column (first non-numeric) and value columns (numeric).
+    id_col: str | None = None
+    value_cols: list[str] = []
+    for name in tbl.column_names:
+        t = str(tbl[name].type).lower()
+        is_numeric = any(s in t for s in ("int", "float", "double", "decimal"))
+        if is_numeric:
+            value_cols.append(name)
+        elif id_col is None:
+            id_col = name
+    if not value_cols:
+        raise ValueError("heatmap: no numeric columns found in data")
+
+    # If no id column found, synthesize a row index.
+    import polars as pl
+    if id_col is None:
+        # Wrap data into a polars frame, add a row id.
+        try:
+            pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
+        except Exception:
+            pdf = pl.from_arrow(tbl)
+        pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
+        data = pdf
+        id_col = "_row_id"
+        tbl = to_arrow_table(data)
+
+    # robust=True: compute vmin/vmax from 2nd/98th percentiles in Python.
+    if robust:
+        import numpy as np
+        all_vals = []
+        for c in value_cols:
+            all_vals.extend(tbl[c].to_numpy().tolist())
+        arr = np.asarray(all_vals, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if vmin is None and arr.size:
+            vmin = float(np.percentile(arr, 2.0))
+        if vmax is None and arr.size:
+            vmax = float(np.percentile(arr, 98.0))
+
+    # Build the chart: Unpivot to long format, then mark_rect.
+    unpivot = Unpivot(
+        id_vars=[id_col], value_vars=value_cols,
+        var_name="column", value_name="value",
+    )
+    rect_kwargs: dict = {}
+    if linewidths > 0:
+        rect_kwargs["stroke"] = linecolor
+        rect_kwargs["stroke_width"] = linewidths
+
+    enc: dict = {"x": "column", "y": id_col, "color": "value"}
+    if "color" in encode_kwargs:
+        enc["color"] = encode_kwargs.pop("color")
+    enc.update(encode_kwargs)
+
+    # Apply color scale (cmap / vmin / vmax / center).
+    if vmin is not None or vmax is not None or center is not None or cmap is not None:
+        from ferrum.encoding import Color
+        scale_kwargs: dict = {"type": "linear"}
+        if vmin is not None and vmax is not None:
+            scale_kwargs["domain"] = [vmin, vmax]
+        if cmap is not None:
+            scale_kwargs["scheme"] = cmap
+        # `center` is a diverging-scale hint; Rust scale resolution may use it
+        # when present.
+        if center is not None:
+            scale_kwargs["domainMid"] = center
+        if len(scale_kwargs) > 1:  # > just "type"
+            enc["color"] = Color(enc["color"], scale=scale_kwargs)
+
+    chart = Chart(data).transform(unpivot).mark_rect(**rect_kwargs).encode(**enc)
+
+    # square=True → fix width=height proportions.
+    if square:
+        n_rows = tbl.num_rows
+        n_cols = len(value_cols)
+        side = 30 * max(n_rows, n_cols)
+        chart = chart.properties(width=side, height=side)
+
+    # annot=True: layer mark_text on top of rects, with the `text` channel
+    # bound to the value column. Format spec lives on the text channel.
+    if annot:
+        from ferrum.encoding import Text
+        text_layer = (
+            Chart(data)
+            .transform(unpivot)
+            .mark_text()
+            .encode(x="column", y=id_col, text=Text("value", format=fmt))
+        )
+        from ferrum.figure.regression import _merge_layers
+        chart = _merge_layers(chart, text_layer)
+
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
 
 
 def clustermap(*args, **kwargs):

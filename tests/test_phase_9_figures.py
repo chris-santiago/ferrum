@@ -372,3 +372,62 @@ class TestPairplot:
         assert set(rc.row) == {"a", "b", "c"}
 
 
+# ---------------------------------------------------------------------------
+# Task 33 — heatmap
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def heat_data():
+    return pl.DataFrame({
+        "row":  ["r1", "r2", "r3"],
+        "A":    [1.0, 2.0, 3.0],
+        "B":    [4.0, 5.0, 6.0],
+        "C":    [7.0, 8.0, 9.0],
+    })
+
+
+class TestHeatmap:
+    def test_default(self, heat_data):
+        chart = fe.heatmap(heat_data)
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "unpivot" for t in d.get("transforms", []))
+
+    def test_annot_true_layers(self, heat_data):
+        chart = fe.heatmap(heat_data, annot=True)
+        d = json.loads(chart.to_spec().to_json())
+        # rect + text layers
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 2
+
+    def test_annot_false_single_layer(self, heat_data):
+        chart = fe.heatmap(heat_data, annot=False)
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("layers") is None
+        assert d["mark"] == "rect"
+
+    def test_robust_sets_vmin_vmax_from_percentiles(self, heat_data):
+        chart = fe.heatmap(heat_data, annot=False, robust=True)
+        d = json.loads(chart.to_spec().to_json())
+        # robust path should populate domain bounds.
+        scale = d["encoding"]["color"].get("scale", {})
+        assert "domain" in scale
+
+    def test_square(self, heat_data):
+        chart = fe.heatmap(heat_data, annot=False, square=True)
+        d = json.loads(chart.to_spec().to_json())
+        # Square heatmap → width == height.
+        # Spec width/height land in the top-level "width" / "height" keys.
+        assert chart._width == chart._height
+
+    def test_vmin_vmax_explicit(self, heat_data):
+        chart = fe.heatmap(heat_data, annot=False, vmin=0.0, vmax=10.0)
+        d = json.loads(chart.to_spec().to_json())
+        scale = d["encoding"]["color"].get("scale", {})
+        assert scale.get("domain") == [0.0, 10.0]
+
+    def test_errors_on_no_numeric(self):
+        df = pl.DataFrame({"a": ["x", "y", "z"]})
+        with pytest.raises(ValueError, match="numeric"):
+            fe.heatmap(df)
+
+
