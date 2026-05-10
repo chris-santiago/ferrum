@@ -28,6 +28,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::outliers::PyOutliers>()?;
     m.add_class::<transform::error_extent::PyErrorExtent>()?;
     m.add_class::<transform::box_stats::PyBoxStats>()?;
+    m.add_class::<transform::violin::PyViolin>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;

@@ -14,6 +14,7 @@ use crate::transform::kde::KdeSpec;
 use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
+use crate::transform::violin::{self, ViolinSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -26,6 +27,7 @@ pub(crate) enum TransformSpec {
     Outliers(OutliersSpec),
     ErrorExtent(ErrorExtentSpec),
     BoxStats(BoxStatsSpec),
+    Violin(ViolinSpec),
 }
 
 impl TransformSpec {
@@ -39,6 +41,7 @@ impl TransformSpec {
             Self::Outliers(s)  => outliers::apply(s, batch),
             Self::ErrorExtent(s) => error_extent::apply(s, batch),
             Self::BoxStats(s)  => box_stats::apply(s, batch),
+            Self::Violin(s)    => violin::apply(s, batch),
         }
     }
 }
@@ -118,6 +121,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Outliers(s) => s.name.as_deref(),
         TransformSpec::ErrorExtent(s) => s.name.as_deref(),
         TransformSpec::BoxStats(s) => s.name.as_deref(),
+        TransformSpec::Violin(s) => s.name.as_deref(),
     }
 }
 

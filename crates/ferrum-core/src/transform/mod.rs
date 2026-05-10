@@ -12,4 +12,5 @@ pub(crate) mod summary;
 pub(crate) mod outliers;
 pub(crate) mod error_extent;
 pub(crate) mod box_stats;
+pub(crate) mod violin;
 pub(crate) mod linalg;

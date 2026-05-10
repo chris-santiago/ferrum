@@ -287,6 +287,18 @@ class ErrorExtent:
         name: Optional[str] = None,
     ) -> None: ...
 
+class Violin:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        bandwidth: object = "scott",   # str ("scott"|"silverman") or float
+        n: int = 256,
+        width: float = 0.4,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,

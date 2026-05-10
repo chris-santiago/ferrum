@@ -19,6 +19,7 @@ from ferrum._core import (
     Smooth,
     Summary,
     ThresholdScale,
+    Violin,
     compute_layout,
     process_batch,
     render_png,
@@ -55,7 +56,7 @@ __all__ = [
     # Phase 1-7 core
     "Aggregate", "AggregateOp", "Bin", "BoxStats", "ChartSpec", "EncodingSpec", "ErrorExtent", "Kde",
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "Outliers", "QuantileScale", "ThresholdScale", "Smooth", "Summary",
+    "Outliers", "QuantileScale", "ThresholdScale", "Smooth", "Summary", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical",
     # Phase 8a

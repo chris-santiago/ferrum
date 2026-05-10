@@ -194,6 +194,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::error_extent::PyErrorExtent(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::BoxStats(_) =>
                     pyo3::Py::new(py, crate::transform::box_stats::PyBoxStats(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Violin(_) =>
+                    pyo3::Py::new(py, crate::transform::violin::PyViolin(t.clone()))?.into_any(),
             };
             out.push(obj);
         }
