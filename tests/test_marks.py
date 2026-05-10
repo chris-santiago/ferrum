@@ -24,7 +24,8 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
 
 def test_deferred_mark_error_for_8b_mark():
     from ferrum.marks import deferred_mark_error, PHASE_8B_MARKS
-    e = deferred_mark_error("boxplot")
+    # Use a still-deferred 8b mark (composite Sub-batch E shipped boxplot/errorbar/errorband/ribbon).
+    e = deferred_mark_error("violin")
     assert isinstance(e, NotImplementedError)
     assert "Phase 8b" in str(e)
 
@@ -37,7 +38,9 @@ def test_deferred_mark_error_for_9_plus_mark():
 
 def test_phase_8b_marks_set_includes_composites_and_heavy_stats():
     from ferrum.marks import PHASE_8B_MARKS
-    assert {"boxplot", "errorbar", "violin", "raster"}.issubset(PHASE_8B_MARKS)
+    # Composites (boxplot, errorbar, errorband, ribbon) shipped in Sub-batch E and
+    # are no longer in the deferred set. Heavy-stat marks remain deferred.
+    assert {"violin", "raster", "qq", "contour"}.issubset(PHASE_8B_MARKS)
 
 
 def test_desugar_density_returns_area_with_kde_transform():
@@ -76,7 +79,6 @@ def test_desugar_smooth_warns_on_ci_kwarg():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("method,phase,extra_args", [
-    ("mark_boxplot", "8b", ()),
     ("mark_violin", "8b", ()),
     ("mark_qq", "8b", ()),
     ("mark_function", "8b", (lambda x: x,)),   # mark_function takes a positional fn arg

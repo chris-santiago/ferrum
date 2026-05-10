@@ -4,8 +4,9 @@ from __future__ import annotations
 
 # Phase 8b marks
 PHASE_8B_MARKS = frozenset([
-    "boxplot", "errorbar", "errorband", "ribbon",        # composite
-    "contour", "violin", "qq", "raster", "swarm", "hex", "function",   # heavy stat
+    # composite (Sub-batch E done)
+    # heavy stat
+    "contour", "violin", "qq", "raster", "swarm", "hex", "function",
 ])
 
 # Phase 9+ marks

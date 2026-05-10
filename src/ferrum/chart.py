@@ -131,6 +131,14 @@ class Chart:
                 if y_enc is not None
                 else None
             )
+            # Ribbon needs y2 from the encoding — inject as a kwarg.
+            if kind == "ribbon":
+                y2_enc = self._encoding.get("y2")
+                if y2_enc is not None:
+                    y2_field = (
+                        y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
+                    )
+                    kwargs = {**kwargs, "y2_field": y2_field}
             result = desugar_fn(x_field, y_field, **kwargs)
             new = self._clone()
             new._pending_stat_mark = None
@@ -274,10 +282,70 @@ class Chart:
 
     # ---- Marks (deferred) ----
 
-    def mark_boxplot(self, **kwargs):       raise deferred_mark_error("boxplot")
-    def mark_errorbar(self, **kwargs):      raise deferred_mark_error("errorbar")
-    def mark_errorband(self, **kwargs):     raise deferred_mark_error("errorband")
-    def mark_ribbon(self, **kwargs):        raise deferred_mark_error("ribbon")
+    def mark_boxplot(
+        self,
+        *,
+        extent=1.5,
+        size=None,
+        outliers=True,
+        color_field=None,
+        horizontal=False,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Composite boxplot. Desugars to box+whisker+median (+optional outlier) layers."""
+        from ferrum.marks.composite import desugar_boxplot
+        new = self._clone()
+        new._mark = "point"  # placeholder; layered mode overrides
+        new._pending_stat_mark = (
+            "boxplot",
+            {
+                "extent": extent,
+                "size": size,
+                "outliers": outliers,
+                "color_field": color_field,
+                "horizontal": horizontal,
+                **mark_kwargs,
+            },
+            desugar_boxplot,
+        )
+        return new
+
+    def mark_errorbar(self, *, extent="ci", ticks=True, **mark_kwargs) -> "Chart":
+        """Errorbar mark via ErrorExtent transform."""
+        from ferrum.marks.composite import desugar_errorbar
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "errorbar",
+            {"extent": extent, "ticks": ticks, **mark_kwargs},
+            desugar_errorbar,
+        )
+        return new
+
+    def mark_errorband(self, *, extent="ci", borders=False, **mark_kwargs) -> "Chart":
+        """Errorband mark (ribbon) via ErrorExtent transform."""
+        from ferrum.marks.composite import desugar_errorband
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "errorband",
+            {"extent": extent, "borders": borders, **mark_kwargs},
+            desugar_errorband,
+        )
+        return new
+
+    def mark_ribbon(self, *, opacity=0.3, interpolate="linear", **mark_kwargs) -> "Chart":
+        """Ribbon mark — fills closed area between y and y2 along x. Requires y2 in encoding."""
+        from ferrum.marks.composite import desugar_ribbon
+        new = self._clone()
+        new._mark = "ribbon"
+        new._pending_stat_mark = (
+            "ribbon",
+            {"opacity": opacity, "interpolate": interpolate, **mark_kwargs},
+            desugar_ribbon,
+        )
+        return new
+
     def mark_contour(self, **kwargs):       raise deferred_mark_error("contour")
     def mark_violin(self, **kwargs):        raise deferred_mark_error("violin")
     def mark_qq(self, **kwargs):            raise deferred_mark_error("qq")
