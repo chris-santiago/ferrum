@@ -2,6 +2,8 @@ use arrow::array::RecordBatch;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
+use crate::transform::context::TransformContext;
+
 use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
 use crate::transform::kde::KdeSpec;
@@ -37,6 +39,32 @@ pub(crate) fn apply_transforms(
     let mut current = batch.clone(); // Arrow Arc-clones; cheap
     for spec in specs {
         current = spec.apply(&current)?;
+    }
+    Ok(current)
+}
+
+impl TransformSpec {
+    pub(crate) fn apply_with_context(
+        &self,
+        batch: &RecordBatch,
+        _ctx: &TransformContext,
+    ) -> PyResult<RecordBatch> {
+        // Default: ignore context and forward to existing apply().
+        // Phase 8b transforms that NEED context (Raster, Swarm) override below.
+        match self {
+            _ => self.apply(batch),
+        }
+    }
+}
+
+pub(crate) fn apply_transforms_with_context(
+    specs: &[TransformSpec],
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    let mut current = batch.clone();
+    for spec in specs {
+        current = spec.apply_with_context(&current, ctx)?;
     }
     Ok(current)
 }
@@ -141,5 +169,23 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("'x'") && (msg.contains("not found") || msg.contains("missing")),
             "expected missing-column error; got: {msg}");
+    }
+
+    #[test]
+    fn apply_with_context_default_falls_back_to_apply() {
+        pyo3::Python::initialize();
+        let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
+        let spec = TransformSpec::Bin(BinSpec {
+            field: "x".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: Some((1.0, 3.0)),
+            nice: false,
+        });
+        let ctx = TransformContext::default();
+        let with_ctx = spec.apply_with_context(&batch, &ctx).unwrap();
+        let without = spec.apply(&batch).unwrap();
+        assert_eq!(with_ctx.num_columns(), without.num_columns());
+        assert_eq!(with_ctx.num_rows(), without.num_rows());
     }
 }

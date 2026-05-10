@@ -4,6 +4,7 @@
 
 pub(crate) mod core;
 pub(crate) mod bin;
+pub(crate) mod context;
 pub(crate) mod kde;
 pub(crate) mod smooth;
 pub(crate) mod aggregate;
