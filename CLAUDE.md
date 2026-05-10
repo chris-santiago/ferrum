@@ -50,6 +50,21 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 ---
 
+## Implementation philosophy (Phase 9 and beyond)
+
+**Do the work now. Do it the right way. Enable a better end-user experience now.**
+
+- Do NOT propose "defer X to a later phase / follow-up ticket" as a scope-reduction strategy.
+- If a `ferrum-spec.md` parameter is hard to ship completely, ship it completely (with whatever Rust transform, mark, encoding, or position-adjustment subsystem it needs) — not a warn-fallback or `NotImplementedError`.
+- Earlier phases accumulated deferred work that landed on Phase 9; further deferral compounds the problem and ships a worse end-user experience than the spec promises.
+- Use sub-phase decomposition (e.g. 9a / 9b / 9c / 9d) to manage build order, not to drop scope.
+- "Implement everything fully" is the default. Warn-fallbacks are not the path.
+- Review `PHASE_9_PLUS_MARKS` in `src/ferrum/marks/deferred.py` at each new phase — pull marks into scope if they're needed by `ferrum-spec.md` §3.14 figure-level functions or any other in-phase contract.
+
+This rule governs Phase 9 forward; it does not retroactively reopen closed phases.
+
+---
+
 ## Where things live
 
 | Artifact | Path |
