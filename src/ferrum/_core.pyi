@@ -6,6 +6,7 @@ DataTypeStr = Literal[
 ]
 MarkStr = Literal[
     "point", "line", "bar", "area", "rule", "text", "tick", "rect",
+    "polygon", "image", "ribbon",
 ]
 
 
@@ -28,6 +29,8 @@ class ChartSpec:
     size: Optional[EncodingSpec]
     shape: Optional[EncodingSpec]
     opacity: Optional[EncodingSpec]
+    x2: Optional[EncodingSpec]
+    y2: Optional[EncodingSpec]
     data: str
     transforms: List[object]
     facet: Optional[dict]
@@ -45,6 +48,8 @@ class ChartSpec:
         size: Union[str, EncodingSpec, None] = None,
         shape: Union[str, EncodingSpec, None] = None,
         opacity: Union[str, EncodingSpec, None] = None,
+        x2: Union[str, EncodingSpec, None] = None,
+        y2: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
         transforms: Optional[List[object]] = None,
         facet: Optional[dict] = None,

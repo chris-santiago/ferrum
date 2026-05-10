@@ -63,7 +63,7 @@ pub fn resolve_mark_style(
     // --- Mark-aware theme base (preserves Phase 7 behaviour exactly) ---
     let base_fill = with_opacity(theme.mark_color, theme.default_opacity);
     let mut style = match mark {
-        Mark::Area => MarkStyle {
+        Mark::Area | Mark::Ribbon => MarkStyle {
             fill: with_opacity(theme.mark_color, theme.area_opacity),
             stroke: Some(theme.mark_color),
             stroke_width: theme.line_stroke_width,
@@ -263,6 +263,7 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
         Mark::Tick  => super::marks::tick::draw(ctx, out),
         Mark::Polygon => super::marks::polygon::draw(ctx, out),
         Mark::Image => super::marks::image::draw(ctx, out),
+        Mark::Ribbon => super::marks::ribbon::draw(ctx, out),
     }
 }
 

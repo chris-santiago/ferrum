@@ -74,6 +74,13 @@ impl LayerPrepared {
         if encoding.opacity.is_none() {
             encoding.opacity = spec.encoding.opacity.clone();
         }
+        // Phase 8b Task 22: paired-channel endpoints (ribbon mark and future scale_resolve work).
+        if encoding.x2.is_none() {
+            encoding.x2 = spec.encoding.x2.clone();
+        }
+        if encoding.y2.is_none() {
+            encoding.y2 = spec.encoding.y2.clone();
+        }
         Self {
             mark: layer.mark,
             encoding,

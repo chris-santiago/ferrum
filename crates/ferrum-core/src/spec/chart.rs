@@ -39,6 +39,7 @@ impl ChartSpec {
     #[pyo3(signature = (
         *, mark, x = None, y = None, color = None,
         size = None, shape = None, opacity = None,           // NEW (from Task 3 follow-on)
+        x2 = None, y2 = None,                                 // NEW Phase 8b Task 22 (ribbon)
         data = None, transforms = None,
         layers = None,                                        // from Task 1
         coord = None,                                         // from Task 4
@@ -53,6 +54,8 @@ impl ChartSpec {
         size: Option<&Bound<'_, PyAny>>,
         shape: Option<&Bound<'_, PyAny>>,
         opacity: Option<&Bound<'_, PyAny>>,
+        x2: Option<&Bound<'_, PyAny>>,
+        y2: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
@@ -69,6 +72,8 @@ impl ChartSpec {
         let size = size.map(coerce_encoding).transpose()?;
         let shape = shape.map(coerce_encoding).transpose()?;
         let opacity = opacity.map(coerce_encoding).transpose()?;
+        let x2 = x2.map(coerce_encoding).transpose()?;
+        let y2 = y2.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -122,7 +127,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2 },
             transforms,
             facet,
             layers,
@@ -164,6 +169,16 @@ impl ChartSpec {
     #[getter]
     fn opacity(&self) -> Option<EncodingSpec> {
         self.encoding.opacity.clone()
+    }
+
+    #[getter]
+    fn x2(&self) -> Option<EncodingSpec> {
+        self.encoding.x2.clone()
+    }
+
+    #[getter]
+    fn y2(&self) -> Option<EncodingSpec> {
+        self.encoding.y2.clone()
     }
 
     #[getter]
@@ -425,6 +440,7 @@ mod tests {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
             Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
+            Mark::Polygon, Mark::Image, Mark::Ribbon,
         ] {
             let mut spec = minimal_scatter();
             spec.mark = m;

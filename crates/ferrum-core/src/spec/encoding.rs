@@ -370,6 +370,12 @@ pub struct Encoding {
     pub shape: Option<EncodingSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub opacity: Option<EncodingSpec>,
+    // NEW Phase 8b Task 22 (ribbon mark): paired-channel endpoints. x2 reserved for
+    // future scale_resolve work in Task 36; ribbon drawer reads y2 directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x2: Option<EncodingSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y2: Option<EncodingSpec>,
 }
 
 #[cfg(test)]
@@ -558,6 +564,36 @@ mod tests {
         assert_eq!(parsed.type_, Some(DataType::Quantitative));
         assert_eq!(parsed.scale, None);
         assert_eq!(parsed.title, None);
+    }
+
+    // --- Phase 8b Task 22: x2 / y2 channels (ribbon support) ---
+
+    #[test]
+    fn encoding_round_trips_with_y2() {
+        let e = Encoding {
+            x: Some(EncodingSpec { field: "t".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "lo".into(), type_: None, ..Default::default() }),
+            y2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(r#""y2":{"field":"hi"}"#), "json: {json}");
+        let parsed: Encoding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn encoding_omits_x2_y2_when_none() {
+        // Existing 8a JSON without x2/y2 must remain byte-identical.
+        let e = Encoding {
+            x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(json, r#"{"x":{"field":"a"},"y":{"field":"b"}}"#);
+        assert!(!json.contains("x2"));
+        assert!(!json.contains("y2"));
     }
 
     #[test]
