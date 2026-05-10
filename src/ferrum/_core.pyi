@@ -418,6 +418,19 @@ class Unpivot:
     ) -> None: ...
 
 
+class LetterValue:
+    def __init__(
+        self,
+        value: str,
+        *,
+        group: Optional[str] = None,
+        k_depth: str = "proportion",
+        k_proportion: float = 0.007,
+        outlier_threshold: float = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
 def compute_layout(
     spec,
     *,

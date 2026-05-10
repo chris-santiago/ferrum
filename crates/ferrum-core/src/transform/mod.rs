@@ -23,4 +23,5 @@ pub(crate) mod swarm;
 pub(crate) mod unpivot;
 pub(crate) mod reorder;
 pub(crate) mod linkage;
+pub(crate) mod letter_value;
 pub(crate) mod linalg;

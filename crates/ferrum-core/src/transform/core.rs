@@ -22,6 +22,7 @@ use crate::transform::swarm::{self, SwarmSpec};
 use crate::transform::unpivot::{self, UnpivotSpec};
 use crate::transform::reorder::{self, ReorderSpec};
 use crate::transform::linkage::{self, LinkageSpec};
+use crate::transform::letter_value::{self, LetterValueSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -49,6 +50,7 @@ pub(crate) enum TransformSpec {
     Swarm(SwarmSpec),
     Unpivot(UnpivotSpec),
     Reorder(ReorderSpec),
+    LetterValue(LetterValueSpec),
 }
 
 impl TransformSpec {
@@ -73,6 +75,7 @@ impl TransformSpec {
             Self::Swarm(s)     => swarm::apply(s, batch),
             Self::Unpivot(s)   => unpivot::apply(s, batch),
             Self::Reorder(s)   => reorder::apply(s, batch),
+            Self::LetterValue(s) => letter_value::apply(s, batch),
         }
     }
 }
@@ -106,15 +109,25 @@ impl TransformSpec {
     /// Additional named outputs produced by this transform's `apply` invocation,
     /// alongside its primary RecordBatch output. Default: empty.
     /// Implementing this method lets a transform publish multiple named outputs
-    /// (e.g. QQ publishes both points + "qq_line").
+    /// (e.g. QQ publishes both points + "qq_line"; LetterValue publishes outliers
+    /// and per-depth bands).
+    ///
+    /// `input` is the batch fed INTO this transform's `apply`; `primary` is the
+    /// batch returned BY `apply`. Most transforms ignore `input`, but transforms
+    /// like `LetterValue` need to classify each original row.
     pub(crate) fn secondary_outputs(
         &self,
-        batch: &RecordBatch,
+        input: &RecordBatch,
+        primary: &RecordBatch,
     ) -> PyResult<Vec<(String, RecordBatch)>> {
         match self {
-            Self::Qq(s) => crate::transform::qq::secondary_outputs(s, batch),
-            Self::Linkage(s) => crate::transform::linkage::secondary_outputs(s, batch),
-            _ => Ok(Vec::new()),
+            Self::Qq(s) => crate::transform::qq::secondary_outputs(s, primary),
+            Self::Linkage(s) => crate::transform::linkage::secondary_outputs(s, primary),
+            Self::LetterValue(s) => crate::transform::letter_value::secondary_outputs(s, input, primary),
+            _ => {
+                let _ = input;
+                Ok(Vec::new())
+            }
         }
     }
 }
@@ -159,14 +172,15 @@ pub(crate) fn apply_transforms_named(
             let result = spec.apply_with_context(batch, ctx)?;
             // Secondary outputs first — explicit `name` (registered below)
             // wins on key collision.
-            for (key, b) in spec.secondary_outputs(&result)? {
+            for (key, b) in spec.secondary_outputs(batch, &result)? {
                 outputs.insert(key, b);
             }
             outputs.insert(name.to_string(), result);
         } else {
             // Unnamed: chained.
+            let input = current.clone();
             current = spec.apply_with_context(&current, ctx)?;
-            for (key, b) in spec.secondary_outputs(&current)? {
+            for (key, b) in spec.secondary_outputs(&input, &current)? {
                 outputs.insert(key, b);
             }
         }
@@ -196,6 +210,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Swarm(s) => s.name.as_deref(),
         TransformSpec::Unpivot(s) => s.name.as_deref(),
         TransformSpec::Reorder(s) => s.name.as_deref(),
+        TransformSpec::LetterValue(s) => s.name.as_deref(),
     }
 }
 

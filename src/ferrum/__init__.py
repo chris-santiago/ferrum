@@ -15,6 +15,7 @@ from ferrum._core import (
     Kde,
     Kde2D,
     LinearScale,
+    LetterValue,
     Linkage,
     LogScale,
     TimeScale,
@@ -69,7 +70,7 @@ __version__ = "0.1.0"
 __all__ = [
     # Phase 1-7 core
     "Aggregate", "AggregateOp", "Bin", "Bin2D", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
-    "LinearScale", "Linkage", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
+    "LetterValue", "LinearScale", "Linkage", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
     "Outliers", "QQ", "QuantileScale", "Raster", "Reorder", "ThresholdScale", "Smooth", "Summary", "Swarm", "Unpivot", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical", "compose_svg_grid",
