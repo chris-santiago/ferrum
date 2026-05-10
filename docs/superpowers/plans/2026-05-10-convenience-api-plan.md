@@ -3115,13 +3115,14 @@ fam_map = {
     "inverse_gaussian": sm.families.InverseGaussian,
 }
 link_map = {
-    "identity": sm.families.links.identity(),
-    "log": sm.families.links.log(),
-    "logit": sm.families.links.logit(),
-    "probit": sm.families.links.probit(),
-    "inverse": sm.families.links.inverse_power(),       # name varies; verify in Task 2
-    "inverse_squared": sm.families.links.inverse_squared(),
-    "sqrt": sm.families.links.sqrt(),
+    # statsmodels 0.14.x uses CamelCase class names — verified in Task 2.
+    "identity": sm.families.links.Identity(),
+    "log": sm.families.links.Log(),
+    "logit": sm.families.links.Logit(),
+    "probit": sm.families.links.Probit(),
+    "inverse": sm.families.links.InversePower(),     # canonical Gamma link
+    "inverse_squared": sm.families.links.InverseSquared(),  # canonical InverseGaussian link
+    "sqrt": sm.families.links.Sqrt(),
 }
 # For each (family, link) pair: fit GLM, extract fitted + Wald CI on grid.
 ```
