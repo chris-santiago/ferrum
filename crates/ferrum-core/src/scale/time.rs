@@ -8,6 +8,37 @@ use super::ticks::nice_time_interval_ms;
 pub struct TimeScale(Scale);
 
 impl TimeScale {
+    /// Crate-internal constructor (no PyO3, no validation), for render-side use.
+    /// `TimeScale` wraps `Scale::Linear` (epoch-ms in domain), matching `TimeScale::new`.
+    pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, clamp: bool, nice: bool) -> Self {
+        let inner = Scale::Linear {
+            domain: [domain[0], domain[1]],
+            range:  [range[0],  range[1]],
+            clamp,
+        };
+        let s = TimeScale(inner);
+        if nice { s.time_nice() } else { s }
+    }
+
+    /// Crate-internal scale call (no PyO3 boundary).
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
+        self.0.scale_f64(x)
+    }
+
+    /// Crate-internal tick call (uses time-aware nice intervals).
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
+        self.time_ticks(count)
+    }
+
+    /// Pixel-range pair `[lo, hi]` of the underlying scale.
+    pub(crate) fn range_pair(&self) -> [f64; 2] {
+        match &self.0 {
+            Scale::Linear { range, .. } => *range,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         match &self.0 {
             Scale::Linear { domain, range, clamp } => format!(
