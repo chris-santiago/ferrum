@@ -276,6 +276,12 @@ pub fn compute_layout(
         vec![(0, 0, plot_region, None)]
     };
 
+    let strip_band_height = if spec.facet.is_some() {
+        metrics.line_height(theme.strip_text_size) + 2.0 * theme.strip_padding
+    } else {
+        0.0
+    };
+
     // 7. Per-panel: clamp degenerate rects, collect axes.
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
     for (panel_index, (row, col, mut rect, facet_key)) in panel_rects.into_iter().enumerate() {
@@ -283,7 +289,45 @@ pub fn compute_layout(
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
             rect = Rect::ZERO;
         }
-        panels.push(PanelLayout { plot_area: rect, facet_key, row, col, strip_title: None });
+
+        let strip_title = if let Some(key) = &facet_key {
+            if rect != Rect::ZERO {
+                let strip_rect = Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: strip_band_height,
+                };
+                let new_panel_rect = Rect {
+                    x: rect.x,
+                    y: rect.y + strip_band_height,
+                    w: rect.w,
+                    h: (rect.h - strip_band_height).max(0.0),
+                };
+                rect = new_panel_rect;
+                Some(StripTitleLayout {
+                    text: key.value.clone(),
+                    anchor: (
+                        strip_rect.x + strip_rect.w / 2.0,
+                        strip_rect.y + theme.strip_padding + theme.strip_text_size,
+                    ),
+                    align: TextAnchor::Middle,
+                    font_size: theme.strip_text_size,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        panels.push(PanelLayout {
+            plot_area: rect,
+            facet_key,
+            row,
+            col,
+            strip_title,
+        });
 
         if rect != Rect::ZERO {
             let y_axis = axis::layout_y_axis(
@@ -584,6 +628,52 @@ mod tests {
             LayoutWarning::PanelsDropped { count: 1 }
         ));
         assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+    }
+
+    #[test]
+    fn compute_layout_faceted_emits_strip_titles() {
+        let spec = faceted_spec(3);
+        let groups = three_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            &m,
+        ).unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        for (i, panel) in result.panels.iter().enumerate() {
+            let strip = panel.strip_title.as_ref()
+                .unwrap_or_else(|| panic!("panel {i} missing strip_title"));
+            assert!(!strip.text.is_empty());
+            assert_eq!(strip.font_size, 13.0);
+            assert!(strip.anchor.0 >= panel.plot_area.x);
+            assert!(strip.anchor.0 <= panel.plot_area.x + panel.plot_area.w);
+        }
+    }
+
+    #[test]
+    fn compute_layout_unfaceted_omits_strip_titles() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 600.0, height: 400.0 },
+            &axes,
+            &[],
+            &[],
+            &m,
+        ).unwrap();
+        assert!(result.panels[0].strip_title.is_none());
     }
 
     #[test]
