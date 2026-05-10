@@ -333,6 +333,20 @@ class QQ:
         name: Optional[str] = None,
     ) -> None: ...
 
+class Raster:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        aggregate: str = "count",
+        field: Optional[str] = None,
+        resolution: Union[str, int, Tuple[int, int]] = "screen",
+        min_count: Optional[int] = None,
+        log_scale: bool = False,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,

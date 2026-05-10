@@ -32,6 +32,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::kde_2d::PyKde2D>()?;
     m.add_class::<transform::contour::PyContour>()?;
     m.add_class::<transform::qq::PyQQ>()?;
+    m.add_class::<transform::raster::PyRaster>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;

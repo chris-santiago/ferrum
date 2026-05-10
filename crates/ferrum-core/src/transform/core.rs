@@ -15,6 +15,7 @@ use crate::transform::kde::KdeSpec;
 use crate::transform::kde_2d::Kde2DSpec;
 use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::qq::{self, QQSpec};
+use crate::transform::raster::{self, RasterSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -34,6 +35,7 @@ pub(crate) enum TransformSpec {
     Kde2D(Kde2DSpec),
     Contour(ContourSpec),
     Qq(QQSpec),
+    Raster(RasterSpec),
 }
 
 impl TransformSpec {
@@ -51,6 +53,7 @@ impl TransformSpec {
             Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
             Self::Contour(s)   => contour::apply(s, batch),
             Self::Qq(s)        => qq::apply(s, batch),
+            Self::Raster(s)    => raster::apply(s, batch),
         }
     }
 }
@@ -70,11 +73,12 @@ impl TransformSpec {
     pub(crate) fn apply_with_context(
         &self,
         batch: &RecordBatch,
-        _ctx: &TransformContext,
+        ctx: &TransformContext,
     ) -> PyResult<RecordBatch> {
         // Default: ignore context and forward to existing apply().
-        // Phase 8b transforms that NEED context (Raster, Swarm) override below.
+        // Phase 8b transforms that NEED context (Raster, Swarm) override here.
         match self {
+            Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
             _ => self.apply(batch),
         }
     }
@@ -153,6 +157,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Kde2D(s) => s.name.as_deref(),
         TransformSpec::Contour(s) => s.name.as_deref(),
         TransformSpec::Qq(s) => s.name.as_deref(),
+        TransformSpec::Raster(s) => s.name.as_deref(),
     }
 }
 
