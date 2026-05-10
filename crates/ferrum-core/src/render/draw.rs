@@ -43,6 +43,9 @@ pub struct MarkStyle {
     pub dx: Option<f64>,
     pub dy: Option<f64>,
     pub angle: Option<f64>,
+    // Polygon-mark-only fields (None = no detail grouping / default cmap)
+    pub detail: Option<String>,
+    pub cmap: Option<String>,
 }
 
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
@@ -75,6 +78,8 @@ pub fn resolve_mark_style(
             dx: None,
             dy: None,
             angle: None,
+            detail: None,
+            cmap: None,
         },
         Mark::Line => MarkStyle {
             fill: theme.mark_color,
@@ -91,6 +96,8 @@ pub fn resolve_mark_style(
             dx: None,
             dy: None,
             angle: None,
+            detail: None,
+            cmap: None,
         },
         Mark::Bar | Mark::Rect => MarkStyle {
             fill: base_fill,
@@ -107,6 +114,8 @@ pub fn resolve_mark_style(
             dx: None,
             dy: None,
             angle: None,
+            detail: None,
+            cmap: None,
         },
         Mark::Rule => MarkStyle {
             fill: theme.mark_color,
@@ -123,6 +132,26 @@ pub fn resolve_mark_style(
             dx: None,
             dy: None,
             angle: None,
+            detail: None,
+            cmap: None,
+        },
+        Mark::Polygon => MarkStyle {
+            fill: with_opacity(theme.mark_color, theme.area_opacity),
+            stroke: Some(theme.mark_color),
+            stroke_width: theme.line_stroke_width,
+            opacity: 1.0,
+            point_size: theme.point_size,
+            corner_radius: 0.0,
+            stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
+            detail: None,
+            cmap: None,
         },
         Mark::Tick | Mark::Point | Mark::Text => MarkStyle {
             fill: base_fill,
@@ -139,6 +168,8 @@ pub fn resolve_mark_style(
             dx: None,
             dy: None,
             angle: None,
+            detail: None,
+            cmap: None,
         },
     };
 
@@ -171,6 +202,10 @@ pub fn resolve_mark_style(
     if let Some(dx) = o.dx { style.dx = Some(dx); }
     if let Some(dy) = o.dy { style.dy = Some(dy); }
     if let Some(ang) = o.angle { style.angle = Some(ang); }
+
+    // Polygon-mark-only fields
+    if let Some(ref d) = o.detail { style.detail = Some(d.clone()); }
+    if let Some(ref c) = o.cmap { style.cmap = Some(c.clone()); }
 
     style
 }
@@ -226,6 +261,7 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
         Mark::Rule  => super::marks::rule::draw(ctx, out),
         Mark::Text  => super::marks::text::draw(ctx, out),
         Mark::Tick  => super::marks::tick::draw(ctx, out),
+        Mark::Polygon => super::marks::polygon::draw(ctx, out),
     }
 }
 

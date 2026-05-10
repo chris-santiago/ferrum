@@ -13,6 +13,7 @@ pub enum Mark {
     Text,
     Tick,
     Rect,
+    Polygon,
 }
 
 impl Mark {
@@ -26,6 +27,7 @@ impl Mark {
             Mark::Text => "text",
             Mark::Tick => "tick",
             Mark::Rect => "rect",
+            Mark::Polygon => "polygon",
         }
     }
 }
@@ -43,7 +45,7 @@ impl fmt::Display for ParseMarkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect]",
+            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect, polygon]",
             self.0
         )
     }
@@ -63,6 +65,7 @@ impl FromStr for Mark {
             "text" => Ok(Mark::Text),
             "tick" => Ok(Mark::Tick),
             "rect" => Ok(Mark::Rect),
+            "polygon" => Ok(Mark::Polygon),
             other => Err(ParseMarkError(other.to_string())),
         }
     }
@@ -76,7 +79,7 @@ mod tests {
     fn test_mark_round_trip_each_variant() {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
-            Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
+            Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect, Mark::Polygon,
         ] {
             let json = serde_json::to_string(&m).unwrap();
             let parsed: Mark = serde_json::from_str(&json).unwrap();
