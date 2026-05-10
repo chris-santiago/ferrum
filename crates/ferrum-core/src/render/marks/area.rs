@@ -51,7 +51,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         if top.len() < 2 { continue; }
         let path = build_area_path(&top, baseline_y);
         let fill = match (key.as_deref(), &ctx.scales.color) {
-            (Some(v), Some(scale @ ColorScale::Categorical { .. })) => {
+            (Some(v), Some(scale)) => {
                 let base = scale.lookup(v).unwrap_or(ctx.mark_style.fill);
                 crate::render::color::with_opacity(base, ctx.theme.area_opacity)
             }

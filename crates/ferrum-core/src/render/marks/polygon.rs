@@ -158,7 +158,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             } else {
                 ctx.mark_style.fill
             }
-        } else if let (Some(values), Some(scale @ ColorScale::Categorical { .. })) =
+        } else if let (Some(values), Some(scale)) =
             (color_str_values.as_ref(), &ctx.scales.color)
         {
             // Categorical: take first row's category string, look up in scale.

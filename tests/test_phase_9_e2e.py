@@ -176,17 +176,6 @@ def test_pairplot_3x3_golden(df_iris_like):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="heatmap requires a continuous color scale to map Float64 'value' "
-           "column to colors. scale_resolve.rs's ColorScale enum currently has "
-           "only the Categorical variant — calling distinct_values_in_order on a "
-           "Float64 column raises 'can't enumerate distinct values from column "
-           "dtype Float64'. Phase 8b's ContinuousScheme exists at the palette "
-           "level but is not wired into ColorScale / build_color_scale. Needs a "
-           "ColorScale::Continuous variant + numeric domain extraction + "
-           "interpolation in the lookup path. Feature gap pre-dating Phase 9.",
-    strict=True,
-)
 def test_heatmap_annot_golden(df_heat):
     chart = fe.heatmap(df_heat, annot=True)
     _check_or_update("heatmap_annot.svg", chart.show_svg())

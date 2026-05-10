@@ -101,6 +101,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
                 },
                 None => ctx.mark_style.fill,
             }

@@ -302,6 +302,9 @@ pub fn prepare_render_inputs(
             .iter()
             .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
             .collect(),
+        // Continuous color scales don't produce categorical legend entries.
+        // (A future colorbar artifact would be a separate legend kind.)
+        Some(super::scale_resolve::ColorScale::Continuous { .. }) => Vec::new(),
         None => Vec::new(),
     };
 
