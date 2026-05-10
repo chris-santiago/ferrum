@@ -83,7 +83,6 @@ def test_desugar_smooth_with_ci_returns_layered_tuple():
     # Phase 8b marks (violin/qq/function) shipped in Sub-batch F. Only Phase 9+ remain deferred.
     ("mark_arc", "9", ()),
     ("mark_geoshape", "9", ()),
-    ("mark_segment", "9", ()),
     ("mark_label", "9", ()),
 ])
 def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):

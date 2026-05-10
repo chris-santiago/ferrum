@@ -518,7 +518,7 @@ mod tests {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
             Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
-            Mark::Polygon, Mark::Image, Mark::Ribbon,
+            Mark::Polygon, Mark::Image, Mark::Ribbon, Mark::Segment,
         ] {
             let mut spec = minimal_scatter();
             spec.mark = m;

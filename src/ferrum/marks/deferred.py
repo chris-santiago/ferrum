@@ -7,7 +7,7 @@ PHASE_8B_MARKS: frozenset[str] = frozenset()
 
 # Phase 9+ marks
 PHASE_9_PLUS_MARKS = frozenset([
-    "arc", "image", "geoshape", "segment", "label",
+    "arc", "image", "geoshape", "label",
 ])
 
 

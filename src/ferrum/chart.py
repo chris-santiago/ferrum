@@ -642,7 +642,18 @@ class Chart:
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
-    def mark_segment(self, **kwargs):       raise deferred_mark_error("segment")
+    def mark_segment(self, *, position=None, **kwargs) -> "Chart":
+        """Diagonal line segment from (x, y) to (x2, y2).
+
+        Distinct from ``mark_rule`` (axis-aligned only); segments may take any
+        direction. Requires ``x``, ``y``, ``x2``, ``y2`` on the encoding.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("segment", position)
+        new = self._set_mark("segment", **kwargs)
+        new._position = position
+        return new
     def mark_label(self, **kwargs):         raise deferred_mark_error("label")
 
     # ---- Encoding ----
