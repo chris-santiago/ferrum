@@ -283,6 +283,10 @@ class Smooth:
         degree: int = 2,
         n: int = 200,
         seed: int = 0,
+        x_bins: Optional[int] = None,
+        x_estimator: Optional[str] = None,
+        output: str = "fitted",
+        name: Optional[str] = None,
     ) -> None: ...
 
 class AggregateOp:
