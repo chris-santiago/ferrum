@@ -89,7 +89,12 @@ def pairplot(
         if hue is not None:
             diag_enc["color"] = hue
         if effective_diag_kind == "hist":
-            diagonal = Chart(data).mark_histogram().encode(**diag_enc)
+            # When hue is set, thread groupby so Bin emits per-(bin, hue) rows
+            # preserving the hue column for color encoding.
+            hist_kwargs: dict = {}
+            if hue is not None:
+                hist_kwargs["groupby"] = hue
+            diagonal = Chart(data).mark_histogram(**hist_kwargs).encode(**diag_enc)
         elif effective_diag_kind == "kde":
             diagonal = Chart(data).mark_density().encode(**diag_enc)
 

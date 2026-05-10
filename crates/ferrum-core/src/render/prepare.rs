@@ -545,6 +545,7 @@ mod tests {
             extent: Some((10.0, 30.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name,
         })];
         if !named {

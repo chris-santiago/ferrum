@@ -229,16 +229,6 @@ def test_jointplot_kde_hist_golden(df_joint):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="pairplot diagonal histograms (via mark_histogram) apply a Bin "
-           "transform that drops the hue (color='species') column. The Bin "
-           "transform's output schema is [bin_start, bin_end, count, density] "
-           "— it has no groupby parameter, so per-group binning isn't expressed. "
-           "Needs Bin(groupby=<col>) Rust extension that emits [bin_start, "
-           "bin_end, count, density, <groupby_col>] for stacked histograms "
-           "across hue. Tracked for Phase 10.",
-    strict=True,
-)
 def test_pairplot_3x3_hue_golden(df_iris_like):
     rc = fe.pairplot(
         df_iris_like,
@@ -284,15 +274,6 @@ def test_jointplot_kde_marginals_golden(df_joint):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="same root cause as pairplot_3x3_hue — Bin transform output schema "
-           "[bin_start, bin_end, count, density] drops the hue column. displot "
-           "multiple='stack' requires per-group histogram counts (one row per "
-           "(bin, group) pair) with the group column preserved for color "
-           "encoding + Stack(by=hue) position adjustment. Needs Bin(groupby=<col>) "
-           "Rust extension.",
-    strict=True,
-)
 def test_displot_stacked_hist_golden(df_iris_like):
     chart = fe.displot(
         df_iris_like,

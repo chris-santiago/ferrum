@@ -320,11 +320,21 @@ fn apply_stack(
             y_field.field
         ))
     })?;
-    let ya = batch
-        .column(yi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| crate::render::RenderError::Other("Stack: y must be Float64".into()))?;
+    // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column),
+    // we transparently widen to f64 so stacked histograms over Bin's groupby
+    // output work without an explicit cast.
+    let y_col = batch.column(yi);
+    let ya_vals: Vec<f64> = if let Some(a) = y_col.as_any().downcast_ref::<Float64Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) }).collect()
+    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
+    } else {
+        return Err(crate::render::RenderError::Other(format!(
+            "Stack: y must be Float64 or UInt64; got {:?}",
+            y_col.data_type()
+        )));
+    };
+    let ya_len = ya_vals.len();
 
     // x may be Float64 (continuous) or Utf8 (ordinal). Build a stable u64 key
     // for the BTreeMap from either case.
@@ -347,7 +357,7 @@ fn apply_stack(
     // Group order from `by` channel (first-appearance).
     let mut group_idx_map: HashMap<String, usize> = HashMap::new();
     let mut group_order: Vec<String> = Vec::new();
-    for i in 0..ya.len() {
+    for i in 0..ya_len {
         let g = by_arr.value(i).to_string();
         if !group_idx_map.contains_key(&g) {
             group_idx_map.insert(g.clone(), group_order.len());
@@ -357,11 +367,10 @@ fn apply_stack(
 
     // bins: x_key → Vec<(group_idx, row_idx, y)>
     let mut bins: BTreeMap<u64, Vec<(usize, usize, f64)>> = BTreeMap::new();
-    for i in 0..ya.len() {
+    for i in 0..ya_len {
         let g = by_arr.value(i).to_string();
         let gi = *group_idx_map.get(&g).unwrap();
-        let yv = if ya.is_null(i) { 0.0 } else { ya.value(i) };
-        bins.entry(x_keys[i]).or_default().push((gi, i, yv));
+        bins.entry(x_keys[i]).or_default().push((gi, i, ya_vals[i]));
     }
 
     let totals: HashMap<u64, f64> = bins
@@ -369,7 +378,7 @@ fn apply_stack(
         .map(|(k, rows)| (*k, rows.iter().map(|(_, _, y)| y).sum::<f64>()))
         .collect();
 
-    let mut new_y = vec![0.0_f64; ya.len()];
+    let mut new_y = vec![0.0_f64; ya_len];
     for (xkey, rows) in bins.iter_mut() {
         rows.sort_by_key(|(gi, _, _)| *gi);
         let total = totals.get(xkey).copied().unwrap_or(0.0);
@@ -399,8 +408,17 @@ fn apply_stack(
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
     cols[yi] = Arc::new(Float64Array::from(new_y));
-    let schema = batch.schema();
-    RecordBatch::try_new(schema, cols)
+    // Rebuild schema with the y column promoted to Float64 (in case the
+    // input was UInt64, e.g. Bin's `count` column).
+    let mut new_fields: Vec<Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
+    new_fields[yi] = Field::new(new_fields[yi].name(), DataType::Float64, true);
+    let new_schema = Arc::new(Schema::new(new_fields));
+    RecordBatch::try_new(new_schema, cols)
         .map_err(|e| crate::render::RenderError::Other(format!("Stack: {e}")))
 }
 

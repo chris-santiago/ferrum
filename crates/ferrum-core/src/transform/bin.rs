@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt64Array};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -20,6 +20,10 @@ pub(crate) struct BinSpec {
     pub nice: bool,
     #[serde(default)]
     pub cumulative: bool,
+    /// When set, partition input by this Utf8 column and emit per-(bin, group)
+    /// rows. Output schema gains the groupby column as the 5th field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub groupby: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -27,6 +31,20 @@ pub(crate) struct BinSpec {
 fn default_true() -> bool { true }
 
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    // Phase 9 finalize: groupby support. Partition input by the groupby column,
+    // run bin_one_group per partition, then stack the per-group outputs into a
+    // single batch with the group column preserved as the 5th field.
+    if let Some(g) = &spec.groupby {
+        return apply_grouped(spec, batch, g);
+    }
+    apply_one_group(spec, batch, None)
+}
+
+fn apply_one_group(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!(
@@ -48,15 +66,16 @@ pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .downcast_ref::<Float64Array>()
         .expect("dtype check above guarantees Float64Array");
 
-    // Drop nulls and NaN
-    let mut clean: Vec<f64> = Vec::with_capacity(arr.len());
-    for i in 0..arr.len() {
-        if !arr.is_null(i) {
-            let v = arr.value(i);
-            if !v.is_nan() {
-                clean.push(v);
-            }
-        }
+    // Drop nulls and NaN; optionally restrict to a subset of row indices (for groupby).
+    let mut clean: Vec<f64> = Vec::new();
+    let push = |i: usize, clean: &mut Vec<f64>| {
+        if arr.is_null(i) { return; }
+        let v = arr.value(i);
+        if !v.is_nan() { clean.push(v); }
+    };
+    match only_indices {
+        Some(ixs) => for &i in ixs { push(i, &mut clean); },
+        None => for i in 0..arr.len() { push(i, &mut clean); },
     }
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
@@ -152,6 +171,65 @@ pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     build_bin_batch(bin_starts, bin_ends, final_counts, final_densities)
 }
 
+/// Partition input batch by `group_col` (Utf8), call apply_one_group per
+/// partition, then stack the results into a single batch with the group
+/// column preserved as the 5th field.
+fn apply_grouped(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    group_col: &str,
+) -> PyResult<RecordBatch> {
+    use std::collections::BTreeMap;
+    let schema = batch.schema();
+    let gi = schema.index_of(group_col).map_err(|_|
+        PyValueError::new_err(format!(
+            "stat_bin: groupby column '{}' not found", group_col)))?;
+    let gtype = schema.field(gi).data_type();
+    if gtype != &DataType::Utf8 {
+        return Err(PyValueError::new_err(format!(
+            "stat_bin: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
+    }
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+
+    // Group row indices by first-appearance order of the group value.
+    let mut group_order: Vec<String> = Vec::new();
+    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..garr.len() {
+        if garr.is_null(i) { continue; }
+        let gv = garr.value(i).to_string();
+        if seen.insert(gv.clone()) {
+            group_order.push(gv.clone());
+        }
+        group_idx_map.entry(gv).or_default().push(i);
+    }
+
+    // Per-group output, then stack.
+    let mut all_starts: Vec<f64> = Vec::new();
+    let mut all_ends: Vec<f64> = Vec::new();
+    let mut all_counts: Vec<u64> = Vec::new();
+    let mut all_densities: Vec<f64> = Vec::new();
+    let mut all_groups: Vec<String> = Vec::new();
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).unwrap();
+        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let n = out.num_rows();
+        let starts = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let ends = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let counts = out.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
+        let densities = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..n {
+            all_starts.push(starts.value(i));
+            all_ends.push(ends.value(i));
+            all_counts.push(counts.value(i));
+            all_densities.push(densities.value(i));
+            all_groups.push(g.clone());
+        }
+    }
+
+    build_bin_batch_grouped(all_starts, all_ends, all_counts, all_densities, all_groups, group_col)
+}
+
 fn build_bin_batch(
     starts: Vec<f64>,
     ends: Vec<f64>,
@@ -169,6 +247,32 @@ fn build_bin_batch(
         Arc::new(Float64Array::from(ends)),
         Arc::new(UInt64Array::from(counts)),
         Arc::new(Float64Array::from(densities)),
+    ];
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
+}
+
+fn build_bin_batch_grouped(
+    starts: Vec<f64>,
+    ends: Vec<f64>,
+    counts: Vec<u64>,
+    densities: Vec<f64>,
+    groups: Vec<String>,
+    group_col_name: &str,
+) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("bin_start", DataType::Float64, false),
+        Field::new("bin_end",   DataType::Float64, false),
+        Field::new("count",     DataType::UInt64,  false),
+        Field::new("density",   DataType::Float64, false),
+        Field::new(group_col_name, DataType::Utf8, false),
+    ]));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(starts)),
+        Arc::new(Float64Array::from(ends)),
+        Arc::new(UInt64Array::from(counts)),
+        Arc::new(Float64Array::from(densities)),
+        Arc::new(StringArray::from(groups.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
     ];
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
@@ -196,7 +300,7 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, name = None))]
+    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, groupby = None, name = None))]
     fn new(
         field: &str,
         bin_count: Option<usize>,
@@ -204,6 +308,7 @@ impl PyBin {
         extent: Option<(f64, f64)>,
         nice: bool,
         cumulative: bool,
+        groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -235,6 +340,7 @@ impl PyBin {
             extent,
             nice,
             cumulative,
+            groupby,
             name,
         })))
     }
@@ -294,6 +400,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -322,6 +429,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -346,6 +454,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -362,6 +471,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -388,6 +498,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -407,6 +518,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -431,6 +543,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -452,6 +565,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -481,6 +595,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: true,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();

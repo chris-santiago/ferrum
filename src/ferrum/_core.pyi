@@ -216,6 +216,7 @@ class Bin:
         extent: Optional[Tuple[float, float]] = None,
         nice: bool = True,
         cumulative: bool = False,
+        groupby: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

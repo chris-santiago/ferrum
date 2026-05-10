@@ -276,6 +276,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            groupby: None,
             name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
@@ -306,6 +307,7 @@ mod tests {
                 extent: Some((1.0, 10.0)),
                 nice: false,
                 cumulative: false,
+                groupby: None,
                 name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
@@ -341,6 +343,7 @@ mod tests {
                 extent: Some((1.0, 5.0)),
                 nice: false,
                 cumulative: false,
+                groupby: None,
                 name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
@@ -368,6 +371,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            groupby: None,
             name: None,
         });
         let json = serde_json::to_string(&s).unwrap();
@@ -430,6 +434,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            groupby: None,
             name: None,
         });
         let ctx = TransformContext::default();

@@ -627,6 +627,7 @@ mod tests {
                 extent: None,
                 nice: true,
                 cumulative: false,
+                groupby: None,
                 name: None,
             })],
             facet: None,

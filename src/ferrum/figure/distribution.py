@@ -58,11 +58,18 @@ def displot(
     # Mark + transforms by kind.
     if kind == "hist":
         bin_count = bins if isinstance(bins, int) else None
-        chart = chart.mark_histogram(
+        # When `multiple` requires per-group binning (stack/fill/dodge) and a
+        # hue is bound, thread `groupby=hue` so the Bin transform emits per-
+        # (bin, group) rows preserving the hue column for color encoding +
+        # position adjustment.
+        hist_kwargs: dict = dict(
             bin_count=bin_count, cumulative=cumulative,
             density=(stat == "density"),
             position=position,
         )
+        if hue is not None and multiple in ("stack", "fill", "dodge"):
+            hist_kwargs["groupby"] = hue
+        chart = chart.mark_histogram(**hist_kwargs)
     elif kind == "kde":
         chart = chart.mark_density(
             bandwidth=bandwidth, bw_adjust=bw_adjust, fill=fill,

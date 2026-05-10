@@ -69,9 +69,13 @@ def desugar_histogram(field: str, **kwargs: Any) -> tuple[str, list, dict]:
     cumulative = kwargs.pop("cumulative", False)
     right = kwargs.pop("right", False)
     multiple = kwargs.pop("multiple", "layer")
+    groupby = kwargs.pop("groupby", None)
 
-    transforms = [Bin(field, bin_count=bin_count, bin_width=bin_width, extent=extent,
-                      nice=nice, cumulative=cumulative)]
+    bin_kwargs: dict = dict(bin_count=bin_count, bin_width=bin_width, extent=extent,
+                            nice=nice, cumulative=cumulative)
+    if groupby is not None:
+        bin_kwargs["groupby"] = groupby
+    transforms = [Bin(field, **bin_kwargs)]
     # Phase 5 Bin produces columns (bin_start, bin_end, count, density)
     y_column = "density" if density else "count"
     encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": y_column}
