@@ -9,6 +9,7 @@ from ferrum.encoding.appearance import (
 from ferrum.encoding.text import (
     Text, Detail, Tooltip, TooltipField, Href, Description, Key,
 )
+from ferrum.encoding.facet import Facet, FacetRow, FacetCol
 
 __all__ = [
     "X", "Y", "X2", "Y2", "XError", "YError", "XError2", "YError2",
@@ -16,4 +17,5 @@ __all__ = [
     "Color", "Fill", "Stroke", "Opacity", "FillOpacity", "StrokeOpacity",
     "StrokeWidth", "StrokeDash", "Size", "Shape", "Angle",
     "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
+    "Facet", "FacetRow", "FacetCol",
 ]

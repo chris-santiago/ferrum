@@ -153,3 +153,13 @@ def test_tooltip_accepts_multiple_fields():
     from ferrum.encoding import Tooltip
     t = Tooltip("a", "b", "c")
     assert t._field_list == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Task 19: facet channels
+# ---------------------------------------------------------------------------
+
+def test_facet_channels_render():
+    from ferrum.encoding import Facet, FacetRow, FacetCol
+    for cls in (Facet, FacetRow, FacetCol):
+        assert cls._renders_in_phase_8a is True
