@@ -174,27 +174,38 @@ def residplot(
     (or ``Robust(output='residuals')`` when ``robust=True``); optionally
     layers a lowess smoother over the residuals.
     """
-    # Build the residuals transform.
+    # Build the residuals transform — unnamed so it advances the chained
+    # output. Smooth/Robust's residuals output schema is literal [x, residual]
+    # (per design §5.3), so the downstream layers encode against "x" and
+    # "residual" rather than the original column names.
     if robust:
-        resid_transform = Robust(x=x, y=y, output="residuals", name="resid")
+        resid_transform = Robust(x=x, y=y, output="residuals")
     else:
         resid_transform = Smooth(
             x=x, y=y, method="lm", degree=order, ci=None,
-            output="residuals", name="resid",
+            output="residuals",
         )
 
     # Base scatter against residuals.
     chart = Chart(data).transform(resid_transform).mark_point()
-    enc: dict = {"x": x, "y": "residual"}
+    enc: dict = {"x": "x", "y": "residual"}
     if color is not None:
         enc["color"] = color
     enc.update(encode_kwargs)
     chart = chart.encode(**enc)
 
     # Optional lowess smoother of the residuals (overlaid as a second layer).
+    # NOTE: full implementation requires per-layer transform chaining so that
+    # layer 1 sees the residuals output and layer 2 sees the loess output
+    # without _merge_layers consolidating both Smooth transforms chart-level.
+    # The current overlay path fails because chart-level chain advances past
+    # the residuals output. Tracked as xfail in tests/test_phase_9_e2e.py.
     if lowess:
-        lo = Chart(data).transform(resid_transform).mark_smooth(method="loess").encode(
-            x=x, y="residual",
+        lo = (
+            Chart(data)
+            .transform(resid_transform)
+            .encode(x="x", y="residual")
+            .mark_smooth(method="loess")
         )
         chart = _merge_layers(chart, lo)
 

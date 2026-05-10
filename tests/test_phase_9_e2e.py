@@ -154,9 +154,13 @@ def test_lmplot_lm_ci_golden(df_reg):
 
 
 @pytest.mark.xfail(
-    reason="lowess overlay layer references 'residual' column but stat_smooth "
-           "in the second layer doesn't see the residual output; renderer "
-           "raises ValueError: stat_smooth: column 'residual' not found",
+    reason="residplot lowess overlay requires per-layer transform chaining: "
+           "layer 1 (point) needs the residuals batch [x, residual] and layer 2 "
+           "(line) needs the loess output [x, y, ci_*]. _merge_layers currently "
+           "consolidates both Smooth transforms chart-level, so the chained "
+           "FINAL output is the second Smooth's output; layer 1's y='residual' "
+           "encoding doesn't resolve. Needs design pass on per-layer transform "
+           "semantics + named-on-chained-intermediate routing.",
     strict=True,
 )
 def test_residplot_lowess_golden(df_reg):

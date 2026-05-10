@@ -230,6 +230,14 @@ class Chart:
                 mark, transforms, remap = result
                 new._mark = mark
                 new._transforms = list(new._transforms) + transforms
+                # Smooth's output schema uses literal "x"/"y" columns; apply the
+                # remap so the encoding references the post-transform schema.
+                if remap:
+                    from ferrum.encoding import X, Y
+                    if "x" in remap:
+                        new._encoding["x"] = X(remap["x"], type="Q")
+                    if "y" in remap:
+                        new._encoding["y"] = Y(remap["y"], type="Q")
         return new
 
     # ---- Marks (primitives) ----
@@ -355,6 +363,14 @@ class Chart:
             mark, transforms, remap = result
             new._mark = mark
             new._transforms = list(self._transforms) + transforms
+            # Smooth's output schema uses literal "x"/"y" columns; apply the
+            # remap so the encoding references the post-transform schema.
+            if remap:
+                from ferrum.encoding import X, Y
+                if "x" in remap:
+                    new._encoding["x"] = X(remap["x"], type="Q")
+                if "y" in remap:
+                    new._encoding["y"] = Y(remap["y"], type="Q")
         new._position = position
         return new
 
