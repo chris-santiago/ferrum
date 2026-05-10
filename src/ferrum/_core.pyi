@@ -275,3 +275,20 @@ def render_png(
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
 ) -> bytes: ...
+
+
+# ---------- SVG compositor (Phase 8a Task 11) ----------
+
+def compose_svg_horizontal(
+    svgs: list[str],
+    *,
+    spacing: float = 10.0,
+    align: Literal["top", "center", "bottom"] = "top",
+) -> str: ...
+
+def compose_svg_vertical(
+    svgs: list[str],
+    *,
+    spacing: float = 10.0,
+    align: Literal["left", "center", "right"] = "left",
+) -> str: ...

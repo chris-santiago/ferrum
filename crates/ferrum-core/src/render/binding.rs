@@ -144,6 +144,54 @@ fn render_err_to_py(e: RenderError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// SVG compositor bindings (Task 11)
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "compose_svg_horizontal")]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top"))]
+pub fn compose_svg_horizontal_py(
+    svgs: Vec<String>,
+    spacing: f64,
+    align: &str,
+) -> PyResult<String> {
+    let align_val = match align {
+        "top" => crate::render::compositor::VerticalAlign::Top,
+        "center" => crate::render::compositor::VerticalAlign::Center,
+        "bottom" => crate::render::compositor::VerticalAlign::Bottom,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "align must be one of 'top'|'center'|'bottom', got '{other}'"
+            )))
+        }
+    };
+    crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "compose_svg_vertical")]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left"))]
+pub fn compose_svg_vertical_py(
+    svgs: Vec<String>,
+    spacing: f64,
+    align: &str,
+) -> PyResult<String> {
+    let align_val = match align {
+        "left" => crate::render::compositor::HorizontalAlign::Left,
+        "center" => crate::render::compositor::HorizontalAlign::Center,
+        "right" => crate::render::compositor::HorizontalAlign::Right,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "align must be one of 'left'|'center'|'right', got '{other}'"
+            )))
+        }
+    };
+    crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
 fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<()> {
     if warnings.is_empty() {
         return Ok(());

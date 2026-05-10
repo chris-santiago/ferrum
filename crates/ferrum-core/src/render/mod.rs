@@ -14,6 +14,10 @@ pub(crate) mod draw;
 pub(crate) mod png;
 pub(crate) mod binding;
 pub(crate) mod marks;
+pub mod compositor;
+pub use compositor::{
+    compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
+};
 
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;
