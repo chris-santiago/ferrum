@@ -321,8 +321,32 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(s.0);
             continue;
         }
+        if let Ok(o) = item.extract::<crate::transform::outliers::PyOutliers>() {
+            out.push(o.0);
+            continue;
+        }
+        if let Ok(e) = item.extract::<crate::transform::error_extent::PyErrorExtent>() {
+            out.push(e.0);
+            continue;
+        }
+        if let Ok(b) = item.extract::<crate::transform::box_stats::PyBoxStats>() {
+            out.push(b.0);
+            continue;
+        }
+        if let Ok(v) = item.extract::<crate::transform::violin::PyViolin>() {
+            out.push(v.0);
+            continue;
+        }
+        if let Ok(k) = item.extract::<crate::transform::kde_2d::PyKde2D>() {
+            out.push(k.0);
+            continue;
+        }
+        if let Ok(c) = item.extract::<crate::transform::contour::PyContour>() {
+            out.push(c.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour"
         )));
     }
     Ok(out)
