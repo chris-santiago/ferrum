@@ -61,6 +61,10 @@ impl FromStr for DataType {
 
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
 /// Mirrors the Python ScaleLog/ScalePow/etc. classes via tagged enum.
+///
+/// Uses `tag = "type"` (NOT the spec-module convention `tag = "kind"`) for Vega-Lite wire-format
+/// alignment — see design spec §11 row 16 ("Vega-Lite interop stays open without translation").
+/// This is the only tagged enum in this module that uses `"type"`; the choice is intentional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ScaleSpec {
