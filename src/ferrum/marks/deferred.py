@@ -1,5 +1,9 @@
-"""Marks deferred to Phase 8b or Phase 9+. These exist as Chart methods that
-raise NotImplementedError with a clear forward-pointer."""
+"""Marks deferred to Phase 9+. Phase 8b's PHASE_8B_MARKS is empty; Phase 9
+removes `segment` from PHASE_9_PLUS_MARKS (now in 9d). The remaining four marks
+(`arc`, `image`, `geoshape`, `label`) are not blocked by any §3.14 Group A figure
+function and stay deferred consistent with the no-defer rule applying to spec
+contracts ferrum currently advertises (see ferrum-spec.md §3.3 — these aren't
+referenced by any §3.14 figure-level signature)."""
 from __future__ import annotations
 
 # Phase 8b marks (Sub-batches E + F landed; list now empty).
