@@ -29,11 +29,11 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
     let val_idx = schema
         .index_of(&spec.field)
         .map_err(|_| PyValueError::new_err(format!(
-            "Outliers: column '{}' not found", spec.field
+            "stat_outliers: column '{}' not found", spec.field
         )))?;
     if schema.field(val_idx).data_type() != &DataType::Float64 {
         return Err(PyValueError::new_err(format!(
-            "Outliers: column '{}' must be Float64", spec.field
+            "stat_outliers: column '{}' must be Float64", spec.field
         )));
     }
     let values_arr = batch
@@ -45,12 +45,12 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
     // Validate groupby columns.
     for g in &spec.groupby {
         let i = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!("Outliers: groupby column '{}' not found", g))
+            PyValueError::new_err(format!("stat_outliers: groupby column '{}' not found", g))
         })?;
         let dt = schema.field(i).data_type();
         if dt != &DataType::Float64 && !matches!(dt, DataType::Utf8) {
             return Err(PyValueError::new_err(format!(
-                "Outliers: groupby column '{}' must be Float64 or Utf8; got {:?}", g, dt
+                "stat_outliers: groupby column '{}' must be Float64 or Utf8; got {:?}", g, dt
             )));
         }
     }
@@ -140,7 +140,7 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
 
     let bool_arr = BooleanArray::from(mask);
     filter_record_batch(batch, &bool_arr)
-        .map_err(|e| PyValueError::new_err(format!("Outliers filter failed: {e}")))
+        .map_err(|e| PyValueError::new_err(format!("stat_outliers: filter failed: {e}")))
 }
 
 /// Type-7 quartile (linear interpolation) — matches numpy/scipy default.
@@ -230,6 +230,49 @@ mod tests {
         };
         let out = apply(&spec, &b).unwrap();
         assert_eq!(out.schema(), b.schema());
+    }
+
+    fn batch_g_v(groups: Vec<&str>, values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(values)),
+                Arc::new(StringArray::from(groups)),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn outliers_per_group_iqr_isolates_outlier() {
+        pyo3::Python::initialize();
+        // Group A: uniform 1..=10, no outliers within group.
+        // Group B: 100..=108 then 1000.0, last value is an extreme outlier within its group.
+        let groups = vec![
+            "A", "B", "A", "B", "A", "B", "A", "B", "A", "B",
+            "A", "B", "A", "B", "A", "B", "A", "B", "A", "B",
+        ];
+        let values = vec![
+            1.0, 100.0, 2.0, 101.0, 3.0, 102.0, 4.0, 103.0, 5.0, 104.0,
+            6.0, 105.0, 7.0, 106.0, 8.0, 107.0, 9.0, 108.0, 10.0, 1000.0,
+        ];
+        let b = batch_g_v(groups, values);
+        let spec = OutliersSpec {
+            field: "v".into(),
+            groupby: vec!["g".into()],
+            extent: 1.5,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let v_arr = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let g_arr = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(v_arr.value(0), 1000.0);
+        assert_eq!(g_arr.value(0), "B");
     }
 }
 
