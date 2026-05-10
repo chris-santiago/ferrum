@@ -485,3 +485,228 @@ mod png_tests {
         assert_eq!(a.bytes, b.bytes);
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    //! End-to-end goldens. Refresh via `FERRUM_UPDATE_GOLDENS=1 cargo test`.
+    //! See spec §9.4 for refresh discipline.
+
+    use super::*;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn check_golden(name: &str, svg: &str) {
+        let path = format!("tests/golden/{name}.svg");
+        let abs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&path);
+        if std::env::var("FERRUM_UPDATE_GOLDENS").is_ok() {
+            std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+            std::fs::write(&abs_path, svg).expect("write golden");
+            return;
+        }
+        let expected = std::fs::read_to_string(&abs_path)
+            .unwrap_or_else(|e| panic!("read golden {path}: {e} — run FERRUM_UPDATE_GOLDENS=1 to create"));
+        assert_eq!(svg, expected, "golden mismatch for {name} — run FERRUM_UPDATE_GOLDENS=1 to refresh");
+    }
+
+    fn check_png_hash(name: &str, png: &[u8]) {
+        use sha2::Digest;
+        use std::io::Write;
+        let path = format!("tests/golden/{name}.sha256");
+        let abs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&path);
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(png);
+        let hash = format!("{:x}", hasher.finalize());
+        if std::env::var("FERRUM_UPDATE_GOLDENS").is_ok() {
+            std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+            let mut f = std::fs::File::create(&abs_path).unwrap();
+            f.write_all(hash.as_bytes()).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&abs_path)
+            .unwrap_or_else(|e| panic!("read png hash {path}: {e}"));
+        assert_eq!(hash.trim(), expected.trim(), "PNG hash mismatch for {name}");
+    }
+
+    #[test]
+    fn scatter_minimal_golden() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+        ]).unwrap();
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("scatter_minimal", &result.bytes);
+
+        let png_result = render_png(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_png_hash("scatter_minimal.png", &png_result.bytes);
+    }
+
+    #[test]
+    fn scatter_color_golden() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+            Arc::new(StringArray::from(vec!["a","b","c","a","b","c"])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None }),
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("scatter_color", &result.bytes);
+    }
+
+    #[test]
+    fn bar_grouped_golden() {
+        use crate::spec::encoding::DataType as SDT;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a","b","c","d"])),
+            Arc::new(Float64Array::from(vec![3.0, 1.0, 4.0, 1.5])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal) }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("bar_grouped", &result.bytes);
+    }
+
+    #[test]
+    fn line_simple_golden() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0, 30.0, 80.0, 60.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("line_simple", &result.bytes);
+    }
+
+    #[test]
+    fn area_filled_golden() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0, 30.0, 80.0, 60.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("area_filled", &result.bytes);
+    }
+
+    #[test]
+    fn faceted_scatter_golden() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 15.0, 25.0, 35.0, 12.0, 22.0, 32.0])),
+            Arc::new(StringArray::from(vec!["setosa","setosa","setosa","versicolor","versicolor","versicolor","virginica","virginica","virginica"])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "species".into(),
+                mode: crate::layout::FacetMode::Wrap { ncols: 3 },
+                spacing: None,
+            }),
+        };
+        let result = render_svg(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 800.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        check_golden("faceted_scatter", &result.bytes);
+    }
+}
