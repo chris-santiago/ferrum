@@ -27,3 +27,5 @@ The secondary wins — zero-copy Arrow ingestion, no matplotlib dependency, head
 **Zero system dependencies.** Ships in a wheel. No Cairo, no X11, no display server. Renders in Kubernetes, CI, SSH sessions. `pip install ferrum` is the entire setup.
 
 **SHAP and ICE at full sample size.** The plots that matter most for understanding models at scale — the ones existing tools sample or crash on — render in full because the rasterization is in Rust and the interactivity is GPU-backed.
+
+**New (Incorporated during design implementation).** Handles multiple dataframe APIs via `Narwhals`.
