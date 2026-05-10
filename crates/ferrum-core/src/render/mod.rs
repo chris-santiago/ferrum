@@ -130,3 +130,279 @@ mod tests {
         assert!(msg.contains("missing"), "msg: {msg}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task 20 — render_svg full pipeline orchestration (spec §6).
+// ---------------------------------------------------------------------------
+
+use crate::layout::{compute_layout, ThemeInputs, Viewport};
+use crate::spec::chart::ChartSpec;
+use arrow::record_batch::RecordBatch;
+
+pub fn render_svg(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    config: &config::RenderConfig,
+) -> Result<RenderOutput<String>, RenderError> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(RenderError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+
+    let viewport = Viewport {
+        width: config.width.unwrap_or(viewport.width),
+        height: config.height.unwrap_or(viewport.height),
+    };
+    let background = config.background.or(Some(theme.background_color));
+
+    let prep = prepare::prepare_render_inputs(spec, batch)?;
+    let mut warnings = prep.warnings.clone();
+
+    let metrics = font::FontdueMetrics::new();
+    let layout = compute_layout(
+        spec,
+        theme,
+        viewport,
+        &prep.axes,
+        &prep.facet_groups,
+        &prep.legend_entries,
+        &metrics,
+    )
+    .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
+    for w in &layout.warnings {
+        warnings.push(RenderWarning::Layout(w.clone()));
+    }
+
+    let mut out = svg::SvgBuffer::new(layout.viewport, background, true);
+
+    for (panel_idx, panel) in layout.panels.iter().enumerate() {
+        if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
+            warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
+            continue;
+        }
+
+        for axis in layout.axes.iter().filter(|a| a.panel_index == panel_idx) {
+            marks::axis::draw(axis, theme, &mut out);
+        }
+
+        if let Some(strip) = &panel.strip_title {
+            marks::strip_title::draw(strip, &panel.plot_area, theme, &mut out);
+        }
+
+        let panel_batch = if let Some(key) = &panel.facet_key {
+            filter_batch_by_facet(&prep.transformed, &key.field, &key.value)?
+        } else {
+            prep.transformed.clone()
+        };
+        if panel_batch.num_rows() == 0 {
+            continue;
+        }
+
+        let (scales, scale_warnings) = scale_resolve::resolve_scales(
+            spec,
+            &panel_batch,
+            (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
+            (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+        )?;
+        warnings.extend(scale_warnings);
+
+        let clip_id = format!("{}{}", CLIP_ID_PREFIX, panel_idx);
+        out.clip_open(&clip_id, panel.plot_area);
+        out.use_clip_open(&clip_id);
+
+        let mark_style = draw::resolve_mark_style(theme, &spec.mark);
+        let ctx = draw::DrawCtx {
+            spec,
+            panel,
+            theme,
+            scales: &scales,
+            batch: &panel_batch,
+            mark_style: &mark_style,
+        };
+        draw::dispatch_mark(&spec.mark, &ctx, &mut out);
+
+        out.use_clip_close();
+    }
+
+    if let Some(legend) = &layout.legend {
+        let color_scale = if spec.encoding.color.is_some() {
+            let (gs, _) = scale_resolve::resolve_scales(
+                spec,
+                &prep.transformed,
+                (0.0, 1.0),
+                (0.0, 1.0),
+            )?;
+            gs.color
+        } else {
+            None
+        };
+        marks::legend::draw(legend, color_scale.as_ref(), theme, &mut out);
+    }
+
+    let svg_string = out.finish();
+    Ok(RenderOutput { bytes: svg_string, layout, warnings })
+}
+
+fn filter_batch_by_facet(
+    batch: &RecordBatch,
+    field: &str,
+    value: &str,
+) -> Result<RecordBatch, RenderError> {
+    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::compute::filter_record_batch;
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    let arr = col
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!("facet field '{field}' must be Utf8"))
+        })?;
+    let mask: BooleanArray = arr
+        .iter()
+        .map(|v| Some(v.map(|s| s == value).unwrap_or(false)))
+        .collect();
+    filter_record_batch(batch, &mask)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("filter: {e}")))
+}
+
+#[cfg(test)]
+mod orchestration_tests {
+    use super::*;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn scatter_3() -> (ChartSpec, RecordBatch) {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(),
+            facet: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    #[test]
+    fn render_svg_minimal_scatter() {
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        let svg = result.bytes;
+        assert!(svg.starts_with("<svg "));
+        assert!(svg.ends_with("</svg>"));
+        assert_eq!(svg.matches("<circle ").count(), 3);
+        assert!(svg.contains("@font-face"));
+    }
+
+    #[test]
+    fn render_svg_invalid_viewport_errors() {
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let result = render_svg(
+            &spec,
+            &batch,
+            &theme,
+            Viewport { width: 0.0, height: 100.0 },
+            &config::RenderConfig::default(),
+        );
+        assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
+    }
+
+    #[test]
+    fn render_svg_unknown_column_errors() {
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.x = Some(EncodingSpec { field: "missing".into(), type_: None });
+        let result = render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 600.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        );
+        assert!(matches!(result.unwrap_err(), RenderError::UnknownColumn { .. }));
+    }
+
+    #[test]
+    fn render_svg_faceted_emits_strip_titles() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "species".into(),
+                mode: crate::layout::FacetMode::Wrap { ncols: 3 },
+                spacing: None,
+            }),
+        };
+        let result = render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 800.0, height: 400.0 },
+            &config::RenderConfig::default(),
+        )
+        .unwrap();
+        let svg = result.bytes;
+        assert!(svg.contains(">a<") || svg.contains(">a</text>"));
+        assert!(svg.contains(">b<") || svg.contains(">b</text>"));
+        assert!(svg.contains(">c<") || svg.contains(">c</text>"));
+    }
+
+    #[test]
+    fn render_svg_determinism_two_calls_byte_identical() {
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let a = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        let b = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        assert_eq!(a.bytes, b.bytes);
+    }
+}
