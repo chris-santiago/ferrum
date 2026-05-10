@@ -303,3 +303,72 @@ class TestResidplot:
         assert "<svg" in svg
 
 
+# ---------------------------------------------------------------------------
+# Task 32 — pairplot
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def iris_pair():
+    rng = np.random.default_rng(3)
+    n = 20
+    return pl.DataFrame({
+        "a": rng.normal(0, 1, n).tolist(),
+        "b": rng.normal(0, 1, n).tolist(),
+        "c": rng.normal(0, 1, n).tolist(),
+        "species": (["x"] * 10 + ["y"] * 10),
+    })
+
+
+class TestPairplot:
+    def test_default_returns_repeatchart(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"])
+        assert isinstance(rc, fe.RepeatChart)
+        assert rc.row == ["a", "b"]
+        assert rc.column == ["a", "b"]
+
+    def test_vars_explicit(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b", "c"])
+        assert rc.row == ["a", "b", "c"]
+        assert rc.column == ["a", "b", "c"]
+
+    def test_x_vars_y_vars(self, iris_pair):
+        rc = fe.pairplot(iris_pair, x_vars=["a"], y_vars=["b", "c"])
+        assert rc.column == ["a"]
+        assert rc.row == ["b", "c"]
+
+    def test_vars_and_x_vars_errors(self, iris_pair):
+        with pytest.raises(ValueError, match="vars"):
+            fe.pairplot(iris_pair, vars=["a"], x_vars=["b"], y_vars=["c"])
+
+    def test_corner_true(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"], corner=True)
+        assert rc.corner is True
+
+    def test_diagonal_hist(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"], diag_kind="hist")
+        assert rc.diagonal is not None
+
+    def test_diagonal_kde(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"], diag_kind="kde")
+        assert rc.diagonal is not None
+
+    def test_diagonal_none(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"], diag_kind=None)
+        assert rc.diagonal is None
+
+    def test_hue_propagates_to_template_encoding(self, iris_pair):
+        rc = fe.pairplot(iris_pair, vars=["a", "b"], hue="species")
+        # The template chart's encoding includes color=species.
+        assert "color" in rc.template._encoding
+
+    def test_invalid_kind_errors(self, iris_pair):
+        with pytest.raises(ValueError, match="kind"):
+            fe.pairplot(iris_pair, vars=["a", "b"], kind="bogus")
+
+    def test_auto_detects_numeric_columns(self, iris_pair):
+        rc = fe.pairplot(iris_pair)
+        # species is non-numeric; should be excluded.
+        assert "species" not in rc.row
+        assert set(rc.row) == {"a", "b", "c"}
+
+
