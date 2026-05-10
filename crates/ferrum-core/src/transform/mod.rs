@@ -9,4 +9,5 @@ pub(crate) mod kde;
 pub(crate) mod smooth;
 pub(crate) mod aggregate;
 pub(crate) mod summary;
+pub(crate) mod outliers;
 pub(crate) mod linalg;

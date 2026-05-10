@@ -12,6 +12,7 @@ from ferrum._core import (
     TimeScale,
     SymlogScale,
     OrdinalScale,
+    Outliers,
     QuantileScale,
     Smooth,
     Summary,
@@ -52,7 +53,7 @@ __all__ = [
     # Phase 1-7 core
     "Aggregate", "AggregateOp", "Bin", "ChartSpec", "EncodingSpec", "Kde",
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "QuantileScale", "ThresholdScale", "Smooth", "Summary",
+    "Outliers", "QuantileScale", "ThresholdScale", "Smooth", "Summary",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical",
     # Phase 8a

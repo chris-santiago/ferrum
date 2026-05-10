@@ -255,6 +255,16 @@ class Summary:
         seed: int = 0,
     ) -> None: ...
 
+class Outliers:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        extent: float = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,
