@@ -48,9 +48,13 @@ class ChannelBase:
         if (t := self._kwargs.get("type")) is not None:
             out["type_"] = t
         for k in ("scale", "title", "axis", "legend", "sort", "stack",
-                  "impute", "scheme", "format", "formatType"):
+                  "impute", "scheme", "format"):
             if (v := self._kwargs.get(k)) is not None:
                 out[k] = v
+        # PyO3 EncodingSpec.__new__ expects snake_case param name `format_type`
+        # even though the user-facing kwarg and JSON serde key is "formatType".
+        if (v := self._kwargs.get("formatType")) is not None:
+            out["format_type"] = v
         return out
 
     def to_implicit_transforms(self) -> list:
