@@ -8,7 +8,11 @@ from ferrum import Bin, Kde, Smooth
 
 
 def desugar_density(field: str, **kwargs: Any) -> tuple[str, list, dict]:
-    """mark_density → mark_area + Kde(field, ...) + remap y → density column."""
+    """mark_density → mark_area + Kde(field, ...) + remap x → value, y → density.
+
+    The Phase 5 Kde transform produces columns ("value", "density") — the x
+    encoding must be remapped from the original field name to "value".
+    """
     bandwidth = kwargs.pop("bandwidth", "scott")
     kernel = kwargs.pop("kernel", "gaussian")
     n = kwargs.pop("n", 512)
@@ -20,9 +24,8 @@ def desugar_density(field: str, **kwargs: Any) -> tuple[str, list, dict]:
         pass
 
     transforms = [Kde(field, bandwidth=bandwidth, n=n, extent=extent, cumulative=cumulative)]
-    # Phase 5 Kde produces columns (field, "density"); encoding_remap tells Chart
-    # to treat the density column as y when wiring the area mark
-    encoding_remap = {"y": "density"}
+    # Phase 5 Kde produces columns ("value", "density") — remap both x and y.
+    encoding_remap = {"x": "value", "y": "density"}
     return ("area", transforms, encoding_remap)
 
 

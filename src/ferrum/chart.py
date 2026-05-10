@@ -52,6 +52,7 @@ class Chart:
         "_data", "_mark", "_mark_kwargs", "_encoding", "_transforms",
         "_facet", "_coord", "_theme", "_layers",
         "_width", "_height", "_title", "_description",
+        "_pending_stat_mark",  # (kind, kwargs) when mark_* called before .encode()
     )
 
     def __init__(
@@ -76,6 +77,7 @@ class Chart:
         self._height = height
         self._title = title
         self._description = description
+        self._pending_stat_mark: Optional[tuple] = None  # (kind, kwargs)
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -92,6 +94,55 @@ class Chart:
         new._height = self._height
         new._title = self._title
         new._description = self._description
+        new._pending_stat_mark = self._pending_stat_mark
+        return new
+
+    def _resolve_pending(self) -> "Chart":
+        """Resolve a pending statistical mark desugar once encoding is known.
+
+        Calling ``mark_density/histogram/smooth`` before ``.encode()`` stores a
+        ``_pending_stat_mark`` sentinel.  ``_resolve_pending`` is called at the
+        start of every render/spec-build path to apply the desugar against the
+        now-populated encoding dict.
+        """
+        if self._pending_stat_mark is None:
+            return self
+        kind, kwargs = self._pending_stat_mark
+        new = self._clone()
+        new._pending_stat_mark = None
+        if kind == "density":
+            x_enc = new._encoding.get("x")
+            if x_enc is None:
+                raise ValueError("mark_density() requires .encode(x=...) to specify the density field")
+            field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            mark, transforms, remap = desugar_density(field, **kwargs)
+            new._mark = mark
+            new._transforms = list(new._transforms) + transforms
+            from ferrum.encoding import X, Y
+            new._encoding["x"] = X(remap["x"], type="Q")
+            new._encoding["y"] = Y(remap["y"], type="Q")
+        elif kind == "histogram":
+            x_enc = new._encoding.get("x")
+            if x_enc is None:
+                raise ValueError("mark_histogram() requires .encode(x=...) to specify the histogram field")
+            field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            mark, transforms, remap = desugar_histogram(field, **kwargs)
+            new._mark = mark
+            new._transforms = list(new._transforms) + transforms
+            from ferrum.encoding import X, X2, Y
+            new._encoding["x"] = X(remap["x"], type="Q")
+            new._encoding["x2"] = X2(remap["x2"], type="Q")
+            new._encoding["y"] = Y(remap["y"], type="Q")
+        elif kind == "smooth":
+            x_enc = new._encoding.get("x")
+            y_enc = new._encoding.get("y")
+            if x_enc is None or y_enc is None:
+                raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
+            x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
+            mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
+            new._mark = mark
+            new._transforms = list(new._transforms) + transforms
         return new
 
     # ---- Marks (primitives) ----
@@ -115,25 +166,33 @@ class Chart:
     # ---- Marks (statistical) ----
 
     def mark_density(self, **kwargs) -> "Chart":
-        # Field comes from .encode(x=...) chain; call after .encode() typically
-        x_field = self._encoding.get("x")
-        if x_field is None:
-            raise ValueError("mark_density() requires .encode(x=...) to specify the density field")
-        field = x_field.field if isinstance(x_field, ChannelBase) else x_field
+        """Density plot (KDE). Can be called before or after .encode(x=...)."""
+        x_enc = self._encoding.get("x")
+        if x_enc is None:
+            # Encoding not yet set — defer resolution to render time.
+            new = self._clone()
+            new._mark = "area"  # placeholder so _mark is not None
+            new._pending_stat_mark = ("density", dict(kwargs))
+            return new
+        field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         mark, transforms, remap = desugar_density(field, **kwargs)
         new = self._clone()
         new._mark = mark
         new._transforms = list(self._transforms) + transforms
-        # Remap encoding
-        from ferrum.encoding import Y
+        from ferrum.encoding import X, Y
+        new._encoding["x"] = X(remap["x"], type="Q")
         new._encoding["y"] = Y(remap["y"], type="Q")
         return new
 
     def mark_histogram(self, **kwargs) -> "Chart":
-        x_field = self._encoding.get("x")
-        if x_field is None:
-            raise ValueError("mark_histogram() requires .encode(x=...)")
-        field = x_field.field if isinstance(x_field, ChannelBase) else x_field
+        """Histogram. Can be called before or after .encode(x=...)."""
+        x_enc = self._encoding.get("x")
+        if x_enc is None:
+            new = self._clone()
+            new._mark = "bar"  # placeholder
+            new._pending_stat_mark = ("histogram", dict(kwargs))
+            return new
+        field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         mark, transforms, remap = desugar_histogram(field, **kwargs)
         new = self._clone()
         new._mark = mark
@@ -145,10 +204,14 @@ class Chart:
         return new
 
     def mark_smooth(self, **kwargs) -> "Chart":
+        """Smooth/regression line. Can be called before or after .encode(x=..., y=...)."""
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
-            raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
+            new = self._clone()
+            new._mark = "line"  # placeholder
+            new._pending_stat_mark = ("smooth", dict(kwargs))
+            return new
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
         mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
@@ -240,27 +303,30 @@ class Chart:
             )
             return self.__or__(other)
 
-        # Same data — build a multi-layer chart
-        new = self._clone()
+        # Same data — build a multi-layer chart.
+        # Resolve pending statistical marks before snapshotting encoding dicts.
+        lhs = self._resolve_pending()
+        rhs = other._resolve_pending()
+        new = lhs._clone()
         new._layers = [
             {
-                "mark": self._mark,
-                "encoding": dict(self._encoding),
-                "transforms": list(self._transforms),
-                "mark_style": dict(self._mark_kwargs),
+                "mark": lhs._mark,
+                "encoding": dict(lhs._encoding),
+                "transforms": list(lhs._transforms),
+                "mark_style": dict(lhs._mark_kwargs),
             },
             {
-                "mark": other._mark,
-                "encoding": dict(other._encoding),
-                "transforms": list(other._transforms),
-                "mark_style": dict(other._mark_kwargs),
+                "mark": rhs._mark,
+                "encoding": dict(rhs._encoding),
+                "transforms": list(rhs._transforms),
+                "mark_style": dict(rhs._mark_kwargs),
             },
         ]
         # Warn if secondary layer has conflicting theme/facet/coord
         if (
-            (other._theme is not None and other._theme != self._theme)
-            or other._facet != self._facet
-            or other._coord != self._coord
+            (rhs._theme is not None and rhs._theme != lhs._theme)
+            or rhs._facet != lhs._facet
+            or rhs._coord != lhs._coord
         ):
             import warnings
             warnings.warn(
@@ -349,9 +415,29 @@ class Chart:
             )
         return new
 
+    @staticmethod
+    def _transforms_to_json_list(transforms: list) -> list:
+        """Serialize a list of Python transform objects to JSON-safe dicts.
+
+        ``coerce_layers`` in Rust calls ``json.dumps()`` on each layer dict, so
+        PyO3 transform objects must be converted to plain dicts first.  We do
+        this by round-tripping through ``ChartSpec.to_json()``.
+        """
+        if not transforms:
+            return []
+        import json as _json
+        from ferrum import ChartSpec
+        # Build a minimal spec with the transforms; extract the "transforms" array.
+        dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=transforms)
+        parsed = _json.loads(dummy.to_json())
+        return parsed.get("transforms", [])
+
     def _build_layers_list(self) -> list:
-        """Convert internal _layers to a list of JSON-serializable dicts for Rust."""
-        from ferrum import EncodingSpec
+        """Convert internal _layers to a list of JSON-serializable dicts for Rust.
+
+        ``coerce_layers`` in Rust runs ``json.dumps()`` on each dict, so every
+        value must be JSON-serializable (no PyO3 objects).
+        """
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
@@ -360,26 +446,29 @@ class Chart:
                 if ch is None:
                     continue
                 if hasattr(ch, "to_encoding_spec_dict"):
+                    # ChannelBase subclass — convert to a plain JSON-serializable dict.
                     d = ch.to_encoding_spec_dict()
-                    field = d.pop("field", None)
-                    if field is None:
+                    field = d.get("field")
+                    if not field:
                         continue
-                    enc_spec = EncodingSpec(field, **d)
-                    # Convert EncodingSpec to a JSON-friendly dict via its to_json method
-                    import json as _json
-                    enc_json = enc_spec.to_json()
-                    encoding_dict[axis] = _json.loads(enc_json)
+                    # Build a JSON-safe dict matching EncodingSpec's JSON shape.
+                    enc_json_dict: dict = {"field": field}
+                    if d.get("type"):
+                        enc_json_dict["type_"] = d["type"]
+                    for opt_key in ("title", "aggregate", "scheme"):
+                        if d.get(opt_key):
+                            enc_json_dict[opt_key] = d[opt_key]
+                    encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
             mark_style = layer.get("mark_style") or {}
             layer_dict: dict = {"mark": layer.get("mark", "point"), "encoding": encoding_dict}
             if mark_style:
                 layer_dict["mark_style"] = dict(mark_style)
-            # Transforms in layers: skip Python objects that aren't JSON-serializable for now.
-            # Only pass transforms if they're already plain dicts.
-            transforms = [t for t in (layer.get("transforms") or []) if isinstance(t, dict)]
-            if transforms:
-                layer_dict["transforms"] = transforms
+            # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
+            raw_transforms = layer.get("transforms") or []
+            if raw_transforms:
+                layer_dict["transforms"] = Chart._transforms_to_json_list(raw_transforms)
             out.append(layer_dict)
         return out
 
@@ -414,14 +503,16 @@ class Chart:
     # ---- Spec output ----
 
     def to_spec(self):
+        # Resolve any pending statistical mark desugar (mark called before encode).
+        resolved = self._resolve_pending()
         from ferrum import ChartSpec, EncodingSpec
         # Build full EncodingSpec instances per channel so honored kwargs
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
-        kw = {"mark": self._mark or "point", "data": "default"}
+        kw = {"mark": resolved._mark or "point", "data": "default"}
         for axis in ("x", "y", "color", "size", "shape", "opacity"):
-            if axis in self._encoding:
-                ch = self._encoding[axis]
+            if axis in resolved._encoding:
+                ch = resolved._encoding[axis]
                 if ch.field is None:
                     continue   # Tooltip(*fields) etc. with no single field
                 d = ch.to_encoding_spec_dict()
@@ -429,16 +520,16 @@ class Chart:
                 # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
                 field = d.pop("field")
                 kw[axis] = EncodingSpec(field, **d)
-        if self._transforms:
-            kw["transforms"] = list(self._transforms)
-        if self._facet is not None:
-            kw["facet"] = self._build_facet_dict()
-        if self._coord is not None:
-            kw["coord"] = self._coord
-        if self._mark_kwargs:
-            kw["mark_style"] = dict(self._mark_kwargs)
-        if self._layers is not None:
-            kw["layers"] = self._build_layers_list()
+        if resolved._transforms:
+            kw["transforms"] = list(resolved._transforms)
+        if resolved._facet is not None:
+            kw["facet"] = resolved._build_facet_dict()
+        if resolved._coord is not None:
+            kw["coord"] = resolved._coord
+        if resolved._mark_kwargs:
+            kw["mark_style"] = dict(resolved._mark_kwargs)
+        if resolved._layers is not None:
+            kw["layers"] = resolved._build_layers_list()
         return ChartSpec(**kw)
 
     def to_json(self, *, indent=None) -> str:

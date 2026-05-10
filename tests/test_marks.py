@@ -46,7 +46,8 @@ def test_desugar_density_returns_area_with_kde_transform():
     mark, transforms, remap = desugar_density("price")
     assert mark == "area"
     assert len(transforms) == 1 and isinstance(transforms[0], Kde)
-    assert remap == {"y": "density"}
+    # Kde produces ("value", "density") columns; both x and y are remapped.
+    assert remap == {"x": "value", "y": "density"}
 
 
 def test_desugar_histogram_returns_bar_with_bin_transform():

@@ -47,10 +47,10 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 ```
 1 → 2 → 3 → 4
               → 5
-         3 → 6 → 7 → 8 → 9
-                           → 10
-                      8 → 11
-              3 → 12 (cross-cutting, unlocks after 8)
+         3 → 6 → 7 → 8a → 8b → 9
+                                  → 10
+                         8a → 11
+              3 → 12 (cross-cutting, unlocks after 8a)
 ```
 
 ### Phases
@@ -64,7 +64,8 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | [`2026-05-09-stat-engine-design.md`](specs/2026-05-09-stat-engine-design.md) | **done** |
 | **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | [`2026-05-09-layout-engine-design.md`](specs/2026-05-09-layout-engine-design.md) | **done** |
 | **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | [`2026-05-09-static-renderer-design.md`](specs/2026-05-09-static-renderer-design.md) | **done** |
-| **8** | Grammar API surface (Python) | `Chart`, `Layer`, encoding channels (`X`, `Y`, `Color`, `Size`, etc.), `+`/`\|`/`&` composition operators, `Facet`, `Repeat`, themes-as-values | 7 | *(not yet written)* | pending |
+| **8a** | Grammar API surface (Python) — primitives + simple stats | `Chart`, `Layer`, all 31 encoding channels, themes-as-values, `+`/`\|`/`&` composition, `Facet`, `CoordFlip`, annotations, `mark_density/histogram/smooth` | 7 | [`2026-05-10-grammar-api-design.md`](specs/2026-05-10-grammar-api-design.md) | **done** |
+| **8b** | Composite + heavy statistical marks | `mark_boxplot/errorbar/errorband/ribbon`, `mark_contour/violin/qq/raster/swarm/hex/function` + ~7 new Phase 5 transforms (Outliers, ErrorExtent, Contour, QQ, Raster, Hex, Swarm, BoxStats, Violin) + new SVG primitives (image, polygon, beeswarm) | 8a | *(not yet written)* | pending |
 | **9** | Convenience / figure-level API | `displot`, `lmplot`, `roc_chart`, `pairplot`, etc. as sugar over the grammar — they must desugar to valid `Chart` specs, not bypass the engine | 8 | *(not yet written)* | pending |
 | **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter), model-diagnostic marks (`ConfusionMark`, `ROCMark`, `CalibrationMark`, etc.), `Visualizer` convenience wrappers | 8 | *(not yet written)* | pending |
 | **11** | Interactive renderer (WASM) | `ferrum-wasm` crate + `ferrum._wasm` module; `.interactive()` switches render target; selections, zoom, pan, linked views declared in chart spec | 8 | *(not yet written)* | pending |
@@ -118,12 +119,20 @@ A phase is `done` when all of the following are true:
 - [x] PNG output works (resvg or equivalent)
 - [x] Output includes correct scale ticks, axis labels, and a legend
 
-### Phase 8 — Grammar API surface
-- [ ] `import ferrum; ferrum.Chart(data).mark_point().encode(x="col_a", y="col_b").show()` works
-- [ ] Layer composition (`+`), hstack (`|`), vstack (`&`) work
-- [ ] `Theme` objects are values passed to `Chart`, not global state
-- [ ] No `matplotlib` in the dependency tree (`pip show matplotlib` returns nothing)
-- [ ] All encoding channels from `ferrum-spec.md §3.2` are implemented
+### Phase 8a — Grammar API surface (primitives + simple stats)
+- [x] `import ferrum; ferrum.Chart(data).mark_point().encode(x="col_a", y="col_b").show()` works
+- [x] Layer composition (`+`), hstack (`|`), vstack (`&`) work
+- [x] `Theme` objects are values passed to `Chart`. `set_default_theme()` is the sanctioned contextvars-backed exception (per CLAUDE.md)
+- [x] No `matplotlib` in the dependency tree
+- [x] All 31 encoding channel classes from `ferrum-spec.md §3.2` exist as Python value classes; renderer honors x/y/color/size/shape/opacity (others warn-once)
+- [x] `mark_density`, `mark_histogram`, `mark_smooth` (without CI band) work over Phase 5 transforms
+
+### Phase 8b — Composite + heavy statistical marks
+- [ ] All 4 composite marks (`mark_boxplot`, `mark_errorbar`, `mark_errorband`, `mark_ribbon`) work
+- [ ] All 7 heavy statistical marks (`mark_contour`, `mark_violin`, `mark_qq`, `mark_raster`, `mark_swarm`, `mark_hex`, `mark_function`) work
+- [ ] New Phase 5 transforms (Outliers, ErrorExtent, Contour, QQ, Raster, Hex, Swarm, BoxStats, Violin) all have round-trip + correctness tests
+- [ ] New SVG primitives in `SvgBuffer` (image, polygon, beeswarm) emit deterministic SVG
+- [ ] `mark_smooth(ci=...)` CI band renders via the new ribbon mark
 
 ### Phase 9 — Convenience API
 - [ ] Each figure-level function in `ferrum-spec.md §3.14` is implemented
