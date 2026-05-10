@@ -279,3 +279,12 @@ def test_chart_spec_transforms_getter_returns_list_of_correct_classes():
     assert isinstance(ts[2], Smooth)
     assert isinstance(ts[3], Aggregate)
     assert isinstance(ts[4], Summary)
+
+
+def test_chart_spec_color_round_trip():
+    from ferrum import ChartSpec, EncodingSpec
+    s = ChartSpec(mark="point", x="a", y="b", color="species")
+    j = s.to_json()
+    assert '"color"' in j
+    parsed = ChartSpec.from_json(j)
+    assert parsed == s

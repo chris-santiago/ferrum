@@ -24,6 +24,7 @@ class ChartSpec:
     mark: str
     x: Optional[EncodingSpec]
     y: Optional[EncodingSpec]
+    color: Optional[EncodingSpec]
     data: str
     transforms: List[object]
 
@@ -33,6 +34,7 @@ class ChartSpec:
         mark: MarkStr,
         x: Union[str, EncodingSpec, None] = None,
         y: Union[str, EncodingSpec, None] = None,
+        color: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
         transforms: Optional[List[object]] = None,
     ) -> None: ...

@@ -115,6 +115,8 @@ pub struct Encoding {
     pub x: Option<EncodingSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub y: Option<EncodingSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<EncodingSpec>,
 }
 
 #[cfg(test)]
@@ -168,6 +170,7 @@ mod tests {
         let e = Encoding {
             x: Some(EncodingSpec { field: "price".into(), type_: None }),
             y: Some(EncodingSpec { field: "weight".into(), type_: Some(DataType::Quantitative) }),
+            color: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(
@@ -183,5 +186,32 @@ mod tests {
         let e = Encoding::default();
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn test_encoding_round_trip_with_color() {
+        let e = Encoding {
+            x: Some(EncodingSpec { field: "price".into(), type_: None }),
+            y: Some(EncodingSpec { field: "weight".into(), type_: None }),
+            color: Some(EncodingSpec { field: "species".into(), type_: Some(DataType::Nominal) }),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(
+            json,
+            r#"{"x":{"field":"price"},"y":{"field":"weight"},"color":{"field":"species","type":"nominal"}}"#,
+        );
+        let parsed: Encoding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn test_encoding_omits_color_when_none() {
+        let e = Encoding {
+            x: Some(EncodingSpec { field: "a".into(), type_: None }),
+            y: Some(EncodingSpec { field: "b".into(), type_: None }),
+            color: None,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(json, r#"{"x":{"field":"a"},"y":{"field":"b"}}"#);
     }
 }

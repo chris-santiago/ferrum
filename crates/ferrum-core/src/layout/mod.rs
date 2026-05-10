@@ -318,6 +318,7 @@ mod tests {
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "a".into(), type_: None }),
                 y: Some(EncodingSpec { field: "b".into(), type_: None }),
+                color: None,
             },
             transforms: Vec::new(),
             facet: None,
