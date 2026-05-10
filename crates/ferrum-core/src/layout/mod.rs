@@ -30,7 +30,7 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     LegendDirection, LegendEntry, LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
 };
-pub use self::panel::{FacetKey, PanelLayout};
+pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,7 +227,7 @@ pub fn compute_layout(
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
             rect = Rect::ZERO;
         }
-        panels.push(PanelLayout { plot_area: rect, facet_key, row, col });
+        panels.push(PanelLayout { plot_area: rect, facet_key, row, col, strip_title: None });
 
         if rect != Rect::ZERO {
             let y_axis = axis::layout_y_axis(
