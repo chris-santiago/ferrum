@@ -104,9 +104,61 @@ class Chart:
         ``_pending_stat_mark`` sentinel.  ``_resolve_pending`` is called at the
         start of every render/spec-build path to apply the desugar against the
         now-populated encoding dict.
+
+        Two sentinel shapes are supported:
+        - 2-tuple ``(kind, kwargs)`` — legacy form for density/histogram/smooth,
+          dispatched by ``kind`` below.
+        - 3-tuple ``(kind, kwargs, desugar_fn)`` — generic form used by composite
+          marks (Phase 8b Tasks 23-33). ``desugar_fn(x_field, y_field, **kwargs)``
+          may return a 5-tuple ``("__layered__", transforms, _, _, layers)`` to
+          emit a multi-layer ChartSpec, or the legacy 3-tuple
+          ``(mark, transforms, remap)`` for a single-mark desugar.
         """
         if self._pending_stat_mark is None:
             return self
+        # 3-tuple form: generic desugar callable.
+        if len(self._pending_stat_mark) == 3:
+            kind, kwargs, desugar_fn = self._pending_stat_mark
+            x_enc = self._encoding.get("x")
+            y_enc = self._encoding.get("y")
+            x_field = (
+                (x_enc.field if isinstance(x_enc, ChannelBase) else x_enc)
+                if x_enc is not None
+                else None
+            )
+            y_field = (
+                (y_enc.field if isinstance(y_enc, ChannelBase) else y_enc)
+                if y_enc is not None
+                else None
+            )
+            result = desugar_fn(x_field, y_field, **kwargs)
+            new = self._clone()
+            new._pending_stat_mark = None
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # ("__layered__", transforms, _, _, layers)
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(self._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode in to_spec
+                return new
+            # Legacy single-mark 3-tuple: (mark, transforms, remap)
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + list(transforms or [])
+            if remap:
+                from ferrum.encoding import X, X2, Y, Y2  # noqa: F401
+                if "x" in remap:
+                    new._encoding["x"] = X(remap["x"], type="Q")
+                if "y" in remap:
+                    new._encoding["y"] = Y(remap["y"], type="Q")
+                if "x2" in remap:
+                    new._encoding["x2"] = X2(remap["x2"], type="Q")
+            return new
+        # 2-tuple legacy form.
         kind, kwargs = self._pending_stat_mark
         new = self._clone()
         new._pending_stat_mark = None
@@ -441,7 +493,7 @@ class Chart:
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
-            for axis in ("x", "y", "color", "size", "shape", "opacity"):
+            for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity"):
                 ch = layer.get("encoding", {}).get(axis)
                 if ch is None:
                     continue
@@ -461,10 +513,17 @@ class Chart:
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
-            mark_style = layer.get("mark_style") or {}
+            # Accept either legacy `mark_style` (8a layered overlays) or
+            # `mark_kwargs` (composite-mark desugar, Phase 8b Tasks 23-33).
+            mark_style = layer.get("mark_style") or layer.get("mark_kwargs") or {}
             layer_dict: dict = {"mark": layer.get("mark", "point"), "encoding": encoding_dict}
             if mark_style:
                 layer_dict["mark_style"] = dict(mark_style)
+            # data_source: composite-mark layers may pull from a named transform
+            # output instead of the final pipeline batch. Only emit when set.
+            data_source = layer.get("data_source")
+            if data_source is not None:
+                layer_dict["data_source"] = data_source
             # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
             raw_transforms = layer.get("transforms") or []
             if raw_transforms:
@@ -532,6 +591,25 @@ class Chart:
             kw["layers"] = resolved._build_layers_list()
         return ChartSpec(**kw)
 
+    def _build_spec(self):
+        """Build the chart spec for callers that want typed Python access to
+        layers (composite-mark tests, future internal renderer wiring).
+
+        For single-layer charts this is a thin alias for ``to_spec``. For
+        layered charts it returns a Python-side ``_SpecView`` that wraps the
+        underlying ``ChartSpec`` and exposes ``.layers`` as a list of
+        ``types.SimpleNamespace`` items with ``.mark``, ``.encoding``,
+        ``.mark_kwargs``, and ``.data_source`` attributes — matching the
+        Layer-instance contract from spec §12.1 without requiring a parallel
+        ``PyLayer`` Rust class. JSON / serialization remains the underlying
+        ``ChartSpec`` (delegated via ``__getattr__``).
+        """
+        resolved = self._resolve_pending()
+        spec = resolved.to_spec()
+        if resolved._layers is None:
+            return spec
+        return _SpecView(spec, resolved._layers)
+
     def to_json(self, *, indent=None) -> str:
         spec = self.to_spec()
         return spec.to_json()
@@ -586,3 +664,57 @@ class Chart:
 
     def __repr__(self) -> str:
         return f"Chart(mark={self._mark!r}, encoding={list(self._encoding.keys())})"
+
+
+class _SpecView:
+    """Python-side typed view over a layered ``ChartSpec``.
+
+    Exposes ``.layers`` as a list of ``types.SimpleNamespace`` items so callers
+    can write ``spec.layers[0].mark.name`` and ``spec.layers[0].data_source``
+    against the spec returned by ``Chart._build_spec()``. All other attribute
+    access (``to_json``, ``mark``, ``encoding``, ``transforms``, etc.) and
+    serialization fall through to the underlying ``ChartSpec`` instance.
+
+    This is the Python-side typed view, not a parallel Rust type — Rust's
+    ``coerce_layers`` already converts the same source dicts into ``Layer``
+    structs internally during ``ChartSpec(...)`` construction.
+    """
+
+    __slots__ = ("_spec", "_layer_dicts", "_layers_cached")
+
+    def __init__(self, spec, layer_dicts: list) -> None:
+        self._spec = spec
+        self._layer_dicts = layer_dicts
+        self._layers_cached: Optional[list] = None
+
+    @property
+    def layers(self) -> list:
+        if self._layers_cached is not None:
+            return self._layers_cached
+        from types import SimpleNamespace
+        out = []
+        for d in self._layer_dicts:
+            mark_name = d.get("mark", "point")
+            mark_obj = SimpleNamespace(name=mark_name)
+            mark_kwargs = d.get("mark_kwargs") or d.get("mark_style")
+            ns = SimpleNamespace(
+                mark=mark_obj,
+                encoding=d.get("encoding") or {},
+                mark_kwargs=mark_kwargs if mark_kwargs else None,
+                data_source=d.get("data_source"),
+                transforms=list(d.get("transforms") or []),
+            )
+            out.append(ns)
+        self._layers_cached = out
+        return out
+
+    def to_json(self, *args, **kwargs) -> str:
+        return self._spec.to_json(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        # Called only if normal attribute lookup fails — delegates everything
+        # else to the underlying ChartSpec.
+        return getattr(self._spec, name)
+
+    def __repr__(self) -> str:
+        return f"_SpecView({self._spec!r}, layers={len(self._layer_dicts)})"
