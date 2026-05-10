@@ -35,3 +35,33 @@ def test_deferred_mark_error_for_9_plus_mark():
 def test_phase_8b_marks_set_includes_composites_and_heavy_stats():
     from ferrum.marks import PHASE_8B_MARKS
     assert {"boxplot", "errorbar", "violin", "raster"}.issubset(PHASE_8B_MARKS)
+
+
+def test_desugar_density_returns_area_with_kde_transform():
+    from ferrum.marks.statistical import desugar_density
+    from ferrum import Kde
+    mark, transforms, remap = desugar_density("price")
+    assert mark == "area"
+    assert len(transforms) == 1 and isinstance(transforms[0], Kde)
+    assert remap == {"y": "density"}
+
+
+def test_desugar_histogram_returns_bar_with_bin_transform():
+    from ferrum.marks.statistical import desugar_histogram
+    from ferrum import Bin
+    mark, transforms, remap = desugar_histogram("price", bin_count=20)
+    assert mark == "bar"
+    assert isinstance(transforms[0], Bin)
+    assert remap == {"x": "bin_start", "x2": "bin_end", "y": "count"}
+
+
+def test_desugar_smooth_warns_on_ci_kwarg():
+    import warnings
+    from ferrum._warn import reset_warnings
+    from ferrum.marks.statistical import desugar_smooth
+
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        desugar_smooth("x_col", "y_col", ci=0.95)
+    assert any("ci=" in str(wi.message) and "Phase 8b" in str(wi.message) for wi in w)
