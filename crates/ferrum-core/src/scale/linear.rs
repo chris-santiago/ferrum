@@ -7,6 +7,38 @@ use super::core::{validate_continuous_pair, Scale};
 pub struct LinearScale(Scale);
 
 impl LinearScale {
+    /// Crate-internal constructor (no PyO3, no validation), for render-side use.
+    pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, clamp: bool, nice: bool) -> Self {
+        let mut s = Scale::Linear {
+            domain: [domain[0], domain[1]],
+            range:  [range[0],  range[1]],
+            clamp,
+        };
+        if nice {
+            s = s.nice();
+        }
+        LinearScale(s)
+    }
+
+    /// Crate-internal scale call (no PyO3 boundary).
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
+        self.0.scale_f64(x)
+    }
+
+    /// Crate-internal tick call.
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
+        self.0.ticks(Some(count))
+    }
+
+    /// Pixel-range pair `[lo, hi]` of the underlying scale. Used by `ScaleKind::pixel_range`.
+    pub(crate) fn range_pair(&self) -> [f64; 2] {
+        match &self.0 {
+            Scale::Linear { range, .. } => *range,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         match &self.0 {
             Scale::Linear { domain, range, clamp } => format!(

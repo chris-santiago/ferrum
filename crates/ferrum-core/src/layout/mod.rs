@@ -30,7 +30,7 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     LegendDirection, LegendEntry, LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
 };
-pub use self::panel::{FacetKey, PanelLayout};
+pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,11 +78,14 @@ impl std::fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Theme fields actually read by Phase 6. Keeps the layout engine decoupled
-/// from a full Theme type (which lives in Phase 8 grammar). Phase 7+ will
-/// translate `ferrum.Theme` into this shape.
+/// Theme fields actually read by Phase 6 + Phase 7. Kept decoupled from a full
+/// Theme type — Phase 8 grammar will translate ferrum.Theme into this shape.
+///
+/// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
+/// and `from_hex_str` helper; for now we construct directly via Srgba::new.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeInputs {
+    // Phase 6 layout fields.
     pub padding: f64,
     pub column_padding: f64,
     pub row_padding: f64,
@@ -90,11 +93,42 @@ pub struct ThemeInputs {
     pub label_font_size: f64,
     pub title_font_size: f64,
     pub legend_orient: LegendOrient,
+
+    // Phase 7 render fields — sizes/widths/opacities.
+    pub point_size: f64,
+    pub line_stroke_width: f64,
+    pub bar_corner_radius: f64,
+    pub area_opacity: f64,
+    pub default_opacity: f64,
+    pub axis_line_width: f64,
+    pub tick_size: f64,
+    pub grid_width: f64,
+    pub grid: bool,
+    pub strip_text_size: f64,
+    pub strip_padding: f64,
+
+    // Phase 7 render fields — colors.
+    pub mark_color: palette::Srgba<u8>,
+    pub axis_line_color: palette::Srgba<u8>,
+    pub tick_color: palette::Srgba<u8>,
+    pub grid_color: palette::Srgba<u8>,
+    pub font_color: palette::Srgba<u8>,
+    pub background_color: palette::Srgba<u8>,
+    pub strip_background_color: palette::Srgba<u8>,
 }
 
 impl Default for ThemeInputs {
     fn default() -> Self {
+        // OKABE_ITO[0] = #E69F00 = (230, 159, 0).
+        let okabe_orange = palette::Srgba::new(0xE6, 0x9F, 0x00, 0xFF);
+        let neutral_888  = palette::Srgba::new(0x88, 0x88, 0x88, 0xFF);
+        let neutral_eee  = palette::Srgba::new(0xEE, 0xEE, 0xEE, 0xFF);
+        let text_222     = palette::Srgba::new(0x22, 0x22, 0x22, 0xFF);
+        let bg_white     = palette::Srgba::new(0xFF, 0xFF, 0xFF, 0xFF);
+        let strip_bg     = palette::Srgba::new(0xF0, 0xF0, 0xF0, 0xFF);
+
         Self {
+            // Phase 6.
             padding: DEFAULT_PADDING,
             column_padding: DEFAULT_PADDING,
             row_padding: DEFAULT_PADDING,
@@ -102,6 +136,28 @@ impl Default for ThemeInputs {
             label_font_size: DEFAULT_LABEL_FONT_SIZE,
             title_font_size: DEFAULT_TITLE_FONT_SIZE,
             legend_orient: LegendOrient::Right,
+
+            // Phase 7 sizes / widths / opacities.
+            point_size: 30.0,
+            line_stroke_width: 1.5,
+            bar_corner_radius: 0.0,
+            area_opacity: 0.4,
+            default_opacity: 1.0,
+            axis_line_width: 1.0,
+            tick_size: 4.0,
+            grid_width: 1.0,
+            grid: true,
+            strip_text_size: 13.0,
+            strip_padding: 4.0,
+
+            // Phase 7 colors.
+            mark_color: okabe_orange,
+            axis_line_color: neutral_888,
+            tick_color: neutral_888,
+            grid_color: neutral_eee,
+            font_color: text_222,
+            background_color: bg_white,
+            strip_background_color: strip_bg,
         }
     }
 }
@@ -220,6 +276,12 @@ pub fn compute_layout(
         vec![(0, 0, plot_region, None)]
     };
 
+    let strip_band_height = if spec.facet.is_some() {
+        metrics.line_height(theme.strip_text_size) + 2.0 * theme.strip_padding
+    } else {
+        0.0
+    };
+
     // 7. Per-panel: clamp degenerate rects, collect axes.
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
     for (panel_index, (row, col, mut rect, facet_key)) in panel_rects.into_iter().enumerate() {
@@ -227,7 +289,45 @@ pub fn compute_layout(
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
             rect = Rect::ZERO;
         }
-        panels.push(PanelLayout { plot_area: rect, facet_key, row, col });
+
+        let strip_title = if let Some(key) = &facet_key {
+            if rect != Rect::ZERO {
+                let strip_rect = Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: strip_band_height,
+                };
+                let new_panel_rect = Rect {
+                    x: rect.x,
+                    y: rect.y + strip_band_height,
+                    w: rect.w,
+                    h: (rect.h - strip_band_height).max(0.0),
+                };
+                rect = new_panel_rect;
+                Some(StripTitleLayout {
+                    text: key.value.clone(),
+                    anchor: (
+                        strip_rect.x + strip_rect.w / 2.0,
+                        strip_rect.y + theme.strip_padding + theme.strip_text_size,
+                    ),
+                    align: TextAnchor::Middle,
+                    font_size: theme.strip_text_size,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        panels.push(PanelLayout {
+            plot_area: rect,
+            facet_key,
+            row,
+            col,
+            strip_title,
+        });
 
         if rect != Rect::ZERO {
             let y_axis = axis::layout_y_axis(
@@ -318,6 +418,7 @@ mod tests {
             encoding: Encoding {
                 x: Some(EncodingSpec { field: "a".into(), type_: None }),
                 y: Some(EncodingSpec { field: "b".into(), type_: None }),
+                color: None,
             },
             transforms: Vec::new(),
             facet: None,
@@ -527,5 +628,71 @@ mod tests {
             LayoutWarning::PanelsDropped { count: 1 }
         ));
         assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+    }
+
+    #[test]
+    fn compute_layout_faceted_emits_strip_titles() {
+        let spec = faceted_spec(3);
+        let groups = three_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            &m,
+        ).unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        for (i, panel) in result.panels.iter().enumerate() {
+            let strip = panel.strip_title.as_ref()
+                .unwrap_or_else(|| panic!("panel {i} missing strip_title"));
+            assert!(!strip.text.is_empty());
+            assert_eq!(strip.font_size, 13.0);
+            assert!(strip.anchor.0 >= panel.plot_area.x);
+            assert!(strip.anchor.0 <= panel.plot_area.x + panel.plot_area.w);
+        }
+    }
+
+    #[test]
+    fn compute_layout_unfaceted_omits_strip_titles() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 600.0, height: 400.0 },
+            &axes,
+            &[],
+            &[],
+            &m,
+        ).unwrap();
+        assert!(result.panels[0].strip_title.is_none());
+    }
+
+    #[test]
+    fn theme_inputs_default_includes_render_fields() {
+        let t = ThemeInputs::default();
+        // Phase 6 fields preserved.
+        assert_eq!(t.padding, DEFAULT_PADDING);
+        assert_eq!(t.label_font_size, DEFAULT_LABEL_FONT_SIZE);
+        // Phase 7 additions.
+        assert_eq!(t.point_size, 30.0);
+        assert_eq!(t.line_stroke_width, 1.5);
+        assert_eq!(t.bar_corner_radius, 0.0);
+        assert_eq!(t.area_opacity, 0.4);
+        assert_eq!(t.default_opacity, 1.0);
+        assert_eq!(t.axis_line_width, 1.0);
+        assert_eq!(t.tick_size, 4.0);
+        assert_eq!(t.grid_width, 1.0);
+        assert_eq!(t.grid, true);
+        assert_eq!(t.strip_text_size, 13.0);
+        assert_eq!(t.strip_padding, 4.0);
     }
 }

@@ -24,6 +24,7 @@ class ChartSpec:
     mark: str
     x: Optional[EncodingSpec]
     y: Optional[EncodingSpec]
+    color: Optional[EncodingSpec]
     data: str
     transforms: List[object]
 
@@ -33,6 +34,7 @@ class ChartSpec:
         mark: MarkStr,
         x: Union[str, EncodingSpec, None] = None,
         y: Union[str, EncodingSpec, None] = None,
+        color: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
         transforms: Optional[List[object]] = None,
     ) -> None: ...
@@ -253,3 +255,23 @@ def compute_layout(
     legend_orient: str = "right",
     label_angle: float | None = None,
 ) -> dict: ...
+
+
+def render_svg(
+    spec: ChartSpec,
+    data: Any,
+    *,
+    viewport: tuple[float, float],
+    theme: Optional[dict] = None,
+    config: Optional[dict] = None,
+) -> str: ...
+
+
+def render_png(
+    spec: ChartSpec,
+    data: Any,
+    *,
+    viewport: tuple[float, float],
+    theme: Optional[dict] = None,
+    config: Optional[dict] = None,
+) -> bytes: ...

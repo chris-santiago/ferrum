@@ -915,6 +915,16 @@ RenderConfig(
 
 `raster_threshold=None` and `raster_behavior="silent"` are not equivalent: `None` disables auto-raster entirely (the chart renders all marks through the requested backend, even if performance suffers); `"silent"` keeps auto-raster active but suppresses the substitution warning.
 
+> **2026-05-09 (Phase 7 implementation note):** Phase 7 honors the following
+> `RenderConfig` fields: `scale`, `embed_fonts`, `background`, `width`,
+> `height`. The remaining fields (`format`, `engine`, `raster_threshold`,
+> `raster_behavior`, `raster_aggregate`, `raster_cmap`, `backend`,
+> `tile_parallel`, `font_path`) are deferred to subsequent phases that ship
+> their corresponding features. `embed_fonts` is treated as always-true in
+> Phase 7 for visual determinism (rendered text uses the bundled Inter
+> Regular regardless of system font availability); future phases may surface
+> the `False` case for size-conscious users.
+
 #### Chart output methods
 
 ```

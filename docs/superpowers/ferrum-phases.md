@@ -63,7 +63,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **4** | Scale engine | `LinearScale`, `LogScale`, `TimeScale`, `OrdinalScale`, `QuantileScale`, `ThresholdScale`, `SymlogScale`; domain/range mapping, tick generation | 3 | [`2026-05-09-scale-engine-design.md`](specs/2026-05-09-scale-engine-design.md) | **done** |
 | **5** | Stat engine | KDE, bootstrap CI, linear/LOESS regression, binning (Sturges floor), aggregation — all as Rust stat transforms declared in the chart spec | 3 | [`2026-05-09-stat-engine-design.md`](specs/2026-05-09-stat-engine-design.md) | **done** |
 | **6** | Layout engine | Constraint solver for facet sizes, legend placement, axis label collision avoidance | 3 | [`2026-05-09-layout-engine-design.md`](specs/2026-05-09-layout-engine-design.md) | **done** |
-| **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | *(not yet written)* | pending |
+| **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | [`2026-05-09-static-renderer-design.md`](specs/2026-05-09-static-renderer-design.md) | **done** |
 | **8** | Grammar API surface (Python) | `Chart`, `Layer`, encoding channels (`X`, `Y`, `Color`, `Size`, etc.), `+`/`\|`/`&` composition operators, `Facet`, `Repeat`, themes-as-values | 7 | *(not yet written)* | pending |
 | **9** | Convenience / figure-level API | `displot`, `lmplot`, `roc_chart`, `pairplot`, etc. as sugar over the grammar — they must desugar to valid `Chart` specs, not bypass the engine | 8 | *(not yet written)* | pending |
 | **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter), model-diagnostic marks (`ConfusionMark`, `ROCMark`, `CalibrationMark`, etc.), `Visualizer` convenience wrappers | 8 | *(not yet written)* | pending |
@@ -113,10 +113,10 @@ A phase is `done` when all of the following are true:
 - [x] `cargo test` covers basic facet layout arithmetic
 
 ### Phase 7 — Static renderer
-- [ ] A scatter plot from a spec file renders to a valid SVG file
-- [ ] All eight primitive marks render without panics on a minimal spec
-- [ ] PNG output works (resvg or equivalent)
-- [ ] Output includes correct scale ticks, axis labels, and a legend
+- [x] A scatter plot from a spec file renders to a valid SVG file
+- [x] All eight primitive marks render without panics on a minimal spec
+- [x] PNG output works (resvg or equivalent)
+- [x] Output includes correct scale ticks, axis labels, and a legend
 
 ### Phase 8 — Grammar API surface
 - [ ] `import ferrum; ferrum.Chart(data).mark_point().encode(x="col_a", y="col_b").show()` works

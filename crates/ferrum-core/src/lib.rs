@@ -5,6 +5,7 @@ mod spec;
 mod scale;
 pub(crate) mod transform;
 pub(crate) mod layout;
+pub(crate) mod render;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -25,5 +26,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::aggregate::PyAggregate>()?;
     m.add_class::<transform::summary::PySummary>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
     Ok(())
 }

@@ -27,11 +27,12 @@ pub struct ChartSpec {
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, data = None, transforms = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, color = None, data = None, transforms = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
         y: Option<&Bound<'_, PyAny>>,
+        color: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
@@ -40,6 +41,7 @@ impl ChartSpec {
 
         let x = x.map(coerce_encoding).transpose()?;
         let y = y.map(coerce_encoding).transpose()?;
+        let color = color.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -57,7 +59,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y },
+            encoding: Encoding { x, y, color },
             transforms,
             facet: None,
         })
@@ -76,6 +78,11 @@ impl ChartSpec {
     #[getter]
     fn y(&self) -> Option<EncodingSpec> {
         self.encoding.y.clone()
+    }
+
+    #[getter]
+    fn color(&self) -> Option<EncodingSpec> {
+        self.encoding.color.clone()
     }
 
     #[getter]
@@ -202,6 +209,7 @@ mod tests {
                     field: "weight".into(),
                     type_: Some(DataType::Quantitative),
                 }),
+                color: None,
             },
             transforms: Vec::new(),
             facet: None,
@@ -280,6 +288,7 @@ mod tests {
                     field: "weight".into(),
                     type_: Some(DataType::Quantitative),
                 }),
+                color: None,
             },
             transforms: Vec::new(),
             facet: None,
