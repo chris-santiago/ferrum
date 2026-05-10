@@ -28,11 +28,13 @@ from ferrum.themes import (
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
+from ferrum.coord import CoordFlip
 
 __version__ = "0.1.0"
 
 __all__ = [
     "Chart",
+    "CoordFlip",
     "Aggregate",
     "AggregateOp",
     "Bin",

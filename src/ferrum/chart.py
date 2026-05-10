@@ -208,6 +208,126 @@ class Chart:
         new._transforms = list(self._transforms) + list(transforms)
         return new
 
+    # ---- Facet / coord / theme ----
+
+    def facet(
+        self,
+        field: Optional[str] = None,
+        *,
+        row: Optional[str] = None,
+        col: Optional[str] = None,
+        ncols: Optional[int] = None,
+        nrows: Optional[int] = None,
+    ) -> "Chart":
+        """Set faceting on this chart.
+
+        Single-field wrap mode: ``facet(field="col")`` or ``facet(col="col")``.
+        Grid mode: ``facet(row="year", col="species")``.
+        """
+        new = self._clone()
+        if field is not None:
+            new._facet = {
+                "field": field,
+                "mode_kind": "wrap",
+                "ncols": ncols,
+                "nrows": nrows,
+            }
+        elif row is not None and col is not None:
+            new._facet = {
+                "row": row,
+                "col": col,
+                "mode_kind": "grid",
+                "nrows": nrows,
+                "ncols": ncols,
+            }
+        elif col is not None:
+            new._facet = {
+                "field": col,
+                "mode_kind": "wrap",
+                "ncols": ncols,
+                "nrows": nrows,
+            }
+        elif row is not None:
+            new._facet = {
+                "field": row,
+                "mode_kind": "wrap",
+                "nrows": nrows,
+                "ncols": ncols,
+            }
+        else:
+            raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
+        return new
+
+    def theme(self, theme: Any) -> "Chart":
+        """Attach a Theme to this chart instance (overrides the process default)."""
+        new = self._clone()
+        new._theme = theme
+        return new
+
+    def coord(self, coord: Any) -> "Chart":
+        """Set the coordinate system. Only CoordFlip is supported in Phase 8a."""
+        from ferrum.coord import CoordFlip
+        new = self._clone()
+        if isinstance(coord, CoordFlip):
+            new._coord = "flip"
+        else:
+            raise TypeError(
+                f"unsupported coord: {type(coord).__name__}; only CoordFlip supported in Phase 8a"
+            )
+        return new
+
+    def _build_layers_list(self) -> list:
+        """Convert internal _layers to a list of JSON-serializable dicts for Rust."""
+        from ferrum import EncodingSpec
+        out = []
+        for layer in (self._layers or []):
+            encoding_dict: dict = {}
+            for axis in ("x", "y", "color", "size", "shape", "opacity"):
+                ch = layer.get("encoding", {}).get(axis)
+                if ch is None:
+                    continue
+                if hasattr(ch, "to_encoding_spec_dict"):
+                    d = ch.to_encoding_spec_dict()
+                    field = d.pop("field", None)
+                    if field is None:
+                        continue
+                    enc_spec = EncodingSpec(field, **d)
+                    # Convert EncodingSpec to a JSON-friendly dict via its to_json method
+                    import json as _json
+                    enc_json = enc_spec.to_json()
+                    encoding_dict[axis] = _json.loads(enc_json)
+                elif isinstance(ch, str):
+                    encoding_dict[axis] = {"field": ch}
+            mark_style = layer.get("mark_style") or {}
+            layer_dict: dict = {"mark": layer.get("mark", "point"), "encoding": encoding_dict}
+            if mark_style:
+                layer_dict["mark_style"] = dict(mark_style)
+            # Transforms in layers: skip Python objects that aren't JSON-serializable for now.
+            # Only pass transforms if they're already plain dicts.
+            transforms = [t for t in (layer.get("transforms") or []) if isinstance(t, dict)]
+            if transforms:
+                layer_dict["transforms"] = transforms
+            out.append(layer_dict)
+        return out
+
+    def _build_facet_dict(self) -> dict:
+        """Convert internal _facet to the JSON dict Rust's FacetSpec expects."""
+        f = self._facet
+        mode_kind = f.get("mode_kind", "wrap")
+        if mode_kind == "wrap":
+            field = f["field"]
+            ncols = f.get("ncols") or 1  # u32 required; default 1
+            return {"field": field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+        else:  # grid
+            # Rust FacetSpec has a single `field`. Use col as primary, row for nrows.
+            field = f.get("col", f.get("field", ""))
+            nrows = f.get("nrows") or 1
+            ncols = f.get("ncols") or 1
+            return {
+                "field": field,
+                "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
+            }
+
     # ---- Properties ----
 
     def properties(self, *, width=None, height=None, title=None, description=None) -> "Chart":
@@ -238,6 +358,14 @@ class Chart:
                 kw[axis] = EncodingSpec(field, **d)
         if self._transforms:
             kw["transforms"] = list(self._transforms)
+        if self._facet is not None:
+            kw["facet"] = self._build_facet_dict()
+        if self._coord is not None:
+            kw["coord"] = self._coord
+        if self._mark_kwargs:
+            kw["mark_style"] = dict(self._mark_kwargs)
+        if self._layers is not None:
+            kw["layers"] = self._build_layers_list()
         return ChartSpec(**kw)
 
     def to_json(self, *, indent=None) -> str:
