@@ -17,4 +17,5 @@ pub(crate) mod violin;
 pub(crate) mod contour;
 pub(crate) mod qq;
 pub(crate) mod raster;
+pub(crate) mod hex;
 pub(crate) mod linalg;

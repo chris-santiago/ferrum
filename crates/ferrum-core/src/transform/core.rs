@@ -16,6 +16,7 @@ use crate::transform::kde_2d::Kde2DSpec;
 use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::qq::{self, QQSpec};
 use crate::transform::raster::{self, RasterSpec};
+use crate::transform::hex::{self, HexSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -36,6 +37,7 @@ pub(crate) enum TransformSpec {
     Contour(ContourSpec),
     Qq(QQSpec),
     Raster(RasterSpec),
+    Hex(HexSpec),
 }
 
 impl TransformSpec {
@@ -54,6 +56,7 @@ impl TransformSpec {
             Self::Contour(s)   => contour::apply(s, batch),
             Self::Qq(s)        => qq::apply(s, batch),
             Self::Raster(s)    => raster::apply(s, batch),
+            Self::Hex(s)       => hex::apply(s, batch),
         }
     }
 }
@@ -158,6 +161,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Contour(s) => s.name.as_deref(),
         TransformSpec::Qq(s) => s.name.as_deref(),
         TransformSpec::Raster(s) => s.name.as_deref(),
+        TransformSpec::Hex(s) => s.name.as_deref(),
     }
 }
 

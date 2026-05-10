@@ -347,6 +347,18 @@ class Raster:
         name: Optional[str] = None,
     ) -> None: ...
 
+class Hex:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bin_size: Optional[float] = None,
+        aggregate: str = "count",
+        field: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,
