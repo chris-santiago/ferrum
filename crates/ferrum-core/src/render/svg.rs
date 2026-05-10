@@ -136,6 +136,18 @@ impl SvgBuffer {
         self.buf.push_str("</text>");
     }
 
+    /// Embed a PNG as <image href="data:image/png;base64,..." x=... y=... width=... height=.../>.
+    /// `png_bytes` must be a valid PNG-encoded buffer (use render::rasterize::encode_png).
+    /// Attribute order is pinned: x, y, width, height, href.
+    pub fn image(&mut self, x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        self.buf.push_str(&format!(
+            r#"<image x="{}" y="{}" width="{}" height="{}" href="data:image/png;base64,{}"/>"#,
+            fmt_f(x), fmt_f(y), fmt_f(w), fmt_f(h), b64
+        ));
+    }
+
     pub fn clip_open(&mut self, id: &str, rect: Rect) {
         self.buf.push_str(&format!(
             "<defs><clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
@@ -314,5 +326,47 @@ mod tests {
         assert!(out.contains("<clipPath id=\"c1\">"));
         assert!(out.contains("<g clip-path=\"url(#c1)\">"));
         assert_eq!(out.matches("</g>").count(), 1);
+    }
+
+    #[test]
+    fn image_emits_data_url_with_fixed_attribute_order() {
+        use base64::Engine;
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let png_bytes: &[u8] = b"\x89PNG\r\n\x1a\n";  // PNG magic bytes (truncated)
+        svg.image(10.0, 20.0, 50.0, 30.0, png_bytes);
+        let out = svg.finish();
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        let expected_href = format!("data:image/png;base64,{b64}");
+
+        // Attribute order: x, y, width, height, href (alphabetical NOT used; this is our pinned order)
+        let needle = format!(r#"<image x="10" y="20" width="50" height="30" href="{expected_href}"/>"#);
+        assert!(out.contains(&needle), "image markup missing or wrong order:\n{out}");
+    }
+
+    #[test]
+    fn image_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nfoo";
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.image(0.0, 0.0, 10.0, 10.0, png);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "image emission must be deterministic");
+    }
+
+    #[test]
+    fn image_does_not_emit_whitespace_in_href() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        svg.image(0.0, 0.0, 10.0, 10.0, b"\x89PNG\r\n\x1a\nx");
+        let out = svg.finish();
+        let href_start = out.find("data:image/png;base64,").expect("href missing");
+        let href_end = out[href_start..].find('"').unwrap() + href_start;
+        let href_body = &out[href_start..href_end];
+        assert!(!href_body.contains('\n') && !href_body.contains(' '),
+                "href body must be one line: {href_body}");
     }
 }
