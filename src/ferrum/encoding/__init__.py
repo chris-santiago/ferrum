@@ -6,10 +6,14 @@ from ferrum.encoding.appearance import (
     Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
     StrokeWidth, StrokeDash, Size, Shape, Angle,
 )
+from ferrum.encoding.text import (
+    Text, Detail, Tooltip, TooltipField, Href, Description, Key,
+)
 
 __all__ = [
     "X", "Y", "X2", "Y2", "XError", "YError", "XError2", "YError2",
     "Theta", "Radius",
     "Color", "Fill", "Stroke", "Opacity", "FillOpacity", "StrokeOpacity",
     "StrokeWidth", "StrokeDash", "Size", "Shape", "Angle",
+    "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
 ]

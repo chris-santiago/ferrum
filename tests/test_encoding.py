@@ -137,3 +137,19 @@ def test_stroke_with_field_warns_once_on_render_attempt():
         warnings.simplefilter("always")
         Stroke("color")
     assert len(w) == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 18: text/detail/tooltip classes
+# ---------------------------------------------------------------------------
+
+def test_text_channels_all_deferred():
+    from ferrum.encoding import Text, Detail, Tooltip, TooltipField, Href, Description, Key
+    for cls in (Text, Detail, Tooltip, TooltipField, Href, Description, Key):
+        assert cls._renders_in_phase_8a is False
+
+
+def test_tooltip_accepts_multiple_fields():
+    from ferrum.encoding import Tooltip
+    t = Tooltip("a", "b", "c")
+    assert t._field_list == ["a", "b", "c"]
