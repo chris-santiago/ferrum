@@ -1,0 +1,89 @@
+"""ChannelBase — the parent class of all encoding-channel value objects."""
+from __future__ import annotations
+
+from typing import Any, ClassVar, Optional
+
+from ferrum._warn import warn_once
+
+
+class ChannelBase:
+    """Base class for all encoding-channel value objects.
+
+    Subclasses set _channel_name, _renders_in_phase_8a, and _honored_kwargs.
+    Constructor accepts a `field` positional arg + arbitrary keyword arguments;
+    unknown kwargs trigger warn_once.
+    """
+
+    _channel_name: ClassVar[str] = "_unknown_"
+    _renders_in_phase_8a: ClassVar[bool] = False
+    _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type"])
+
+    def __init__(self, field: Optional[str] = None, **kwargs: Any) -> None:
+        if field is not None and not isinstance(field, str):
+            raise TypeError(
+                f"{self.__class__.__name__}: field must be str or None, "
+                f"got {type(field).__name__}"
+            )
+        self.field = field
+        self._kwargs = dict(kwargs)
+        self._validate()
+
+        for k in self._kwargs:
+            if k not in self._honored_kwargs:
+                warn_once(self._channel_name, k)
+
+    def _validate(self) -> None:
+        """Subclasses may override to enforce kwarg-value constraints."""
+        type_ = self._kwargs.get("type")
+        if type_ is not None and type_ not in ("Q", "N", "O", "T",
+                                                 "quantitative", "nominal", "ordinal", "temporal"):
+            raise ValueError(
+                f"{self.__class__.__name__}(type={type_!r}): "
+                f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
+            )
+
+    def to_encoding_spec_dict(self) -> dict:
+        """Return kwargs for the Rust EncodingSpec constructor / serde JSON."""
+        out: dict = {"field": self.field}
+        if (t := self._kwargs.get("type")) is not None:
+            out["type_"] = t
+        for k in ("scale", "title", "axis", "legend", "sort", "stack",
+                  "impute", "scheme", "format", "formatType"):
+            if (v := self._kwargs.get(k)) is not None:
+                out[k] = v
+        return out
+
+    def to_implicit_transforms(self) -> list:
+        """Return a list of transform objects derived from kwargs (bin, aggregate)."""
+        out: list = []
+        bin_arg = self._kwargs.get("bin")
+        if bin_arg:
+            from ferrum import Bin
+            if isinstance(bin_arg, dict):
+                out.append(Bin(self.field, **bin_arg))
+            elif isinstance(bin_arg, bool):
+                out.append(Bin(self.field))
+            else:
+                # Bin instance passed directly
+                out.append(bin_arg)
+        agg = self._kwargs.get("aggregate")
+        if agg:
+            from ferrum import Aggregate, AggregateOp
+            out.append(Aggregate([AggregateOp(self.field or "", agg, f"{agg}_{self.field or 'all'}")]))
+        return out
+
+    def __repr__(self) -> str:
+        kw_parts = [f"{k}={v!r}" for k, v in self._kwargs.items()]
+        body = ", ".join([repr(self.field)] + kw_parts)
+        return f"{self.__class__.__name__}({body})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ChannelBase):
+            return NotImplemented
+        return (self.__class__ == other.__class__
+                and self.field == other.field
+                and self._kwargs == other._kwargs)
+
+    def __hash__(self) -> int:
+        return hash((self.__class__, self.field,
+                     tuple(sorted((k, repr(v)) for k, v in self._kwargs.items()))))
