@@ -6,6 +6,7 @@ from ferrum._core import (
     Bin,
     BoxStats,
     ChartSpec,
+    ContinuousScheme,
     Contour,
     EncodingSpec,
     ErrorExtent,
@@ -33,6 +34,7 @@ from ferrum._core import (
     compose_svg_horizontal,
     compose_svg_vertical,
 )
+from ferrum.schemes import continuous_palette, Gradient
 
 from ferrum.themes import (
     Theme, set_default_theme, get_default_theme, theme_context,
@@ -77,4 +79,6 @@ __all__ = [
     "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
     "Facet", "FacetRow", "FacetCol",
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
+    # Phase 8b
+    "ContinuousScheme", "continuous_palette", "Gradient",
 ]

@@ -84,6 +84,79 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
 }
 
+// --- Phase 8b Task 37: PyO3 bindings for ContinuousScheme + Gradient ---
+
+use pyo3::prelude::*;
+use pyo3::exceptions::PyValueError;
+
+#[pyclass(name = "ContinuousScheme", module = "ferrum._core")]
+#[derive(Debug, Clone)]
+pub struct PyContinuousScheme(pub ContinuousScheme);
+
+#[pymethods]
+impl PyContinuousScheme {
+    /// Look up a built-in continuous colormap by name. Accepted names:
+    /// "viridis", "plasma", "magma", "inferno", "cividis".
+    #[staticmethod]
+    fn from_name(name: &str) -> PyResult<Self> {
+        NamedContinuous::from_name(name)
+            .map(|n| Self(ContinuousScheme::Named(n)))
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "Unknown colormap: '{name}'; available: viridis, plasma, magma, inferno, cividis"
+            )))
+    }
+
+    /// Return a new scheme that samples the inverse of this scheme (1 - t).
+    fn reversed(&self) -> Self {
+        Self(ContinuousScheme::Reverse(Box::new(self.0.clone())))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ContinuousScheme({:?})", self.0)
+    }
+}
+
+/// Construct a `ContinuousScheme` from a list of (t, color) stops where
+/// each color is a CSS-style string ("#rrggbb", "#rrggbbaa", or one of a
+/// handful of named colors). `t` values must be in [0, 1].
+#[pyfunction]
+#[allow(non_snake_case)]
+pub fn Gradient(stops: Vec<(f64, String)>) -> PyResult<PyContinuousScheme> {
+    let mut color_stops = Vec::with_capacity(stops.len());
+    for (t, name) in stops {
+        let color = parse_color_string(&name)
+            .map_err(|e| PyValueError::new_err(format!("Gradient: {e}")))?;
+        color_stops.push((t, color));
+    }
+    Ok(PyContinuousScheme(ContinuousScheme::Gradient(color_stops)))
+}
+
+/// Parse a color string. Accepts `#rrggbb` / `#rrggbbaa` (delegated to
+/// `categorical::from_hex_str`) and a small set of common named colors.
+fn parse_color_string(s: &str) -> Result<Color, String> {
+    let trimmed = s.trim();
+    if trimmed.starts_with('#') {
+        return crate::render::color::categorical::from_hex_str(trimmed)
+            .map_err(|e| format!("{e}"));
+    }
+    let named: Option<(u8, u8, u8)> = match trimmed.to_ascii_lowercase().as_str() {
+        "red"     => Some((255,   0,   0)),
+        "green"   => Some((  0, 128,   0)),
+        "blue"    => Some((  0,   0, 255)),
+        "white"   => Some((255, 255, 255)),
+        "black"   => Some((  0,   0,   0)),
+        "yellow"  => Some((255, 255,   0)),
+        "magenta" => Some((255,   0, 255)),
+        "cyan"    => Some((  0, 255, 255)),
+        "gray" | "grey" => Some((128, 128, 128)),
+        _ => None,
+    };
+    if let Some((r, g, b)) = named {
+        return Ok(from_rgba(r, g, b, 255));
+    }
+    Err(format!("unrecognized color: '{s}' (use a named color or #rrggbb / #rrggbbaa)"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
