@@ -133,6 +133,12 @@ resvg   = "~0.47"
 base64  = "~0.22"
 ```
 
+Then **edit the existing `arrow` line** to add the `"compute"` feature (used by `arrow::compute::filter_record_batch` in Task 20 and `arrow::compute::concat_batches` in Task 22):
+
+```toml
+arrow      = { version = "58", default-features = false, features = ["ipc", "compute"] }
+```
+
 - [ ] **Step 3: Add deps to `crates/ferrum-core/Cargo.toml`**
 
 Edit `crates/ferrum-core/Cargo.toml`. Inside `[dependencies]`, after the `rand_chacha` line, append:
@@ -1061,22 +1067,24 @@ Replace `crates/ferrum-core/src/render/palette.rs` with:
 //! Hardcoded categorical palette (Okabe-Ito). One palette for Phase 7;
 //! Phase 8+ may add a scheme registry.
 
+use std::sync::LazyLock;
+
 use super::color::{from_rgb, Color};
 
-pub const OKABE_ITO: &[Color; 8] = &[
-    from_rgb_const(0xE6, 0x9F, 0x00), // orange
-    from_rgb_const(0x56, 0xB4, 0xE9), // sky blue
-    from_rgb_const(0x00, 0x9E, 0x73), // bluish green
-    from_rgb_const(0xF0, 0xE4, 0x42), // yellow
-    from_rgb_const(0x00, 0x72, 0xB2), // blue
-    from_rgb_const(0xD5, 0x5E, 0x00), // vermillion
-    from_rgb_const(0xCC, 0x79, 0xA7), // reddish purple
-    from_rgb_const(0x00, 0x00, 0x00), // black
-];
-
-const fn from_rgb_const(r: u8, g: u8, b: u8) -> Color {
-    palette::Srgba { color: palette::rgb::Rgb { red: r, green: g, blue: b, standard: std::marker::PhantomData }, alpha: 0xFF }
-}
+/// Okabe-Ito 8-color categorical palette. Lazy-initialized because palette's
+/// `Srgba::new` is not const-fn and the internal struct layout (`Alpha<Rgb<...>, u8>`)
+/// is not stable enough to literal-construct in a `const`. `LazyLock` (Rust 1.80+)
+/// initializes on first access; cost is one-time.
+pub static OKABE_ITO: LazyLock<[Color; 8]> = LazyLock::new(|| [
+    from_rgb(0xE6, 0x9F, 0x00), // orange
+    from_rgb(0x56, 0xB4, 0xE9), // sky blue
+    from_rgb(0x00, 0x9E, 0x73), // bluish green
+    from_rgb(0xF0, 0xE4, 0x42), // yellow
+    from_rgb(0x00, 0x72, 0xB2), // blue
+    from_rgb(0xD5, 0x5E, 0x00), // vermillion
+    from_rgb(0xCC, 0x79, 0xA7), // reddish purple
+    from_rgb(0x00, 0x00, 0x00), // black
+]);
 
 pub fn categorical_color(category_index: usize) -> Color {
     OKABE_ITO[category_index % OKABE_ITO.len()]
@@ -1102,7 +1110,9 @@ mod tests {
 }
 ```
 
-> **Implementer note on `from_rgb_const`:** `palette::Srgba::new` is not currently `const fn`. The literal struct construction in `from_rgb_const` is the workaround — verify against the installed `palette` version. If the field layout differs (e.g., `palette` uses a tuple-struct or a different `standard` parameter), adjust the literal accordingly. If literal construction is impossible due to crate-private fields, fall back to `lazy_static!` or `once_cell::sync::Lazy` for `OKABE_ITO` and drop the `const`. Open the issue, fix it, and continue — this is the only place we touch `palette` internals.
+> **Implementer note on MSRV:** `std::sync::LazyLock` requires Rust 1.80+ (released July 2024). If the project's MSRV is older, swap for `once_cell::sync::Lazy` (add `once_cell = "1"` to workspace deps). Check `rust-toolchain.toml` (if present) or current `rustc --version` to confirm. If MSRV ≥ 1.80, no change needed.
+>
+> **Knock-on for `scale_resolve.rs` (Task 10):** the static now derefs via auto-deref — `palette: OKABE_ITO` won't compile if `OKABE_ITO` is `LazyLock<[Color; 8]>`. Use `palette: &*OKABE_ITO` or `palette: OKABE_ITO.as_slice()` and update `ColorScale::Categorical { palette: &'static [Color] }` accordingly (already a slice, just need a deref at construction). Tests in Task 10 already pass `OKABE_ITO` to assertions — change those to `*OKABE_ITO[0]` or use `categorical_color(0)`.
 
 - [ ] **Step 2: Run tests**
 
@@ -1436,18 +1446,21 @@ pub struct SvgBuffer {
     buf: String,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct FillStroke {
     pub fill: Option<Color>,
     pub stroke: Option<Color>,
     pub stroke_width: f64,
 }
 
+#[derive(Debug, Clone)]
 pub struct Stroke {
     pub stroke: Color,
     pub stroke_width: f64,
     pub stroke_dash: Option<Vec<f64>>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct TextStyle {
     pub fill: Color,
     pub font_size: f64,
@@ -4517,10 +4530,9 @@ pub fn svg_string_to_png_bytes(
     height_px: u32,
     scale: f64,
 ) -> Result<Vec<u8>, RenderError> {
-    let mut fontdb = usvg::fontdb::Database::new();
-    fontdb.load_font_data(INTER_REGULAR.to_vec());
+    let mut opts = usvg::Options::default();
+    opts.fontdb_mut().load_font_data(INTER_REGULAR.to_vec());
 
-    let opts = usvg::Options { fontdb: std::sync::Arc::new(fontdb), ..usvg::Options::default() };
     let tree = usvg::Tree::from_str(svg, &opts)
         .map_err(|e| RenderError::ResvgFailed(format!("usvg parse: {e}")))?;
 
