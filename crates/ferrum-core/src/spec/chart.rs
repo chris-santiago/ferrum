@@ -31,6 +31,8 @@ pub struct ChartSpec {
     pub coord: Option<CoordKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_style: Option<MarkKwargsSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<crate::spec::position::PositionAdjust>,
 }
 
 #[pymethods]
@@ -45,6 +47,7 @@ impl ChartSpec {
         coord = None,                                         // from Task 4
         facet = None,                                         // NEW here
         mark_style = None,                                    // NEW here
+        position = None,                                      // Phase 9c
     ))]
     fn new(
         mark: &str,
@@ -62,6 +65,7 @@ impl ChartSpec {
         coord: Option<&str>,
         facet: Option<&Bound<'_, PyAny>>,
         mark_style: Option<&Bound<'_, PyAny>>,
+        position: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -124,6 +128,17 @@ impl ChartSpec {
             }
         };
 
+        let position = match position {
+            None => None,
+            Some(obj) => {
+                let py = obj.py();
+                let json_module = py.import("json")?;
+                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+                Some(serde_json::from_str(&s).map_err(|e|
+                    PyValueError::new_err(format!("position: {e}")))?)
+            }
+        };
+
         Ok(ChartSpec {
             data,
             mark,
@@ -133,6 +148,7 @@ impl ChartSpec {
             layers,
             coord,
             mark_style,
+            position,
         })
     }
 
@@ -264,6 +280,19 @@ impl ChartSpec {
             None => None,
             Some(CoordKind::Cartesian) => Some("cartesian"),
             Some(CoordKind::Flip) => Some("flip"),
+        }
+    }
+
+    #[getter]
+    fn position(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.position {
+            None => Ok(None),
+            Some(p) => {
+                let s = serde_json::to_string(p).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                let val = json_module.call_method1("loads", (s,))?;
+                Ok(Some(val.unbind()))
+            }
         }
     }
 
@@ -463,6 +492,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -548,6 +578,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -575,6 +606,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -601,6 +633,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -657,13 +690,31 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn chart_spec_position_round_trips() {
+        use crate::spec::position::PositionAdjust;
+        let mut spec = minimal_scatter();
+        spec.position = Some(PositionAdjust::Identity);
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""position""#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn chart_spec_position_none_omits_from_json() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains(r#""position""#), "position=None must be omitted: {json}");
     }
 
     #[test]

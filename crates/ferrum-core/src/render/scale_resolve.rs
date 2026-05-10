@@ -801,6 +801,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -880,6 +881,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -931,6 +933,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -952,6 +955,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -973,6 +977,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -1053,6 +1058,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1105,6 +1111,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1157,6 +1164,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1195,6 +1203,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

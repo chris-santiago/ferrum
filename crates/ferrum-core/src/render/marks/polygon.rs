@@ -213,6 +213,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: Some(kwargs),
+        position: None,
         }
     }
 

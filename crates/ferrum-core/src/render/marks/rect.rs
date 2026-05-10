@@ -84,6 +84,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
  mark_style: None,
+        position: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("row", DataType::Utf8, false),
@@ -118,6 +119,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
  mark_style: None,
+        position: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
