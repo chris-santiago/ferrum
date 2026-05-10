@@ -23,6 +23,7 @@ use crate::transform::unpivot::{self, UnpivotSpec};
 use crate::transform::reorder::{self, ReorderSpec};
 use crate::transform::linkage::{self, LinkageSpec};
 use crate::transform::letter_value::{self, LetterValueSpec};
+use crate::transform::logistic::{self, LogisticSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -51,6 +52,7 @@ pub(crate) enum TransformSpec {
     Unpivot(UnpivotSpec),
     Reorder(ReorderSpec),
     LetterValue(LetterValueSpec),
+    Logistic(LogisticSpec),
 }
 
 impl TransformSpec {
@@ -76,6 +78,7 @@ impl TransformSpec {
             Self::Unpivot(s)   => unpivot::apply(s, batch),
             Self::Reorder(s)   => reorder::apply(s, batch),
             Self::LetterValue(s) => letter_value::apply(s, batch),
+            Self::Logistic(s) => logistic::apply(s, batch),
         }
     }
 }
@@ -211,6 +214,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Unpivot(s) => s.name.as_deref(),
         TransformSpec::Reorder(s) => s.name.as_deref(),
         TransformSpec::LetterValue(s) => s.name.as_deref(),
+        TransformSpec::Logistic(s) => s.name.as_deref(),
     }
 }
 

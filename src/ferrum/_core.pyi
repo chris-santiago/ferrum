@@ -431,6 +431,20 @@ class LetterValue:
     ) -> None: ...
 
 
+class Logistic:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        n_grid: int = 100,
+        ci: Optional[float] = None,
+        max_iter: int = 25,
+        tol: float = 1e-8,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
 def compute_layout(
     spec,
     *,
