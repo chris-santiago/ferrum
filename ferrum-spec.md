@@ -183,6 +183,13 @@ ModelSource(model, X, y=None, *, feature_names=None, class_names=None, sample_we
 - `.embeddings(*, method="umap", n_components=2, **method_kwargs)` — `dim_0`, `dim_1`, (`dim_2`), `label`
 - `.learning_curve(*, cv=5, scoring=None, train_sizes=None)` — `train_size`, `split`, `score`, `mean_score`, `std_score`, `lower`, `upper`
 - `.validation_curve(param, values, *, cv=5, scoring=None)` — `param_value`, `split`, `score`, `mean_score`, `lower`, `upper`
+- `.discrimination_threshold(*, n_thresholds=50, cv=None)` — `threshold`, `precision`, `recall`, `f1`, `queue_rate`. Binary classifiers only. Sweeps the decision threshold and records precision, recall, F1, and queue rate at each point. `cv`: if provided, averages over cross-validation folds.
+- `.pca_variance(*, n_components=None)` — `component`, `explained_variance_ratio`, `cumulative_variance_ratio`. Model must expose `explained_variance_ratio_` (e.g. sklearn PCA, TruncatedSVD). `n_components`: limit output to first n components.
+- `.rank1d(*, algorithm="shapiro")` — `feature`, `score`, `rank`. Univariate feature ranking. `algorithm`: `"shapiro"` (Shapiro-Wilk normality score) | `"variance"` | `"covariance"` (covariance with target y).
+- `.rank2d(*, algorithm="pearson")` — `feature_x`, `feature_y`, `correlation`. Pairwise feature correlation matrix. `algorithm`: `"pearson"` | `"spearman"` | `"kendall"` | `"covariance"`.
+- `.cv_scores(*, cv=5, scoring=None)` — `fold`, `split`, `score`. Cross-validation score per fold. `split`: `"train"` | `"test"`. `scoring`: sklearn scorer string or callable; defaults to model's default scorer.
+- `.alpha_selection(alphas, *, cv=5, scoring=None)` — `alpha`, `fold`, `score`, `mean_score`, `std_score`. CV score at each regularization parameter value. `alphas`: array-like of alpha values to evaluate. Intended for Ridge, Lasso, ElasticNet, and other regularized estimators.
+- `.intercluster_distance(k, *, method="mds")` — `cluster`, `x`, `y`, `size`. MDS or t-SNE projection of cluster centers, with `size` = membership count. `k`: number of clusters. `method`: `"mds"` | `"tsne"`.
 
 **Class method**
 - `ModelSource.compare(models: dict[str, estimator], X, y, **kwargs)` → `ComparedModelSource`
@@ -275,6 +282,8 @@ Marks are constructors that accept visual property overrides as keyword argument
 | `mark_arc(...)` | Arc / pie / donut | `inner_radius`, `outer_radius`, `pad_angle`, `corner_radius` |
 | `mark_image(...)` | Image at point | `width`, `height`, `align`, `baseline` |
 | `mark_geoshape(...)` | Choropleth / geographic shape | `projection` |
+| `mark_segment(...)` | Line segment between (x,y) and (x2,y2). Requires X, Y, X2, Y2 encoding channels. Used for dumbbell charts, slope graphs, network edges, and free-form annotations. | `stroke`, `stroke_width`, `stroke_dash`, `stroke_cap` (`"butt"`\|`"round"`\|`"square"`), `arrow` (bool), `arrow_size` |
+| `mark_label(...)` | Text with a solid background fill box. All `mark_text` parameters, plus: | `background_fill`, `background_stroke`, `background_stroke_width`, `background_padding`, `background_corner_radius` |
 
 #### Composite Marks (expand to multiple primitive layers)
 
@@ -290,12 +299,15 @@ Marks are constructors that accept visual property overrides as keyword argument
 | Mark | Stat Computed | Key Parameters |
 |---|---|---|
 | `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`), `ci`, `bandwidth`, `degree`, `n` |
-| `mark_density(...)` | KDE | `bandwidth` (`"scott"`, `"silverman"`, float), `kernel`, `extent`, `cumulative` |
-| `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right` |
+| `mark_density(...)` | KDE | `bandwidth` (`"scott"`\|`"silverman"`\|float), `kernel`, `extent`, `cumulative`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
+| `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
 | `mark_violin(...)` | KDE + optional boxplot overlay | `bandwidth`, `inner` (`"box"`, `"quartile"`, `"point"`, `None`) |
 | `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, or `scipy.stats` dist), `dequantize` |
 | `mark_raster(...)` | Aggregates data to a pixel-resolution grid and renders as a colored image | `aggregate` (`"count"`, `"density"`, `"mean"`, `"sum"`, `"any"`), `field` (required if `aggregate` is `"mean"` or `"sum"`), `cmap`, `resolution` (`"screen"`, `int`, `tuple[int, int]`), `blend` (`"alpha"`, `"additive"`), `min_count`, `log_scale` |
+| `mark_swarm(...)` | Beeswarm for categorical data. Points are arranged along the categorical axis to avoid overplotting while preserving the value distribution. General-purpose; distinct from `mark_shap_beeswarm`. | `size`, `orient`, `spacing`, `side` (`"both"`\|`"left"`\|`"right"`), `dodge` |
+| `mark_hex(...)` | Hexagonal binning. Aggregates data into a hexagonal grid and renders each hex colored by aggregate value. Preferred over `mark_raster` when topology and shape perception matter. | `bin_size`, `aggregate` (`"count"`\|`"mean"`\|`"sum"`), `field` (required if `aggregate` is mean or sum), `cmap`, `stroke`, `stroke_width` |
+| `mark_function(fn, ...)` | Plot a Python callable f(x) → y as a line. `fn` receives a numpy array of x values and must return a numpy array of y values. Domain inferred from X scale if not specified. | `domain` (`tuple[float, float]`), `n` (evaluation points, default 200), `clip` |
 
 **Auto-raster (`mark_raster` as a policy):**
 
@@ -310,6 +322,8 @@ When auto-raster fires:
 Auto-raster will **not** fire if the chart has an active color encoding — doing so would silently discard user intent. Either remove the color encoding or use `mark_raster` explicitly.
 
 Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), `"silent"`, or `"error"`.
+
+**Bivariate density:** When both X and Y channels are encoded as quantitative fields, `mark_density` switches to bivariate KDE mode and renders filled contours, equivalent to `mark_contour` with `fill=True`. The `multiple` parameter applies to univariate mode only.
 
 #### Model Diagnostic Marks
 
@@ -332,6 +346,15 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_learning_curve(...)` | Learning curve with CI band | `ci_style` (`"band"`, `"errorbar"`) |
 | `mark_validation_curve(...)` | Validation curve with CI band | `log_scale`, `ci_style` |
 | `mark_decision_boundary(...)` | 2D classification boundary | `grid_resolution`, `alpha`, `background`, `contour_levels` |
+| `mark_discrimination_threshold(...)` | Precision, recall, F1, and queue rate vs decision threshold for binary classifiers. Useful for threshold selection under class imbalance. | `metrics` (list of metrics to display, default all four), `n_thresholds`, `threshold_line` (bool, marks estimated optimal threshold) |
+| `mark_parallel_coordinates(...)` | Parallel coordinates plot. Each sample is a polyline drawn across vertically-arranged feature axes. General-purpose: accepts any tabular data, not only model output. | `rescale` (`"minmax"`\|`"zscore"`\|`None`), `alpha`, `highlight_selection` (bool) |
+| `mark_class_prediction_error(...)` | Stacked bar chart of predicted class counts, colored by actual class. Distinct from confusion matrix: shows absolute prediction volume per class and reveals systematic over/under-prediction. | `orient`, `normalize` (bool) |
+| `mark_pca_scree(...)` | Bar chart of explained variance ratio per principal component with optional cumulative variance line overlay. | `n_components`, `cumulative_line` (bool, default `True`), `threshold_line` (float, draws a horizontal line at this cumulative variance level, e.g. 0.95) |
+| `mark_rank1d(...)` | Horizontal bar chart of feature scores from a univariate ranking algorithm. | `algorithm` (`"shapiro"`\|`"variance"`\|`"covariance"`), `orient`, `top_k` |
+| `mark_rank2d(...)` | Heatmap of pairwise feature correlations or covariances. | `algorithm` (`"pearson"`\|`"spearman"`\|`"kendall"`\|`"covariance"`), `annot` (bool), `cmap` |
+| `mark_intercluster_distance(...)` | MDS or t-SNE projection of cluster centers, with each center sized proportionally to its membership count. Completes the clustering diagnostic suite alongside `mark_silhouette`. | `method` (`"mds"`\|`"tsne"`), `min_size`, `max_size`, `label_clusters` (bool) |
+| `mark_cv_scores(...)` | Box, bar, or strip plot of cross-validation score distributions per fold. | `kind` (`"box"`\|`"bar"`\|`"strip"`), `split` (`"test"`\|`"train"`\|`"both"`) |
+| `mark_alpha_selection(...)` | CV score vs regularization parameter curve with CI band. Intended for Ridge, Lasso, ElasticNet. Distinct from `mark_validation_curve` in that it assumes a log-spaced alpha domain by default. | `log_scale` (bool, default `True`), `ci_style` (`"band"`\|`"errorbar"`), `highlight_best` (bool) |
 
 ---
 
@@ -352,6 +375,9 @@ Stat transforms are applied before rendering, in the Rust engine. They receive a
 | `stat_qq(field, *, distribution="normal", line=True)` | Quantile–quantile data | |
 | `stat_contour(x, y, *, bandwidth="scott", thresholds=6, smooth=True)` | 2D contour levels | |
 | `stat_identity()` | No-op; explicit passthrough | |
+| `stat_ellipse(x, y, *, type="norm", level=0.95, segments=51)` | Compute a confidence or data ellipse for bivariate scatter. Returns `x`, `y` coordinates of the ellipse boundary. | `type`: `"norm"` (parametric normal ellipse) \| `"t"` (t-distribution) \| `"euclid"` (Euclidean distance from centroid). `level`: confidence level (ignored for `"euclid"`). |
+| `stat_function(fn, *, domain=None, n=200, as_=("x", "y"))` | Evaluate a Python callable over a 1D domain. `fn` receives a numpy array and must return a numpy array. `domain`: `(min, max)` tuple; inferred from X scale if `None`. Returns columns named by `as_`. | |
+| `stat_hex(x, y, *, bin_size=None, bins=None, aggregate="count", field=None)` | Hexagonal binning. Returns `hex_x`, `hex_y`, `value`. Triggered implicitly by `mark_hex`. | |
 
 **Model stat transforms** (accept `ModelSource` or raw arrays)
 
@@ -477,6 +503,7 @@ Applied via `.coord()` on `Chart`.
 | `CoordFlip()` | Flipped Cartesian (swap X/Y roles) | |
 | `CoordPolar(theta="x", radius="y", *, start_angle=0, end_angle=None, direction="clockwise")` | Polar (pie, radar) | |
 | `CoordGeo(projection=None, *, center=None, scale=None, translate=None, rotate=None, precision=None, clip_angle=None, clip_extent=None)` | Geographic | Any D3 projection name |
+| `CoordFixed(ratio=1.0, *, xlim=None, ylim=None, expand=True, clip=True)` | Fixed aspect ratio. `ratio` = y units per x unit; default 1.0 enforces equal scaling on both axes. Required for geographic projections, correlation matrices, and any chart where axis unit equality is semantically meaningful. | `ratio` |
 
 ---
 
@@ -556,6 +583,18 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 | `LayerChart(*charts)` | Layer overlay (same axes) | `resolve`, `title` |
 | `ConcatChart(*charts, columns=None)` | General wrapping concatenation | `spacing`, `resolve`, `columns` |
 | `RepeatChart(spec, row=None, column=None, layer=None)` | Repeat across field lists | `spacing`, `columns`, `resolve` |
+
+#### `JointChart`
+
+Compound view with a center plot and optional marginal distribution plots sharing the center's x-axis (top) and y-axis (right). The marginals are independent `Chart` objects, typically `mark_histogram` or `mark_density`.
+
+```
+JointChart(center, *, top=None, right=None, ratio=5, spacing=0.02)
+```
+
+`center`: any `Chart`. `top` / `right`: marginal `Chart` objects; x-axis of `top` is shared with center x; y-axis of `right` is shared with center y. `ratio`: size ratio of center panel to each marginal. `spacing`: gap between panels as a fraction of total size.
+
+Most users construct `JointChart` via `ferrum.jointplot(...)`.
 
 All compound views accept `.theme()`, `.properties()`, `.save()`, `.show()`.
 
@@ -693,6 +732,20 @@ ferrum.clustermap(data, *, method="ward", metric="euclidean",
                   figsize=None, dendrogram_ratio=0.2, theme=None)
 ```
 
+#### Joint Distribution
+
+```
+ferrum.jointplot(data, *, x, y, hue=None,
+                 kind="scatter",       # "scatter" | "kde" | "hist" | "hex" | "reg"
+                 marginal_kind="hist", # "hist" | "kde" | "rug" | "box"
+                 ratio=5, space=0.05,
+                 xlim=None, ylim=None,
+                 joint_kws=None, marginal_kws=None,
+                 height=None, theme=None)
+```
+
+Returns a `JointChart`. `kind` controls the center panel mark; `marginal_kind` controls both marginal panels. `joint_kws` and `marginal_kws` are passed as keyword arguments to the center and marginal chart constructors respectively.
+
 #### Model Diagnostics (figure-level)
 
 ```
@@ -745,6 +798,36 @@ ferrum.decision_boundary_chart(model, X, y, *,
                                  grid_resolution=200,
                                  proba=False,         # plot probability surface if True
                                  scatter=True, theme=None)
+
+ferrum.discrimination_threshold_chart(model_or_source, X=None, y=None, *,
+                                       n_thresholds=50,
+                                       metrics=("precision", "recall", "f1", "queue_rate"),
+                                       highlight_best=True, theme=None)
+
+ferrum.parallel_coordinates_chart(data_or_source, X=None, y=None, *,
+                                   features=None, hue=None,
+                                   rescale="minmax",   # "minmax" | "zscore" | None
+                                   alpha=0.5, theme=None)
+
+ferrum.class_prediction_error_chart(model_or_source, X=None, y=None, *,
+                                     normalize=False, theme=None)
+
+ferrum.pca_scree_chart(model_or_source, X=None, *, n_components=None,
+                        cumulative_line=True, threshold=0.95, theme=None)
+
+ferrum.rank_chart(data_or_source, X=None, y=None, *,
+                   rank="2d",       # "1d" | "2d"
+                   algorithm=None,  # "1d" default: "shapiro"; "2d" default: "pearson"
+                   top_k=None, theme=None)
+
+ferrum.alpha_selection_chart(model, X, y, alphas, *, cv=5, scoring=None,
+                               log_scale=True, ci_style="band", theme=None)
+
+ferrum.intercluster_distance_chart(model_or_source, X=None, *, k=None,
+                                    method="mds", theme=None)
+
+ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
+                        kind="box", split="both", theme=None)
 ```
 
 ---
@@ -783,6 +866,15 @@ class FerrumVisualizer:
 | `ClassBalanceVisualizer(*, theme=None)` | Class frequency bar chart |
 | `CooksDistanceVisualizer(model, *, threshold=None, theme=None)` | Cook's distance |
 | `SHAPVisualizer(model, *, kind="beeswarm", background=None, theme=None)` | SHAP chart |
+| `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, scoring=None, cv=None, theme=None)` | Discrimination threshold chart (binary classifiers only) |
+| `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts raw feature matrix. `hue` applied from `y` if provided. |
+| `ClassPredictionErrorVisualizer(model, *, normalize=False, theme=None)` | Class prediction error chart |
+| `PCAVarianceVisualizer(model, *, n_components=None, theme=None)` | PCA scree plot. Model must expose `explained_variance_ratio_` attribute (sklearn PCA, TruncatedSVD, or compatible). |
+| `Rank1DVisualizer(*, algorithm="shapiro", top_k=None, theme=None)` | Univariate feature ranking bar chart. No model required. |
+| `Rank2DVisualizer(*, algorithm="pearson", theme=None)` | Pairwise feature correlation heatmap. No model required. |
+| `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, theme=None)` | Regularization parameter selection curve |
+| `InterclusterDistanceVisualizer(model, *, method="mds", theme=None)` | Intercluster distance map |
+| `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", theme=None)` | Cross-validation score distribution |
 
 ---
 
