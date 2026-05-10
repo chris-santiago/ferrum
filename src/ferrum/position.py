@@ -21,9 +21,13 @@ from typing import Optional
 _DODGE_ELIGIBLE = frozenset([
     "bar", "point", "box", "boxplot", "boxen", "swarm", "violin",
     "errorbar", "errorband", "ribbon",
+    # Composite marks that desugar to bar/area underneath:
+    "histogram", "density",
 ])
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])
-_STACK_ELIGIBLE = frozenset(["bar", "area", "ribbon"])
+_STACK_ELIGIBLE = frozenset(["bar", "area", "ribbon",
+                              # composite marks
+                              "histogram", "density"])
 
 
 # ---- Valid-value sets --------------------------------------------------------
