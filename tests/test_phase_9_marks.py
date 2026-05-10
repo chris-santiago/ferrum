@@ -40,3 +40,56 @@ class TestMarkSegment:
         # Dodge is not.
         with pytest.raises(TypeError, match="Dodge"):
             fe.Chart(df).mark_segment(position=Dodge())
+
+
+class TestMarkBoxen:
+    @pytest.fixture
+    def df_grouped(self):
+        import numpy as np
+        np.random.seed(42)
+        return pl.DataFrame({
+            "g": ["a"] * 100 + ["b"] * 100,
+            "v": np.concatenate(
+                [np.random.normal(0, 1, 100), np.random.normal(2, 1, 100)]
+            ).tolist(),
+        })
+
+    def test_mark_boxen_renders(self, df_grouped):
+        chart = fe.Chart(df_grouped).mark_boxen().encode(x="g", y="v")
+        svg = chart.show_svg()
+        assert "<svg" in svg
+
+    def test_mark_boxen_spec_has_letter_value_transform(self, df_grouped):
+        chart = fe.Chart(df_grouped).mark_boxen().encode(x="g", y="v")
+        import json
+        d = json.loads(chart.to_spec().to_json())
+        # Either at top-level or in a layer's transforms.
+        all_transforms = list(d.get("transforms", []) or [])
+        for layer in d.get("layers", []) or []:
+            all_transforms.extend(layer.get("transforms", []) or [])
+        assert any(t.get("type") == "letter_value" for t in all_transforms)
+
+    def test_mark_boxen_layered_spec(self, df_grouped):
+        chart = fe.Chart(df_grouped).mark_boxen().encode(x="g", y="v")
+        spec = chart._build_spec()
+        # Multiple layers: rects per depth + median + outliers.
+        assert len(spec.layers) >= 3
+
+    def test_mark_boxen_position_dodge_eligible(self, df_grouped):
+        from ferrum import Dodge, Jitter
+        # Dodge accepted on boxen.
+        fe.Chart(df_grouped).mark_boxen(position=Dodge(by="g")).encode(x="g", y="v")
+        # Jitter rejected.
+        with pytest.raises(TypeError, match="Jitter"):
+            fe.Chart(df_grouped).mark_boxen(position=Jitter())
+
+    def test_mark_boxen_k_depth_param_threads_through(self, df_grouped):
+        chart = fe.Chart(df_grouped).mark_boxen(k_depth="full").encode(x="g", y="v")
+        import json
+        d = json.loads(chart.to_spec().to_json())
+        all_t = list(d.get("transforms", []) or [])
+        for layer in d.get("layers", []) or []:
+            all_t.extend(layer.get("transforms", []) or [])
+        lv = next(t for t in all_t if t.get("type") == "letter_value")
+        # KDepth serializes via serde(tag = "type"): {"type": "full"}.
+        assert lv["k_depth"]["type"] == "full"

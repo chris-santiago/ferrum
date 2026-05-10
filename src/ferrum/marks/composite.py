@@ -9,7 +9,7 @@ Where `layers` is a list of dicts each of shape:
 from __future__ import annotations
 from typing import Any, Optional
 
-from ferrum import BoxStats, ErrorExtent, Outliers
+from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 
 
 def desugar_boxplot(
@@ -132,6 +132,94 @@ def desugar_ribbon(
          "mark_kwargs": {"opacity": opacity}, "data_source": None},
     ]
     return ("__layered__", [], None, None, layers)
+
+
+def desugar_boxen(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    k_depth: str = "proportion",
+    k_proportion: float = 0.007,
+    outlier_threshold: float = 1.5,
+    palette=None,
+    horizontal: bool = False,
+    color_field: str | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Letter-value (boxen) composite mark.
+
+    Desugars into a `LetterValue` transform plus N nested rect bands (one per
+    depth, opacity ramping outer→inner), a median rule, and a point layer for
+    outliers. Each rect layer reads from a dedicated `lv_depth_K` named output
+    (no overlapping rows).
+
+    LetterValue secondary-output schemas:
+        ``lv_depth_K``:  ``[group, lower, upper, level]``
+        ``lv_outliers``: ``[group, value, is_outlier]``
+
+    Layer encodings therefore use ``"group"`` / ``"lower"`` / ``"upper"`` /
+    ``"value"`` rather than the original chart-level column names — but the
+    chart-level x/y encoding still references the user's columns, so axis
+    scales resolve naturally (LetterValue copies the groupby values verbatim
+    into ``group``, and quantile outputs lie within the original value range).
+    """
+    if x_field is None or y_field is None:
+        raise ValueError("mark_boxen() requires .encode(x=..., y=...)")
+    cat = y_field if horizontal else x_field
+    val = x_field if horizontal else y_field
+    group = color_field if color_field else cat
+
+    transforms = [
+        LetterValue(
+            value=val,
+            group=group,
+            k_depth=k_depth,
+            k_proportion=k_proportion,
+            outlier_threshold=outlier_threshold,
+            name="lv",
+        ),
+    ]
+
+    # Per-depth named outputs (lv_depth_1 … lv_depth_6) let each rect layer
+    # read its own slice — no overlap. K_MAX = 6 visible bands; for data with
+    # fewer effective depths, unused outputs are zero-row batches and render
+    # nothing.
+    K_MAX = 6
+    layers: list[dict] = []
+    for k in range(1, K_MAX + 1):
+        opacity = 0.85 - (0.55 * (k - 1) / max(K_MAX - 1, 1))
+        enc = (
+            {"x": "lower", "x2": "upper", "y": "group"}
+            if horizontal
+            else {"x": "group", "y": "lower", "y2": "upper"}
+        )
+        layers.append({
+            "mark": "rect",
+            "encoding": enc,
+            "mark_kwargs": {"opacity": opacity},
+            "data_source": f"lv_depth_{k}",
+        })
+
+    # Median rule: at depth=1, ``lower == upper == median``.
+    layers.append({
+        "mark": "rule",
+        "encoding": (
+            {"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}
+        ),
+        "data_source": "lv_depth_1",
+    })
+
+    # Outliers: point layer reading from the dedicated outliers output. Schema:
+    # [group, value, is_outlier].
+    layers.append({
+        "mark": "point",
+        "encoding": (
+            {"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}
+        ),
+        "data_source": "lv_outliers",
+    })
+
+    return ("__layered__", transforms, None, None, layers)
 
 
 def _extent_to_box(extent):

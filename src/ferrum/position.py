@@ -8,7 +8,7 @@ Eligibility per-mark is enforced at chart-build time via
 The eligibility matrix mirrors the design spec §6.4:
 
     Identity: every mark.
-    Dodge:    bar, point, box, boxplot, swarm, violin, errorbar, errorband, ribbon.
+    Dodge:    bar, point, box, boxplot, boxen, swarm, violin, errorbar, errorband, ribbon.
     Jitter:   point, swarm, tick.
     Stack:    bar, area, ribbon.
 """
@@ -19,7 +19,7 @@ from typing import Optional
 # ---- Eligibility matrix ------------------------------------------------------
 
 _DODGE_ELIGIBLE = frozenset([
-    "bar", "point", "box", "boxplot", "swarm", "violin",
+    "bar", "point", "box", "boxplot", "boxen", "swarm", "violin",
     "errorbar", "errorband", "ribbon",
 ])
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])

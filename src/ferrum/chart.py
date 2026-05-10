@@ -393,6 +393,44 @@ class Chart:
         new._position = position
         return new
 
+    def mark_boxen(
+        self,
+        *,
+        k_depth: str = "proportion",
+        k_proportion: float = 0.007,
+        outlier_threshold: float = 1.5,
+        palette=None,
+        horizontal: bool = False,
+        color_field=None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Letter-value (boxen) plot. Composite mark — desugars to nested rect
+        bands per letter-value depth, plus a median rule and an outlier-point
+        layer, via the ``LetterValue`` transform.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("boxen", position)
+        from ferrum.marks.composite import desugar_boxen
+        new = self._clone()
+        new._mark = "point"  # placeholder; layered mode overrides
+        new._pending_stat_mark = (
+            "boxen",
+            {
+                "k_depth": k_depth,
+                "k_proportion": k_proportion,
+                "outlier_threshold": outlier_threshold,
+                "palette": palette,
+                "horizontal": horizontal,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_boxen,
+        )
+        new._position = position
+        return new
+
     def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
         """Errorbar mark via ErrorExtent transform."""
         if position is not None:
