@@ -14,6 +14,7 @@ use crate::transform::box_stats::{self, BoxStatsSpec};
 use crate::transform::kde::KdeSpec;
 use crate::transform::kde_2d::Kde2DSpec;
 use crate::transform::outliers::{self, OutliersSpec};
+use crate::transform::qq::{self, QQSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -32,6 +33,7 @@ pub(crate) enum TransformSpec {
     Violin(ViolinSpec),
     Kde2D(Kde2DSpec),
     Contour(ContourSpec),
+    Qq(QQSpec),
 }
 
 impl TransformSpec {
@@ -48,6 +50,7 @@ impl TransformSpec {
             Self::Violin(s)    => violin::apply(s, batch),
             Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
             Self::Contour(s)   => contour::apply(s, batch),
+            Self::Qq(s)        => qq::apply(s, batch),
         }
     }
 }
@@ -73,6 +76,20 @@ impl TransformSpec {
         // Phase 8b transforms that NEED context (Raster, Swarm) override below.
         match self {
             _ => self.apply(batch),
+        }
+    }
+
+    /// Additional named outputs produced by this transform's `apply` invocation,
+    /// alongside its primary RecordBatch output. Default: empty.
+    /// Implementing this method lets a transform publish multiple named outputs
+    /// (e.g. QQ publishes both points + "qq_line").
+    pub(crate) fn secondary_outputs(
+        &self,
+        batch: &RecordBatch,
+    ) -> PyResult<Vec<(String, RecordBatch)>> {
+        match self {
+            Self::Qq(s) => crate::transform::qq::secondary_outputs(s, batch),
+            _ => Ok(Vec::new()),
         }
     }
 }
@@ -109,6 +126,11 @@ pub(crate) fn apply_transforms_named(
     let mut current = batch.clone();
     for spec in specs {
         current = spec.apply_with_context(&current, ctx)?;
+        // Secondary outputs first — a user's explicit `name` (registered below)
+        // wins on key collision.
+        for (key, batch) in spec.secondary_outputs(&current)? {
+            outputs.insert(key, batch);
+        }
         if let Some(name) = spec_name(spec) {
             outputs.insert(name.to_string(), current.clone());
         }
@@ -130,6 +152,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Violin(s) => s.name.as_deref(),
         TransformSpec::Kde2D(s) => s.name.as_deref(),
         TransformSpec::Contour(s) => s.name.as_deref(),
+        TransformSpec::Qq(s) => s.name.as_deref(),
     }
 }
 

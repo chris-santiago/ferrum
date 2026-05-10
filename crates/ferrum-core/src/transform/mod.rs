@@ -15,4 +15,5 @@ pub(crate) mod error_extent;
 pub(crate) mod box_stats;
 pub(crate) mod violin;
 pub(crate) mod contour;
+pub(crate) mod qq;
 pub(crate) mod linalg;

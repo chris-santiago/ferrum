@@ -321,6 +321,18 @@ class Violin:
         name: Optional[str] = None,
     ) -> None: ...
 
+class QQ:
+    def __init__(
+        self,
+        field: str,
+        *,
+        distribution: str = "normal",
+        dequantize: bool = False,
+        emit_line: bool = True,
+        seed: int = 0,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,
