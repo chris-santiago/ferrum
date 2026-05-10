@@ -25,8 +25,15 @@ class ChartSpec:
     x: Optional[EncodingSpec]
     y: Optional[EncodingSpec]
     color: Optional[EncodingSpec]
+    size: Optional[EncodingSpec]
+    shape: Optional[EncodingSpec]
+    opacity: Optional[EncodingSpec]
     data: str
     transforms: List[object]
+    facet: Optional[dict]
+    layers: Optional[List[dict]]
+    coord: Optional[str]
+    mark_style: Optional[dict]
 
     def __init__(
         self,
@@ -35,8 +42,15 @@ class ChartSpec:
         x: Union[str, EncodingSpec, None] = None,
         y: Union[str, EncodingSpec, None] = None,
         color: Union[str, EncodingSpec, None] = None,
+        size: Union[str, EncodingSpec, None] = None,
+        shape: Union[str, EncodingSpec, None] = None,
+        opacity: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
         transforms: Optional[List[object]] = None,
+        facet: Optional[dict] = None,
+        layers: Optional[List[dict]] = None,
+        coord: Optional[Literal["cartesian", "flip"]] = None,
+        mark_style: Optional[dict] = None,
     ) -> None: ...
     def to_json(self) -> str: ...
     @classmethod
