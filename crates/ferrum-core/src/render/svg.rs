@@ -148,6 +148,36 @@ impl SvgBuffer {
         ));
     }
 
+    /// Emit a closed filled/stroked polygon as `<path d="M ... Z" fill-rule="evenodd"/>`.
+    /// `paths`: each inner `Vec<(f64, f64)>` is one ring; multiple rings → first is outer,
+    /// rest are holes. `fill-rule="evenodd"` handles winding automatically.
+    pub fn polygon(&mut self, paths: &[Vec<(f64, f64)>], style: &FillStroke) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut d = String::new();
+        let mut first_ring = true;
+        for ring in paths {
+            if ring.is_empty() {
+                continue;
+            }
+            if !first_ring {
+                d.push(' ');
+            }
+            first_ring = false;
+            d.push_str(&format!("M {} {}", fmt_f(ring[0].0), fmt_f(ring[0].1)));
+            for (x, y) in &ring[1..] {
+                d.push_str(&format!(" L {} {}", fmt_f(*x), fmt_f(*y)));
+            }
+            d.push_str(" Z");
+        }
+        self.buf.push_str("<path");
+        push_attr(&mut self.buf, "d", &d);
+        push_attr(&mut self.buf, "fill-rule", "evenodd");
+        push_fill_stroke(&mut self.buf, style);
+        self.buf.push_str("/>");
+    }
+
     pub fn clip_open(&mut self, id: &str, rect: Rect) {
         self.buf.push_str(&format!(
             "<defs><clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
@@ -368,5 +398,44 @@ mod tests {
         let href_body = &out[href_start..href_end];
         assert!(!href_body.contains('\n') && !href_body.contains(' '),
                 "href body must be one line: {href_body}");
+    }
+
+    #[test]
+    fn polygon_one_ring_emits_closed_path() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let ring = vec![(0.0_f64, 0.0_f64), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        svg.polygon(&[ring], &style);
+        let out = svg.finish();
+        assert!(out.contains(r#"d="M 0 0 L 10 0 L 10 10 L 0 10 Z""#),
+                "missing single-ring path data: {out}");
+        assert!(out.contains(r#"fill-rule="evenodd""#),
+                "missing fill-rule=evenodd: {out}");
+    }
+
+    #[test]
+    fn polygon_multi_ring_concatenates_subpaths() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let outer = vec![(0.0_f64, 0.0_f64), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+        let hole  = vec![(5.0_f64, 5.0_f64), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)];
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        svg.polygon(&[outer, hole], &style);
+        let out = svg.finish();
+        assert!(out.contains("M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"),
+                "multi-ring path data wrong: {out}");
+    }
+
+    #[test]
+    fn polygon_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let style = FillStroke { fill: Some(from_rgba(50, 50, 50, 128)), stroke: None, stroke_width: 0.0 };
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.polygon(&[vec![(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]], &style);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "polygon emission must be deterministic");
     }
 }
