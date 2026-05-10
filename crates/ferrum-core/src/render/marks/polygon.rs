@@ -352,6 +352,8 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            x2: None,
+            y2: None,
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };

@@ -202,6 +202,12 @@ pub struct ResolvedScales {
     pub size: Option<SizeScale>,
     pub shape: Option<ShapeScale>,
     pub opacity: Option<OpacityScale>,
+    // Phase 8b: paired-channel field names. The x2/y2 axis is shared with x/y
+    // (their domain is unioned in `build_axis_scale`); this field surfaces the
+    // bound field name so downstream code (mark drawers, legends) can read it
+    // off `ResolvedScales` without re-walking the spec encoding.
+    pub x2: Option<String>,
+    pub y2: Option<String>,
 }
 
 /// Build scales from spec + post-transform batch + pixel ranges.
@@ -294,8 +300,20 @@ pub fn resolve_scales_with_outputs(
     }
     let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
 
+    let x2_field_name = x2_enc.map(|e| e.field.clone());
+    let y2_field_name = y2_enc.map(|e| e.field.clone());
+
     Ok((
-        ResolvedScales { x, y, color, size, shape, opacity },
+        ResolvedScales {
+            x,
+            y,
+            color,
+            size,
+            shape,
+            opacity,
+            x2: x2_field_name,
+            y2: y2_field_name,
+        },
         warnings,
     ))
 }
@@ -1099,6 +1117,90 @@ mod tests {
             (0.0..=100.0).contains(&px),
             "x2 max should map within the x pixel range, got: {px}"
         );
+    }
+
+    // --- Phase 8b Task 36: x2/y2 field names surfaced on ResolvedScales ---
+
+    #[test]
+    fn resolved_scales_include_x2_y2_field_names_when_set() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a",  ArrowDataType::Float64, false),
+            Field::new("a2", ArrowDataType::Float64, false),
+            Field::new("b",  ArrowDataType::Float64, false),
+            Field::new("b2", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "a".into(),  type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "a2".into(), type_: None, ..Default::default() }),
+                y:  Some(EncodingSpec { field: "b".into(),  type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "b2".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) =
+            resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        assert_eq!(scales.x2.as_deref(), Some("a2"));
+        assert_eq!(scales.y2.as_deref(), Some("b2"));
+    }
+
+    #[test]
+    fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", ArrowDataType::Float64, false),
+            Field::new("b", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) =
+            resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        assert!(scales.x2.is_none(), "x2 should be None for 8a charts: {:?}", scales.x2);
+        assert!(scales.y2.is_none(), "y2 should be None for 8a charts: {:?}", scales.y2);
     }
 
     #[test]
