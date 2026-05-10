@@ -226,6 +226,10 @@ def test_bivariate_density_routes_through_contour():
     spec = fe.Chart(df).mark_density().encode(x="x", y="y")._build_spec()
     json_str = spec.to_json()
     # 2D KDE transform (Kde2D) and contour transform should both appear in the
-    # serialized spec, regardless of exact casing/format of their tags.
-    assert "kde_2d" in json_str.lower() or "kde2d" in json_str.lower()
+    # serialized spec, regardless of exact casing/format of their tags. The
+    # serde snake_case mangling on `Bin2D`/`Kde2D` yields `bin_2_d`/`kde2_d`
+    # — see ferrum-phase-9 commit 041c528 for the explicit serde rename
+    # applied to `Bin2D`; `Kde2D` is unaffected here because callers don't
+    # need to match against a fixed string.
+    assert any(t in json_str.lower() for t in ("kde_2d", "kde2d", "kde2_d"))
     assert "contour" in json_str.lower()

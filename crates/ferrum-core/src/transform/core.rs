@@ -160,13 +160,23 @@ pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 
 /// Apply each transform; record named outputs with fan-out semantics.
 ///
-/// - **Named transforms** (`name = Some(...)`) run on the ORIGINAL `batch`
-///   (parallel/fan-out). They publish their output under their name and do
-///   NOT advance the chained pipeline pointer.
+/// - **Named transforms** (`name = Some(...)`) run on the CURRENT chained
+///   batch (the prior unnamed output, or the original input if none). They
+///   publish their output under their name but do NOT advance the chained
+///   pipeline pointer — subsequent unnamed transforms see the same chained
+///   input the named transform did.
 /// - **Unnamed transforms** chain: each consumes the prior unnamed output.
 ///
 /// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
 /// the original input when no unnamed transforms ran.
+///
+/// **Semantics note (Phase 9 finalize):** Earlier the named branch ran on the
+/// ORIGINAL batch (true fan-out from the input). Phase 9's compound desugars
+/// (mark_contour's Kde2D→Contour, clustermap's Linkage→Reorder→Unpivot,
+/// residplot's residuals overlay) need a named transform to consume the
+/// previous unnamed transform's output. Switching the named branch to use
+/// `current` instead of `batch` enables those patterns without breaking
+/// existing first-transform-named usages (where `current == batch` anyway).
 pub(crate) fn apply_transforms_named(
     specs: &[TransformSpec],
     batch: &RecordBatch,
@@ -176,12 +186,12 @@ pub(crate) fn apply_transforms_named(
     let mut current = batch.clone();
     for spec in specs {
         if let Some(name) = spec_name(spec) {
-            // Named: run on the ORIGINAL input (fan-out). Does not advance the
-            // chained pipeline pointer.
-            let result = spec.apply_with_context(batch, ctx)?;
+            // Named: run on the CURRENT chained batch (prior unnamed tail).
+            // Does not advance the chained pipeline pointer.
+            let result = spec.apply_with_context(&current, ctx)?;
             // Secondary outputs first — explicit `name` (registered below)
             // wins on key collision.
-            for (key, b) in spec.secondary_outputs(batch, &result)? {
+            for (key, b) in spec.secondary_outputs(&current, &result)? {
                 outputs.insert(key, b);
             }
             outputs.insert(name.to_string(), result);

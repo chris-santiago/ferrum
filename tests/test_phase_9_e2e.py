@@ -219,13 +219,6 @@ def test_clustermap_basic_golden(df_cluster):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="jointplot kind='kde' desugars to mark_contour, but the center "
-           "Chart's transform chain misses the Kde2D producer feeding "
-           "stat_contour; renderer raises ValueError: stat_contour: input "
-           "must be a Kde2D output (missing column 'grid_x')",
-    strict=True,
-)
 def test_jointplot_kde_hist_golden(df_joint):
     jc = fe.jointplot(df_joint, x="x", y="y", kind="kde", marginal_kind="hist")
     _check_or_update("jointplot_kde_hist.svg", jc.show_svg())
@@ -275,11 +268,6 @@ def test_clustermap_row_col_dendrograms_golden(df_cluster):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="same jointplot kind='kde' renderer gap — center Chart's "
-           "stat_contour cannot find Kde2D output columns",
-    strict=True,
-)
 def test_jointplot_kde_marginals_golden(df_joint):
     jc = fe.jointplot(df_joint, x="x", y="y", kind="kde", marginal_kind="kde")
     _check_or_update("jointplot_kde_marginals.svg", jc.show_svg())
