@@ -18,6 +18,7 @@ use crate::transform::qq::{self, QQSpec};
 use crate::transform::raster::{self, RasterSpec};
 use crate::transform::hex::{self, HexSpec};
 use crate::transform::swarm::{self, SwarmSpec};
+use crate::transform::unpivot::{self, UnpivotSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -40,6 +41,7 @@ pub(crate) enum TransformSpec {
     Raster(RasterSpec),
     Hex(HexSpec),
     Swarm(SwarmSpec),
+    Unpivot(UnpivotSpec),
 }
 
 impl TransformSpec {
@@ -60,6 +62,7 @@ impl TransformSpec {
             Self::Raster(s)    => raster::apply(s, batch),
             Self::Hex(s)       => hex::apply(s, batch),
             Self::Swarm(s)     => swarm::apply(s, batch),
+            Self::Unpivot(s)   => unpivot::apply(s, batch),
         }
     }
 }
@@ -178,6 +181,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Raster(s) => s.name.as_deref(),
         TransformSpec::Hex(s) => s.name.as_deref(),
         TransformSpec::Swarm(s) => s.name.as_deref(),
+        TransformSpec::Unpivot(s) => s.name.as_deref(),
     }
 }
 
@@ -301,6 +305,22 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("name"), "name=None must be omitted: {json}");
         assert!(json.contains(r#""type":"bin""#));
+    }
+
+    #[test]
+    fn test_transform_spec_unpivot_round_trip() {
+        use crate::transform::unpivot::UnpivotSpec;
+        let original = TransformSpec::Unpivot(UnpivotSpec {
+            id_vars: vec!["row_id".into()],
+            value_vars: Some(vec!["a".into(), "b".into()]),
+            var_name: "variable".into(),
+            value_name: "value".into(),
+            name: None,
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains(r#""type":"unpivot""#), "missing tag: {json}");
+        let parsed: TransformSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
     }
 
     #[test]

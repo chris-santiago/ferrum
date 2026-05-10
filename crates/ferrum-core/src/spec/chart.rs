@@ -223,6 +223,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::hex::PyHex(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Swarm(_) =>
                     pyo3::Py::new(py, crate::transform::swarm::PySwarm(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Unpivot(_) =>
+                    pyo3::Py::new(py, crate::transform::unpivot::PyUnpivot(t.clone()))?.into_any(),
             };
             out.push(obj);
         }

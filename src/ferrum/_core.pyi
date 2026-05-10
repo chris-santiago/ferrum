@@ -377,6 +377,18 @@ class Swarm:
     ) -> None: ...
 
 
+class Unpivot:
+    def __init__(
+        self,
+        *,
+        id_vars: list[str] = ...,
+        value_vars: list[str] | None = None,
+        var_name: str = "variable",
+        value_name: str = "value",
+        name: str | None = None,
+    ) -> None: ...
+
+
 def compute_layout(
     spec,
     *,

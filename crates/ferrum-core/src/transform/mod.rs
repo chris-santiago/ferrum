@@ -19,4 +19,5 @@ pub(crate) mod qq;
 pub(crate) mod raster;
 pub(crate) mod hex;
 pub(crate) mod swarm;
+pub(crate) mod unpivot;
 pub(crate) mod linalg;
