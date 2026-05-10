@@ -209,6 +209,7 @@ mod tests {
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
             }),
+            layers: None,
         }
     }
 

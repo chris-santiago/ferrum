@@ -47,7 +47,7 @@ mod tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),

@@ -77,7 +77,7 @@ mod tests {
                 y: Some(EncodingSpec { field: "v".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -107,7 +107,7 @@ mod tests {
                 y: Some(EncodingSpec { field: "v".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),

@@ -74,6 +74,7 @@ mod tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         }
     }
 

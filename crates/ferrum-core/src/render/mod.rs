@@ -306,6 +306,7 @@ mod orchestration_tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -394,6 +395,7 @@ mod orchestration_tests {
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
+            layers: None,
         };
         let result = render_svg(
             &spec,
@@ -440,7 +442,7 @@ mod png_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -467,7 +469,7 @@ mod png_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -540,7 +542,7 @@ mod golden_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -584,7 +586,7 @@ mod golden_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: Some(EncodingSpec { field: "g".into(), type_: None }),
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -612,7 +614,7 @@ mod golden_tests {
                 y: Some(EncodingSpec { field: "v".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -639,7 +641,7 @@ mod golden_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -666,7 +668,7 @@ mod golden_tests {
                 y: Some(EncodingSpec { field: "y".into(), type_: None }),
                 color: None,
             },
-            transforms: Vec::new(), facet: None,
+            transforms: Vec::new(), facet: None, layers: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -701,6 +703,7 @@ mod golden_tests {
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
+            layers: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::Encoding;
+use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -22,12 +23,14 @@ pub struct ChartSpec {
     pub transforms: Vec<crate::transform::core::TransformSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facet: Option<crate::layout::facet::FacetSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<Layer>>,
 }
 
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, color = None, data = None, transforms = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, color = None, data = None, transforms = None, layers = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
@@ -35,6 +38,7 @@ impl ChartSpec {
         color: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
+        layers: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -56,12 +60,18 @@ impl ChartSpec {
             Some(obj) => coerce_transforms(obj)?,
         };
 
+        let layers = match layers {
+            None => None,
+            Some(obj) => Some(coerce_layers(obj)?),
+        };
+
         Ok(ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y, color },
             transforms,
             facet: None,
+            layers,
         })
     }
 
@@ -113,6 +123,19 @@ impl ChartSpec {
         Ok(out)
     }
 
+    #[getter]
+    fn layers(&self, py: Python) -> PyResult<Option<Vec<Py<PyAny>>>> {
+        let Some(ref vec) = self.layers else { return Ok(None) };
+        let mut out: Vec<Py<PyAny>> = Vec::with_capacity(vec.len());
+        let json_module = py.import("json")?;
+        for layer in vec {
+            let s = serde_json::to_string(layer).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let py_obj = json_module.call_method1("loads", (s,))?;
+            out.push(py_obj.unbind());
+        }
+        Ok(Some(out))
+    }
+
     fn to_json(&self) -> PyResult<String> {
         serde_json::to_string(self).map_err(|e| PyValueError::new_err(e.to_string()))
     }
@@ -159,6 +182,24 @@ fn coerce_encoding(obj: &Bound<'_, PyAny>) -> PyResult<EncodingSpec> {
     Err(PyTypeError::new_err(
         "expected str or EncodingSpec for encoding channel",
     ))
+}
+
+fn coerce_layers(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Layer>> {
+    use pyo3::types::{PyDict, PyList};
+    let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
+        .map_err(|_| PyValueError::new_err("layers must be a list"))?;
+    let mut out = Vec::with_capacity(list.len());
+    for (i, item) in list.iter().enumerate() {
+        let py_dict: &Bound<PyDict> = item.downcast::<PyDict>()
+            .map_err(|_| PyValueError::new_err(format!("layers[{i}] must be a dict")))?;
+        let py = item.py();
+        let json_module = py.import("json")?;
+        let s: String = json_module.call_method1("dumps", (py_dict,))?.extract()?;
+        let layer: Layer = serde_json::from_str(&s)
+            .map_err(|e| PyValueError::new_err(format!("layers[{i}]: {e}")))?;
+        out.push(layer);
+    }
+    Ok(out)
 }
 
 fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::core::TransformSpec>> {
@@ -213,6 +254,7 @@ mod tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         }
     }
 
@@ -292,6 +334,7 @@ mod tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -316,6 +359,7 @@ mod tests {
             encoding: Encoding::default(),
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -337,6 +381,7 @@ mod tests {
                 nice: true,
             })],
             facet: None,
+            layers: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -372,5 +417,44 @@ mod tests {
         assert!(json.contains(r#""facet":{"#));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_layers_default_when_omitted() {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.layers.is_none());
+    }
+
+    #[test]
+    fn test_chart_spec_layers_omitted_in_canonical_json_when_none() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("layers"), "layers=None should be skipped: {json}");
+    }
+
+    #[test]
+    fn test_chart_spec_layers_round_trip() {
+        use crate::spec::layer::Layer;
+        let mut spec = minimal_scatter();
+        spec.layers = Some(vec![
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new() },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new() },
+        ]);
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""layers":["#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_existing_phase_7_canonical_json_unchanged() {
+        // Phase 3-7 byte-identical JSON shape when layers.is_none()
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(
+            json,
+            r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"price"},"y":{"field":"weight","type":"quantitative"}}}"#,
+        );
     }
 }

@@ -337,6 +337,7 @@ mod tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         }
     }
 
@@ -408,6 +409,7 @@ mod tests {
             },
             transforms: Vec::new(),
             facet: None,
+            layers: None,
         };
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0)).unwrap();
         assert!(matches!(
