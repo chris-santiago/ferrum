@@ -496,3 +496,70 @@ class TestClustermap:
         assert link_t.get("metric") == "cosine"
 
 
+# ---------------------------------------------------------------------------
+# Task 35 — jointplot
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def joint_data():
+    rng = np.random.default_rng(5)
+    return pl.DataFrame({
+        "x": rng.normal(0, 1, 50).tolist(),
+        "y": rng.normal(0, 1, 50).tolist(),
+        "g": (["a"] * 25 + ["b"] * 25),
+    })
+
+
+class TestJointplot:
+    def test_returns_jointchart(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y")
+        assert isinstance(jc, fe.JointChart)
+
+    def test_scatter_center(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", kind="scatter")
+        d = json.loads(jc.center.to_spec().to_json())
+        assert d["mark"] == "point"
+
+    def test_kde_center(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", kind="kde")
+        d = json.loads(jc.center.to_spec().to_json())
+        # 2D kde routes through desugar_contour → layered output.
+        assert d.get("layers") is not None or any(
+            t.get("type") in ("kde2d", "contour")
+            for t in d.get("transforms", [])
+        )
+
+    def test_hist_center_uses_bin2d(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", kind="hist")
+        d = json.loads(jc.center.to_spec().to_json())
+        assert any(t.get("type") == "bin_2d" for t in d.get("transforms", []))
+
+    def test_hex_center(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", kind="hex")
+        d = json.loads(jc.center.to_spec().to_json())
+        assert any(t.get("type") == "hex" for t in d.get("transforms", []))
+
+    def test_reg_center(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", kind="reg")
+        d = json.loads(jc.center.to_spec().to_json())
+        # scatter + smoothing line → 2 layers.
+        assert d.get("layers") is not None
+        assert len(d["layers"]) >= 2
+
+    def test_marginal_hist(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", marginal_kind="hist")
+        d_top = json.loads(jc.top.to_spec().to_json())
+        assert d_top["mark"] == "bar"
+
+    def test_marginal_kde(self, joint_data):
+        jc = fe.jointplot(joint_data, x="x", y="y", marginal_kind="kde")
+        d_top = json.loads(jc.top.to_spec().to_json())
+        assert any(t.get("type") == "kde" for t in d_top.get("transforms", []))
+
+    def test_invalid_kind_errors(self, joint_data):
+        with pytest.raises(ValueError, match="kind"):
+            fe.jointplot(joint_data, x="x", y="y", kind="bogus")
+
+    def test_invalid_marginal_kind_errors(self, joint_data):
+        with pytest.raises(ValueError, match="marginal"):
+            fe.jointplot(joint_data, x="x", y="y", marginal_kind="bogus")
