@@ -95,3 +95,85 @@ class TestDisplot:
         chart = fe.displot(iris_like, x="sepal_length", col="species")
         d = json.loads(chart.to_spec().to_json())
         assert d.get("facet") is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 29 — catplot
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def cat_data():
+    np.random.seed(1)
+    return pl.DataFrame({
+        "group":    ["a"] * 20 + ["b"] * 20 + ["c"] * 20,
+        "subgroup": (["x", "y"] * 30),
+        "value":    np.random.normal(0, 1, 60).tolist(),
+    })
+
+
+class TestCatplot:
+    def test_strip_with_jitter(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="strip")
+        d = json.loads(chart.to_spec().to_json())
+        assert d["mark"] == "point"
+        assert d.get("position", {}).get("type") == "jitter"
+
+    def test_strip_without_jitter(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="strip", jitter=False)
+        d = json.loads(chart.to_spec().to_json())
+        assert d["mark"] == "point"
+        assert d.get("position", {}).get("type") == "identity"
+
+    def test_swarm(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="swarm")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "swarm" for t in d.get("transforms", []))
+
+    def test_box(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="box")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "box_stats" for t in d.get("transforms", []))
+
+    def test_violin(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="violin")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "violin" for t in d.get("transforms", []))
+
+    def test_boxen(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="boxen")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "letter_value" for t in d.get("transforms", []))
+
+    def test_point(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="point")
+        d = json.loads(chart.to_spec().to_json())
+        assert d["mark"] == "point"
+
+    def test_bar(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", y="value", kind="bar")
+        d = json.loads(chart.to_spec().to_json())
+        assert d["mark"] == "bar"
+
+    def test_count(self, cat_data):
+        chart = fe.catplot(cat_data, x="group", kind="count")
+        d = json.loads(chart.to_spec().to_json())
+        assert d["mark"] == "bar"
+        assert any(t.get("type") == "aggregate" for t in d.get("transforms", []))
+
+    def test_dodge_with_hue(self, cat_data):
+        chart = fe.catplot(
+            cat_data, x="group", y="value", hue="subgroup",
+            kind="bar", dodge=True,
+        )
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("position", {}).get("type") == "dodge"
+        assert d["position"].get("by") == "subgroup"
+
+    def test_orient_horizontal(self, cat_data):
+        chart = fe.catplot(cat_data, y="group", x="value", kind="box", orient="h")
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("coord", {}).get("kind") == "flip"
+
+    def test_invalid_kind_errors(self, cat_data):
+        with pytest.raises(ValueError, match="kind"):
+            fe.catplot(cat_data, x="group", y="value", kind="bogus")
