@@ -8,6 +8,7 @@ use crate::transform::context::TransformContext;
 
 use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
+use crate::transform::contour::{self, ContourSpec};
 use crate::transform::error_extent::{self, ErrorExtentSpec};
 use crate::transform::box_stats::{self, BoxStatsSpec};
 use crate::transform::kde::KdeSpec;
@@ -30,6 +31,7 @@ pub(crate) enum TransformSpec {
     BoxStats(BoxStatsSpec),
     Violin(ViolinSpec),
     Kde2D(Kde2DSpec),
+    Contour(ContourSpec),
 }
 
 impl TransformSpec {
@@ -45,6 +47,7 @@ impl TransformSpec {
             Self::BoxStats(s)  => box_stats::apply(s, batch),
             Self::Violin(s)    => violin::apply(s, batch),
             Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
+            Self::Contour(s)   => contour::apply(s, batch),
         }
     }
 }
@@ -126,6 +129,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::BoxStats(s) => s.name.as_deref(),
         TransformSpec::Violin(s) => s.name.as_deref(),
         TransformSpec::Kde2D(s) => s.name.as_deref(),
+        TransformSpec::Contour(s) => s.name.as_deref(),
     }
 }
 

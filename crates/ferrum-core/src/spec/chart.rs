@@ -198,6 +198,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::violin::PyViolin(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Kde2D(_) =>
                     pyo3::Py::new(py, crate::transform::kde_2d::PyKde2D(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Contour(_) =>
+                    pyo3::Py::new(py, crate::transform::contour::PyContour(t.clone()))?.into_any(),
             };
             out.push(obj);
         }

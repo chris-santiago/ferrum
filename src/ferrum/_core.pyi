@@ -245,6 +245,16 @@ class Kde2D:
         name: Optional[str] = None,
     ) -> None: ...
 
+class Contour:
+    def __init__(
+        self,
+        *,
+        thresholds: int = 6,
+        fill: bool = False,
+        smooth: bool = True,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 class Smooth:
     def __init__(
         self,
