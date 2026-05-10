@@ -6,3 +6,5 @@ pub mod layer;
 pub use layer::Layer;
 pub mod coord;
 pub use coord::CoordKind;
+pub mod mark_style;
+pub use mark_style::MarkKwargsSpec;

@@ -340,6 +340,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         }
     }
 
@@ -415,6 +416,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0)).unwrap();
         assert!(matches!(

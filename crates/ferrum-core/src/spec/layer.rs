@@ -13,7 +13,8 @@ pub struct Layer {
     pub encoding: Encoding,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<TransformSpec>,
-    // mark_style: Option<MarkKwargsSpec> added in Task 5
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_style: Option<crate::spec::mark_style::MarkKwargsSpec>,
 }
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ mod tests {
             mark: Mark::Point,
             encoding: Encoding::default(),
             transforms: Vec::new(),
+            mark_style: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -44,6 +46,24 @@ mod tests {
                 ..Default::default()
             },
             transforms: Vec::new(),
+            mark_style: None,
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_round_trips_with_mark_style() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: Some(MarkKwargsSpec {
+                size: Some(50.0),
+                ..Default::default()
+            }),
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();

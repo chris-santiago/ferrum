@@ -5,6 +5,7 @@ use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::Encoding;
 use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
+use crate::spec::mark_style::MarkKwargsSpec;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -28,12 +29,22 @@ pub struct ChartSpec {
     pub layers: Option<Vec<Layer>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coord: Option<CoordKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_style: Option<MarkKwargsSpec>,
 }
 
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, color = None, size = None, shape = None, opacity = None, data = None, transforms = None, layers = None, coord = None))]
+    #[pyo3(signature = (
+        *, mark, x = None, y = None, color = None,
+        size = None, shape = None, opacity = None,           // NEW (from Task 3 follow-on)
+        data = None, transforms = None,
+        layers = None,                                        // from Task 1
+        coord = None,                                         // from Task 4
+        facet = None,                                         // NEW here
+        mark_style = None,                                    // NEW here
+    ))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
@@ -46,6 +57,8 @@ impl ChartSpec {
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
         coord: Option<&str>,
+        facet: Option<&Bound<'_, PyAny>>,
+        mark_style: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -77,11 +90,33 @@ impl ChartSpec {
 
         let coord = match coord {
             None => None,
-            Some("cartesian") => Some(CoordKind::Cartesian),
-            Some("flip") => Some(CoordKind::Flip),
+            Some("cartesian") => Some(crate::spec::coord::CoordKind::Cartesian),
+            Some("flip") => Some(crate::spec::coord::CoordKind::Flip),
             Some(other) => return Err(PyValueError::new_err(format!(
                 "unknown coord kind: '{other}'; expected 'cartesian' or 'flip'"
             ))),
+        };
+
+        let facet = match facet {
+            None => None,
+            Some(obj) => {
+                let py = obj.py();
+                let json_module = py.import("json")?;
+                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+                Some(serde_json::from_str(&s).map_err(|e|
+                    PyValueError::new_err(format!("facet: {e}")))?)
+            }
+        };
+
+        let mark_style = match mark_style {
+            None => None,
+            Some(obj) => {
+                let py = obj.py();
+                let json_module = py.import("json")?;
+                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+                Some(serde_json::from_str(&s).map_err(|e|
+                    PyValueError::new_err(format!("mark_style: {e}")))?)
+            }
         };
 
         Ok(ChartSpec {
@@ -89,9 +124,10 @@ impl ChartSpec {
             mark,
             encoding: Encoding { x, y, color, size, shape, opacity },
             transforms,
-            facet: None,
+            facet,
             layers,
             coord,
+            mark_style,
         })
     }
 
@@ -303,6 +339,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         }
     }
 
@@ -386,6 +423,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -412,6 +450,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -435,6 +474,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -491,8 +531,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new() },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new() },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));
@@ -532,6 +572,28 @@ mod tests {
         spec.coord = Some(CoordKind::Flip);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""coord":{"kind":"flip"}"#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_mark_style_default_when_omitted() {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.mark_style.is_none());
+    }
+
+    #[test]
+    fn test_chart_spec_mark_style_round_trip() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let mut spec = minimal_scatter();
+        spec.mark_style = Some(MarkKwargsSpec {
+            size: Some(100.0),
+            stroke: Some("#ff0000".into()),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r##""mark_style":{"size":100.0,"stroke":"#ff0000""##));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
     }

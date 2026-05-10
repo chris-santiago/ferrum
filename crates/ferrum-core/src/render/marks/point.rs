@@ -77,6 +77,7 @@ mod tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         }
     }
 

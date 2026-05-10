@@ -80,6 +80,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -112,6 +113,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),

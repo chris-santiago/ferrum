@@ -309,6 +309,7 @@ mod orchestration_tests {
             facet: None,
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -400,6 +401,7 @@ mod orchestration_tests {
             }),
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let result = render_svg(
             &spec,
@@ -449,6 +451,7 @@ mod png_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -478,6 +481,7 @@ mod png_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -553,6 +557,7 @@ mod golden_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -599,6 +604,7 @@ mod golden_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -629,6 +635,7 @@ mod golden_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -658,6 +665,7 @@ mod golden_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -687,6 +695,7 @@ mod golden_tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
+ mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -724,6 +733,7 @@ mod golden_tests {
             }),
             layers: None,
             coord: None,
+            mark_style: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
