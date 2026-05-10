@@ -462,6 +462,30 @@ class Chart:
         theme_dict = (self._theme.to_theme_inputs_dict() if self._theme else {})
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
+    def save(self, path, *, format=None, **render_kwargs) -> None:
+        """Save chart to disk (svg or png). Format inferred from extension."""
+        from ferrum.display import save_chart
+        save_chart(self, path, format=format, **render_kwargs)
+
+    def show(self) -> None:
+        """Display chart: Jupyter inline SVG or browser fallback."""
+        from ferrum.display import show_chart
+        show_chart(self)
+
+    def _repr_svg_(self) -> str | None:
+        """Jupyter SVG rich display hook."""
+        try:
+            return self.show_svg()
+        except Exception:
+            return None  # let Jupyter fall back to __repr__
+
+    def _repr_html_(self) -> str | None:
+        """Jupyter HTML rich display hook — wraps SVG in a <div>."""
+        try:
+            return f"<div>{self.show_svg()}</div>"
+        except Exception:
+            return None
+
     # Stubs for Phase 11
     def add_selection(self, *selections):
         raise NotImplementedError("selections require .interactive() — Phase 11")
