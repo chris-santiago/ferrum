@@ -95,20 +95,31 @@ def desugar_smooth(x_field: str, y_field: str, **kwargs: Any) -> tuple:
     degree = kwargs.pop("degree", 2)
     n = kwargs.pop("n", 200)
     seed = kwargs.pop("seed", 0)
+    x_bins = kwargs.pop("x_bins", None)
+    x_estimator = kwargs.pop("x_estimator", None)
 
     if ci is None:
         # 8a-compatible single-line path: keep the legacy 3-tuple shape so the
-        # 6 SVG goldens stay byte-identical. No `seed` kwarg passed → matches
-        # the pre-8b call site exactly.
-        transforms = [Smooth(x_field, y_field, method=method, ci=None,
-                             bandwidth=bandwidth, degree=degree, n=n)]
+        # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator when
+        # explicitly set; otherwise omit (so existing goldens stay identical).
+        smooth_kwargs: dict = dict(method=method, ci=None,
+                                    bandwidth=bandwidth, degree=degree, n=n)
+        if x_bins is not None:
+            smooth_kwargs["x_bins"] = x_bins
+        if x_estimator is not None:
+            smooth_kwargs["x_estimator"] = x_estimator
+        transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": "x", "y": "y"}
         return ("line", transforms, encoding_remap)
 
     # CI band path (NEW in 8b — replaces former warn-once deferral).
-    transforms = [Smooth(x_field, y_field, method=method, ci=ci,
-                         bandwidth=bandwidth, degree=degree, n=n, seed=seed,
-                         name="smooth")]
+    smooth_kwargs = dict(method=method, ci=ci, bandwidth=bandwidth,
+                          degree=degree, n=n, seed=seed, name="smooth")
+    if x_bins is not None:
+        smooth_kwargs["x_bins"] = x_bins
+    if x_estimator is not None:
+        smooth_kwargs["x_estimator"] = x_estimator
+    transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
     layers = [
         {"mark": "ribbon",
          "encoding": {"x": "x", "y": "ci_lower", "y2": "ci_upper"},

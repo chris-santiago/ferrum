@@ -177,3 +177,86 @@ class TestCatplot:
     def test_invalid_kind_errors(self, cat_data):
         with pytest.raises(ValueError, match="kind"):
             fe.catplot(cat_data, x="group", y="value", kind="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Task 30 — lmplot
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def reg_data():
+    rng = np.random.default_rng(2)
+    n = 50
+    x = np.linspace(0, 10, n)
+    y = 2.0 + 0.5 * x + rng.normal(0, 1, n)
+    return pl.DataFrame({"x": x.tolist(), "y": y.tolist()})
+
+
+class TestLmplot:
+    def test_lm_default(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y")
+        d = json.loads(chart.to_spec().to_json())
+        # scatter + ribbon + line (3 layers when ci is set).
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 3
+
+    def test_lm_no_ci(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", ci=None)
+        d = json.loads(chart.to_spec().to_json())
+        # scatter + line (no ribbon) → 2 layers.
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 2
+
+    def test_lm_no_scatter(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", scatter=False)
+        d = json.loads(chart.to_spec().to_json())
+        # ribbon + line only.
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 2
+
+    def test_loess_method(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", method="loess")
+        d = json.loads(chart.to_spec().to_json())
+        smooth_t = next(
+            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            None,
+        )
+        assert smooth_t is not None
+        assert smooth_t["method"] == "loess"
+
+    def test_logistic_method(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", method="logistic")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "logistic" for t in d.get("transforms", []))
+
+    def test_glm_method(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", method="glm")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "glm" for t in d.get("transforms", []))
+
+    def test_robust_method(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", method="robust")
+        d = json.loads(chart.to_spec().to_json())
+        assert any(t.get("type") == "robust" for t in d.get("transforms", []))
+
+    def test_x_bins_estimator(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", x_bins=5, x_estimator="mean")
+        d = json.loads(chart.to_spec().to_json())
+        smooth_t = next(
+            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            None,
+        )
+        assert smooth_t is not None
+        assert smooth_t.get("x_bins") == 5
+        assert smooth_t.get("x_estimator") == "mean"
+
+    def test_invalid_method_errors(self, reg_data):
+        with pytest.raises(ValueError, match="method"):
+            fe.lmplot(reg_data, x="x", y="y", method="bogus")
+
+    def test_renders_e2e(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", method="lm", ci=None)
+        svg = chart.show_svg()
+        assert "<svg" in svg
+
+
