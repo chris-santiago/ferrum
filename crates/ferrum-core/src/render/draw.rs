@@ -153,7 +153,7 @@ pub fn resolve_mark_style(
             detail: None,
             cmap: None,
         },
-        Mark::Tick | Mark::Point | Mark::Text => MarkStyle {
+        Mark::Tick | Mark::Point | Mark::Text | Mark::Image => MarkStyle {
             fill: base_fill,
             stroke: None,
             stroke_width: 0.0,
@@ -262,6 +262,7 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
         Mark::Text  => super::marks::text::draw(ctx, out),
         Mark::Tick  => super::marks::tick::draw(ctx, out),
         Mark::Polygon => super::marks::polygon::draw(ctx, out),
+        Mark::Image => super::marks::image::draw(ctx, out),
     }
 }
 

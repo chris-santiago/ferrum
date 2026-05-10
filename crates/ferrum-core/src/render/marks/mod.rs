@@ -11,6 +11,7 @@ pub(crate) mod rule;
 pub(crate) mod text;
 pub(crate) mod tick;
 pub(crate) mod polygon;
+pub(crate) mod image;
 pub(crate) mod axis;
 pub(crate) mod legend;
 pub(crate) mod strip_title;
