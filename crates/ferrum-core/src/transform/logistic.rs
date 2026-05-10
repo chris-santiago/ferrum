@@ -271,7 +271,7 @@ fn build_logistic_batch(
 }
 
 /// Inverse standard normal CDF (Beasley-Springer / Moro).
-fn inv_normal_cdf(p: f64) -> f64 {
+pub(crate) fn inv_normal_cdf(p: f64) -> f64 {
     let a = [
         -3.969683028665376e+01,  2.209460984245205e+02,
         -2.759285104469687e+02,  1.383577518672690e+02,

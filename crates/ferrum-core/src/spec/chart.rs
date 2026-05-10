@@ -235,6 +235,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::letter_value::PyLetterValue(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Logistic(_) =>
                     pyo3::Py::new(py, crate::transform::logistic::PyLogistic(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Glm(_) =>
+                    pyo3::Py::new(py, crate::transform::glm::PyGlm(t.clone()))?.into_any(),
             };
             out.push(obj);
         }
@@ -420,8 +422,12 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(lg.0);
             continue;
         }
+        if let Ok(g) = item.extract::<crate::transform::glm::PyGlm>() {
+            out.push(g.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | LetterValue | Logistic"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | LetterValue | Logistic | Glm"
         )));
     }
     Ok(out)
