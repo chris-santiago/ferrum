@@ -241,3 +241,63 @@ class TestStack:
         )
         svg = chart.show_svg()
         assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# Task 23 — eligibility-matrix enforcement across every Chart.mark_* method
+# ---------------------------------------------------------------------------
+
+class TestEligibilityMatrix:
+    @pytest.mark.parametrize(
+        "mark_name,position_class,should_accept",
+        [
+            ("bar",       "Identity", True),
+            ("bar",       "Dodge",    True),
+            ("bar",       "Jitter",   False),
+            ("bar",       "Stack",    True),
+            ("point",     "Dodge",    True),
+            ("point",     "Jitter",   True),
+            ("point",     "Stack",    False),
+            ("line",      "Dodge",    False),
+            ("line",      "Jitter",   False),
+            ("line",      "Stack",    False),
+            ("rule",      "Dodge",    False),
+            ("rule",      "Jitter",   False),
+            ("area",      "Stack",    True),
+            ("area",      "Dodge",    False),
+            ("ribbon",    "Stack",    True),
+            ("ribbon",    "Dodge",    True),
+            ("tick",      "Jitter",   True),
+            ("tick",      "Dodge",    False),
+            ("swarm",     "Jitter",   True),
+            ("swarm",     "Dodge",    True),
+            ("violin",    "Dodge",    True),
+            ("violin",    "Jitter",   False),
+            ("boxplot",   "Dodge",    True),
+            ("boxplot",   "Stack",    False),
+            ("errorbar",  "Dodge",    True),
+            ("errorbar",  "Jitter",   False),
+            ("errorband", "Dodge",    True),
+            ("errorband", "Stack",    False),
+        ],
+    )
+    def test_eligibility(self, mark_name, position_class, should_accept):
+        position_classes = {
+            "Identity": Identity(),
+            "Dodge": Dodge(),
+            "Jitter": Jitter(),
+            "Stack": Stack(),
+        }
+        pos = position_classes[position_class]
+        df = pl.DataFrame({
+            "x": [1.0, 2.0],
+            "y": [3.0, 4.0],
+            "y2": [5.0, 6.0],
+            "g": ["a", "b"],
+        })
+        method = getattr(fe.Chart(df), f"mark_{mark_name}")
+        if should_accept:
+            method(position=pos)
+        else:
+            with pytest.raises(TypeError, match=position_class):
+                method(position=pos)

@@ -259,17 +259,21 @@ class Chart:
 
     # ---- Marks (statistical) ----
 
-    def mark_density(self, **kwargs) -> "Chart":
+    def mark_density(self, *, position=None, **kwargs) -> "Chart":
         """Density plot. 1D KDE when only x is encoded; bivariate (filled
         contour over 2D KDE — Phase 8b) when both x and y are encoded.
         Can be called before or after ``.encode()``.
         """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("density", position)
         x_enc = self._encoding.get("x")
         if x_enc is None:
             # Encoding not yet set — defer resolution to render time.
             new = self._clone()
             new._mark = "area"  # placeholder so _mark is not None
             new._pending_stat_mark = ("density", dict(kwargs))
+            new._position = position
             return new
         field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
@@ -291,15 +295,20 @@ class Chart:
             from ferrum.encoding import X, Y
             new._encoding["x"] = X(remap["x"], type="Q")
             new._encoding["y"] = Y(remap["y"], type="Q")
+        new._position = position
         return new
 
-    def mark_histogram(self, **kwargs) -> "Chart":
+    def mark_histogram(self, *, position=None, **kwargs) -> "Chart":
         """Histogram. Can be called before or after .encode(x=...)."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("histogram", position)
         x_enc = self._encoding.get("x")
         if x_enc is None:
             new = self._clone()
             new._mark = "bar"  # placeholder
             new._pending_stat_mark = ("histogram", dict(kwargs))
+            new._position = position
             return new
         field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         mark, transforms, remap = desugar_histogram(field, **kwargs)
@@ -310,19 +319,24 @@ class Chart:
         new._encoding["x"] = X(remap["x"], type="Q")
         new._encoding["x2"] = X2(remap["x2"], type="Q")
         new._encoding["y"] = Y(remap["y"], type="Q")
+        new._position = position
         return new
 
-    def mark_smooth(self, **kwargs) -> "Chart":
+    def mark_smooth(self, *, position=None, **kwargs) -> "Chart":
         """Smooth/regression line. Can be called before or after .encode(x=..., y=...).
 
         With ``ci=`` set, emits a layered ribbon (CI band) + line (Phase 8b).
         """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("smooth", position)
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
             new = self._clone()
             new._mark = "line"  # placeholder
             new._pending_stat_mark = ("smooth", dict(kwargs))
+            new._position = position
             return new
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
@@ -341,6 +355,7 @@ class Chart:
             mark, transforms, remap = result
             new._mark = mark
             new._transforms = list(self._transforms) + transforms
+        new._position = position
         return new
 
     # ---- Marks (deferred) ----
@@ -353,9 +368,13 @@ class Chart:
         outliers=True,
         color_field=None,
         horizontal=False,
+        position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Composite boxplot. Desugars to box+whisker+median (+optional outlier) layers."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("boxplot", position)
         from ferrum.marks.composite import desugar_boxplot
         new = self._clone()
         new._mark = "point"  # placeholder; layered mode overrides
@@ -371,10 +390,14 @@ class Chart:
             },
             desugar_boxplot,
         )
+        new._position = position
         return new
 
-    def mark_errorbar(self, *, extent="ci", ticks=True, **mark_kwargs) -> "Chart":
+    def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
         """Errorbar mark via ErrorExtent transform."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("errorbar", position)
         from ferrum.marks.composite import desugar_errorbar
         new = self._clone()
         new._mark = "point"
@@ -383,10 +406,14 @@ class Chart:
             {"extent": extent, "ticks": ticks, **mark_kwargs},
             desugar_errorbar,
         )
+        new._position = position
         return new
 
-    def mark_errorband(self, *, extent="ci", borders=False, **mark_kwargs) -> "Chart":
+    def mark_errorband(self, *, extent="ci", borders=False, position=None, **mark_kwargs) -> "Chart":
         """Errorband mark (ribbon) via ErrorExtent transform."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("errorband", position)
         from ferrum.marks.composite import desugar_errorband
         new = self._clone()
         new._mark = "point"
@@ -395,10 +422,14 @@ class Chart:
             {"extent": extent, "borders": borders, **mark_kwargs},
             desugar_errorband,
         )
+        new._position = position
         return new
 
-    def mark_ribbon(self, *, opacity=0.3, interpolate="linear", **mark_kwargs) -> "Chart":
+    def mark_ribbon(self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs) -> "Chart":
         """Ribbon mark — fills closed area between y and y2 along x. Requires y2 in encoding."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("ribbon", position)
         from ferrum.marks.composite import desugar_ribbon
         new = self._clone()
         new._mark = "ribbon"
@@ -407,6 +438,7 @@ class Chart:
             {"opacity": opacity, "interpolate": interpolate, **mark_kwargs},
             desugar_ribbon,
         )
+        new._position = position
         return new
 
     def mark_contour(
@@ -417,9 +449,13 @@ class Chart:
         smooth=True,
         fill=False,
         cmap="viridis",
+        position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Contour plot via Kde2D + Contour transforms."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("contour", position)
         from ferrum.marks.heavy_stat import desugar_contour
         new = self._clone()
         new._mark = "polygon"  # placeholder; layered mode overrides
@@ -431,10 +467,14 @@ class Chart:
             },
             desugar_contour,
         )
+        new._position = position
         return new
 
-    def mark_violin(self, *, bandwidth="scott", inner="box", **mark_kwargs) -> "Chart":
+    def mark_violin(self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs) -> "Chart":
         """Violin plot via Violin transform; optional inner box/quartile/point overlay."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("violin", position)
         from ferrum.marks.heavy_stat import desugar_violin
         new = self._clone()
         new._mark = "polygon"
@@ -443,10 +483,14 @@ class Chart:
             {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
             desugar_violin,
         )
+        new._position = position
         return new
 
-    def mark_qq(self, *, distribution="normal", dequantize=False, line=True, **mark_kwargs) -> "Chart":
+    def mark_qq(self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs) -> "Chart":
         """QQ plot. Reads `field` from x encoding (single-column input)."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("qq", position)
         from ferrum.marks.heavy_stat import desugar_qq
         new = self._clone()
         new._mark = "point"
@@ -462,6 +506,7 @@ class Chart:
             {"distribution": distribution, "dequantize": dequantize, "line": line, **mark_kwargs},
             _resolve_qq,
         )
+        new._position = position
         return new
 
     def mark_raster(
@@ -474,9 +519,13 @@ class Chart:
         blend="alpha",
         min_count=None,
         log_scale=False,
+        position=None,
         **mark_kwargs,
     ) -> "Chart":
         """2D raster (heatmap) via Raster transform."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("raster", position)
         from ferrum.marks.heavy_stat import desugar_raster
         new = self._clone()
         new._mark = "image"
@@ -488,6 +537,7 @@ class Chart:
             },
             desugar_raster,
         )
+        new._position = position
         return new
 
     def mark_hex(
@@ -499,9 +549,13 @@ class Chart:
         cmap="viridis",
         stroke=None,
         stroke_width=0,
+        position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Hexagonal binning via Hex transform."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("hex", position)
         from ferrum.marks.heavy_stat import desugar_hex
         new = self._clone()
         new._mark = "polygon"
@@ -513,6 +567,7 @@ class Chart:
             },
             desugar_hex,
         )
+        new._position = position
         return new
 
     def mark_swarm(
@@ -523,9 +578,13 @@ class Chart:
         spacing=1.0,
         side="both",
         dodge=None,
+        position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Beeswarm plot via Swarm transform."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("swarm", position)
         from ferrum.marks.heavy_stat import desugar_swarm
         new = self._clone()
         new._mark = "point"
@@ -537,10 +596,14 @@ class Chart:
             },
             desugar_swarm,
         )
+        new._position = position
         return new
 
-    def mark_function(self, fn, *, domain=None, n=200, clip=True, **mark_kwargs) -> "Chart":
+    def mark_function(self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs) -> "Chart":
         """Function plot. Materializes synthetic data via fn(xs)."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("function", position)
         if self._layers is not None and self._layers:
             raise NotImplementedError(
                 "mark_function as a layer in a multi-layer Chart is deferred to Phase 9+; "
@@ -573,6 +636,7 @@ class Chart:
                 new._encoding["x"] = X(remap["x"], type="Q")
             if "y" in remap:
                 new._encoding["y"] = Y(remap["y"], type="Q")
+        new._position = position
         return new
 
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
