@@ -95,6 +95,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: true,
+            name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"bin""#), "missing tag: {json}");
@@ -123,6 +124,7 @@ mod tests {
                 bin_width: None,
                 extent: Some((1.0, 10.0)),
                 nice: false,
+                name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -131,6 +133,7 @@ mod tests {
                     as_: "total_count".into(),
                 }],
                 groupby: vec![],
+                name: None,
             }),
         ];
 
@@ -155,6 +158,7 @@ mod tests {
                 bin_width: None,
                 extent: Some((1.0, 5.0)),
                 nice: false,
+                name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -163,12 +167,28 @@ mod tests {
                     as_: "m".into(),
                 }],
                 groupby: vec![],
+                name: None,
             }),
         ];
         let err = apply_transforms(&pipeline, &batch).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'x'") && (msg.contains("not found") || msg.contains("missing")),
             "expected missing-column error; got: {msg}");
+    }
+
+    #[test]
+    fn transform_spec_json_byte_identical_when_name_none() {
+        let s = TransformSpec::Bin(BinSpec {
+            field: "x".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            name: None,
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("name"), "name=None must be omitted: {json}");
+        assert!(json.contains(r#""type":"bin""#));
     }
 
     #[test]
@@ -181,6 +201,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 3.0)),
             nice: false,
+            name: None,
         });
         let ctx = TransformContext::default();
         let with_ctx = spec.apply_with_context(&batch, &ctx).unwrap();

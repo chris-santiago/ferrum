@@ -24,6 +24,8 @@ pub(crate) struct SummarySpec {
     pub n_boot: usize,
     #[serde(default)]
     pub seed: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -259,7 +261,7 @@ pub(crate) struct PySummary(pub(crate) TransformSpec);
 #[pymethods]
 impl PySummary {
     #[new]
-    #[pyo3(signature = (field, *, groupby = None, error_fn = "ci", ci = 0.95, n_boot = 1000, seed = 0))]
+    #[pyo3(signature = (field, *, groupby = None, error_fn = "ci", ci = 0.95, n_boot = 1000, seed = 0, name = None))]
     fn new(
         field: &str,
         groupby: Option<Vec<String>>,
@@ -267,6 +269,7 @@ impl PySummary {
         ci: f64,
         n_boot: usize,
         seed: u64,
+        name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
             return Err(PyValueError::new_err("Summary: field must be non-empty"));
@@ -301,6 +304,7 @@ impl PySummary {
             groupby: gb,
             error_fn: parsed,
             ci, n_boot, seed,
+            name,
         })))
     }
 
@@ -368,6 +372,7 @@ mod tests {
             ci: 0.95,
             n_boot: 0,
             seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let groups = col_str(&out, "group");
@@ -396,6 +401,7 @@ mod tests {
             ci: 0.95,
             n_boot: 0,
             seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let mean = col_f64(&out, "mean");
@@ -425,6 +431,7 @@ mod tests {
             ci: 0.95,
             n_boot: 0,
             seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let groups = col_str(&out, "group");
@@ -450,6 +457,7 @@ mod tests {
             ci: 0.95,
             n_boot: 0,
             seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -464,6 +472,7 @@ mod tests {
             ci: 0.95,
             n_boot: 1000,
             seed: 42,
+            name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SummarySpec = serde_json::from_str(&json).unwrap();
@@ -485,6 +494,7 @@ mod tests {
             ci: 0.95,
             n_boot: 500,
             seed: 42,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let mean = col_f64(&out, "mean");
@@ -515,6 +525,7 @@ mod tests {
             ci: 0.95,
             n_boot: 1000,
             seed: 42,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let mean = col_f64(&out, "mean");
@@ -541,6 +552,7 @@ mod tests {
             ci: 0.95,
             n_boot: 500,
             seed: 12345,
+            name: None,
         };
         let spec2 = spec1.clone();
         let out1 = apply(&spec1, &batch).unwrap();
@@ -563,6 +575,7 @@ mod tests {
             ci: 0.95,
             n_boot: 1000,
             seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let mean = col_f64(&out, "mean");

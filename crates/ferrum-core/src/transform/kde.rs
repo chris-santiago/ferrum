@@ -22,6 +22,8 @@ pub(crate) struct KdeSpec {
     pub extent: Option<(f64, f64)>,
     #[serde(default)]
     pub cumulative: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -173,13 +175,14 @@ pub(crate) struct PyKde(pub(crate) TransformSpec);
 #[pymethods]
 impl PyKde {
     #[new]
-    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false))]
+    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false, name = None))]
     fn new(
         field: &str,
         bandwidth: Option<&Bound<'_, PyAny>>,
         n: usize,
         extent: Option<(f64, f64)>,
         cumulative: bool,
+        name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
             return Err(PyValueError::new_err("Kde: field must be non-empty"));
@@ -225,6 +228,7 @@ impl PyKde {
             n,
             extent,
             cumulative,
+            name,
         })))
     }
 
@@ -307,6 +311,7 @@ mod tests {
                 n: case.n,
                 extent: Some((case.extent[0], case.extent[1])),
                 cumulative: case.cumulative,
+                name: None,
             };
             let batch = batch_with("x", case.input.clone());
             let out = apply(&spec, &batch).unwrap();
@@ -343,6 +348,7 @@ mod tests {
             n: 16,
             extent: Some((0.0, 6.0)),
             cumulative: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let density = col(&out, "density");
@@ -358,6 +364,7 @@ mod tests {
             n: 8,
             extent: Some((0.0, 2.0)),
             cumulative: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let density = col(&out, "density");
@@ -372,6 +379,7 @@ mod tests {
             n: 32,
             extent: Some((-1.0, 5.0)),
             cumulative: true,
+            name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: KdeSpec = serde_json::from_str(&json).unwrap();

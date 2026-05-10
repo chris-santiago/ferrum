@@ -18,6 +18,8 @@ pub(crate) struct BinSpec {
     pub extent: Option<(f64, f64)>,
     #[serde(default = "default_true")]
     pub nice: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -172,13 +174,14 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true))]
+    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, name = None))]
     fn new(
         field: &str,
         bin_count: Option<usize>,
         bin_width: Option<f64>,
         extent: Option<(f64, f64)>,
         nice: bool,
+        name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
             return Err(PyValueError::new_err("Bin: field must be non-empty"));
@@ -208,6 +211,7 @@ impl PyBin {
             bin_width,
             extent,
             nice,
+            name,
         })))
     }
 
@@ -264,6 +268,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 10.0)),
             nice: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 5);
@@ -290,6 +295,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 10.0)),
             nice: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let densities = col_f64(&out, "density");
@@ -312,6 +318,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 4);
@@ -326,6 +333,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -350,6 +358,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 3.0)),
             nice: false,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let counts = col_u64(&out, "count");
@@ -367,6 +376,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("ghost"), "err: {err}");
@@ -389,6 +399,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 3.0)),
             nice: false,
+            name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         let msg = err.to_string();
@@ -408,6 +419,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: true,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let starts = col_f64(&out, "bin_start");

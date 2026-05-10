@@ -443,12 +443,14 @@ mod tests {
                 },
                 transforms: vec![],
                 mark_style: None,
+                data_source: None,
             },
             Layer {
                 mark: Mark::Line,
                 encoding: Encoding::default(), // inherits from chart-level
                 transforms: vec![],
                 mark_style: None,
+                data_source: None,
             },
         ]);
         let batch = price_weight_batch();
