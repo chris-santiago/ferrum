@@ -47,3 +47,21 @@ class Theme:
             return "Theme()"
         kv = ", ".join(f"{k}={v!r}" for k, v in sorted(self._props.items()))
         return f"Theme({kv})"
+
+
+from ferrum.themes import builtins as _builtins  # noqa: E402
+
+# Re-export the 8 builtins as module attributes
+default = _builtins.default
+minimal = _builtins.minimal
+dark = _builtins.dark
+publication = _builtins.publication
+economist = _builtins.economist
+fivethirtyeight = _builtins.fivethirtyeight
+solarized_light = _builtins.solarized_light
+solarized_dark = _builtins.solarized_dark
+
+__all__ = [
+    "Theme", "default", "minimal", "dark", "publication", "economist",
+    "fivethirtyeight", "solarized_light", "solarized_dark",
+]

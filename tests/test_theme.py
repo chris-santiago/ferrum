@@ -50,3 +50,22 @@ def test_theme_hashable():
     t = Theme(background="#000")
     s = {t}
     assert t in s
+
+
+def test_eight_builtins_exist():
+    from ferrum.themes import (default, minimal, dark, publication,
+                                 economist, fivethirtyeight,
+                                 solarized_light, solarized_dark)
+    for t in (default, minimal, dark, publication, economist,
+              fivethirtyeight, solarized_light, solarized_dark):
+        assert isinstance(t, Theme)
+
+
+def test_default_theme_has_no_props():
+    from ferrum.themes import default
+    assert default._props == {}
+
+
+def test_dark_theme_has_dark_background():
+    from ferrum.themes import dark
+    assert dark._props["background"] == "#1a1a2e"
