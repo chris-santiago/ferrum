@@ -1,13 +1,18 @@
 //! Build ResolvedScales from a ChartSpec + a post-transform RecordBatch.
 //! Phase 7 supports: LinearScale, OrdinalScale, TimeScale on x/y;
 //! CategoricalColorScale on color.
+//! Phase 8a adds: LogScale, SymlogScale (via explicit ScaleSpec override);
+//! SizeScale, ShapeScale, OpacityScale for new encoding channels.
 
 use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
 
+use crate::layout::ThemeInputs;
 use crate::scale::linear::LinearScale;
+use crate::scale::log::LogScale;
 use crate::scale::ordinal::OrdinalScale;
+use crate::scale::symlog::SymlogScale;
 use crate::scale::time::TimeScale;
 use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::DataType as SpecDataType;
@@ -17,12 +22,14 @@ use super::palette::OKABE_ITO;
 use super::RenderError;
 
 /// Sealed-enum wrapper over Phase 4 scales, used during render.
-/// Phase 7 only constructs Linear/Ordinal/Time variants.
-#[derive(Debug)]
+/// Phase 7: Linear/Ordinal/Time. Phase 8a adds: Log, Symlog.
+#[derive(Debug, Clone)]
 pub enum ScaleKind {
     Linear(LinearScale),
     Ordinal(OrdinalScale),
     Time(TimeScale),
+    Log(LogScale),
+    Symlog(SymlogScale),
 }
 
 impl ScaleKind {
@@ -32,6 +39,8 @@ impl ScaleKind {
         match self {
             Self::Linear(s) => Some(s.scale_internal(x)),
             Self::Time(s) => Some(s.scale_internal(x)),
+            Self::Log(s) => Some(s.scale_internal(x)),
+            Self::Symlog(s) => Some(s.scale_internal(x)),
             Self::Ordinal(_) => None,
         }
     }
@@ -70,6 +79,16 @@ impl ScaleKind {
                     .map(|t| super::format::format_time(t as i64, spacing))
                     .collect()
             }
+            Self::Log(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .map(super::format::format_numeric)
+                .collect(),
+            Self::Symlog(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .map(super::format::format_numeric)
+                .collect(),
         }
     }
 
@@ -88,11 +107,19 @@ impl ScaleKind {
                 let r = s.range_pair();
                 (r[0], r[1])
             }
+            Self::Log(s) => {
+                let r = s.range_pair();
+                (r[0], r[1])
+            }
+            Self::Symlog(s) => {
+                let r = s.range_pair();
+                (r[0], r[1])
+            }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ColorScale {
     Categorical {
         domain: Vec<String>,
@@ -111,11 +138,68 @@ impl ColorScale {
     }
 }
 
+/// A linear size scale: maps a quantitative field to a radius/diameter in pixels.
+#[derive(Debug, Clone)]
+pub struct SizeScale {
+    pub inner: ScaleKind, // typically Linear
+    pub min_px: f64,      // default 3.0
+    pub max_px: f64,      // default 30.0
+}
+
+/// An ordinal shape scale: maps a categorical field to one of 6 shapes.
+#[derive(Debug, Clone)]
+pub struct ShapeScale {
+    pub domain: Vec<String>,   // distinct values in encounter order
+    pub shapes: Vec<ShapeKind>, // mapped from SHAPE_PALETTE
+}
+
+impl ShapeScale {
+    pub fn lookup(&self, value: &str) -> Option<ShapeKind> {
+        self.domain
+            .iter()
+            .position(|v| v == value)
+            .map(|i| self.shapes[i])
+    }
+}
+
+/// The 6 point shapes available to the shape scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Circle,
+    Square,
+    Cross,
+    Diamond,
+    TriangleUp,
+    TriangleDown,
+}
+
+/// Fixed 6-shape palette used by `build_shape_scale`.
+pub const SHAPE_PALETTE: [ShapeKind; 6] = [
+    ShapeKind::Circle,
+    ShapeKind::Square,
+    ShapeKind::Cross,
+    ShapeKind::Diamond,
+    ShapeKind::TriangleUp,
+    ShapeKind::TriangleDown,
+];
+
+/// A linear opacity scale: maps a quantitative field to [min_opacity, max_opacity].
+#[derive(Debug, Clone)]
+pub struct OpacityScale {
+    pub inner: ScaleKind, // typically Linear
+    pub min_opacity: f64, // default 0.1
+    pub max_opacity: f64, // default 1.0
+}
+
 #[derive(Debug)]
 pub struct ResolvedScales {
     pub x: ScaleKind,
     pub y: ScaleKind,
     pub color: Option<ColorScale>,
+    // Phase 8a:
+    pub size: Option<SizeScale>,
+    pub shape: Option<ShapeScale>,
+    pub opacity: Option<OpacityScale>,
 }
 
 /// Build scales from spec + post-transform batch + pixel ranges.
@@ -125,6 +209,7 @@ pub fn resolve_scales(
     batch: &RecordBatch,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
+    theme: &ThemeInputs,
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
 
@@ -165,7 +250,17 @@ pub fn resolve_scales(
         None
     };
 
-    Ok((ResolvedScales { x, y, color }, warnings))
+    let size = build_size_scale(&spec.encoding, batch, theme)?;
+    let (shape, shape_warn) = build_shape_scale(&spec.encoding, batch)?;
+    if let Some(w) = shape_warn {
+        warnings.push(w);
+    }
+    let opacity = build_opacity_scale(&spec.encoding, batch, theme)?;
+
+    Ok((
+        ResolvedScales { x, y, color, size, shape, opacity },
+        warnings,
+    ))
 }
 
 fn build_axis_scale(
@@ -184,6 +279,12 @@ fn build_axis_scale(
     } else {
         pixel_range
     };
+
+    // If an explicit ScaleSpec is present, honor it (Phase 8a).
+    if let Some(scale_spec) = &enc.scale {
+        return build_from_scale_spec(scale_spec, enc, batch, pr);
+    }
+
     match dtype {
         SpecDataType::Quantitative => {
             let (min, max) = column_min_max_f64(col)
@@ -214,6 +315,179 @@ fn build_axis_scale(
             )))
         }
     }
+}
+
+/// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.
+fn build_from_scale_spec(
+    scale_spec: &crate::spec::encoding::ScaleSpec,
+    enc: &crate::spec::encoding::EncodingSpec,
+    batch: &RecordBatch,
+    pr: (f64, f64),
+) -> Result<ScaleKind, RenderError> {
+    use crate::spec::encoding::ScaleSpec;
+
+    let col = batch
+        .column_by_name(&enc.field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
+
+    let default_pixel_range = vec![pr.0, pr.1];
+
+    Ok(match scale_spec {
+        ScaleSpec::Linear { domain, range, nice, clamp, .. } => {
+            let d = match domain {
+                Some(d) => d.clone(),
+                None => {
+                    let (mn, mx) = column_min_max_f64(col)
+                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
+                    vec![mn, mx]
+                }
+            };
+            ScaleKind::Linear(LinearScale::new_internal(
+                d,
+                range.clone().unwrap_or(default_pixel_range),
+                *clamp,
+                *nice,
+            ))
+        }
+        ScaleSpec::Log { base, domain, range, nice, clamp } => {
+            let d = match domain {
+                Some(d) => d.clone(),
+                None => {
+                    let (mn, mx) = column_min_max_f64(col)
+                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
+                    vec![mn, mx]
+                }
+            };
+            ScaleKind::Log(LogScale::new_internal(
+                d,
+                range.clone().unwrap_or(default_pixel_range),
+                *base,
+                *clamp,
+                *nice,
+            ))
+        }
+        ScaleSpec::Time { domain, range, nice, clamp } => {
+            let d = match domain {
+                Some(d) => d.clone(),
+                None => {
+                    let (mn, mx) = column_min_max_f64(col)
+                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
+                    vec![mn, mx]
+                }
+            };
+            ScaleKind::Time(TimeScale::new_internal(
+                d,
+                range.clone().unwrap_or(default_pixel_range),
+                *clamp,
+                *nice,
+            ))
+        }
+        ScaleSpec::Symlog { constant, domain, range, nice, clamp } => {
+            let d = match domain {
+                Some(d) => d.clone(),
+                None => {
+                    let (mn, mx) = column_min_max_f64(col)
+                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
+                    vec![mn, mx]
+                }
+            };
+            ScaleKind::Symlog(SymlogScale::new_internal(
+                d,
+                range.clone().unwrap_or(default_pixel_range),
+                *constant,
+                *clamp,
+                *nice,
+            ))
+        }
+        ScaleSpec::Ordinal { domain, range, padding } => {
+            let d = match domain {
+                Some(d) => d.clone(),
+                None => distinct_values_in_order(batch, &enc.field)?,
+            };
+            ScaleKind::Ordinal(OrdinalScale::new_internal(
+                d,
+                range.clone().unwrap_or(default_pixel_range),
+                *padding,
+            ))
+        }
+    })
+}
+
+/// Build a SizeScale if `encoding.size` is present.
+pub fn build_size_scale(
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+) -> Result<Option<SizeScale>, RenderError> {
+    let Some(size_enc) = &encoding.size else {
+        return Ok(None);
+    };
+    let col = batch
+        .column_by_name(&size_enc.field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: size_enc.field.clone() })?;
+    let (min, max) = column_min_max_f64(col)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("size: {e}")))?;
+    let inner = ScaleKind::Linear(LinearScale::new_internal(
+        vec![min, max],
+        vec![theme.point_size_min, theme.point_size_max],
+        false,
+        true,
+    ));
+    Ok(Some(SizeScale {
+        inner,
+        min_px: theme.point_size_min,
+        max_px: theme.point_size_max,
+    }))
+}
+
+/// Build a ShapeScale if `encoding.shape` is present.
+/// Returns the scale (if built) and an optional overflow warning.
+pub fn build_shape_scale(
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+) -> Result<(Option<ShapeScale>, Option<crate::render::RenderWarning>), RenderError> {
+    let Some(shape_enc) = &encoding.shape else {
+        return Ok((None, None));
+    };
+    let distinct = distinct_values_in_order(batch, &shape_enc.field)?;
+    let warn = if distinct.len() > SHAPE_PALETTE.len() {
+        Some(crate::render::RenderWarning::ShapePaletteOverflowed {
+            categories: distinct.len() as u32,
+        })
+    } else {
+        None
+    };
+    let shapes: Vec<ShapeKind> = (0..distinct.len())
+        .map(|i| SHAPE_PALETTE[i % SHAPE_PALETTE.len()])
+        .collect();
+    Ok((Some(ShapeScale { domain: distinct, shapes }), warn))
+}
+
+/// Build an OpacityScale if `encoding.opacity` is present.
+pub fn build_opacity_scale(
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+) -> Result<Option<OpacityScale>, RenderError> {
+    let Some(op_enc) = &encoding.opacity else {
+        return Ok(None);
+    };
+    let col = batch
+        .column_by_name(&op_enc.field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: op_enc.field.clone() })?;
+    let (min, max) = column_min_max_f64(col)
+        .map_err(|e| RenderError::ScaleResolutionFailed(format!("opacity: {e}")))?;
+    let inner = ScaleKind::Linear(LinearScale::new_internal(
+        vec![min, max],
+        vec![theme.opacity_min, theme.opacity_max],
+        true,
+        false,
+    ));
+    Ok(Some(OpacityScale {
+        inner,
+        min_opacity: theme.opacity_min,
+        max_opacity: theme.opacity_max,
+    }))
 }
 
 fn infer_spec_type(
@@ -348,7 +622,8 @@ mod tests {
     fn quantitative_x_resolves_to_linear() {
         let s = make_spec_with_color();
         let b = make_batch_q_q_n();
-        let (scales, warnings) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0)).unwrap();
+        let theme = ThemeInputs::default();
+        let (scales, warnings) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
         assert!(matches!(scales.x, ScaleKind::Linear(_)));
         assert!(matches!(scales.y, ScaleKind::Linear(_)));
         assert!(warnings.is_empty());
@@ -358,7 +633,8 @@ mod tests {
     fn color_encoding_builds_categorical_in_encounter_order() {
         let s = make_spec_with_color();
         let b = make_batch_q_q_n();
-        let (scales, _) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0)).unwrap();
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
         let cs = scales.color.unwrap();
         match cs {
             ColorScale::Categorical { domain, .. } => {
@@ -376,7 +652,8 @@ mod tests {
             ..Default::default()
         });
         let b = make_batch_q_q_n();
-        let err = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0)).unwrap_err();
+        let theme = ThemeInputs::default();
+        let err = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0), &theme).unwrap_err();
         assert!(matches!(err, RenderError::UnknownColumn { .. }));
     }
 
@@ -418,10 +695,149 @@ mod tests {
             coord: None,
             mark_style: None,
         };
-        let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0)).unwrap();
+        let theme = ThemeInputs::default();
+        let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
         assert!(matches!(
             warnings[0],
             crate::render::RenderWarning::ColorPaletteOverflowed { categories: 10 }
         ));
+    }
+
+    // --- Phase 8a new tests ---
+
+    fn make_batch_q_q_n_n_q() -> RecordBatch {
+        // x, y (quantitative), species (nominal), size_val (quantitative), opacity_val (quantitative)
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+            Field::new("species", ArrowDataType::Utf8, false),
+            Field::new("size_val", ArrowDataType::Float64, false),
+            Field::new("opacity_val", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["cat", "dog", "bird"])),
+                Arc::new(Float64Array::from(vec![1.0, 5.0, 10.0])),
+                Arc::new(Float64Array::from(vec![0.2, 0.5, 0.9])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn make_spec_with_size() -> ChartSpec {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                size: Some(EncodingSpec { field: "size_val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        }
+    }
+
+    fn make_spec_with_shape() -> ChartSpec {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                shape: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        }
+    }
+
+    fn make_spec_with_opacity() -> ChartSpec {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "opacity_val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        }
+    }
+
+    #[test]
+    fn explicit_log_scale_overrides_auto_detection() {
+        use crate::spec::encoding::ScaleSpec;
+        let mut s = make_spec_with_color();
+        s.encoding.x.as_mut().unwrap().scale = Some(ScaleSpec::Log {
+            base: 10.0,
+            domain: Some(vec![1.0, 1000.0]),
+            range: None,
+            nice: false,
+            clamp: false,
+        });
+        let b = make_batch_q_q_n();
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        assert!(matches!(scales.x, ScaleKind::Log(_)));
+    }
+
+    #[test]
+    fn size_scale_defaults_to_3_to_30_px() {
+        let batch = make_batch_q_q_n_n_q();
+        let theme = ThemeInputs::default();
+        let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &theme)
+            .unwrap()
+            .unwrap();
+        assert_eq!(scale.min_px, 3.0);
+        assert_eq!(scale.max_px, 30.0);
+    }
+
+    #[test]
+    fn shape_scale_picks_from_6_shape_palette_in_order() {
+        let batch = make_batch_q_q_n_n_q();
+        let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch).unwrap();
+        let scale = scale.unwrap();
+        assert!(warn.is_none()); // 3 categories, no overflow
+        assert_eq!(scale.shapes.len(), 3);
+        assert_eq!(scale.shapes[0], ShapeKind::Circle);
+        assert_eq!(scale.shapes[1], ShapeKind::Square);
+        assert_eq!(scale.shapes[2], ShapeKind::Cross);
+    }
+
+    #[test]
+    fn opacity_scale_defaults_to_0_1_to_1_0() {
+        let batch = make_batch_q_q_n_n_q();
+        let theme = ThemeInputs::default();
+        let scale = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &theme)
+            .unwrap()
+            .unwrap();
+        assert_eq!(scale.min_opacity, 0.1);
+        assert_eq!(scale.max_opacity, 1.0);
     }
 }

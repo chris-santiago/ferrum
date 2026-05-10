@@ -194,7 +194,7 @@ pub fn prepare_render_inputs(
     };
 
     let (provisional_scales, scale_warnings) =
-        resolve_scales(&rendering_spec, &transformed, (0.0, 1.0), (0.0, 1.0))?;
+        resolve_scales(&rendering_spec, &transformed, (0.0, 1.0), (0.0, 1.0), &crate::layout::ThemeInputs::default())?;
 
     let x_field = rendering_encoding.x.as_ref().map(|e| e.field.clone());
     let y_field = rendering_encoding.y.as_ref().map(|e| e.field.clone());

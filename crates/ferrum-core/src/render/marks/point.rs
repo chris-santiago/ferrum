@@ -47,7 +47,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
 fn scale_value(s: &ScaleKind, v: f64, label: Option<&str>) -> Option<f64> {
     match s {
-        ScaleKind::Linear(_) | ScaleKind::Time(_) => s.to_pixel_f64(v),
+        ScaleKind::Linear(_) | ScaleKind::Time(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) => {
+            s.to_pixel_f64(v)
+        }
         ScaleKind::Ordinal(_) => label.and_then(|l| s.to_pixel_str(l)),
     }
 }
@@ -104,7 +106,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None,
         };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
@@ -132,7 +134,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None,
         };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);

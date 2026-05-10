@@ -78,6 +78,7 @@ pub enum RenderWarning {
     Layout(LayoutWarning),
     OutOfDomainRows { mark: String, count: u64 },
     ColorPaletteOverflowed { categories: u32 },
+    ShapePaletteOverflowed { categories: u32 },
     EmptyPanel { panel_index: usize },
 }
 
@@ -109,6 +110,7 @@ mod tests {
             RenderWarning::Layout(LayoutWarning::PanelCollapsed { panel_index: 0 }),
             RenderWarning::OutOfDomainRows { mark: "point".into(), count: 3 },
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
+            RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
         ] {
             let json = serde_json::to_string(&w).unwrap();
@@ -215,6 +217,7 @@ pub fn render_svg(
             &panel_batch,
             (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
             (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+            theme,
         )?;
         warnings.extend(scale_warnings);
 
@@ -258,6 +261,7 @@ pub fn render_svg(
                 &prep.transformed,
                 (0.0, 1.0),
                 (0.0, 1.0),
+                theme,
             )?;
             gs.color
         } else {

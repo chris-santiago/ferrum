@@ -8,6 +8,34 @@ use super::core::{validate_continuous_pair, Scale};
 pub struct SymlogScale(Scale);
 
 impl SymlogScale {
+    /// Rust-side constructor (no Python validation overhead).
+    pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, constant: f64, clamp: bool, nice: bool) -> Self {
+        let mut s = super::core::Scale::Symlog {
+            domain: [domain[0], domain[1]],
+            range:  [range[0],  range[1]],
+            constant,
+            clamp,
+        };
+        if nice { s = s.nice(); }
+        SymlogScale(s)
+    }
+
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
+        self.0.scale_f64(x)
+    }
+
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
+        self.0.ticks(Some(count))
+    }
+
+    pub(crate) fn range_pair(&self) -> [f64; 2] {
+        match &self.0 {
+            super::core::Scale::Symlog { range, .. } => *range,
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         match &self.0 {
             Scale::Symlog { domain, range, constant, clamp } => format!(

@@ -100,7 +100,7 @@ mod tests {
         ]).unwrap();
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
@@ -122,7 +122,7 @@ mod tests {
         ]).unwrap();
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
-        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
