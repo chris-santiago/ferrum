@@ -554,7 +554,7 @@ pub enum RenderError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RenderWarning {
     Layout(LayoutWarning),
     OutOfDomainRows { mark: String, count: u64 },
@@ -562,6 +562,14 @@ pub enum RenderWarning {
     EmptyPanel { panel_index: usize },
 }
 ```
+
+> **Note 2026-05-09 (Task 5):** outer tag renamed from `"kind"` to `"type"`.
+> `LayoutWarning` (Phase 6) already uses `tag = "kind"` and has Phase 6
+> round-trip tests pinning that JSON shape; with both enums tagged `"kind"`
+> and internal tagging on a newtype variant, serde flattens the inner
+> struct's fields into the outer object and emits two `kind` keys, which
+> fails round-trip. `LayoutWarning`'s tag is held stable; `RenderWarning`'s
+> outer tag becomes `"type"` to disambiguate.
 
 Python binding (`render/binding.rs`) raises `PyValueError` for `RenderError`; emits `warnings.warn(message)` per warning at the binding boundary, preserving the warning's variant info as part of the message.
 
