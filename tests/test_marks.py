@@ -22,25 +22,18 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
     assert d == {"size": 100}   # method and bandwidth go to transforms, not style
 
 
-def test_deferred_mark_error_for_8b_mark():
-    from ferrum.marks import deferred_mark_error, PHASE_8B_MARKS
-    # Use a still-deferred 8b mark (composite Sub-batch E shipped boxplot/errorbar/errorband/ribbon).
-    e = deferred_mark_error("violin")
-    assert isinstance(e, NotImplementedError)
-    assert "Phase 8b" in str(e)
-
-
 def test_deferred_mark_error_for_9_plus_mark():
     from ferrum.marks import deferred_mark_error
     e = deferred_mark_error("arc")
     assert "Phase 9+" in str(e)
 
 
-def test_phase_8b_marks_set_includes_composites_and_heavy_stats():
+def test_phase_8b_marks_set_is_empty_after_subbatch_f():
     from ferrum.marks import PHASE_8B_MARKS
-    # Composites (boxplot, errorbar, errorband, ribbon) shipped in Sub-batch E and
-    # are no longer in the deferred set. Heavy-stat marks remain deferred.
-    assert {"violin", "raster", "qq", "contour"}.issubset(PHASE_8B_MARKS)
+    # Sub-batch E shipped composites (boxplot/errorbar/errorband/ribbon) and
+    # Sub-batch F shipped heavy-stat marks (contour/violin/qq/raster/hex/swarm/function).
+    # All Phase 8b marks are now implemented; the deferred set is empty.
+    assert PHASE_8B_MARKS == frozenset()
 
 
 def test_desugar_density_returns_area_with_kde_transform():
@@ -79,14 +72,14 @@ def test_desugar_smooth_warns_on_ci_kwarg():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("method,phase,extra_args", [
-    ("mark_violin", "8b", ()),
-    ("mark_qq", "8b", ()),
-    ("mark_function", "8b", (lambda x: x,)),   # mark_function takes a positional fn arg
+    # Phase 8b marks (violin/qq/function) shipped in Sub-batch F. Only Phase 9+ remain deferred.
     ("mark_arc", "9", ()),
+    ("mark_geoshape", "9", ()),
+    ("mark_segment", "9", ()),
+    ("mark_label", "9", ()),
 ])
 def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):
     df = pl.DataFrame({"a": [1]})
-    c = pl.DataFrame({"a": [1]})
     from ferrum import Chart
     c = Chart(df).encode(x="a", y="a")
     with pytest.raises(NotImplementedError, match=f"Phase {phase}"):

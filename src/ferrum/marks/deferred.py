@@ -2,12 +2,8 @@
 raise NotImplementedError with a clear forward-pointer."""
 from __future__ import annotations
 
-# Phase 8b marks
-PHASE_8B_MARKS = frozenset([
-    # composite (Sub-batch E done)
-    # heavy stat
-    "contour", "violin", "qq", "raster", "swarm", "hex", "function",
-])
+# Phase 8b marks (Sub-batches E + F landed; list now empty).
+PHASE_8B_MARKS: frozenset[str] = frozenset()
 
 # Phase 9+ marks
 PHASE_9_PLUS_MARKS = frozenset([

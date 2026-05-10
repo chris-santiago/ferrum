@@ -346,13 +346,172 @@ class Chart:
         )
         return new
 
-    def mark_contour(self, **kwargs):       raise deferred_mark_error("contour")
-    def mark_violin(self, **kwargs):        raise deferred_mark_error("violin")
-    def mark_qq(self, **kwargs):            raise deferred_mark_error("qq")
-    def mark_raster(self, **kwargs):        raise deferred_mark_error("raster")
-    def mark_swarm(self, **kwargs):         raise deferred_mark_error("swarm")
-    def mark_hex(self, **kwargs):           raise deferred_mark_error("hex")
-    def mark_function(self, fn, **kwargs):  raise deferred_mark_error("function")
+    def mark_contour(
+        self,
+        *,
+        bandwidth="scott",
+        thresholds=6,
+        smooth=True,
+        fill=False,
+        cmap="viridis",
+        **mark_kwargs,
+    ) -> "Chart":
+        """Contour plot via Kde2D + Contour transforms."""
+        from ferrum.marks.heavy_stat import desugar_contour
+        new = self._clone()
+        new._mark = "polygon"  # placeholder; layered mode overrides
+        new._pending_stat_mark = (
+            "contour",
+            {
+                "bandwidth": bandwidth, "thresholds": thresholds, "smooth": smooth,
+                "fill": fill, "cmap": cmap, **mark_kwargs,
+            },
+            desugar_contour,
+        )
+        return new
+
+    def mark_violin(self, *, bandwidth="scott", inner="box", **mark_kwargs) -> "Chart":
+        """Violin plot via Violin transform; optional inner box/quartile/point overlay."""
+        from ferrum.marks.heavy_stat import desugar_violin
+        new = self._clone()
+        new._mark = "polygon"
+        new._pending_stat_mark = (
+            "violin",
+            {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
+            desugar_violin,
+        )
+        return new
+
+    def mark_qq(self, *, distribution="normal", dequantize=False, line=True, **mark_kwargs) -> "Chart":
+        """QQ plot. Reads `field` from x encoding (single-column input)."""
+        from ferrum.marks.heavy_stat import desugar_qq
+        new = self._clone()
+        new._mark = "point"
+
+        def _resolve_qq(x_field, y_field, **kw):
+            # QQ is single-column: use x_field as the sample field. y_field ignored.
+            if x_field is None:
+                raise ValueError("mark_qq() requires .encode(x=...) to specify the sample field")
+            return desugar_qq(x_field, **kw)
+
+        new._pending_stat_mark = (
+            "qq",
+            {"distribution": distribution, "dequantize": dequantize, "line": line, **mark_kwargs},
+            _resolve_qq,
+        )
+        return new
+
+    def mark_raster(
+        self,
+        *,
+        aggregate="count",
+        field=None,
+        cmap="viridis",
+        resolution="screen",
+        blend="alpha",
+        min_count=None,
+        log_scale=False,
+        **mark_kwargs,
+    ) -> "Chart":
+        """2D raster (heatmap) via Raster transform."""
+        from ferrum.marks.heavy_stat import desugar_raster
+        new = self._clone()
+        new._mark = "image"
+        new._pending_stat_mark = (
+            "raster",
+            {
+                "aggregate": aggregate, "field": field, "cmap": cmap, "resolution": resolution,
+                "blend": blend, "min_count": min_count, "log_scale": log_scale, **mark_kwargs,
+            },
+            desugar_raster,
+        )
+        return new
+
+    def mark_hex(
+        self,
+        *,
+        bin_size=None,
+        aggregate="count",
+        field=None,
+        cmap="viridis",
+        stroke=None,
+        stroke_width=0,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Hexagonal binning via Hex transform."""
+        from ferrum.marks.heavy_stat import desugar_hex
+        new = self._clone()
+        new._mark = "polygon"
+        new._pending_stat_mark = (
+            "hex",
+            {
+                "bin_size": bin_size, "aggregate": aggregate, "field": field, "cmap": cmap,
+                "stroke": stroke, "stroke_width": stroke_width, **mark_kwargs,
+            },
+            desugar_hex,
+        )
+        return new
+
+    def mark_swarm(
+        self,
+        *,
+        size=4,
+        orient="vertical",
+        spacing=1.0,
+        side="both",
+        dodge=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Beeswarm plot via Swarm transform."""
+        from ferrum.marks.heavy_stat import desugar_swarm
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "swarm",
+            {
+                "size": size, "orient": orient, "spacing": spacing, "side": side,
+                "dodge": dodge, **mark_kwargs,
+            },
+            desugar_swarm,
+        )
+        return new
+
+    def mark_function(self, fn, *, domain=None, n=200, clip=True, **mark_kwargs) -> "Chart":
+        """Function plot. Materializes synthetic data via fn(xs)."""
+        if self._layers is not None and self._layers:
+            raise NotImplementedError(
+                "mark_function as a layer in a multi-layer Chart is deferred to Phase 9+; "
+                "use a separate Chart composed via + instead"
+            )
+        from ferrum.marks.heavy_stat import desugar_function
+        # Try to infer parent x data for domain inference
+        parent_x_data = None
+        x_enc = self._encoding.get("x")
+        if x_enc is not None and self._data is not None:
+            try:
+                from ferrum._coerce import to_arrow_table
+                x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+                tbl = to_arrow_table(self._data)
+                if x_field_name in tbl.column_names:
+                    parent_x_data = tbl[x_field_name].to_numpy()
+            except Exception:
+                pass
+
+        mark, transforms, remap, synthetic = desugar_function(
+            fn, parent_chart_x_data=parent_x_data, domain=domain, n=n, clip=clip, **mark_kwargs,
+        )
+        new = self._clone()
+        new._mark = mark
+        new._data = synthetic
+        new._transforms = list(self._transforms) + list(transforms)
+        if remap:
+            from ferrum.encoding import X, Y
+            if "x" in remap:
+                new._encoding["x"] = X(remap["x"], type="Q")
+            if "y" in remap:
+                new._encoding["y"] = Y(remap["y"], type="Q")
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
