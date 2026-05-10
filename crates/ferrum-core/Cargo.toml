@@ -25,4 +25,5 @@ fontdue     = { workspace = true }
 palette     = { workspace = true }
 usvg        = { workspace = true }
 resvg       = { workspace = true }
+tiny-skia   = { workspace = true }
 base64      = { workspace = true }

@@ -38,6 +38,9 @@ palette = "~0.7"
 # SVG → typed tree → tiny_skia rasterization. usvg/resvg minor versions must match.
 usvg    = "~0.47"
 resvg   = "~0.47"
+# tiny-skia: pixel buffer + transform types used by resvg::render. Pinned to the
+# version resvg 0.47 depends on so we share a single Pixmap/Transform ABI.
+tiny-skia = "~0.12"
 # base64 @font-face data URL emission for Phase 7 SVG embed.
 base64  = "~0.22"
 

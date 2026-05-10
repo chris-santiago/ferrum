@@ -247,6 +247,20 @@ pub fn render_svg(
     Ok(RenderOutput { bytes: svg_string, layout, warnings })
 }
 
+pub fn render_png(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    config: &config::RenderConfig,
+) -> Result<RenderOutput<Vec<u8>>, RenderError> {
+    let svg_out = render_svg(spec, batch, theme, viewport, config)?;
+    let w = (svg_out.layout.viewport.w * config.scale).round() as u32;
+    let h = (svg_out.layout.viewport.h * config.scale).round() as u32;
+    let bytes = png::svg_string_to_png_bytes(&svg_out.bytes, w, h, config.scale)?;
+    Ok(RenderOutput { bytes, layout: svg_out.layout, warnings: svg_out.warnings })
+}
+
 fn filter_batch_by_facet(
     batch: &RecordBatch,
     field: &str,
@@ -403,6 +417,71 @@ mod orchestration_tests {
         let config = config::RenderConfig::default();
         let a = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
         let b = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        assert_eq!(a.bytes, b.bytes);
+    }
+}
+
+#[cfg(test)]
+mod png_tests {
+    use super::*;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    #[test]
+    fn render_png_produces_png_magic_bytes() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+        ]).unwrap();
+        let result = render_png(
+            &spec, &batch, &ThemeInputs::default(),
+            Viewport { width: 100.0, height: 80.0 },
+            &config::RenderConfig::default(),
+        ).unwrap();
+        assert_eq!(&result.bytes[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    #[test]
+    fn render_png_determinism_two_calls_byte_identical() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                color: None,
+            },
+            transforms: Vec::new(), facet: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 100.0, height: 80.0 };
+        let config = config::RenderConfig::default();
+        let a = render_png(&spec, &batch, &theme, viewport, &config).unwrap();
+        let b = render_png(&spec, &batch, &theme, viewport, &config).unwrap();
         assert_eq!(a.bytes, b.bytes);
     }
 }
