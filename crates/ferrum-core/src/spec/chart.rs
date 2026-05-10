@@ -190,6 +190,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::summary::PySummary(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Outliers(_) =>
                     pyo3::Py::new(py, crate::transform::outliers::PyOutliers(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::ErrorExtent(_) =>
+                    pyo3::Py::new(py, crate::transform::error_extent::PyErrorExtent(t.clone()))?.into_any(),
             };
             out.push(obj);
         }

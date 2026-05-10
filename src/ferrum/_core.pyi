@@ -265,6 +265,18 @@ class Outliers:
         name: Optional[str] = None,
     ) -> None: ...
 
+class ErrorExtent:
+    def __init__(
+        self,
+        field: str,
+        *,
+        method: str = "ci",
+        groupby: List[str] = ...,
+        seed: int = 0,
+        n_boot: int = 1000,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,
