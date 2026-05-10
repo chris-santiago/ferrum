@@ -198,10 +198,15 @@ def test_heatmap_annot_golden(df_heat):
 
 
 @pytest.mark.xfail(
-    reason="clustermap heatmap layer references 'row_link_order' / "
-           "'col_link_order' produced by Linkage but the Reorder stat "
-           "can't see them across transform boundaries; renderer raises "
-           "ValueError: stat_reorder: index column 'row_link_order' not found",
+    reason="clustermap needs Reorder to consume a secondary named output "
+           "(row_link_order / col_link_order) from a prior Linkage. Reorder's "
+           "current contract requires its index column to be in the input "
+           "batch — but Linkage's order output has a different cardinality "
+           "(n rows for n observations) than its primary linkage matrix "
+           "(n-1 rows), so the order column can't simply be merged into the "
+           "primary chained output. Needs a `from='<named_output>'` parameter "
+           "on Reorder + a mechanism to look up named outputs from the "
+           "transform context. Tracked for Phase 10 design.",
     strict=True,
 )
 def test_clustermap_basic_golden(df_cluster):
@@ -225,10 +230,13 @@ def test_jointplot_kde_hist_golden(df_joint):
 
 
 @pytest.mark.xfail(
-    reason="pairplot with hue='species' propagates color encoding to the "
-           "template but Repeat substitution does not preserve the hue "
-           "column in per-cell data slices; renderer raises "
-           "ValueError: unknown column 'species' referenced by an encoding",
+    reason="pairplot diagonal histograms (via mark_histogram) apply a Bin "
+           "transform that drops the hue (color='species') column. The Bin "
+           "transform's output schema is [bin_start, bin_end, count, density] "
+           "— it has no groupby parameter, so per-group binning isn't expressed. "
+           "Needs Bin(groupby=<col>) Rust extension that emits [bin_start, "
+           "bin_end, count, density, <groupby_col>] for stacked histograms "
+           "across hue. Tracked for Phase 10.",
     strict=True,
 )
 def test_pairplot_3x3_hue_golden(df_iris_like):
@@ -246,8 +254,11 @@ def test_pairplot_3x3_hue_golden(df_iris_like):
 
 
 @pytest.mark.xfail(
-    reason="same clustermap renderer gap as clustermap_basic — stat_reorder "
-           "cannot resolve 'row_link_order' index column at render time",
+    reason="same root cause as clustermap_basic — Reorder needs to consume a "
+           "Linkage secondary output (the order index) but Reorder's current "
+           "API requires its index column to be in the primary input batch, "
+           "and Linkage's primary (n-1) and secondary (n) outputs differ in "
+           "cardinality. Needs Reorder(from=<named_output>) extension.",
     strict=True,
 )
 def test_clustermap_row_col_dendrograms_golden(df_cluster):
@@ -274,10 +285,12 @@ def test_jointplot_kde_marginals_golden(df_joint):
 
 
 @pytest.mark.xfail(
-    reason="displot multiple='stack' with hue=' species' emits a color "
-           "encoding for 'species' but the binned-transform output does "
-           "not retain that column; renderer raises ValueError: unknown "
-           "column 'species' referenced by an encoding",
+    reason="same root cause as pairplot_3x3_hue — Bin transform output schema "
+           "[bin_start, bin_end, count, density] drops the hue column. displot "
+           "multiple='stack' requires per-group histogram counts (one row per "
+           "(bin, group) pair) with the group column preserved for color "
+           "encoding + Stack(by=hue) position adjustment. Needs Bin(groupby=<col>) "
+           "Rust extension.",
     strict=True,
 )
 def test_displot_stacked_hist_golden(df_iris_like):
