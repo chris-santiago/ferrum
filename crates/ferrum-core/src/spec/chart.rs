@@ -188,12 +188,13 @@ fn coerce_layers(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Layer>> {
     use pyo3::types::{PyDict, PyList};
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("layers must be a list"))?;
+    let py = obj.py();
+    let json_module = py.import("json")?;
+    // No PyLayer class yet; deserialize Python dicts via JSON round-trip until that's added.
     let mut out = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
         let py_dict: &Bound<PyDict> = item.downcast::<PyDict>()
             .map_err(|_| PyValueError::new_err(format!("layers[{i}] must be a dict")))?;
-        let py = item.py();
-        let json_module = py.import("json")?;
         let s: String = json_module.call_method1("dumps", (py_dict,))?.extract()?;
         let layer: Layer = serde_json::from_str(&s)
             .map_err(|e| PyValueError::new_err(format!("layers[{i}]: {e}")))?;
