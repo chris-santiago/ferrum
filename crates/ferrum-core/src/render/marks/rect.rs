@@ -76,9 +76,10 @@ mod tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Rect,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "row".into(), type_: Some(SDT::Ordinal) }),
-                y: Some(EncodingSpec { field: "col".into(), type_: Some(SDT::Ordinal) }),
+                x: Some(EncodingSpec { field: "row".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "col".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -107,9 +108,10 @@ mod tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Rect,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };

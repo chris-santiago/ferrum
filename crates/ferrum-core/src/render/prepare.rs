@@ -199,9 +199,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {

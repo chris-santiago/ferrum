@@ -30,12 +30,15 @@ pub struct ChartSpec {
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, color = None, data = None, transforms = None, layers = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, color = None, size = None, shape = None, opacity = None, data = None, transforms = None, layers = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
         y: Option<&Bound<'_, PyAny>>,
         color: Option<&Bound<'_, PyAny>>,
+        size: Option<&Bound<'_, PyAny>>,
+        shape: Option<&Bound<'_, PyAny>>,
+        opacity: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
@@ -46,6 +49,9 @@ impl ChartSpec {
         let x = x.map(coerce_encoding).transpose()?;
         let y = y.map(coerce_encoding).transpose()?;
         let color = color.map(coerce_encoding).transpose()?;
+        let size = size.map(coerce_encoding).transpose()?;
+        let shape = shape.map(coerce_encoding).transpose()?;
+        let opacity = opacity.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -68,7 +74,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color },
+            encoding: Encoding { x, y, color, size, shape, opacity },
             transforms,
             facet: None,
             layers,
@@ -93,6 +99,21 @@ impl ChartSpec {
     #[getter]
     fn color(&self) -> Option<EncodingSpec> {
         self.encoding.color.clone()
+    }
+
+    #[getter]
+    fn size(&self) -> Option<EncodingSpec> {
+        self.encoding.size.clone()
+    }
+
+    #[getter]
+    fn shape(&self) -> Option<EncodingSpec> {
+        self.encoding.shape.clone()
+    }
+
+    #[getter]
+    fn opacity(&self) -> Option<EncodingSpec> {
+        self.encoding.opacity.clone()
     }
 
     #[getter]
@@ -174,7 +195,7 @@ fn coerce_encoding(obj: &Bound<'_, PyAny>) -> PyResult<EncodingSpec> {
         if s.is_empty() {
             return Err(PyValueError::new_err("encoding field name must be non-empty"));
         }
-        return Ok(EncodingSpec { field: s, type_: None });
+        return Ok(EncodingSpec { field: s, ..Default::default() });
     }
     if let Ok(spec) = obj.extract::<EncodingSpec>() {
         return Ok(spec);
@@ -246,12 +267,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "price".into(), type_: None }),
+                x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec {
                     field: "weight".into(),
                     type_: Some(DataType::Quantitative),
+                    ..Default::default()
                 }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
@@ -326,12 +349,14 @@ mod tests {
             data: DataRef::Named { name: "default".into() },
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "price".into(), type_: None }),
+                x: Some(EncodingSpec { field: "price".into(), type_: None, ..Default::default() }),
                 y: Some(EncodingSpec {
                     field: "weight".into(),
                     type_: Some(DataType::Quantitative),
+                    ..Default::default()
                 }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,

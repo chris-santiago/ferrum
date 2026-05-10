@@ -331,9 +331,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
@@ -370,6 +371,7 @@ mod tests {
         s.encoding.x = Some(crate::spec::encoding::EncodingSpec {
             field: "missing".into(),
             type_: None,
+            ..Default::default()
         });
         let b = make_batch_q_q_n();
         let err = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0)).unwrap_err();
@@ -403,9 +405,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "g".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,

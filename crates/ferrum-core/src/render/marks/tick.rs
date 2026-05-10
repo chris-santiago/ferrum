@@ -43,9 +43,10 @@ mod tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Tick,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };

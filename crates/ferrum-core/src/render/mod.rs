@@ -300,9 +300,10 @@ mod orchestration_tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
@@ -354,7 +355,7 @@ mod orchestration_tests {
     #[test]
     fn render_svg_unknown_column_errors() {
         let (mut spec, batch) = scatter_3();
-        spec.encoding.x = Some(EncodingSpec { field: "missing".into(), type_: None });
+        spec.encoding.x = Some(EncodingSpec { field: "missing".into(), type_: None, ..Default::default() });
         let result = render_svg(
             &spec,
             &batch,
@@ -385,9 +386,10 @@ mod orchestration_tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
@@ -438,9 +440,10 @@ mod png_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -465,9 +468,10 @@ mod png_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -538,9 +542,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -582,9 +587,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "g".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -610,9 +616,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal) }),
-                y: Some(EncodingSpec { field: "v".into(), type_: None }),
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -637,9 +644,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -664,9 +672,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Area,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
                 color: None,
+                ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
         };
@@ -693,9 +702,10 @@ mod golden_tests {
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), type_: None }),
-                y: Some(EncodingSpec { field: "y".into(), type_: None }),
-                color: Some(EncodingSpec { field: "species".into(), type_: None }),
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
             },
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
