@@ -23,6 +23,7 @@ from ferrum._core import (
     Raster,
     Smooth,
     Summary,
+    Swarm,
     ThresholdScale,
     Violin,
     compute_layout,
@@ -61,7 +62,7 @@ __all__ = [
     # Phase 1-7 core
     "Aggregate", "AggregateOp", "Bin", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "Outliers", "QQ", "QuantileScale", "Raster", "ThresholdScale", "Smooth", "Summary", "Violin",
+    "Outliers", "QQ", "QuantileScale", "Raster", "ThresholdScale", "Smooth", "Summary", "Swarm", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical",
     # Phase 8a

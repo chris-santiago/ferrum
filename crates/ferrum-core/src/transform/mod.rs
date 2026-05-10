@@ -18,4 +18,5 @@ pub(crate) mod contour;
 pub(crate) mod qq;
 pub(crate) mod raster;
 pub(crate) mod hex;
+pub(crate) mod swarm;
 pub(crate) mod linalg;

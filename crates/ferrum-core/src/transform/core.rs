@@ -17,6 +17,7 @@ use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::qq::{self, QQSpec};
 use crate::transform::raster::{self, RasterSpec};
 use crate::transform::hex::{self, HexSpec};
+use crate::transform::swarm::{self, SwarmSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -38,6 +39,7 @@ pub(crate) enum TransformSpec {
     Qq(QQSpec),
     Raster(RasterSpec),
     Hex(HexSpec),
+    Swarm(SwarmSpec),
 }
 
 impl TransformSpec {
@@ -57,6 +59,7 @@ impl TransformSpec {
             Self::Qq(s)        => qq::apply(s, batch),
             Self::Raster(s)    => raster::apply(s, batch),
             Self::Hex(s)       => hex::apply(s, batch),
+            Self::Swarm(s)     => swarm::apply(s, batch),
         }
     }
 }
@@ -82,6 +85,7 @@ impl TransformSpec {
         // Phase 8b transforms that NEED context (Raster, Swarm) override here.
         match self {
             Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
+            Self::Swarm(s) => crate::transform::swarm::apply_with_context(s, batch, ctx),
             _ => self.apply(batch),
         }
     }
@@ -162,6 +166,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Qq(s) => s.name.as_deref(),
         TransformSpec::Raster(s) => s.name.as_deref(),
         TransformSpec::Hex(s) => s.name.as_deref(),
+        TransformSpec::Swarm(s) => s.name.as_deref(),
     }
 }
 

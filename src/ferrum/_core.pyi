@@ -359,6 +359,18 @@ class Hex:
         name: Optional[str] = None,
     ) -> None: ...
 
+class Swarm:
+    def __init__(
+        self,
+        category: str,
+        value: str,
+        *,
+        point_size: float = 5.0,
+        spacing: float = 1.0,
+        side: str = "both",
+        name: Optional[str] = None,
+    ) -> None: ...
+
 
 def compute_layout(
     spec,

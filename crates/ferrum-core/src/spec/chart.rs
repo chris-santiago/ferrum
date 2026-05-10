@@ -206,6 +206,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::raster::PyRaster(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Hex(_) =>
                     pyo3::Py::new(py, crate::transform::hex::PyHex(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Swarm(_) =>
+                    pyo3::Py::new(py, crate::transform::swarm::PySwarm(t.clone()))?.into_any(),
             };
             out.push(obj);
         }
@@ -363,8 +365,12 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(h.0);
             continue;
         }
+        if let Ok(sw) = item.extract::<crate::transform::swarm::PySwarm>() {
+            out.push(sw.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Raster | Hex"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Raster | Hex | Swarm"
         )));
     }
     Ok(out)
