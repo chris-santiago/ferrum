@@ -255,3 +255,23 @@ def compute_layout(
     legend_orient: str = "right",
     label_angle: float | None = None,
 ) -> dict: ...
+
+
+def render_svg(
+    spec: ChartSpec,
+    data: Any,
+    *,
+    viewport: tuple[float, float],
+    theme: Optional[dict] = None,
+    config: Optional[dict] = None,
+) -> str: ...
+
+
+def render_png(
+    spec: ChartSpec,
+    data: Any,
+    *,
+    viewport: tuple[float, float],
+    theme: Optional[dict] = None,
+    config: Optional[dict] = None,
+) -> bytes: ...

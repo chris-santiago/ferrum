@@ -18,6 +18,8 @@ from ferrum._core import (
     ThresholdScale,
     compute_layout,
     process_batch,
+    render_png,
+    render_svg,
 )
 
 __version__ = "0.1.0"
@@ -40,4 +42,6 @@ __all__ = [
     "ThresholdScale",
     "compute_layout",
     "process_batch",
+    "render_png",
+    "render_svg",
 ]
