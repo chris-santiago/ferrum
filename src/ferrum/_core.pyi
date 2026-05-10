@@ -377,6 +377,10 @@ class Swarm:
     ) -> None: ...
 
 
+class Reorder:
+    def __init__(self, by: str, *, drop_index: bool = True, name: str | None = None) -> None: ...
+
+
 class Unpivot:
     def __init__(
         self,
