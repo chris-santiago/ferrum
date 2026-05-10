@@ -16,6 +16,7 @@ pub(crate) mod png;
 pub(crate) mod binding;
 pub(crate) mod marks;
 pub mod compositor;
+pub(crate) mod grid_compose;
 pub use compositor::{
     compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
 };

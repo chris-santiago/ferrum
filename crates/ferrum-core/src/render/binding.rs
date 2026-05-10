@@ -192,6 +192,32 @@ pub fn compose_svg_vertical_py(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+#[pyfunction]
+#[pyo3(name = "compose_svg_grid")]
+#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0,
+                     share_x = Vec::<Vec<usize>>::new(), share_y = Vec::<Vec<usize>>::new()))]
+#[allow(unused_variables)]
+pub fn compose_svg_grid_py(
+    cells: Vec<Option<String>>,
+    rows: usize,
+    cols: usize,
+    row_ratios: Vec<f64>,
+    col_ratios: Vec<f64>,
+    spacing: f64,
+    share_x: Vec<Vec<usize>>,
+    share_y: Vec<Vec<usize>>,
+) -> PyResult<String> {
+    crate::render::grid_compose::compose_svg_grid(
+        &cells,
+        rows,
+        cols,
+        &row_ratios,
+        &col_ratios,
+        spacing,
+    )
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
 fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<()> {
     if warnings.is_empty() {
         return Ok(());

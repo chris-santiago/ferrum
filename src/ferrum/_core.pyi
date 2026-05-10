@@ -463,6 +463,18 @@ def compose_svg_vertical(
     align: Literal["left", "center", "right"] = "left",
 ) -> str: ...
 
+def compose_svg_grid(
+    cells: list[str | None],
+    *,
+    rows: int,
+    cols: int,
+    row_ratios: list[float],
+    col_ratios: list[float],
+    spacing: float = 10.0,
+    share_x: list[list[int]] = ...,
+    share_y: list[list[int]] = ...,
+) -> str: ...
+
 
 # ---------- Continuous color schemes (Phase 8b Task 37) ----------
 

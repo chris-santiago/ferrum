@@ -63,16 +63,16 @@ pub enum HorizontalAlign {
 // Internal parsing
 // ---------------------------------------------------------------------------
 
-struct ParsedSvg<'a> {
-    width: f64,
-    height: f64,
-    body: &'a str,
+pub(crate) struct ParsedSvg<'a> {
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) body: &'a str,
 }
 
 /// Parse the width and height attributes from an SVG root element.
 /// Returns a `ParsedSvg` where `body` is the content between the opening
 /// `<svg ...>` tag and the closing `</svg>`.
-fn parse_svg_root(svg: &str) -> Result<ParsedSvg<'_>, CompositorError> {
+pub(crate) fn parse_svg_root(svg: &str) -> Result<ParsedSvg<'_>, CompositorError> {
     let svg_open_start = svg.find("<svg").ok_or(CompositorError::NoSvgRoot)?;
     let svg_open_end = svg[svg_open_start..]
         .find('>')
@@ -117,7 +117,7 @@ const FONT_DEFS_MARKER: &str = "<defs><style>@font-face";
 /// Called only for non-first children to avoid duplicating embedded fonts.
 /// Allocates a new `String`; returns `body.to_string()` unchanged if the marker
 /// is not found.
-fn strip_font_defs(body: &str) -> String {
+pub(crate) fn strip_font_defs(body: &str) -> String {
     let Some(start) = body.find(FONT_DEFS_MARKER) else {
         return body.to_string();
     };

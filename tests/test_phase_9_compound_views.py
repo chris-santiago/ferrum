@@ -94,12 +94,13 @@ class TestJointChart:
         assert spec["share"]["x"] == ["center", "top"]
         assert spec["share"]["y"] == ["center"]
 
-    def test_show_svg_deferred_until_grid_compositor_lands(self, df_xy):
-        # Until Task 12 (compose_svg_grid) lands, .show_svg() raises a clear error.
+    def test_show_svg_renders_after_task_12(self, df_xy):
         center = fe.Chart(df_xy).mark_point().encode(x="x", y="y")
-        jc = fe.JointChart(center)
-        with pytest.raises(NotImplementedError, match="compose_svg_grid"):
-            jc.show_svg()
+        top = fe.Chart(df_xy).mark_histogram().encode(x="x")
+        jc = fe.JointChart(center, top=top)
+        out = jc.show_svg()
+        assert out.startswith("<svg")
+        assert "</svg>" in out
 
     def test_invalid_ratio_errors(self, df_xy):
         center = fe.Chart(df_xy).mark_point().encode(x="x", y="y")

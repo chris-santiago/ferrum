@@ -44,6 +44,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_horizontal_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::compose_svg_grid_py, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
