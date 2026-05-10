@@ -5,6 +5,8 @@ from ferrum._warn import reset_warnings
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding import (
     X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
+    Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
+    StrokeWidth, StrokeDash, Size, Shape, Angle,
 )
 
 
@@ -100,3 +102,38 @@ def test_x_warns_on_deferred_kwargs():
         warnings.simplefilter("always")
         X("price", axis={"grid": False}, sort="ascending")
     assert len(w) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 17: appearance channels
+# ---------------------------------------------------------------------------
+
+def test_color_renders_in_phase_8a():
+    assert Color._renders_in_phase_8a is True
+
+
+def test_size_shape_opacity_render_in_phase_8a():
+    for cls in (Size, Shape, Opacity):
+        assert cls._renders_in_phase_8a is True, f"{cls.__name__} must render in 8a"
+
+
+def test_other_appearance_channels_deferred():
+    for cls in (Fill, Stroke, FillOpacity, StrokeOpacity, StrokeWidth, StrokeDash, Angle):
+        assert cls._renders_in_phase_8a is False, f"{cls.__name__} should be deferred"
+
+
+def test_color_with_scheme_kwarg_no_warning():
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        Color("species", scheme="tableau10")
+    assert len(w) == 0  # scheme is honored for Color in 8a
+
+
+def test_stroke_with_field_warns_once_on_render_attempt():
+    # Bare construction with just `field` doesn't pass kwargs → no warning yet.
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        Stroke("color")
+    assert len(w) == 0
