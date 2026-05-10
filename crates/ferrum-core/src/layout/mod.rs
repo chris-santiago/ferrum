@@ -78,11 +78,14 @@ impl std::fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Theme fields actually read by Phase 6. Keeps the layout engine decoupled
-/// from a full Theme type (which lives in Phase 8 grammar). Phase 7+ will
-/// translate `ferrum.Theme` into this shape.
+/// Theme fields actually read by Phase 6 + Phase 7. Kept decoupled from a full
+/// Theme type — Phase 8 grammar will translate ferrum.Theme into this shape.
+///
+/// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
+/// and `from_hex_str` helper; for now we construct directly via Srgba::new.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeInputs {
+    // Phase 6 layout fields.
     pub padding: f64,
     pub column_padding: f64,
     pub row_padding: f64,
@@ -90,11 +93,42 @@ pub struct ThemeInputs {
     pub label_font_size: f64,
     pub title_font_size: f64,
     pub legend_orient: LegendOrient,
+
+    // Phase 7 render fields — sizes/widths/opacities.
+    pub point_size: f64,
+    pub line_stroke_width: f64,
+    pub bar_corner_radius: f64,
+    pub area_opacity: f64,
+    pub default_opacity: f64,
+    pub axis_line_width: f64,
+    pub tick_size: f64,
+    pub grid_width: f64,
+    pub grid: bool,
+    pub strip_text_size: f64,
+    pub strip_padding: f64,
+
+    // Phase 7 render fields — colors.
+    pub mark_color: palette::Srgba<u8>,
+    pub axis_line_color: palette::Srgba<u8>,
+    pub tick_color: palette::Srgba<u8>,
+    pub grid_color: palette::Srgba<u8>,
+    pub font_color: palette::Srgba<u8>,
+    pub background_color: palette::Srgba<u8>,
+    pub strip_background_color: palette::Srgba<u8>,
 }
 
 impl Default for ThemeInputs {
     fn default() -> Self {
+        // OKABE_ITO[0] = #E69F00 = (230, 159, 0).
+        let okabe_orange = palette::Srgba::new(0xE6, 0x9F, 0x00, 0xFF);
+        let neutral_888  = palette::Srgba::new(0x88, 0x88, 0x88, 0xFF);
+        let neutral_eee  = palette::Srgba::new(0xEE, 0xEE, 0xEE, 0xFF);
+        let text_222     = palette::Srgba::new(0x22, 0x22, 0x22, 0xFF);
+        let bg_white     = palette::Srgba::new(0xFF, 0xFF, 0xFF, 0xFF);
+        let strip_bg     = palette::Srgba::new(0xF0, 0xF0, 0xF0, 0xFF);
+
         Self {
+            // Phase 6.
             padding: DEFAULT_PADDING,
             column_padding: DEFAULT_PADDING,
             row_padding: DEFAULT_PADDING,
@@ -102,6 +136,28 @@ impl Default for ThemeInputs {
             label_font_size: DEFAULT_LABEL_FONT_SIZE,
             title_font_size: DEFAULT_TITLE_FONT_SIZE,
             legend_orient: LegendOrient::Right,
+
+            // Phase 7 sizes / widths / opacities.
+            point_size: 30.0,
+            line_stroke_width: 1.5,
+            bar_corner_radius: 0.0,
+            area_opacity: 0.4,
+            default_opacity: 1.0,
+            axis_line_width: 1.0,
+            tick_size: 4.0,
+            grid_width: 1.0,
+            grid: true,
+            strip_text_size: 13.0,
+            strip_padding: 4.0,
+
+            // Phase 7 colors.
+            mark_color: okabe_orange,
+            axis_line_color: neutral_888,
+            tick_color: neutral_888,
+            grid_color: neutral_eee,
+            font_color: text_222,
+            background_color: bg_white,
+            strip_background_color: strip_bg,
         }
     }
 }
@@ -528,5 +584,25 @@ mod tests {
             LayoutWarning::PanelsDropped { count: 1 }
         ));
         assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
+    }
+
+    #[test]
+    fn theme_inputs_default_includes_render_fields() {
+        let t = ThemeInputs::default();
+        // Phase 6 fields preserved.
+        assert_eq!(t.padding, DEFAULT_PADDING);
+        assert_eq!(t.label_font_size, DEFAULT_LABEL_FONT_SIZE);
+        // Phase 7 additions.
+        assert_eq!(t.point_size, 30.0);
+        assert_eq!(t.line_stroke_width, 1.5);
+        assert_eq!(t.bar_corner_radius, 0.0);
+        assert_eq!(t.area_opacity, 0.4);
+        assert_eq!(t.default_opacity, 1.0);
+        assert_eq!(t.axis_line_width, 1.0);
+        assert_eq!(t.tick_size, 4.0);
+        assert_eq!(t.grid_width, 1.0);
+        assert_eq!(t.grid, true);
+        assert_eq!(t.strip_text_size, 13.0);
+        assert_eq!(t.strip_padding, 4.0);
     }
 }
