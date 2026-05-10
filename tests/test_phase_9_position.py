@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 import ferrum as fe
-from ferrum import Dodge, Identity
+from ferrum import Dodge, Identity, Jitter
 
 
 # ---------------------------------------------------------------------------
@@ -93,3 +93,90 @@ def test_dodge_renders_side_by_side(hue_field, categories):
     assert "<svg" in svg
     # 3 categories × 2 groups = 6 rows → 6 bars.
     assert svg.count("<rect") >= 6
+
+
+# ---------------------------------------------------------------------------
+# Task 21 — Jitter
+# ---------------------------------------------------------------------------
+
+class TestJitter:
+    def test_construction(self):
+        j = Jitter(axis="x", width=0.5, seed=42)
+        assert j.axis == "x"
+        assert j.width == 0.5
+        assert j.seed == 42
+
+    def test_default_axis_x_width_0_4(self):
+        j = Jitter()
+        assert j.axis == "x"
+        assert j.width == 0.4
+        assert j.seed is None
+
+    def test_to_spec_dict_with_seed(self):
+        j = Jitter(axis="both", width=0.3, seed=7)
+        assert j.to_spec_dict() == {
+            "type": "jitter",
+            "axis": "both",
+            "width": 0.3,
+            "seed": 7,
+        }
+
+    def test_to_spec_dict_no_seed(self):
+        j = Jitter()
+        assert j.to_spec_dict() == {"type": "jitter", "axis": "x", "width": 0.4}
+
+    def test_invalid_axis_errors(self):
+        with pytest.raises(ValueError, match="axis"):
+            Jitter(axis="invalid")
+
+    def test_invalid_width_errors(self):
+        with pytest.raises(ValueError, match="width"):
+            Jitter(width=0.0)
+
+    def test_eligibility_rejects_bar(self):
+        df = pl.DataFrame({"x": [1, 2]})
+        with pytest.raises(TypeError, match="Jitter"):
+            fe.Chart(df).mark_bar(position=Jitter())
+
+    def test_eligibility_accepts_point(self):
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+        fe.Chart(df).mark_point(position=Jitter()).encode(x="x", y="y")
+
+    def test_renders_with_explicit_seed_byte_identical(self):
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+        c = (
+            fe.Chart(df)
+            .mark_point(position=Jitter(width=0.3, seed=42))
+            .encode(x="x", y="y")
+        )
+        a = c.show_svg()
+        b = c.show_svg()
+        assert a == b  # identical seed → identical output
+
+    def test_renders_with_seed_none_byte_identical(self):
+        # seed=None falls back to xxh3 hash of (x, y) per row — also byte-deterministic.
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+        c = (
+            fe.Chart(df)
+            .mark_point(position=Jitter(width=0.3))
+            .encode(x="x", y="y")
+        )
+        a = c.show_svg()
+        b = c.show_svg()
+        assert a == b
+
+    def test_different_seeds_produce_different_output(self):
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+        a = (
+            fe.Chart(df)
+            .mark_point(position=Jitter(width=0.5, seed=1))
+            .encode(x="x", y="y")
+            .show_svg()
+        )
+        b = (
+            fe.Chart(df)
+            .mark_point(position=Jitter(width=0.5, seed=2))
+            .encode(x="x", y="y")
+            .show_svg()
+        )
+        assert a != b

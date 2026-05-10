@@ -36,15 +36,19 @@ pub enum ScaleKind {
 
 impl ScaleKind {
     /// Map a quantitative or temporal value to a pixel coordinate.
-    /// Returns `None` for ordinal scales (use `to_pixel_str` instead).
+    /// Returns `None` for ordinal scales (use `to_pixel_str` instead) and for
+    /// inputs that fall outside the scale's domain (Phase 9c — position
+    /// adjustments such as Jitter can push values past the original domain;
+    /// the underlying scale returns `NaN` rather than `None` in that case).
     pub fn to_pixel_f64(&self, x: f64) -> Option<f64> {
-        match self {
-            Self::Linear(s) => Some(s.scale_internal(x)),
-            Self::Time(s) => Some(s.scale_internal(x)),
-            Self::Log(s) => Some(s.scale_internal(x)),
-            Self::Symlog(s) => Some(s.scale_internal(x)),
-            Self::Ordinal(_) => None,
-        }
+        let p = match self {
+            Self::Linear(s) => s.scale_internal(x),
+            Self::Time(s) => s.scale_internal(x),
+            Self::Log(s) => s.scale_internal(x),
+            Self::Symlog(s) => s.scale_internal(x),
+            Self::Ordinal(_) => return None,
+        };
+        if p.is_finite() { Some(p) } else { None }
     }
 
     /// Map an ordinal/string value to a pixel band center.
