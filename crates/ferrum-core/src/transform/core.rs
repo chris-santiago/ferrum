@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use arrow::array::RecordBatch;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,44 @@ pub(crate) fn apply_transforms_with_context(
         current = spec.apply_with_context(&current, ctx)?;
     }
     Ok(current)
+}
+
+/// Sentinel key under which the final pipeline output is always published in
+/// the map returned by [`apply_transforms_named`]. Layers with `data_source: None`
+/// resolve to this key.
+pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
+
+/// Apply each transform in pipeline order; record named outputs.
+///
+/// Returns a map from each named transform's `name` (when present) → that
+/// transform's output (cloned), plus [`FINAL_OUTPUT_KEY`] → the final pipeline
+/// output. When `specs` is empty, the map contains only `FINAL_OUTPUT_KEY`
+/// mapped to the input batch.
+pub(crate) fn apply_transforms_named(
+    specs: &[TransformSpec],
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<HashMap<String, RecordBatch>> {
+    let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+    let mut current = batch.clone();
+    for spec in specs {
+        current = spec.apply_with_context(&current, ctx)?;
+        if let Some(name) = spec_name(spec) {
+            outputs.insert(name.to_string(), current.clone());
+        }
+    }
+    outputs.insert(FINAL_OUTPUT_KEY.to_string(), current);
+    Ok(outputs)
+}
+
+fn spec_name(spec: &TransformSpec) -> Option<&str> {
+    match spec {
+        TransformSpec::Bin(s) => s.name.as_deref(),
+        TransformSpec::Kde(s) => s.name.as_deref(),
+        TransformSpec::Smooth(s) => s.name.as_deref(),
+        TransformSpec::Aggregate(s) => s.name.as_deref(),
+        TransformSpec::Summary(s) => s.name.as_deref(),
+    }
 }
 
 #[cfg(test)]

@@ -209,6 +209,30 @@ pub fn render_svg(
             continue;
         }
 
+        // Per-layer source batches: layers with data_source: None reuse
+        // panel_batch (the facet-filtered chart-level final output, identical
+        // to phase 8a behavior). Layers with data_source: Some(name) look up
+        // the named output and apply the same facet filter to it.
+        // prepare_render_inputs has already validated every layer's
+        // data_source resolves to a known key, so .get() is total here.
+        let layer_batches: Vec<arrow::record_batch::RecordBatch> = prep
+            .layers
+            .iter()
+            .map(|layer| match &layer.data_source {
+                None => Ok(panel_batch.clone()),
+                Some(name) => {
+                    let src = prep.transform_outputs.get(name).expect(
+                        "layer.data_source validated by prepare_render_inputs",
+                    );
+                    if let Some(key) = &panel.facet_key {
+                        filter_batch_by_facet(src, &key.field, &key.value)
+                    } else {
+                        Ok(src.clone())
+                    }
+                }
+            })
+            .collect::<Result<Vec<_>, RenderError>>()?;
+
         // Build a rendering spec for scale resolution that uses the first layer's
         // encoding (which accounts for CoordFlip and chart-level inheritance).
         // For single-layer non-flipped specs this is structurally identical to spec.
@@ -231,7 +255,14 @@ pub fn render_svg(
         out.use_clip_open(&clip_id);
 
         // Phase 8a: iterate layers. Single-layer charts have prep.layers.len() == 1.
-        for layer in &prep.layers {
+        // Phase 8b Task 9: each layer reads its own per-layer batch resolved
+        // from data_source. For layers with data_source: None this is exactly
+        // panel_batch (preserving 8a byte-identical SVG output).
+        for (li, layer) in prep.layers.iter().enumerate() {
+            let layer_batch = &layer_batches[li];
+            if layer_batch.num_rows() == 0 {
+                continue;
+            }
             // Build a synthetic ChartSpec with the layer's mark + encoding so
             // mark renderers (which read ctx.spec) see the correct per-layer values.
             let layer_spec = ChartSpec {
@@ -245,7 +276,7 @@ pub fn render_svg(
                 panel,
                 theme,
                 scales: &scales,
-                batch: &panel_batch,
+                batch: layer_batch,
                 mark_style: &mark_style,
             };
             draw::dispatch_mark(&layer.mark, &ctx, &mut out);
