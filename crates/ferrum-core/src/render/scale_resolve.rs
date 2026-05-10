@@ -18,7 +18,7 @@ use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::DataType as SpecDataType;
 
 use super::color::Color;
-use super::palette::OKABE_ITO;
+use super::palette;
 use super::RenderError;
 
 /// Sealed-enum wrapper over Phase 4 scales, used during render.
@@ -237,14 +237,15 @@ pub fn resolve_scales(
 
     let color = if let Some(c_enc) = &spec.encoding.color {
         let domain = distinct_values_in_order(batch, &c_enc.field)?;
-        if domain.len() > OKABE_ITO.len() {
+        let palette: &'static [Color] = match &c_enc.scheme {
+            Some(name) => palette::categorical_palette(name),
+            None => &*palette::OKABE_ITO,
+        };
+        if domain.len() > palette.len() {
             warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
                 categories: domain.len() as u32,
             });
         }
-        // OKABE_ITO is `static LazyLock<[Color; 8]>`; deref then coerce array → slice
-        // with `'static` lifetime, since the underlying storage outlives the program.
-        let palette: &'static [Color] = &*OKABE_ITO;
         Some(ColorScale::Categorical { domain, palette })
     } else {
         None
