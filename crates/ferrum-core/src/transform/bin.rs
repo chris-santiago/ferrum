@@ -18,6 +18,8 @@ pub(crate) struct BinSpec {
     pub extent: Option<(f64, f64)>,
     #[serde(default = "default_true")]
     pub nice: bool,
+    #[serde(default)]
+    pub cumulative: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -127,7 +129,27 @@ pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .map(|(c, (s, e))| (*c as f64) / (total * (e - s)))
         .collect();
 
-    build_bin_batch(bin_starts, bin_ends, counts, densities)
+    let (final_counts, final_densities) = if spec.cumulative {
+        let mut acc_count: u64 = 0;
+        let cum_counts: Vec<u64> = counts.iter().map(|c| {
+            acc_count = acc_count.saturating_add(*c);
+            acc_count
+        }).collect();
+        let mut acc_density: f64 = 0.0;
+        let cum_densities: Vec<f64> = densities
+            .iter()
+            .zip(bin_starts.iter().zip(bin_ends.iter()))
+            .map(|(d, (s, e))| {
+                acc_density += d * (e - s);
+                acc_density
+            })
+            .collect();
+        (cum_counts, cum_densities)
+    } else {
+        (counts, densities)
+    };
+
+    build_bin_batch(bin_starts, bin_ends, final_counts, final_densities)
 }
 
 fn build_bin_batch(
@@ -174,13 +196,14 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, name = None))]
+    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, name = None))]
     fn new(
         field: &str,
         bin_count: Option<usize>,
         bin_width: Option<f64>,
         extent: Option<(f64, f64)>,
         nice: bool,
+        cumulative: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -211,6 +234,7 @@ impl PyBin {
             bin_width,
             extent,
             nice,
+            cumulative,
             name,
         })))
     }
@@ -218,9 +242,10 @@ impl PyBin {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Bin(s) => format!(
-                "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={})",
+                "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
                 s.field, s.bin_count, s.bin_width, s.extent,
                 if s.nice { "True" } else { "False" },
+                if s.cumulative { "True" } else { "False" },
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -268,6 +293,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 10.0)),
             nice: false,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -295,6 +321,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 10.0)),
             nice: false,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -318,6 +345,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -333,6 +361,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -358,6 +387,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 3.0)),
             nice: false,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -376,6 +406,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: false,
+            cumulative: false,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -399,6 +430,7 @@ mod tests {
             bin_width: None,
             extent: Some((1.0, 3.0)),
             nice: false,
+            cumulative: false,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -419,6 +451,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: true,
+            cumulative: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -436,5 +469,32 @@ mod tests {
         let counts = col_u64(&out, "count");
         let total: u64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
         assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn bin_cumulative_count_is_monotonic() {
+        let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(5),
+            bin_width: None,
+            extent: Some((1.0, 10.0)),
+            nice: false,
+            cumulative: true,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let counts = col_u64(&out, "count");
+        let n = counts.len();
+        for i in 1..n {
+            assert!(counts.value(i) >= counts.value(i - 1),
+                "cumulative count not monotonic at i={i}: {} < {}",
+                counts.value(i), counts.value(i - 1));
+        }
+        assert_eq!(counts.value(n - 1), 10);
+        // Cumulative density at the end should equal 1.0 (full CDF).
+        let densities = col_f64(&out, "density");
+        let last = densities.value(n - 1);
+        assert!((last - 1.0).abs() < 1e-12, "cumulative density should reach 1.0, got {last}");
     }
 }

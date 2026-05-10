@@ -534,6 +534,7 @@ mod tests {
             bin_width: None,
             extent: Some((10.0, 30.0)),
             nice: false,
+            cumulative: false,
             name,
         })];
         if !named {

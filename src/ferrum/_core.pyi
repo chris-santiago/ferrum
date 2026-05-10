@@ -215,6 +215,8 @@ class Bin:
         bin_width: Optional[float] = None,
         extent: Optional[Tuple[float, float]] = None,
         nice: bool = True,
+        cumulative: bool = False,
+        name: Optional[str] = None,
     ) -> None: ...
 
 class Bin2D:

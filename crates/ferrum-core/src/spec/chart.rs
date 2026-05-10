@@ -570,6 +570,7 @@ mod tests {
                 bin_width: None,
                 extent: None,
                 nice: true,
+                cumulative: false,
                 name: None,
             })],
             facet: None,
