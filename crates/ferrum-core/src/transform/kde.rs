@@ -104,7 +104,7 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
 }
 
-fn bandwidth(x: &[f64], spec: &BandwidthSpec) -> PyResult<f64> {
+pub(crate) fn bandwidth(x: &[f64], spec: &BandwidthSpec) -> PyResult<f64> {
     let n = x.len() as f64;
     let mean = x.iter().sum::<f64>() / n;
     let var = x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);

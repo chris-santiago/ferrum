@@ -233,6 +233,18 @@ class Kde:
         cumulative: bool = False,
     ) -> None: ...
 
+class Kde2D:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bandwidth: object = "scott",
+        n: int = 128,
+        extent: Optional[Tuple[float, float, float, float]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 class Smooth:
     def __init__(
         self,

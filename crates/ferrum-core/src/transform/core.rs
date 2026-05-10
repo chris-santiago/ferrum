@@ -11,6 +11,7 @@ use crate::transform::bin::{self, BinSpec};
 use crate::transform::error_extent::{self, ErrorExtentSpec};
 use crate::transform::box_stats::{self, BoxStatsSpec};
 use crate::transform::kde::KdeSpec;
+use crate::transform::kde_2d::Kde2DSpec;
 use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
@@ -28,6 +29,7 @@ pub(crate) enum TransformSpec {
     ErrorExtent(ErrorExtentSpec),
     BoxStats(BoxStatsSpec),
     Violin(ViolinSpec),
+    Kde2D(Kde2DSpec),
 }
 
 impl TransformSpec {
@@ -42,6 +44,7 @@ impl TransformSpec {
             Self::ErrorExtent(s) => error_extent::apply(s, batch),
             Self::BoxStats(s)  => box_stats::apply(s, batch),
             Self::Violin(s)    => violin::apply(s, batch),
+            Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
         }
     }
 }
@@ -122,6 +125,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::ErrorExtent(s) => s.name.as_deref(),
         TransformSpec::BoxStats(s) => s.name.as_deref(),
         TransformSpec::Violin(s) => s.name.as_deref(),
+        TransformSpec::Kde2D(s) => s.name.as_deref(),
     }
 }
 
