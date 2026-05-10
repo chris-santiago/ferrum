@@ -153,16 +153,6 @@ def test_lmplot_lm_ci_golden(df_reg):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="residplot lowess overlay requires per-layer transform chaining: "
-           "layer 1 (point) needs the residuals batch [x, residual] and layer 2 "
-           "(line) needs the loess output [x, y, ci_*]. _merge_layers currently "
-           "consolidates both Smooth transforms chart-level, so the chained "
-           "FINAL output is the second Smooth's output; layer 1's y='residual' "
-           "encoding doesn't resolve. Needs design pass on per-layer transform "
-           "semantics + named-on-chained-intermediate routing.",
-    strict=True,
-)
 def test_residplot_lowess_golden(df_reg):
     chart = fe.residplot(df_reg, x="x", y="y", lowess=True)
     _check_or_update("residplot_lowess.svg", chart.show_svg())

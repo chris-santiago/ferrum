@@ -195,19 +195,34 @@ def residplot(
     chart = chart.encode(**enc)
 
     # Optional lowess smoother of the residuals (overlaid as a second layer).
-    # NOTE: full implementation requires per-layer transform chaining so that
-    # layer 1 sees the residuals output and layer 2 sees the loess output
-    # without _merge_layers consolidating both Smooth transforms chart-level.
-    # The current overlay path fails because chart-level chain advances past
-    # the residuals output. Tracked as xfail in tests/test_phase_9_e2e.py.
+    # Chart-level chain: [Smooth(residuals), Smooth(loess, name="lowess")].
+    # First Smooth advances FINAL → residuals batch [x, residual].
+    # Second Smooth is named, so it doesn't advance FINAL but publishes its
+    # output ([x, y, ci_lower, ci_upper]) under "lowess". (After Phase 9's
+    # named-on-chained-current semantics fix, the named Smooth runs on the
+    # chained residuals batch, not the original data.)
+    # Layer 0 (point) consumes FINAL = residuals → encoding y="residual" works.
+    # Layer 1 (line) consumes data_source="lowess" → encoding y="y" works.
     if lowess:
-        lo = (
-            Chart(data)
-            .transform(resid_transform)
-            .encode(x="x", y="residual")
-            .mark_smooth(method="loess")
+        loess_transform = Smooth(
+            x="x", y="residual", method="loess",
+            ci=None, name="lowess",
         )
-        chart = _merge_layers(chart, lo)
+        # Build layered chart manually to control transform placement.
+        chart = chart._clone()
+        chart._transforms = [resid_transform, loess_transform]
+        chart._layers = [
+            {
+                "mark": "point",
+                "encoding": dict(enc),  # {"x": "x", "y": "residual", maybe color}
+            },
+            {
+                "mark": "line",
+                "encoding": {"x": "x", "y": "y"},
+                "data_source": "lowess",
+            },
+        ]
+        chart._mark = None  # signals layered mode in to_spec
 
     if theme is not None:
         chart = chart.theme(theme)
