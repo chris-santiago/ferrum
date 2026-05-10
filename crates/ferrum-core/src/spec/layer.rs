@@ -15,6 +15,8 @@ pub struct Layer {
     pub transforms: Vec<TransformSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_style: Option<crate::spec::mark_style::MarkKwargsSpec>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data_source: Option<String>,
 }
 
 #[cfg(test)]
@@ -29,6 +31,7 @@ mod tests {
             encoding: Encoding::default(),
             transforms: Vec::new(),
             mark_style: None,
+            data_source: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -47,6 +50,7 @@ mod tests {
             },
             transforms: Vec::new(),
             mark_style: None,
+            data_source: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -64,9 +68,44 @@ mod tests {
                 size: Some(50.0),
                 ..Default::default()
             }),
+            data_source: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_data_source_round_trip_some() {
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: Some("box".into()),
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            json.contains(r#""data_source":"box""#),
+            "expected data_source in JSON: {json}"
+        );
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_data_source_none_omits_from_json() {
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            !json.contains("data_source"),
+            "data_source=None must be omitted: {json}"
+        );
     }
 }

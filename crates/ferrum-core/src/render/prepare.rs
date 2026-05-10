@@ -6,6 +6,7 @@
 //!   5. Build LegendEntry list (if color encoding).
 //!   6. (Phase 8a) Build per-layer prepared inputs; swap x↔y if CoordFlip.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, LargeStringArray, StringArray, StringViewArray};
@@ -16,9 +17,10 @@ use crate::layout::{
     AxesInput, AxisInput, AxisOrient, FacetGroup, FacetKey, LegendEntry, SymbolKind,
 };
 use crate::spec::chart::ChartSpec;
-use crate::transform::core::apply_transforms;
+use crate::transform::context::TransformContext;
+use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 
-use super::scale_resolve::{resolve_scales, ResolvedScales};
+use super::scale_resolve::ResolvedScales;
 use super::{RenderError, RenderWarning};
 
 /// Per-layer prepared rendering data. When ChartSpec.layers.is_none(), exactly one
@@ -29,6 +31,9 @@ pub struct LayerPrepared {
     pub encoding: crate::spec::encoding::Encoding,
     pub transforms: Vec<crate::transform::core::TransformSpec>,
     pub mark_style: Option<crate::spec::mark_style::MarkKwargsSpec>,
+    /// Name of the chart-level transform output this layer reads from.
+    /// `None` ⇒ pipeline final output (resolved via [`FINAL_OUTPUT_KEY`]).
+    pub data_source: Option<String>,
 }
 
 impl LayerPrepared {
@@ -39,6 +44,7 @@ impl LayerPrepared {
             encoding: spec.encoding.clone(),
             transforms: spec.transforms.clone(),
             mark_style: spec.mark_style.clone(),
+            data_source: None,
         }
     }
 
@@ -68,11 +74,19 @@ impl LayerPrepared {
         if encoding.opacity.is_none() {
             encoding.opacity = spec.encoding.opacity.clone();
         }
+        // Phase 8b Task 22: paired-channel endpoints (ribbon mark and future scale_resolve work).
+        if encoding.x2.is_none() {
+            encoding.x2 = spec.encoding.x2.clone();
+        }
+        if encoding.y2.is_none() {
+            encoding.y2 = spec.encoding.y2.clone();
+        }
         Self {
             mark: layer.mark,
             encoding,
             transforms: layer.transforms.clone(),
             mark_style: layer.mark_style.clone().or_else(|| spec.mark_style.clone()),
+            data_source: layer.data_source.clone(),
         }
     }
 }
@@ -141,7 +155,16 @@ fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
 
 #[derive(Debug)]
 pub struct PreparedInputs {
+    /// Final output of the chart-level transform pipeline. Equal to
+    /// `transform_outputs[FINAL_OUTPUT_KEY]`. Retained as a field so existing
+    /// consumers (facet filtering, scale resolution, legend) continue to work
+    /// unchanged when no layer sets `data_source`.
     pub transformed: RecordBatch,
+    /// All chart-level transform outputs, keyed by their `name` (when present)
+    /// plus `FINAL_OUTPUT_KEY` ("__final__") for the pipeline tail. Layers
+    /// with `data_source: Some(name)` look up their input batch here; layers
+    /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY`.
+    pub transform_outputs: HashMap<String, RecordBatch>,
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
@@ -166,12 +189,15 @@ pub fn prepare_render_inputs(
     // downcasts to StringArray succeed uniformly.
     let normalized = normalize_string_views(batch);
 
-    let transformed = if spec.transforms.is_empty() {
-        normalized
-    } else {
-        apply_transforms(&spec.transforms, &normalized)
-            .map_err(|e| RenderError::TransformFailed(e.to_string()))?
-    };
+    // Build the named-output map. When there are no transforms, the helper
+    // still publishes a `FINAL_OUTPUT_KEY` entry pointing at the input batch.
+    let ctx = TransformContext::default();
+    let transform_outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
+        .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+    let transformed = transform_outputs
+        .get(FINAL_OUTPUT_KEY)
+        .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
+        .clone();
 
     // --- Phase 8a: per-layer inputs + CoordFlip ---
 
@@ -200,6 +226,23 @@ pub fn prepare_render_inputs(
         }
     };
 
+    // Validate every layer's data_source resolves to a known transform output.
+    // Fail-fast here so the per-panel render loop can unconditionally `.get()`.
+    for (i, layer) in layers.iter().enumerate() {
+        if let Some(name) = &layer.data_source {
+            if !transform_outputs.contains_key(name) {
+                let mut keys: Vec<&str> =
+                    transform_outputs.keys().map(|s| s.as_str()).collect();
+                keys.sort_unstable();
+                return Err(RenderError::TransformFailed(format!(
+                    "layer {i} data_source '{name}' not found in transform outputs; \
+                     available keys: [{}]",
+                    keys.join(", ")
+                )));
+            }
+        }
+    }
+
     // Build provisional scales and axes using the first layer's resolved encoding,
     // which already incorporates CoordFlip. For single-layer non-flipped specs this
     // is identical to what Phase 7 computed (same encoding, same spec fields).
@@ -214,8 +257,14 @@ pub fn prepare_render_inputs(
         ..spec.clone()
     };
 
-    let (provisional_scales, scale_warnings) =
-        resolve_scales(&rendering_spec, &transformed, (0.0, 1.0), (0.0, 1.0), &crate::layout::ThemeInputs::default())?;
+    let (provisional_scales, scale_warnings) = crate::render::scale_resolve::resolve_scales_with_outputs(
+        &rendering_spec,
+        &transformed,
+        &transform_outputs,
+        (0.0, 1.0),
+        (0.0, 1.0),
+        &crate::layout::ThemeInputs::default(),
+    )?;
 
     let x_field = rendering_encoding.x.as_ref().map(|e| e.field.clone());
     let y_field = rendering_encoding.y.as_ref().map(|e| e.field.clone());
@@ -252,6 +301,7 @@ pub fn prepare_render_inputs(
 
     Ok(PreparedInputs {
         transformed,
+        transform_outputs,
         provisional_scales,
         axes,
         facet_groups,
@@ -443,12 +493,14 @@ mod tests {
                 },
                 transforms: vec![],
                 mark_style: None,
+                data_source: None,
             },
             Layer {
                 mark: Mark::Line,
                 encoding: Encoding::default(), // inherits from chart-level
                 transforms: vec![],
                 mark_style: None,
+                data_source: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -459,6 +511,145 @@ mod tests {
         // Layer 2 inherits chart-level encoding
         assert_eq!(prepared.layers[1].encoding.x.as_ref().unwrap().field, "price");
         assert_eq!(prepared.layers[1].encoding.y.as_ref().unwrap().field, "weight");
+    }
+
+    // --- Phase 8b Task 9: named-output transform routing ---
+
+    /// Build a ChartSpec with one Bin transform whose `name` is configurable,
+    /// and `bin_count` such that the transform succeeds on price_weight_batch().
+    ///
+    /// When `name` is None, the bin transform is unnamed → it chains, so
+    /// `__final__` has bin output schema and the encoding is pointed at bin
+    /// columns. When `name` is Some, fan-out semantics apply: `__final__`
+    /// retains the original schema, so the encoding stays on the original
+    /// columns to keep `resolve_scales` happy.
+    fn spec_with_one_bin(name: Option<String>) -> ChartSpec {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        let named = name.is_some();
+        let mut spec = single_layer_spec();
+        spec.transforms = vec![TransformSpec::Bin(BinSpec {
+            field: "price".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: Some((10.0, 30.0)),
+            nice: false,
+            name,
+        })];
+        if !named {
+            // Unnamed/chained: after Bin, the encoding fields ("price", "weight")
+            // no longer exist in __final__ — point at bin output columns so
+            // resolve_scales doesn't fail.
+            spec.encoding.x = Some(crate::spec::encoding::EncodingSpec {
+                field: "bin_start".into(),
+                type_: None,
+                ..Default::default()
+            });
+            spec.encoding.y = Some(crate::spec::encoding::EncodingSpec {
+                field: "count".into(),
+                type_: None,
+                ..Default::default()
+            });
+        }
+        // Named/fan-out: __final__ keeps the original price/weight schema, so
+        // the chart-level encoding (price, weight) from `single_layer_spec()`
+        // still resolves against __final__ correctly.
+        spec
+    }
+
+    #[test]
+    fn data_source_none_uses_final_pipeline_output() {
+        pyo3::Python::initialize();
+        let spec = spec_with_one_bin(None);
+        let batch = price_weight_batch();
+        let prep = prepare_render_inputs(&spec, &batch).unwrap();
+        // __final__ is always present.
+        assert!(
+            prep.transform_outputs.contains_key("__final__"),
+            "transform_outputs must always publish __final__"
+        );
+        // Bin had no name → its output is NOT separately keyed.
+        assert_eq!(
+            prep.transform_outputs.len(),
+            1,
+            "expected only __final__, got keys: {:?}",
+            prep.transform_outputs.keys().collect::<Vec<_>>()
+        );
+        // prep.transformed is a clone of __final__.
+        let final_batch = prep.transform_outputs.get("__final__").unwrap();
+        assert_eq!(prep.transformed.num_rows(), final_batch.num_rows());
+        assert_eq!(prep.transformed.num_columns(), final_batch.num_columns());
+        assert_eq!(
+            prep.transformed.schema(),
+            final_batch.schema(),
+            "transformed and __final__ schemas must match"
+        );
+    }
+
+    #[test]
+    fn data_source_some_publishes_named_transform_output() {
+        pyo3::Python::initialize();
+        let spec = spec_with_one_bin(Some("box".into()));
+        let batch = price_weight_batch();
+        let prep = prepare_render_inputs(&spec, &batch).unwrap();
+        assert!(prep.transform_outputs.contains_key("box"));
+        assert!(prep.transform_outputs.contains_key("__final__"));
+        // Under fan-out semantics, named transforms run on the ORIGINAL input
+        // and do NOT advance the chained pipeline. The named "box" output is
+        // the bin output; __final__ is the original input (since no unnamed
+        // transforms advanced the chain).
+        let named = prep.transform_outputs.get("box").unwrap();
+        let fin = prep.transform_outputs.get("__final__").unwrap();
+        // The named bin output has the bin schema (bin_start/bin_end/count/density).
+        let named_schema = named.schema();
+        let named_fields: Vec<&str> = named_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(
+            named_fields.contains(&"bin_start") && named_fields.contains(&"count"),
+            "named output should have bin schema, got: {:?}",
+            named_fields
+        );
+        // __final__ retains the original schema (price + weight).
+        let final_schema = fin.schema();
+        let final_fields: Vec<&str> = final_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(
+            final_fields.contains(&"price") && final_fields.contains(&"weight"),
+            "__final__ should have original schema, got: {:?}",
+            final_fields
+        );
+        // And — proving the change — the named output and __final__ schemas differ.
+        assert_ne!(named.schema(), fin.schema());
+    }
+
+    #[test]
+    fn unknown_data_source_raises_clear_error() {
+        pyo3::Python::initialize();
+        use crate::spec::layer::Layer;
+        // Pipeline publishes "step1"; layer asks for "missing".
+        let mut spec = spec_with_one_bin(Some("step1".into()));
+        spec.layers = Some(vec![Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: vec![],
+            mark_style: None,
+            data_source: Some("missing".into()),
+        }]);
+        let batch = price_weight_batch();
+        let err = prepare_render_inputs(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "error must name the bogus key: {msg}");
+        // Available keys list must mention either the named transform or the sentinel.
+        assert!(
+            msg.contains("step1") || msg.contains("__final__"),
+            "error must list available keys: {msg}"
+        );
     }
 
     #[test]

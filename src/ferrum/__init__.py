@@ -4,18 +4,29 @@ from ferrum._core import (
     Aggregate,
     AggregateOp,
     Bin,
+    BoxStats,
     ChartSpec,
+    ContinuousScheme,
+    Contour,
     EncodingSpec,
+    ErrorExtent,
+    Hex,
     Kde,
+    Kde2D,
     LinearScale,
     LogScale,
     TimeScale,
     SymlogScale,
     OrdinalScale,
+    Outliers,
+    QQ,
     QuantileScale,
+    Raster,
     Smooth,
     Summary,
+    Swarm,
     ThresholdScale,
+    Violin,
     compute_layout,
     process_batch,
     render_png,
@@ -23,6 +34,7 @@ from ferrum._core import (
     compose_svg_horizontal,
     compose_svg_vertical,
 )
+from ferrum.schemes import continuous_palette, Gradient
 
 from ferrum.themes import (
     Theme, set_default_theme, get_default_theme, theme_context,
@@ -50,9 +62,9 @@ __version__ = "0.1.0"
 
 __all__ = [
     # Phase 1-7 core
-    "Aggregate", "AggregateOp", "Bin", "ChartSpec", "EncodingSpec", "Kde",
+    "Aggregate", "AggregateOp", "Bin", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "QuantileScale", "ThresholdScale", "Smooth", "Summary",
+    "Outliers", "QQ", "QuantileScale", "Raster", "ThresholdScale", "Smooth", "Summary", "Swarm", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical",
     # Phase 8a
@@ -67,4 +79,6 @@ __all__ = [
     "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
     "Facet", "FacetRow", "FacetCol",
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
+    # Phase 8b
+    "ContinuousScheme", "continuous_palette", "Gradient",
 ]

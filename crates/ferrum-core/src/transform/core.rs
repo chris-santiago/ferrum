@@ -1,12 +1,26 @@
+use std::collections::HashMap;
+
 use arrow::array::RecordBatch;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
+use crate::transform::context::TransformContext;
+
 use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
+use crate::transform::contour::{self, ContourSpec};
+use crate::transform::error_extent::{self, ErrorExtentSpec};
+use crate::transform::box_stats::{self, BoxStatsSpec};
 use crate::transform::kde::KdeSpec;
+use crate::transform::kde_2d::Kde2DSpec;
+use crate::transform::outliers::{self, OutliersSpec};
+use crate::transform::qq::{self, QQSpec};
+use crate::transform::raster::{self, RasterSpec};
+use crate::transform::hex::{self, HexSpec};
+use crate::transform::swarm::{self, SwarmSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
+use crate::transform::violin::{self, ViolinSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -16,6 +30,16 @@ pub(crate) enum TransformSpec {
     Smooth(SmoothSpec),
     Aggregate(AggregateSpec),
     Summary(SummarySpec),
+    Outliers(OutliersSpec),
+    ErrorExtent(ErrorExtentSpec),
+    BoxStats(BoxStatsSpec),
+    Violin(ViolinSpec),
+    Kde2D(Kde2DSpec),
+    Contour(ContourSpec),
+    Qq(QQSpec),
+    Raster(RasterSpec),
+    Hex(HexSpec),
+    Swarm(SwarmSpec),
 }
 
 impl TransformSpec {
@@ -26,6 +50,16 @@ impl TransformSpec {
             Self::Smooth(s)    => crate::transform::smooth::apply(s, batch),
             Self::Aggregate(s) => crate::transform::aggregate::apply(s, batch),
             Self::Summary(s)   => crate::transform::summary::apply(s, batch),
+            Self::Outliers(s)  => outliers::apply(s, batch),
+            Self::ErrorExtent(s) => error_extent::apply(s, batch),
+            Self::BoxStats(s)  => box_stats::apply(s, batch),
+            Self::Violin(s)    => violin::apply(s, batch),
+            Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
+            Self::Contour(s)   => contour::apply(s, batch),
+            Self::Qq(s)        => qq::apply(s, batch),
+            Self::Raster(s)    => raster::apply(s, batch),
+            Self::Hex(s)       => hex::apply(s, batch),
+            Self::Swarm(s)     => swarm::apply(s, batch),
         }
     }
 }
@@ -39,6 +73,112 @@ pub(crate) fn apply_transforms(
         current = spec.apply(&current)?;
     }
     Ok(current)
+}
+
+impl TransformSpec {
+    pub(crate) fn apply_with_context(
+        &self,
+        batch: &RecordBatch,
+        ctx: &TransformContext,
+    ) -> PyResult<RecordBatch> {
+        // Default: ignore context and forward to existing apply().
+        // Phase 8b transforms that NEED context (Raster, Swarm) override here.
+        match self {
+            Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
+            Self::Swarm(s) => crate::transform::swarm::apply_with_context(s, batch, ctx),
+            _ => self.apply(batch),
+        }
+    }
+
+    /// Additional named outputs produced by this transform's `apply` invocation,
+    /// alongside its primary RecordBatch output. Default: empty.
+    /// Implementing this method lets a transform publish multiple named outputs
+    /// (e.g. QQ publishes both points + "qq_line").
+    pub(crate) fn secondary_outputs(
+        &self,
+        batch: &RecordBatch,
+    ) -> PyResult<Vec<(String, RecordBatch)>> {
+        match self {
+            Self::Qq(s) => crate::transform::qq::secondary_outputs(s, batch),
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+pub(crate) fn apply_transforms_with_context(
+    specs: &[TransformSpec],
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    let mut current = batch.clone();
+    for spec in specs {
+        current = spec.apply_with_context(&current, ctx)?;
+    }
+    Ok(current)
+}
+
+/// Sentinel key under which the final pipeline output is always published in
+/// the map returned by [`apply_transforms_named`]. Layers with `data_source: None`
+/// resolve to this key.
+pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
+
+/// Apply each transform; record named outputs with fan-out semantics.
+///
+/// - **Named transforms** (`name = Some(...)`) run on the ORIGINAL `batch`
+///   (parallel/fan-out). They publish their output under their name and do
+///   NOT advance the chained pipeline pointer.
+/// - **Unnamed transforms** chain: each consumes the prior unnamed output.
+///
+/// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
+/// the original input when no unnamed transforms ran.
+pub(crate) fn apply_transforms_named(
+    specs: &[TransformSpec],
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<HashMap<String, RecordBatch>> {
+    let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+    let mut current = batch.clone();
+    for spec in specs {
+        if let Some(name) = spec_name(spec) {
+            // Named: run on the ORIGINAL input (fan-out). Does not advance the
+            // chained pipeline pointer.
+            let result = spec.apply_with_context(batch, ctx)?;
+            // Secondary outputs first — explicit `name` (registered below)
+            // wins on key collision.
+            for (key, b) in spec.secondary_outputs(&result)? {
+                outputs.insert(key, b);
+            }
+            outputs.insert(name.to_string(), result);
+        } else {
+            // Unnamed: chained.
+            current = spec.apply_with_context(&current, ctx)?;
+            for (key, b) in spec.secondary_outputs(&current)? {
+                outputs.insert(key, b);
+            }
+        }
+    }
+    outputs.insert(FINAL_OUTPUT_KEY.to_string(), current);
+    Ok(outputs)
+}
+
+fn spec_name(spec: &TransformSpec) -> Option<&str> {
+    match spec {
+        TransformSpec::Bin(s) => s.name.as_deref(),
+        TransformSpec::Kde(s) => s.name.as_deref(),
+        TransformSpec::Smooth(s) => s.name.as_deref(),
+        TransformSpec::Aggregate(s) => s.name.as_deref(),
+        TransformSpec::Summary(s) => s.name.as_deref(),
+        TransformSpec::Outliers(s) => s.name.as_deref(),
+        TransformSpec::ErrorExtent(s) => s.name.as_deref(),
+        TransformSpec::BoxStats(s) => s.name.as_deref(),
+        TransformSpec::Violin(s) => s.name.as_deref(),
+        TransformSpec::Kde2D(s) => s.name.as_deref(),
+        TransformSpec::Contour(s) => s.name.as_deref(),
+        TransformSpec::Qq(s) => s.name.as_deref(),
+        TransformSpec::Raster(s) => s.name.as_deref(),
+        TransformSpec::Hex(s) => s.name.as_deref(),
+        TransformSpec::Swarm(s) => s.name.as_deref(),
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +207,7 @@ mod tests {
             bin_width: None,
             extent: None,
             nice: true,
+            name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"bin""#), "missing tag: {json}");
@@ -95,6 +236,7 @@ mod tests {
                 bin_width: None,
                 extent: Some((1.0, 10.0)),
                 nice: false,
+                name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -103,6 +245,7 @@ mod tests {
                     as_: "total_count".into(),
                 }],
                 groupby: vec![],
+                name: None,
             }),
         ];
 
@@ -127,6 +270,7 @@ mod tests {
                 bin_width: None,
                 extent: Some((1.0, 5.0)),
                 nice: false,
+                name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
                 ops: vec![AggregateOp {
@@ -135,11 +279,46 @@ mod tests {
                     as_: "m".into(),
                 }],
                 groupby: vec![],
+                name: None,
             }),
         ];
         let err = apply_transforms(&pipeline, &batch).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'x'") && (msg.contains("not found") || msg.contains("missing")),
             "expected missing-column error; got: {msg}");
+    }
+
+    #[test]
+    fn transform_spec_json_byte_identical_when_name_none() {
+        let s = TransformSpec::Bin(BinSpec {
+            field: "x".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            name: None,
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("name"), "name=None must be omitted: {json}");
+        assert!(json.contains(r#""type":"bin""#));
+    }
+
+    #[test]
+    fn apply_with_context_default_falls_back_to_apply() {
+        pyo3::Python::initialize();
+        let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
+        let spec = TransformSpec::Bin(BinSpec {
+            field: "x".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: Some((1.0, 3.0)),
+            nice: false,
+            name: None,
+        });
+        let ctx = TransformContext::default();
+        let with_ctx = spec.apply_with_context(&batch, &ctx).unwrap();
+        let without = spec.apply(&batch).unwrap();
+        assert_eq!(with_ctx.num_columns(), without.num_columns());
+        assert_eq!(with_ctx.num_rows(), without.num_rows());
     }
 }

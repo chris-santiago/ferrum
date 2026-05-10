@@ -35,6 +35,14 @@ pub struct MarkKwargsSpec {
     pub dy: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<f64>,
+    /// Polygon mark grouping column (e.g. `hex_id`, `violin_id`, `level_id`).
+    /// When None, all rows form a single polygon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Named continuous colormap (e.g. `viridis`, `plasma`). Used by polygon mark
+    /// when `color` encoding maps to a quantitative column. Defaults to `viridis`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmap: Option<String>,
 }
 
 #[cfg(test)]

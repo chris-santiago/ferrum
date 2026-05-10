@@ -35,6 +35,8 @@ rand_chacha = { version = "0.3", default-features = false }
 fontdue = "=0.9.3"
 # Color type alias + future colorspace conversions. Range pin per spec §11 row 6.
 palette = "~0.7"
+# Phase 8b — perceptually-uniform sequential/diverging color ramps for stat marks.
+colorous = "1"
 # SVG → typed tree → tiny_skia rasterization. usvg/resvg minor versions must match.
 usvg    = "~0.47"
 resvg   = "~0.47"
@@ -43,6 +45,8 @@ resvg   = "~0.47"
 tiny-skia = "~0.12"
 # base64 @font-face data URL emission for Phase 7 SVG embed.
 base64  = "~0.22"
+# Phase 8b — direct PNG encode path for raster export (promoted from transitive).
+png     = "0.18"
 
 [profile.release]
 lto = "thin"

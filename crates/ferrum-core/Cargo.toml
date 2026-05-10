@@ -27,6 +27,8 @@ usvg        = { workspace = true }
 resvg       = { workspace = true }
 tiny-skia   = { workspace = true }
 base64      = { workspace = true }
+colorous    = { workspace = true }
+png         = { workspace = true }
 
 [dev-dependencies]
 sha2 = "0.10"

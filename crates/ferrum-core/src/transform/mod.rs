@@ -4,8 +4,19 @@
 
 pub(crate) mod core;
 pub(crate) mod bin;
+pub(crate) mod context;
 pub(crate) mod kde;
+pub(crate) mod kde_2d;
 pub(crate) mod smooth;
 pub(crate) mod aggregate;
 pub(crate) mod summary;
+pub(crate) mod outliers;
+pub(crate) mod error_extent;
+pub(crate) mod box_stats;
+pub(crate) mod violin;
+pub(crate) mod contour;
+pub(crate) mod qq;
+pub(crate) mod raster;
+pub(crate) mod hex;
+pub(crate) mod swarm;
 pub(crate) mod linalg;

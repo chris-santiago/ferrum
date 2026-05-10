@@ -104,9 +104,69 @@ class Chart:
         ``_pending_stat_mark`` sentinel.  ``_resolve_pending`` is called at the
         start of every render/spec-build path to apply the desugar against the
         now-populated encoding dict.
+
+        Two sentinel shapes are supported:
+        - 2-tuple ``(kind, kwargs)`` — legacy form for density/histogram/smooth,
+          dispatched by ``kind`` below.
+        - 3-tuple ``(kind, kwargs, desugar_fn)`` — generic form used by composite
+          marks (Phase 8b Tasks 23-33). ``desugar_fn(x_field, y_field, **kwargs)``
+          may return a 5-tuple ``("__layered__", transforms, _, _, layers)`` to
+          emit a multi-layer ChartSpec, or the legacy 3-tuple
+          ``(mark, transforms, remap)`` for a single-mark desugar.
         """
         if self._pending_stat_mark is None:
             return self
+        # 3-tuple form: generic desugar callable.
+        if len(self._pending_stat_mark) == 3:
+            kind, kwargs, desugar_fn = self._pending_stat_mark
+            x_enc = self._encoding.get("x")
+            y_enc = self._encoding.get("y")
+            x_field = (
+                (x_enc.field if isinstance(x_enc, ChannelBase) else x_enc)
+                if x_enc is not None
+                else None
+            )
+            y_field = (
+                (y_enc.field if isinstance(y_enc, ChannelBase) else y_enc)
+                if y_enc is not None
+                else None
+            )
+            # Ribbon needs y2 from the encoding — inject as a kwarg.
+            if kind == "ribbon":
+                y2_enc = self._encoding.get("y2")
+                if y2_enc is not None:
+                    y2_field = (
+                        y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
+                    )
+                    kwargs = {**kwargs, "y2_field": y2_field}
+            result = desugar_fn(x_field, y_field, **kwargs)
+            new = self._clone()
+            new._pending_stat_mark = None
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # ("__layered__", transforms, _, _, layers)
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(self._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode in to_spec
+                return new
+            # Legacy single-mark 3-tuple: (mark, transforms, remap)
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + list(transforms or [])
+            if remap:
+                from ferrum.encoding import X, X2, Y, Y2  # noqa: F401
+                if "x" in remap:
+                    new._encoding["x"] = X(remap["x"], type="Q")
+                if "y" in remap:
+                    new._encoding["y"] = Y(remap["y"], type="Q")
+                if "x2" in remap:
+                    new._encoding["x2"] = X2(remap["x2"], type="Q")
+            return new
+        # 2-tuple legacy form.
         kind, kwargs = self._pending_stat_mark
         new = self._clone()
         new._pending_stat_mark = None
@@ -115,12 +175,24 @@ class Chart:
             if x_enc is None:
                 raise ValueError("mark_density() requires .encode(x=...) to specify the density field")
             field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-            mark, transforms, remap = desugar_density(field, **kwargs)
-            new._mark = mark
-            new._transforms = list(new._transforms) + transforms
-            from ferrum.encoding import X, Y
-            new._encoding["x"] = X(remap["x"], type="Q")
-            new._encoding["y"] = Y(remap["y"], type="Q")
+            result = desugar_density(field, chart_encoding=new._encoding, **kwargs)
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # Bivariate density routed through desugar_contour(fill=True).
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(new._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode
+            else:
+                mark, transforms, remap = result
+                new._mark = mark
+                new._transforms = list(new._transforms) + transforms
+                from ferrum.encoding import X, Y
+                new._encoding["x"] = X(remap["x"], type="Q")
+                new._encoding["y"] = Y(remap["y"], type="Q")
         elif kind == "histogram":
             x_enc = new._encoding.get("x")
             if x_enc is None:
@@ -140,9 +212,21 @@ class Chart:
                 raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
             x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
             y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-            mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
-            new._mark = mark
-            new._transforms = list(new._transforms) + transforms
+            result = desugar_smooth(x_field, y_field, **kwargs)
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] == "__layered__"
+            ):
+                # ("__layered__", transforms, _, _, layers) — 8b ci-band path
+                _, transforms, _ignored1, _ignored2, layers_list = result
+                new._transforms = list(new._transforms) + list(transforms or [])
+                new._layers = list(layers_list)
+                new._mark = None  # signals layered mode
+            else:
+                mark, transforms, remap = result
+                new._mark = mark
+                new._transforms = list(new._transforms) + transforms
         return new
 
     # ---- Marks (primitives) ----
@@ -166,7 +250,10 @@ class Chart:
     # ---- Marks (statistical) ----
 
     def mark_density(self, **kwargs) -> "Chart":
-        """Density plot (KDE). Can be called before or after .encode(x=...)."""
+        """Density plot. 1D KDE when only x is encoded; bivariate (filled
+        contour over 2D KDE — Phase 8b) when both x and y are encoded.
+        Can be called before or after ``.encode()``.
+        """
         x_enc = self._encoding.get("x")
         if x_enc is None:
             # Encoding not yet set — defer resolution to render time.
@@ -175,13 +262,25 @@ class Chart:
             new._pending_stat_mark = ("density", dict(kwargs))
             return new
         field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-        mark, transforms, remap = desugar_density(field, **kwargs)
+        result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
         new = self._clone()
-        new._mark = mark
-        new._transforms = list(self._transforms) + transforms
-        from ferrum.encoding import X, Y
-        new._encoding["x"] = X(remap["x"], type="Q")
-        new._encoding["y"] = Y(remap["y"], type="Q")
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and result[0] == "__layered__"
+        ):
+            # Bivariate density routed through desugar_contour(fill=True).
+            _, transforms, _ignored1, _ignored2, layers_list = result
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = list(layers_list)
+            new._mark = None  # signals layered mode
+        else:
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + transforms
+            from ferrum.encoding import X, Y
+            new._encoding["x"] = X(remap["x"], type="Q")
+            new._encoding["y"] = Y(remap["y"], type="Q")
         return new
 
     def mark_histogram(self, **kwargs) -> "Chart":
@@ -204,7 +303,10 @@ class Chart:
         return new
 
     def mark_smooth(self, **kwargs) -> "Chart":
-        """Smooth/regression line. Can be called before or after .encode(x=..., y=...)."""
+        """Smooth/regression line. Can be called before or after .encode(x=..., y=...).
+
+        With ``ci=`` set, emits a layered ribbon (CI band) + line (Phase 8b).
+        """
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
@@ -214,25 +316,255 @@ class Chart:
             return new
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-        mark, transforms, remap = desugar_smooth(x_field, y_field, **kwargs)
+        result = desugar_smooth(x_field, y_field, **kwargs)
         new = self._clone()
-        new._mark = mark
-        new._transforms = list(self._transforms) + transforms
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and result[0] == "__layered__"
+        ):
+            _, transforms, _ignored1, _ignored2, layers_list = result
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = list(layers_list)
+            new._mark = None  # signals layered mode
+        else:
+            mark, transforms, remap = result
+            new._mark = mark
+            new._transforms = list(self._transforms) + transforms
         return new
 
     # ---- Marks (deferred) ----
 
-    def mark_boxplot(self, **kwargs):       raise deferred_mark_error("boxplot")
-    def mark_errorbar(self, **kwargs):      raise deferred_mark_error("errorbar")
-    def mark_errorband(self, **kwargs):     raise deferred_mark_error("errorband")
-    def mark_ribbon(self, **kwargs):        raise deferred_mark_error("ribbon")
-    def mark_contour(self, **kwargs):       raise deferred_mark_error("contour")
-    def mark_violin(self, **kwargs):        raise deferred_mark_error("violin")
-    def mark_qq(self, **kwargs):            raise deferred_mark_error("qq")
-    def mark_raster(self, **kwargs):        raise deferred_mark_error("raster")
-    def mark_swarm(self, **kwargs):         raise deferred_mark_error("swarm")
-    def mark_hex(self, **kwargs):           raise deferred_mark_error("hex")
-    def mark_function(self, fn, **kwargs):  raise deferred_mark_error("function")
+    def mark_boxplot(
+        self,
+        *,
+        extent=1.5,
+        size=None,
+        outliers=True,
+        color_field=None,
+        horizontal=False,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Composite boxplot. Desugars to box+whisker+median (+optional outlier) layers."""
+        from ferrum.marks.composite import desugar_boxplot
+        new = self._clone()
+        new._mark = "point"  # placeholder; layered mode overrides
+        new._pending_stat_mark = (
+            "boxplot",
+            {
+                "extent": extent,
+                "size": size,
+                "outliers": outliers,
+                "color_field": color_field,
+                "horizontal": horizontal,
+                **mark_kwargs,
+            },
+            desugar_boxplot,
+        )
+        return new
+
+    def mark_errorbar(self, *, extent="ci", ticks=True, **mark_kwargs) -> "Chart":
+        """Errorbar mark via ErrorExtent transform."""
+        from ferrum.marks.composite import desugar_errorbar
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "errorbar",
+            {"extent": extent, "ticks": ticks, **mark_kwargs},
+            desugar_errorbar,
+        )
+        return new
+
+    def mark_errorband(self, *, extent="ci", borders=False, **mark_kwargs) -> "Chart":
+        """Errorband mark (ribbon) via ErrorExtent transform."""
+        from ferrum.marks.composite import desugar_errorband
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "errorband",
+            {"extent": extent, "borders": borders, **mark_kwargs},
+            desugar_errorband,
+        )
+        return new
+
+    def mark_ribbon(self, *, opacity=0.3, interpolate="linear", **mark_kwargs) -> "Chart":
+        """Ribbon mark — fills closed area between y and y2 along x. Requires y2 in encoding."""
+        from ferrum.marks.composite import desugar_ribbon
+        new = self._clone()
+        new._mark = "ribbon"
+        new._pending_stat_mark = (
+            "ribbon",
+            {"opacity": opacity, "interpolate": interpolate, **mark_kwargs},
+            desugar_ribbon,
+        )
+        return new
+
+    def mark_contour(
+        self,
+        *,
+        bandwidth="scott",
+        thresholds=6,
+        smooth=True,
+        fill=False,
+        cmap="viridis",
+        **mark_kwargs,
+    ) -> "Chart":
+        """Contour plot via Kde2D + Contour transforms."""
+        from ferrum.marks.heavy_stat import desugar_contour
+        new = self._clone()
+        new._mark = "polygon"  # placeholder; layered mode overrides
+        new._pending_stat_mark = (
+            "contour",
+            {
+                "bandwidth": bandwidth, "thresholds": thresholds, "smooth": smooth,
+                "fill": fill, "cmap": cmap, **mark_kwargs,
+            },
+            desugar_contour,
+        )
+        return new
+
+    def mark_violin(self, *, bandwidth="scott", inner="box", **mark_kwargs) -> "Chart":
+        """Violin plot via Violin transform; optional inner box/quartile/point overlay."""
+        from ferrum.marks.heavy_stat import desugar_violin
+        new = self._clone()
+        new._mark = "polygon"
+        new._pending_stat_mark = (
+            "violin",
+            {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
+            desugar_violin,
+        )
+        return new
+
+    def mark_qq(self, *, distribution="normal", dequantize=False, line=True, **mark_kwargs) -> "Chart":
+        """QQ plot. Reads `field` from x encoding (single-column input)."""
+        from ferrum.marks.heavy_stat import desugar_qq
+        new = self._clone()
+        new._mark = "point"
+
+        def _resolve_qq(x_field, y_field, **kw):
+            # QQ is single-column: use x_field as the sample field. y_field ignored.
+            if x_field is None:
+                raise ValueError("mark_qq() requires .encode(x=...) to specify the sample field")
+            return desugar_qq(x_field, **kw)
+
+        new._pending_stat_mark = (
+            "qq",
+            {"distribution": distribution, "dequantize": dequantize, "line": line, **mark_kwargs},
+            _resolve_qq,
+        )
+        return new
+
+    def mark_raster(
+        self,
+        *,
+        aggregate="count",
+        field=None,
+        cmap="viridis",
+        resolution="screen",
+        blend="alpha",
+        min_count=None,
+        log_scale=False,
+        **mark_kwargs,
+    ) -> "Chart":
+        """2D raster (heatmap) via Raster transform."""
+        from ferrum.marks.heavy_stat import desugar_raster
+        new = self._clone()
+        new._mark = "image"
+        new._pending_stat_mark = (
+            "raster",
+            {
+                "aggregate": aggregate, "field": field, "cmap": cmap, "resolution": resolution,
+                "blend": blend, "min_count": min_count, "log_scale": log_scale, **mark_kwargs,
+            },
+            desugar_raster,
+        )
+        return new
+
+    def mark_hex(
+        self,
+        *,
+        bin_size=None,
+        aggregate="count",
+        field=None,
+        cmap="viridis",
+        stroke=None,
+        stroke_width=0,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Hexagonal binning via Hex transform."""
+        from ferrum.marks.heavy_stat import desugar_hex
+        new = self._clone()
+        new._mark = "polygon"
+        new._pending_stat_mark = (
+            "hex",
+            {
+                "bin_size": bin_size, "aggregate": aggregate, "field": field, "cmap": cmap,
+                "stroke": stroke, "stroke_width": stroke_width, **mark_kwargs,
+            },
+            desugar_hex,
+        )
+        return new
+
+    def mark_swarm(
+        self,
+        *,
+        size=4,
+        orient="vertical",
+        spacing=1.0,
+        side="both",
+        dodge=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Beeswarm plot via Swarm transform."""
+        from ferrum.marks.heavy_stat import desugar_swarm
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "swarm",
+            {
+                "size": size, "orient": orient, "spacing": spacing, "side": side,
+                "dodge": dodge, **mark_kwargs,
+            },
+            desugar_swarm,
+        )
+        return new
+
+    def mark_function(self, fn, *, domain=None, n=200, clip=True, **mark_kwargs) -> "Chart":
+        """Function plot. Materializes synthetic data via fn(xs)."""
+        if self._layers is not None and self._layers:
+            raise NotImplementedError(
+                "mark_function as a layer in a multi-layer Chart is deferred to Phase 9+; "
+                "use a separate Chart composed via + instead"
+            )
+        from ferrum.marks.heavy_stat import desugar_function
+        # Try to infer parent x data for domain inference
+        parent_x_data = None
+        x_enc = self._encoding.get("x")
+        if x_enc is not None and self._data is not None:
+            try:
+                from ferrum._coerce import to_arrow_table
+                x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+                tbl = to_arrow_table(self._data)
+                if x_field_name in tbl.column_names:
+                    parent_x_data = tbl[x_field_name].to_numpy()
+            except Exception:
+                pass
+
+        mark, transforms, remap, synthetic = desugar_function(
+            fn, parent_chart_x_data=parent_x_data, domain=domain, n=n, clip=clip, **mark_kwargs,
+        )
+        new = self._clone()
+        new._mark = mark
+        new._data = synthetic
+        new._transforms = list(self._transforms) + list(transforms)
+        if remap:
+            from ferrum.encoding import X, Y
+            if "x" in remap:
+                new._encoding["x"] = X(remap["x"], type="Q")
+            if "y" in remap:
+                new._encoding["y"] = Y(remap["y"], type="Q")
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
@@ -441,7 +773,7 @@ class Chart:
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
-            for axis in ("x", "y", "color", "size", "shape", "opacity"):
+            for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity"):
                 ch = layer.get("encoding", {}).get(axis)
                 if ch is None:
                     continue
@@ -461,10 +793,17 @@ class Chart:
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
-            mark_style = layer.get("mark_style") or {}
+            # Accept either legacy `mark_style` (8a layered overlays) or
+            # `mark_kwargs` (composite-mark desugar, Phase 8b Tasks 23-33).
+            mark_style = layer.get("mark_style") or layer.get("mark_kwargs") or {}
             layer_dict: dict = {"mark": layer.get("mark", "point"), "encoding": encoding_dict}
             if mark_style:
                 layer_dict["mark_style"] = dict(mark_style)
+            # data_source: composite-mark layers may pull from a named transform
+            # output instead of the final pipeline batch. Only emit when set.
+            data_source = layer.get("data_source")
+            if data_source is not None:
+                layer_dict["data_source"] = data_source
             # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
             raw_transforms = layer.get("transforms") or []
             if raw_transforms:
@@ -532,6 +871,25 @@ class Chart:
             kw["layers"] = resolved._build_layers_list()
         return ChartSpec(**kw)
 
+    def _build_spec(self):
+        """Build the chart spec for callers that want typed Python access to
+        layers (composite-mark tests, future internal renderer wiring).
+
+        For single-layer charts this is a thin alias for ``to_spec``. For
+        layered charts it returns a Python-side ``_SpecView`` that wraps the
+        underlying ``ChartSpec`` and exposes ``.layers`` as a list of
+        ``types.SimpleNamespace`` items with ``.mark``, ``.encoding``,
+        ``.mark_kwargs``, and ``.data_source`` attributes — matching the
+        Layer-instance contract from spec §12.1 without requiring a parallel
+        ``PyLayer`` Rust class. JSON / serialization remains the underlying
+        ``ChartSpec`` (delegated via ``__getattr__``).
+        """
+        resolved = self._resolve_pending()
+        spec = resolved.to_spec()
+        if resolved._layers is None:
+            return spec
+        return _SpecView(spec, resolved._layers)
+
     def to_json(self, *, indent=None) -> str:
         spec = self.to_spec()
         return spec.to_json()
@@ -586,3 +944,57 @@ class Chart:
 
     def __repr__(self) -> str:
         return f"Chart(mark={self._mark!r}, encoding={list(self._encoding.keys())})"
+
+
+class _SpecView:
+    """Python-side typed view over a layered ``ChartSpec``.
+
+    Exposes ``.layers`` as a list of ``types.SimpleNamespace`` items so callers
+    can write ``spec.layers[0].mark.name`` and ``spec.layers[0].data_source``
+    against the spec returned by ``Chart._build_spec()``. All other attribute
+    access (``to_json``, ``mark``, ``encoding``, ``transforms``, etc.) and
+    serialization fall through to the underlying ``ChartSpec`` instance.
+
+    This is the Python-side typed view, not a parallel Rust type — Rust's
+    ``coerce_layers`` already converts the same source dicts into ``Layer``
+    structs internally during ``ChartSpec(...)`` construction.
+    """
+
+    __slots__ = ("_spec", "_layer_dicts", "_layers_cached")
+
+    def __init__(self, spec, layer_dicts: list) -> None:
+        self._spec = spec
+        self._layer_dicts = layer_dicts
+        self._layers_cached: Optional[list] = None
+
+    @property
+    def layers(self) -> list:
+        if self._layers_cached is not None:
+            return self._layers_cached
+        from types import SimpleNamespace
+        out = []
+        for d in self._layer_dicts:
+            mark_name = d.get("mark", "point")
+            mark_obj = SimpleNamespace(name=mark_name)
+            mark_kwargs = d.get("mark_kwargs") or d.get("mark_style")
+            ns = SimpleNamespace(
+                mark=mark_obj,
+                encoding=d.get("encoding") or {},
+                mark_kwargs=mark_kwargs if mark_kwargs else None,
+                data_source=d.get("data_source"),
+                transforms=list(d.get("transforms") or []),
+            )
+            out.append(ns)
+        self._layers_cached = out
+        return out
+
+    def to_json(self, *args, **kwargs) -> str:
+        return self._spec.to_json(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        # Called only if normal attribute lookup fails — delegates everything
+        # else to the underlying ChartSpec.
+        return getattr(self._spec, name)
+
+    def __repr__(self) -> str:
+        return f"_SpecView({self._spec!r}, layers={len(self._layer_dicts)})"

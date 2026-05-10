@@ -7,12 +7,42 @@ from typing import Any
 from ferrum import Bin, Kde, Smooth
 
 
-def desugar_density(field: str, **kwargs: Any) -> tuple[str, list, dict]:
-    """mark_density → mark_area + Kde(field, ...) + remap x → value, y → density.
+def desugar_density(field: str, *, chart_encoding: Any = None, **kwargs: Any) -> tuple:
+    """mark_density desugar.
 
-    The Phase 5 Kde transform produces columns ("value", "density") — the x
-    encoding must be remapped from the original field name to "value".
+    1D path (only x encoded): ``mark_area`` + ``Kde(field)`` + remap
+    ``x → value``, ``y → density``. Returns the legacy 3-tuple
+    ``(mark, transforms, remap)``.
+
+    Bivariate path (both x AND y encoded — Phase 8b): routes through
+    ``desugar_contour(fill=True)`` to emit a filled-contour layer over a
+    2D KDE. Returns the 5-tuple
+    ``("__layered__", transforms, None, None, layers)``.
     """
+    # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
+    # contour fill instead of a 1D KDE area.
+    if chart_encoding is not None:
+        x_enc = chart_encoding.get("x")
+        y_enc = chart_encoding.get("y")
+        if x_enc is not None and y_enc is not None:
+            from ferrum.encoding.base import ChannelBase
+            from ferrum.marks.heavy_stat import desugar_contour
+            x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
+            # Forward only kwargs that desugar_contour understands; the 1D
+            # KDE-only kwargs (n, extent, cumulative, kernel, multiple) are
+            # silently dropped in the bivariate branch.
+            contour_kwargs = {}
+            if "bandwidth" in kwargs:
+                contour_kwargs["bandwidth"] = kwargs["bandwidth"]
+            if "thresholds" in kwargs:
+                contour_kwargs["thresholds"] = kwargs["thresholds"]
+            if "smooth" in kwargs:
+                contour_kwargs["smooth"] = kwargs["smooth"]
+            if "cmap" in kwargs:
+                contour_kwargs["cmap"] = kwargs["cmap"]
+            return desugar_contour(x_field, y_field, fill=True, **contour_kwargs)
+
     bandwidth = kwargs.pop("bandwidth", "scott")
     kernel = kwargs.pop("kernel", "gaussian")
     n = kwargs.pop("n", 512)
@@ -47,23 +77,44 @@ def desugar_histogram(field: str, **kwargs: Any) -> tuple[str, list, dict]:
     return ("bar", transforms, encoding_remap)
 
 
-def desugar_smooth(x_field: str, y_field: str, **kwargs: Any) -> tuple[str, list, dict]:
-    """mark_smooth → mark_line + Smooth(x, y, ...). Phase 8a does NOT render the CI band."""
+def desugar_smooth(x_field: str, y_field: str, **kwargs: Any) -> tuple:
+    """mark_smooth → mark_line + Smooth(x, y, ...).
+
+    With ``ci=None`` (the default): single ``line`` mark layer, returns the
+    legacy 3-tuple ``(mark, transforms, remap)``.
+
+    With ``ci`` set (e.g. ``0.95``) — Phase 8b: layered output emitting a
+    ribbon (CI band, semi-transparent) below a line, both bound to the same
+    named ``Smooth`` transform output. Returns the 5-tuple
+    ``("__layered__", transforms, None, None, layers)``.
+    """
     method = kwargs.pop("method", "loess")
     ci = kwargs.pop("ci", None)
     bandwidth = kwargs.pop("bandwidth", 0.75)
     degree = kwargs.pop("degree", 2)
     n = kwargs.pop("n", 200)
+    seed = kwargs.pop("seed", 0)
 
-    if ci is not None:
-        # warn-once: CI band requires Phase 8b ribbon mark
-        from ferrum._warn import warn_once
-        warn_once("mark_smooth", "ci",
-                  "mark_smooth(ci=...) requires the ribbon mark; deferred to Phase 8b. "
-                  "Smooth curve rendered without CI band.")
+    if ci is None:
+        # 8a-compatible single-line path: keep the legacy 3-tuple shape so the
+        # 6 SVG goldens stay byte-identical. No `seed` kwarg passed → matches
+        # the pre-8b call site exactly.
+        transforms = [Smooth(x_field, y_field, method=method, ci=None,
+                             bandwidth=bandwidth, degree=degree, n=n)]
+        encoding_remap = {"x": "x", "y": "y"}
+        return ("line", transforms, encoding_remap)
 
-    transforms = [Smooth(x_field, y_field, method=method, ci=None, bandwidth=bandwidth,
-                         degree=degree, n=n)]
-    # Phase 5 Smooth produces (x, y) columns named after as_ tuple; default ("x", "y")
-    encoding_remap = {"x": "x", "y": "y"}
-    return ("line", transforms, encoding_remap)
+    # CI band path (NEW in 8b — replaces former warn-once deferral).
+    transforms = [Smooth(x_field, y_field, method=method, ci=ci,
+                         bandwidth=bandwidth, degree=degree, n=n, seed=seed,
+                         name="smooth")]
+    layers = [
+        {"mark": "ribbon",
+         "encoding": {"x": "x", "y": "ci_lower", "y2": "ci_upper"},
+         "mark_kwargs": {"opacity": 0.3},
+         "data_source": "smooth"},
+        {"mark": "line",
+         "encoding": {"x": "x", "y": "y"},
+         "data_source": "smooth"},
+    ]
+    return ("__layered__", transforms, None, None, layers)

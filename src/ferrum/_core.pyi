@@ -6,6 +6,7 @@ DataTypeStr = Literal[
 ]
 MarkStr = Literal[
     "point", "line", "bar", "area", "rule", "text", "tick", "rect",
+    "polygon", "image", "ribbon",
 ]
 
 
@@ -28,6 +29,8 @@ class ChartSpec:
     size: Optional[EncodingSpec]
     shape: Optional[EncodingSpec]
     opacity: Optional[EncodingSpec]
+    x2: Optional[EncodingSpec]
+    y2: Optional[EncodingSpec]
     data: str
     transforms: List[object]
     facet: Optional[dict]
@@ -45,6 +48,8 @@ class ChartSpec:
         size: Union[str, EncodingSpec, None] = None,
         shape: Union[str, EncodingSpec, None] = None,
         opacity: Union[str, EncodingSpec, None] = None,
+        x2: Union[str, EncodingSpec, None] = None,
+        y2: Union[str, EncodingSpec, None] = None,
         data: Optional[str] = None,
         transforms: Optional[List[object]] = None,
         facet: Optional[dict] = None,
@@ -212,6 +217,16 @@ class Bin:
         nice: bool = True,
     ) -> None: ...
 
+class BoxStats:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        whisker_extent: Union[str, float] = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 class Kde:
     def __init__(
         self,
@@ -221,6 +236,28 @@ class Kde:
         n: int = 512,
         extent: Optional[Tuple[float, float]] = None,
         cumulative: bool = False,
+    ) -> None: ...
+
+class Kde2D:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bandwidth: object = "scott",
+        n: int = 128,
+        extent: Optional[Tuple[float, float, float, float]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Contour:
+    def __init__(
+        self,
+        *,
+        thresholds: int = 6,
+        fill: bool = False,
+        smooth: bool = True,
+        name: Optional[str] = None,
     ) -> None: ...
 
 class Smooth:
@@ -253,6 +290,90 @@ class Summary:
         ci: float = 0.95,
         n_boot: int = 1000,
         seed: int = 0,
+    ) -> None: ...
+
+class Outliers:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        extent: float = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class ErrorExtent:
+    def __init__(
+        self,
+        field: str,
+        *,
+        method: str = "ci",
+        groupby: List[str] = ...,
+        seed: int = 0,
+        n_boot: int = 1000,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Violin:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        bandwidth: object = "scott",   # str ("scott"|"silverman") or float
+        n: int = 256,
+        width: float = 0.4,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class QQ:
+    def __init__(
+        self,
+        field: str,
+        *,
+        distribution: str = "normal",
+        dequantize: bool = False,
+        emit_line: bool = True,
+        seed: int = 0,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Raster:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        aggregate: str = "count",
+        field: Optional[str] = None,
+        resolution: Union[str, int, Tuple[int, int]] = "screen",
+        min_count: Optional[int] = None,
+        log_scale: bool = False,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Hex:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bin_size: Optional[float] = None,
+        aggregate: str = "count",
+        field: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Swarm:
+    def __init__(
+        self,
+        category: str,
+        value: str,
+        *,
+        point_size: float = 5.0,
+        spacing: float = 1.0,
+        side: str = "both",
+        name: Optional[str] = None,
     ) -> None: ...
 
 
@@ -306,3 +427,14 @@ def compose_svg_vertical(
     spacing: float = 10.0,
     align: Literal["left", "center", "right"] = "left",
 ) -> str: ...
+
+
+# ---------- Continuous color schemes (Phase 8b Task 37) ----------
+
+class ContinuousScheme:
+    @staticmethod
+    def from_name(name: str) -> "ContinuousScheme": ...
+    def reversed(self) -> "ContinuousScheme": ...
+    def __repr__(self) -> str: ...
+
+def Gradient(stops: list[tuple[float, str]]) -> ContinuousScheme: ...

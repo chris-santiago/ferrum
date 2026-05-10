@@ -136,6 +136,66 @@ impl SvgBuffer {
         self.buf.push_str("</text>");
     }
 
+    /// Embed a PNG as <image href="data:image/png;base64,..." x=... y=... width=... height=.../>.
+    /// `png_bytes` must be a valid PNG-encoded buffer (use render::rasterize::encode_png).
+    /// Attribute order is pinned: x, y, width, height, href.
+    pub fn image(&mut self, x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        self.buf.push_str(&format!(
+            r#"<image x="{}" y="{}" width="{}" height="{}" href="data:image/png;base64,{}"/>"#,
+            fmt_f(x), fmt_f(y), fmt_f(w), fmt_f(h), b64
+        ));
+    }
+
+    /// Emit a closed filled/stroked polygon as `<path d="M ... Z" fill-rule="evenodd"/>`.
+    /// `paths`: each inner `Vec<(f64, f64)>` is one ring; multiple rings → first is outer,
+    /// rest are holes. `fill-rule="evenodd"` handles winding automatically.
+    pub fn polygon(&mut self, paths: &[Vec<(f64, f64)>], style: &FillStroke) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut d = String::new();
+        let mut first_ring = true;
+        for ring in paths {
+            if ring.is_empty() {
+                continue;
+            }
+            if !first_ring {
+                d.push(' ');
+            }
+            first_ring = false;
+            d.push_str(&format!("M {} {}", fmt_f(ring[0].0), fmt_f(ring[0].1)));
+            for (x, y) in &ring[1..] {
+                d.push_str(&format!(" L {} {}", fmt_f(*x), fmt_f(*y)));
+            }
+            d.push_str(" Z");
+        }
+        self.buf.push_str("<path");
+        push_attr(&mut self.buf, "d", &d);
+        push_attr(&mut self.buf, "fill-rule", "evenodd");
+        push_fill_stroke(&mut self.buf, style);
+        self.buf.push_str("/>");
+    }
+
+    /// Emit a batch of <circle> elements at pre-resolved positions, wrapped in a <g>.
+    /// Equivalent to N circle() calls with deterministic ordering, but more compact DOM.
+    /// Used by mark_swarm to keep beeswarm SVG manageable.
+    pub fn beeswarm(&mut self, points: &[(f64, f64)], radius: f64, style: &FillStroke) {
+        if points.is_empty() { return; }
+        self.buf.push_str("<g");
+        push_fill_stroke(&mut self.buf, style);
+        self.buf.push('>');
+        let r = fmt_f(radius);
+        for (x, y) in points {
+            self.buf.push_str(&format!(
+                r#"<circle cx="{}" cy="{}" r="{}"/>"#,
+                fmt_f(*x), fmt_f(*y), r
+            ));
+        }
+        self.buf.push_str("</g>");
+    }
+
     pub fn clip_open(&mut self, id: &str, rect: Rect) {
         self.buf.push_str(&format!(
             "<defs><clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
@@ -314,5 +374,137 @@ mod tests {
         assert!(out.contains("<clipPath id=\"c1\">"));
         assert!(out.contains("<g clip-path=\"url(#c1)\">"));
         assert_eq!(out.matches("</g>").count(), 1);
+    }
+
+    #[test]
+    fn image_emits_data_url_with_fixed_attribute_order() {
+        use base64::Engine;
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let png_bytes: &[u8] = b"\x89PNG\r\n\x1a\n";  // PNG magic bytes (truncated)
+        svg.image(10.0, 20.0, 50.0, 30.0, png_bytes);
+        let out = svg.finish();
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        let expected_href = format!("data:image/png;base64,{b64}");
+
+        // Attribute order: x, y, width, height, href (alphabetical NOT used; this is our pinned order)
+        let needle = format!(r#"<image x="10" y="20" width="50" height="30" href="{expected_href}"/>"#);
+        assert!(out.contains(&needle), "image markup missing or wrong order:\n{out}");
+    }
+
+    #[test]
+    fn image_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nfoo";
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.image(0.0, 0.0, 10.0, 10.0, png);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "image emission must be deterministic");
+    }
+
+    #[test]
+    fn image_does_not_emit_whitespace_in_href() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        svg.image(0.0, 0.0, 10.0, 10.0, b"\x89PNG\r\n\x1a\nx");
+        let out = svg.finish();
+        let href_start = out.find("data:image/png;base64,").expect("href missing");
+        let href_end = out[href_start..].find('"').unwrap() + href_start;
+        let href_body = &out[href_start..href_end];
+        assert!(!href_body.contains('\n') && !href_body.contains(' '),
+                "href body must be one line: {href_body}");
+    }
+
+    #[test]
+    fn polygon_one_ring_emits_closed_path() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let ring = vec![(0.0_f64, 0.0_f64), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        svg.polygon(&[ring], &style);
+        let out = svg.finish();
+        assert!(out.contains(r#"d="M 0 0 L 10 0 L 10 10 L 0 10 Z""#),
+                "missing single-ring path data: {out}");
+        assert!(out.contains(r#"fill-rule="evenodd""#),
+                "missing fill-rule=evenodd: {out}");
+    }
+
+    #[test]
+    fn polygon_multi_ring_concatenates_subpaths() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let outer = vec![(0.0_f64, 0.0_f64), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+        let hole  = vec![(5.0_f64, 5.0_f64), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)];
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        svg.polygon(&[outer, hole], &style);
+        let out = svg.finish();
+        assert!(out.contains("M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"),
+                "multi-ring path data wrong: {out}");
+    }
+
+    #[test]
+    fn polygon_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let style = FillStroke { fill: Some(from_rgba(50, 50, 50, 128)), stroke: None, stroke_width: 0.0 };
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.polygon(&[vec![(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]], &style);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "polygon emission must be deterministic");
+    }
+
+    #[test]
+    fn beeswarm_emits_group_with_n_circles() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let pts = vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)];
+        let style = FillStroke {
+            fill: Some(from_rgb(0, 0, 0)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        svg.beeswarm(&pts, 3.0, &style);
+        let out = svg.finish();
+        let circle_count = out.matches("<circle").count();
+        assert_eq!(circle_count, 3, "expected 3 circles in beeswarm: {out}");
+        assert!(out.contains("<g "), "beeswarm should wrap in <g>: {out}");
+    }
+
+    #[test]
+    fn beeswarm_circles_in_input_order() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let pts = vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)];
+        let style = FillStroke {
+            fill: Some(from_rgb(0, 0, 0)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        svg.beeswarm(&pts, 1.0, &style);
+        let out = svg.finish();
+        let pos1 = out.find(r#"cx="1""#).unwrap();
+        let pos2 = out.find(r#"cx="2""#).unwrap();
+        let pos3 = out.find(r#"cx="3""#).unwrap();
+        assert!(pos1 < pos2 && pos2 < pos3, "circles must emit in input order");
+    }
+
+    #[test]
+    fn beeswarm_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let style = FillStroke {
+            fill: Some(from_rgb(50, 50, 50)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.beeswarm(&[(1.0, 2.0), (3.0, 4.0)], 2.0, &style);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "beeswarm must be deterministic");
     }
 }

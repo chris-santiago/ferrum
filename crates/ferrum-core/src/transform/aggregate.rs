@@ -31,6 +31,8 @@ pub(crate) struct AggregateSpec {
     pub ops: Vec<AggregateOp>,
     #[serde(default)]
     pub groupby: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
 }
 
 /// Internal representation of a group key value. Order matters: BTreeMap relies on Ord.
@@ -253,10 +255,11 @@ pub(crate) struct PyAggregate(pub(crate) TransformSpec);
 #[pymethods]
 impl PyAggregate {
     #[new]
-    #[pyo3(signature = (ops, *, groupby = None))]
+    #[pyo3(signature = (ops, *, groupby = None, name = None))]
     fn new(
         ops: &Bound<'_, PyAny>,
         groupby: Option<Vec<String>>,
+        name: Option<String>,
     ) -> PyResult<Self> {
         let ops_list: &Bound<'_, PyList> = ops.downcast::<PyList>()
             .map_err(|_| PyValueError::new_err("Aggregate: ops must be a list of AggregateOp"))?;
@@ -283,6 +286,7 @@ impl PyAggregate {
         Ok(PyAggregate(TransformSpec::Aggregate(AggregateSpec {
             ops: parsed_ops,
             groupby: gb,
+            name,
         })))
     }
 
@@ -342,6 +346,7 @@ mod tests {
                 AggregateOp { field: "v".into(), fn_: AggFn::Max,   as_: "hi".into() },
             ],
             groupby: vec!["group".into()],
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 2);
@@ -373,6 +378,7 @@ mod tests {
         let spec = AggregateSpec {
             ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Median, as_: "med".into() }],
             groupby: vec!["group".into()],
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let groups = col_str(&out, "group");
@@ -392,6 +398,7 @@ mod tests {
         let spec = AggregateSpec {
             ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Mean, as_: "m".into() }],
             groupby: vec![],
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -408,6 +415,7 @@ mod tests {
         let spec = AggregateSpec {
             ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Mean, as_: "m".into() }],
             groupby: vec!["group".into()],
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let groups = col_str(&out, "group");
@@ -425,6 +433,7 @@ mod tests {
         let spec = AggregateSpec {
             ops: vec![AggregateOp { field: "ghost".into(), fn_: AggFn::Mean, as_: "m".into() }],
             groupby: vec!["group".into()],
+            name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("ghost"));
@@ -438,6 +447,7 @@ mod tests {
                 AggregateOp { field: "y".into(), fn_: AggFn::Mean, as_: "avg".into() },
             ],
             groupby: vec!["k".into()],
+            name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: AggregateSpec = serde_json::from_str(&json).unwrap();

@@ -24,6 +24,8 @@ pub(crate) struct SmoothSpec {
     pub n: usize,
     #[serde(default)]
     pub seed: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -332,7 +334,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, name = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
@@ -341,6 +343,7 @@ impl PySmooth {
         degree: u8,
         n: usize,
         seed: u64,
+        name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Smooth: x and y must be non-empty"));
@@ -373,6 +376,7 @@ impl PySmooth {
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
             method, ci, bandwidth, degree, n, seed,
+            name,
         })))
     }
 
@@ -422,6 +426,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let xg = col(&out, "x");
@@ -445,6 +450,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 51, seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let xg = col(&out, "x");
@@ -468,6 +474,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let yf = col(&out, "y");
@@ -482,6 +489,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let yf = col(&out, "y");
@@ -495,6 +503,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.5, degree: 2, n: 100, seed: 42,
+            name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let parsed: SmoothSpec = serde_json::from_str(&json).unwrap();
@@ -521,6 +530,7 @@ mod tests {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                name: None,
             };
             let out = apply(&spec, &batch).unwrap();
             let xg = col(&out, "x");
@@ -552,6 +562,7 @@ mod tests {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                name: None,
             };
             let out = apply(&spec, &batch).unwrap();
             let xg = col(&out, "x");
@@ -577,6 +588,7 @@ mod tests {
             method: SmoothMethod::Loess, ci: None,
             bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
             degree: 2, n: 5, seed: 0,
+            name: None,
         };
         // Primary goal: no panic with k == n == degree+1.
         // With k=n=3 and tricube weights, the farthest neighbor's weight is exactly 0 for grid
@@ -605,6 +617,7 @@ mod tests {
             method: SmoothMethod::Loess,
             ci: Some(0.95),
             bandwidth: 0.5, degree: 1, n: 20, seed: 42,
+            name: None,
         };
         let spec2 = spec1.clone();
         let out1 = apply(&spec1, &batch).unwrap();

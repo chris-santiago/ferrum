@@ -336,6 +336,12 @@ Auto-raster will **not** fire if the chart has an active color encoding — doin
 
 Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), `"silent"`, or `"error"`.
 
+> *(2026-05-10) Phase 8b: `blend="additive"` is deferred to Phase 11 (interactive renderer). Auto-raster policy (`raster_threshold`, `raster_behavior`) is deferred to Phase 9+; explicit `mark_raster` is implemented in Phase 8b.*
+
+> *(2026-05-10) Phase 8b: `mark_swarm` `dodge=` parameter deferred (single-group swarm only in 8b).*
+
+> *(2026-05-10) Phase 8b: `mark_hex` only count/mean/sum aggregates supported. Other Vega-Lite aggregates warn-once and fall back to count.*
+
 **Bivariate density:** When both X and Y channels are encoded as quantitative fields, `mark_density` switches to bivariate KDE mode and renders filled contours, equivalent to `mark_contour` with `fill=True`. The `multiple` parameter applies to univariate mode only.
 
 #### Model Diagnostic Marks
@@ -391,6 +397,8 @@ Stat transforms are applied before rendering, in the Rust engine. They receive a
 | `stat_ellipse(x, y, *, type="norm", level=0.95, segments=51)` | Compute a confidence or data ellipse for bivariate scatter. Returns `x`, `y` coordinates of the ellipse boundary. | `type`: `"norm"` (parametric normal ellipse) \| `"t"` (t-distribution) \| `"euclid"` (Euclidean distance from centroid). `level`: confidence level (ignored for `"euclid"`). |
 | `stat_function(fn, *, domain=None, n=200, as_=("x", "y"))` | Evaluate a Python callable over a 1D domain. `fn` receives a numpy array and must return a numpy array. `domain`: `(min, max)` tuple; inferred from X scale if `None`. Returns columns named by `as_`. | |
 | `stat_hex(x, y, *, bin_size=None, bins=None, aggregate="count", field=None)` | Hexagonal binning. Returns `hex_x`, `hex_y`, `value`. Triggered implicitly by `mark_hex`. | |
+
+> *(2026-05-10) Phase 8b: `stat_kde_2d` is implemented as the `Kde2D` transform (10th transform of the phase). Output is a single-row Arrow batch with `grid_x` / `grid_y` / `density` list columns.*
 
 **Model stat transforms** (accept `ModelSource` or raw arrays)
 

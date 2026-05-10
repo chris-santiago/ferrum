@@ -39,6 +39,7 @@ impl ChartSpec {
     #[pyo3(signature = (
         *, mark, x = None, y = None, color = None,
         size = None, shape = None, opacity = None,           // NEW (from Task 3 follow-on)
+        x2 = None, y2 = None,                                 // NEW Phase 8b Task 22 (ribbon)
         data = None, transforms = None,
         layers = None,                                        // from Task 1
         coord = None,                                         // from Task 4
@@ -53,6 +54,8 @@ impl ChartSpec {
         size: Option<&Bound<'_, PyAny>>,
         shape: Option<&Bound<'_, PyAny>>,
         opacity: Option<&Bound<'_, PyAny>>,
+        x2: Option<&Bound<'_, PyAny>>,
+        y2: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
@@ -69,6 +72,8 @@ impl ChartSpec {
         let size = size.map(coerce_encoding).transpose()?;
         let shape = shape.map(coerce_encoding).transpose()?;
         let opacity = opacity.map(coerce_encoding).transpose()?;
+        let x2 = x2.map(coerce_encoding).transpose()?;
+        let y2 = y2.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -122,7 +127,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2 },
             transforms,
             facet,
             layers,
@@ -167,6 +172,16 @@ impl ChartSpec {
     }
 
     #[getter]
+    fn x2(&self) -> Option<EncodingSpec> {
+        self.encoding.x2.clone()
+    }
+
+    #[getter]
+    fn y2(&self) -> Option<EncodingSpec> {
+        self.encoding.y2.clone()
+    }
+
+    #[getter]
     fn data(&self) -> &str {
         match &self.data {
             DataRef::Named { name } => name,
@@ -188,6 +203,26 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::aggregate::PyAggregate(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Summary(_) =>
                     pyo3::Py::new(py, crate::transform::summary::PySummary(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Outliers(_) =>
+                    pyo3::Py::new(py, crate::transform::outliers::PyOutliers(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::ErrorExtent(_) =>
+                    pyo3::Py::new(py, crate::transform::error_extent::PyErrorExtent(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::BoxStats(_) =>
+                    pyo3::Py::new(py, crate::transform::box_stats::PyBoxStats(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Violin(_) =>
+                    pyo3::Py::new(py, crate::transform::violin::PyViolin(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Kde2D(_) =>
+                    pyo3::Py::new(py, crate::transform::kde_2d::PyKde2D(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Contour(_) =>
+                    pyo3::Py::new(py, crate::transform::contour::PyContour(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Qq(_) =>
+                    pyo3::Py::new(py, crate::transform::qq::PyQQ(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Raster(_) =>
+                    pyo3::Py::new(py, crate::transform::raster::PyRaster(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Hex(_) =>
+                    pyo3::Py::new(py, crate::transform::hex::PyHex(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Swarm(_) =>
+                    pyo3::Py::new(py, crate::transform::swarm::PySwarm(t.clone()))?.into_any(),
             };
             out.push(obj);
         }
@@ -309,8 +344,48 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(s.0);
             continue;
         }
+        if let Ok(o) = item.extract::<crate::transform::outliers::PyOutliers>() {
+            out.push(o.0);
+            continue;
+        }
+        if let Ok(e) = item.extract::<crate::transform::error_extent::PyErrorExtent>() {
+            out.push(e.0);
+            continue;
+        }
+        if let Ok(b) = item.extract::<crate::transform::box_stats::PyBoxStats>() {
+            out.push(b.0);
+            continue;
+        }
+        if let Ok(v) = item.extract::<crate::transform::violin::PyViolin>() {
+            out.push(v.0);
+            continue;
+        }
+        if let Ok(k) = item.extract::<crate::transform::kde_2d::PyKde2D>() {
+            out.push(k.0);
+            continue;
+        }
+        if let Ok(c) = item.extract::<crate::transform::contour::PyContour>() {
+            out.push(c.0);
+            continue;
+        }
+        if let Ok(q) = item.extract::<crate::transform::qq::PyQQ>() {
+            out.push(q.0);
+            continue;
+        }
+        if let Ok(r) = item.extract::<crate::transform::raster::PyRaster>() {
+            out.push(r.0);
+            continue;
+        }
+        if let Ok(h) = item.extract::<crate::transform::hex::PyHex>() {
+            out.push(h.0);
+            continue;
+        }
+        if let Ok(sw) = item.extract::<crate::transform::swarm::PySwarm>() {
+            out.push(sw.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Raster | Hex | Swarm"
         )));
     }
     Ok(out)
@@ -365,6 +440,7 @@ mod tests {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
             Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
+            Mark::Polygon, Mark::Image, Mark::Ribbon,
         ] {
             let mut spec = minimal_scatter();
             spec.mark = m;
@@ -470,6 +546,7 @@ mod tests {
                 bin_width: None,
                 extent: None,
                 nice: true,
+                name: None,
             })],
             facet: None,
             layers: None,
@@ -531,8 +608,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));
