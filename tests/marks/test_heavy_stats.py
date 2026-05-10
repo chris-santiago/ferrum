@@ -214,3 +214,18 @@ def test_function_renders(df_xy):
     chart = fe.Chart(df_xy).encode(x="x", y="y").mark_function(lambda x: x ** 2)
     svg = chart.show_svg()
     assert "<svg" in svg
+
+
+# --- Phase 8b Task 35: bivariate density routes through mark_contour ---
+
+def test_bivariate_density_routes_through_contour():
+    """When .encode() binds both x and y, mark_density() emits a 2D KDE +
+    contour-fill layered spec (Phase 8b), not the 1D area+Kde path."""
+    rng = np.random.default_rng(0)
+    df = pl.DataFrame({"x": rng.standard_normal(50), "y": rng.standard_normal(50)})
+    spec = fe.Chart(df).mark_density().encode(x="x", y="y")._build_spec()
+    json_str = spec.to_json()
+    # 2D KDE transform (Kde2D) and contour transform should both appear in the
+    # serialized spec, regardless of exact casing/format of their tags.
+    assert "kde_2d" in json_str.lower() or "kde2d" in json_str.lower()
+    assert "contour" in json_str.lower()
