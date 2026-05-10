@@ -386,6 +386,16 @@ class Swarm:
     ) -> None: ...
 
 
+class Linkage:
+    def __init__(self, *,
+                 method: str = "ward",
+                 metric: str = "euclidean",
+                 axis: str = "rows",
+                 z_score: str | None = None,
+                 standard_scale: str | None = None,
+                 name: str | None = None) -> None: ...
+
+
 class Reorder:
     def __init__(self, by: str, *, drop_index: bool = True, name: str | None = None) -> None: ...
 

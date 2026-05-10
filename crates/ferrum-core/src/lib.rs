@@ -38,6 +38,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::swarm::PySwarm>()?;
     m.add_class::<transform::unpivot::PyUnpivot>()?;
     m.add_class::<transform::reorder::PyReorder>()?;
+    m.add_class::<transform::linkage::PyLinkage>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;

@@ -21,6 +21,7 @@ use crate::transform::hex::{self, HexSpec};
 use crate::transform::swarm::{self, SwarmSpec};
 use crate::transform::unpivot::{self, UnpivotSpec};
 use crate::transform::reorder::{self, ReorderSpec};
+use crate::transform::linkage::{self, LinkageSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -42,6 +43,7 @@ pub(crate) enum TransformSpec {
     Kde2D(Kde2DSpec),
     Contour(ContourSpec),
     Qq(QQSpec),
+    Linkage(LinkageSpec),
     Raster(RasterSpec),
     Hex(HexSpec),
     Swarm(SwarmSpec),
@@ -65,6 +67,7 @@ impl TransformSpec {
             Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
             Self::Contour(s)   => contour::apply(s, batch),
             Self::Qq(s)        => qq::apply(s, batch),
+            Self::Linkage(s)   => linkage::apply(s, batch),
             Self::Raster(s)    => raster::apply(s, batch),
             Self::Hex(s)       => hex::apply(s, batch),
             Self::Swarm(s)     => swarm::apply(s, batch),
@@ -110,6 +113,7 @@ impl TransformSpec {
     ) -> PyResult<Vec<(String, RecordBatch)>> {
         match self {
             Self::Qq(s) => crate::transform::qq::secondary_outputs(s, batch),
+            Self::Linkage(s) => crate::transform::linkage::secondary_outputs(s, batch),
             _ => Ok(Vec::new()),
         }
     }
@@ -186,6 +190,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Kde2D(s) => s.name.as_deref(),
         TransformSpec::Contour(s) => s.name.as_deref(),
         TransformSpec::Qq(s) => s.name.as_deref(),
+        TransformSpec::Linkage(s) => s.name.as_deref(),
         TransformSpec::Raster(s) => s.name.as_deref(),
         TransformSpec::Hex(s) => s.name.as_deref(),
         TransformSpec::Swarm(s) => s.name.as_deref(),
@@ -210,6 +215,19 @@ mod tests {
             Field::new(name, DataType::Float64, false),
         ]));
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn test_transform_spec_linkage_round_trip() {
+        use crate::transform::linkage::{LinkageSpec, LinkageMethod, DistanceMetric, LinkageAxis};
+        let original = TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward, metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows, z_score: None, standard_scale: None, name: None,
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains(r#""type":"linkage""#));
+        let parsed: TransformSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
     }
 
     #[test]
