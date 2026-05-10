@@ -442,11 +442,13 @@ mod tests {
         let n = vals.len() as f64;
         let mean = vals.iter().sum::<f64>() / n;
         let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let sd = var.sqrt();
+        let se = (var / n).sqrt();
+        let m = col_f64(&out, "mean");
         let lo = col_f64(&out, "lower");
         let hi = col_f64(&out, "upper");
-        // stderr CI should be narrower than stdev CI
-        assert!(hi[0] - lo[0] < 2.0 * sd, "stderr extent {} >= 2*stdev {}", hi[0] - lo[0], 2.0 * sd);
+        assert!((m[0] - mean).abs() < 1e-12);
+        assert!((lo[0] - (mean - se)).abs() < 1e-12, "lower should be mean - se; got {}", lo[0]);
+        assert!((hi[0] - (mean + se)).abs() < 1e-12, "upper should be mean + se; got {}", hi[0]);
     }
 
     #[test]
