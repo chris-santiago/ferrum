@@ -65,3 +65,6 @@ __all__ = [
     "Theme", "default", "minimal", "dark", "publication", "economist",
     "fivethirtyeight", "solarized_light", "solarized_dark",
 ]
+
+from ferrum.themes._defaults import set_default_theme, get_default_theme, theme_context  # noqa: E402
+__all__ += ["set_default_theme", "get_default_theme", "theme_context"]

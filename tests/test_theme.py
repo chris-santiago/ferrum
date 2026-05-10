@@ -69,3 +69,39 @@ def test_default_theme_has_no_props():
 def test_dark_theme_has_dark_background():
     from ferrum.themes import dark
     assert dark._props["background"] == "#1a1a2e"
+
+
+def test_set_default_theme_sets_process_default():
+    import ferrum
+    from ferrum.themes import dark, get_default_theme
+    from ferrum.themes._defaults import _default_theme
+
+    # Save and restore to avoid bleed-through
+    original = get_default_theme()
+    try:
+        ferrum.set_default_theme(dark)
+        assert get_default_theme() is dark
+    finally:
+        _default_theme.set(original)
+
+
+def test_set_default_theme_returns_context_manager():
+    import ferrum
+    from ferrum.themes import get_default_theme
+
+    original = get_default_theme()
+    with ferrum.set_default_theme(ferrum.themes.dark):
+        assert get_default_theme() is ferrum.themes.dark
+    assert get_default_theme() is original
+
+
+def test_nested_set_default_theme_restores_correctly():
+    import ferrum
+    from ferrum.themes import get_default_theme
+
+    original = get_default_theme()
+    with ferrum.set_default_theme(ferrum.themes.dark):
+        with ferrum.set_default_theme(ferrum.themes.minimal):
+            assert get_default_theme() is ferrum.themes.minimal
+        assert get_default_theme() is ferrum.themes.dark
+    assert get_default_theme() is original
