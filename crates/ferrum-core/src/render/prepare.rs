@@ -5,6 +5,10 @@
 //!   4. Group rows by facet field (if facet).
 //!   5. Build LegendEntry list (if color encoding).
 
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, StringArray, StringViewArray};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
@@ -15,6 +19,47 @@ use crate::transform::core::apply_transforms;
 
 use super::scale_resolve::{resolve_scales, ResolvedScales};
 use super::{RenderError, RenderWarning};
+
+/// Normalize Arrow string columns to `Utf8` (`StringArray`).
+///
+/// Polars exports string columns as `Utf8View` (`StringViewArray`) by default,
+/// but the rest of the render pipeline (scale_resolve, draw, mark renderers)
+/// downcasts to `StringArray`. Converting once here keeps every consumer simple
+/// and avoids per-site downcast forks.
+fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
+    let schema = batch.schema();
+    let mut new_fields: Vec<Arc<Field>> = Vec::with_capacity(schema.fields().len());
+    let mut new_cols: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+    let mut changed = false;
+    for (i, field) in schema.fields().iter().enumerate() {
+        let col = batch.column(i);
+        if matches!(field.data_type(), DataType::Utf8View) {
+            if let Some(view) = col.as_any().downcast_ref::<StringViewArray>() {
+                let owned: StringArray = view
+                    .iter()
+                    .map(|opt| opt.map(|s| s.to_string()))
+                    .collect::<Vec<Option<String>>>()
+                    .into();
+                new_cols.push(Arc::new(owned));
+                new_fields.push(Arc::new(Field::new(
+                    field.name(),
+                    DataType::Utf8,
+                    field.is_nullable(),
+                )));
+                changed = true;
+                continue;
+            }
+        }
+        new_cols.push(col.clone());
+        new_fields.push(field.clone());
+    }
+    if !changed {
+        return batch.clone();
+    }
+    let new_schema = Arc::new(Schema::new(new_fields));
+    RecordBatch::try_new(new_schema, new_cols)
+        .expect("normalized batch must construct: same row count + matched dtypes")
+}
 
 #[derive(Debug)]
 pub struct PreparedInputs {
@@ -34,10 +79,14 @@ pub fn prepare_render_inputs(
         return Err(RenderError::EmptyBatch);
     }
 
+    // Normalize Utf8View columns (e.g. from polars) to Utf8 so downstream
+    // downcasts to StringArray succeed uniformly.
+    let normalized = normalize_string_views(batch);
+
     let transformed = if spec.transforms.is_empty() {
-        batch.clone()
+        normalized
     } else {
-        apply_transforms(&spec.transforms, batch)
+        apply_transforms(&spec.transforms, &normalized)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?
     };
 
