@@ -198,7 +198,7 @@ ContinuousScheme enum (Rust):
     Gradient(Vec<(f64, Color)>) — user-defined stops [(t0, c0), (t1, c1), ...]
     Reverse(Box<ContinuousScheme>)
 
-NamedContinuous variants are backed by colorous v0.6 (~12 KB, MIT, pinned LUTs).
+NamedContinuous variants are backed by colorous v1 (~12 KB, MIT, pinned LUTs).
 
 dispatch:
     fn sample(&self, t: f64) -> Color   // t ∈ [0, 1]; clamp out-of-range
@@ -769,7 +769,7 @@ End-of-phase, append dated 2026-05-10 notes to `ferrum-spec.md` for:
 
 | Crate | Version | Used by | Rationale |
 |---|---|---|---|
-| `colorous` | `0.6` | `render::color::continuous` | Continuous colormaps (viridis/plasma/magma/inferno/cividis). Tiny (~12 KB compiled), MIT, pinned 256-stop LUTs. Alternative considered: hand-rolled tables (rejected — would be ~50 LOC and 3840 floats, no real saving once interpolation logic is added). Maintained by sibling project of d3-scale-chromatic, so visual semantics match standard tools. |
+| `colorous` | `1` | `render::color::continuous` | Continuous colormaps (viridis/plasma/magma/inferno/cividis). Tiny (~12 KB compiled), MIT, pinned 256-stop LUTs. Alternative considered: hand-rolled tables (rejected — would be ~50 LOC and 3840 floats, no real saving once interpolation logic is added). Maintained by sibling project of d3-scale-chromatic, so visual semantics match standard tools. *(Originally specified as 0.6 — does not exist on crates.io; corrected to 1.x range matching current 1.0.16 release. Same crate, same API surface.)* |
 | `png` | `0.18` | `render::rasterize` | PNG encoding for raster mark. **Promoted from transitive (via resvg) to direct workspace dep** so the version is explicit and the encoder settings are pinned at the use site. No new code added to the build graph. |
 
 ### §7.2 Python deps — none
@@ -780,7 +780,7 @@ No new Python deps. `numpy` and `pyarrow` (already required runtime deps) cover 
 
 ```toml
 [workspace.dependencies]
-colorous = "0.6"   # NEW — continuous colormaps
+colorous = "1"     # NEW — continuous colormaps (1.0.16 at time of writing)
 png      = "0.18"  # NEW — pinned for raster determinism (was transitive)
 ```
 

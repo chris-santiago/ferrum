@@ -10,7 +10,7 @@
 - `mark_raster` embeds RGBA→PNG→base64 in SVG via `<image href="data:image/png;base64,...">`. `mark_function` evaluates the callable Python-side at chart-build-time and feeds a synthetic Arrow table into a regular `mark_line` desugar.
 - Continuous colormaps (viridis/plasma/magma/inferno/cividis) added via the `colorous` crate; Python `continuous_palette(name)` mirrors 8a's `categorical_palette`.
 
-**Tech Stack:** Rust (PyO3, arrow, serde_json, rand_chacha, **NEW**: colorous 0.6, **PROMOTED**: png 0.18 from transitive→direct), Python ≥3.10 (numpy, pyarrow), maturin build backend.
+**Tech Stack:** Rust (PyO3, arrow, serde_json, rand_chacha, **NEW**: colorous 1, **PROMOTED**: png 0.18 from transitive→direct), Python ≥3.10 (numpy, pyarrow), maturin build backend.
 
 **Source spec:** `docs/superpowers/specs/2026-05-10-composite-stat-marks-design.md`
 
@@ -160,7 +160,7 @@ Note the alphabetical ordering convention.
 In `Cargo.toml` workspace block, add (alphabetically sorted):
 
 ```toml
-colorous = "0.6"
+colorous = "1"
 png      = "0.18"
 ```
 
@@ -176,7 +176,7 @@ png      = { workspace = true }
 - [ ] **Step 4: Refresh lockfile**
 
 Run: `unset CONDA_PREFIX && uv run --no-sync maturin develop 2>&1 | tail -20`
-Expected: builds successfully; `colorous v0.6.x` and `png v0.18.x` show in compile output.
+Expected: builds successfully; `colorous v1.0.x` and `png v0.18.x` show in compile output.
 
 - [ ] **Step 5: Verify no matplotlib in tree**
 
@@ -193,6 +193,9 @@ git commit -m "build(phase-8b): add colorous dep, promote png to direct workspac
 ---
 
 ### Task 2: ContinuousScheme enum + colorous backing
+
+**Note:** Use `colorous = "1"` (1.0.16 at time of writing); the original spec/plan said "0.6" but that version doesn't exist on crates.io. Same API surface; see spec §7.1 dated correction.
+
 
 **Files:**
 - Create: `crates/ferrum-core/src/render/color/mod.rs`
