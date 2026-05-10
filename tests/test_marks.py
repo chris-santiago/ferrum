@@ -1,3 +1,6 @@
+import re
+
+import polars as pl
 import pytest
 
 from ferrum.marks.base import MarkBase
@@ -65,3 +68,70 @@ def test_desugar_smooth_warns_on_ci_kwarg():
         warnings.simplefilter("always")
         desugar_smooth("x_col", "y_col", ci=0.95)
     assert any("ci=" in str(wi.message) and "Phase 8b" in str(wi.message) for wi in w)
+
+
+# ---------------------------------------------------------------------------
+# Task 36: deferred-mark NotImplementedError parametrized test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method,phase,extra_args", [
+    ("mark_boxplot", "8b", ()),
+    ("mark_violin", "8b", ()),
+    ("mark_qq", "8b", ()),
+    ("mark_function", "8b", (lambda x: x,)),   # mark_function takes a positional fn arg
+    ("mark_arc", "9", ()),
+])
+def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):
+    df = pl.DataFrame({"a": [1]})
+    c = pl.DataFrame({"a": [1]})
+    from ferrum import Chart
+    c = Chart(df).encode(x="a", y="a")
+    with pytest.raises(NotImplementedError, match=f"Phase {phase}"):
+        getattr(c, method)(*extra_args)
+
+
+# ---------------------------------------------------------------------------
+# Task 36: e2e log-scale roundtrip — load-bearing test
+# ---------------------------------------------------------------------------
+
+def test_encode_with_explicit_log_scale_renders_log_axis():
+    """Proves EncodingSpec.scale roundtrip (Task 3): LogScale flows to renderer.
+
+    With an explicit LogScale(domain=[1, 1000]), the x-axis ticks are
+    logarithmically spaced. Without it, the renderer defaults to linear,
+    producing evenly-spaced ticks across the data range (400, 500, 600, ...).
+    We verify the log path by checking that a logarithmically-intermediate
+    value like "10" appears as a tick label (it would never appear on a
+    linear scale over this range), and that purely linear-spaced ticks
+    (400, 500, 600 ...) are absent from the axis text labels.
+    """
+    from ferrum import Chart, X, LogScale
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    df = pl.DataFrame({
+        "x": [1.0, 10.0, 100.0, 1000.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+    })
+    svg = Chart(df).mark_point().encode(
+        x=X("x", scale=LogScale(domain=[1.0, 1000.0], range=[0.0, 600.0], base=10.0)),
+        y="y",
+    ).show_svg()
+
+    # Extract text-element labels from the SVG (strip font/base64 blobs).
+    text_labels = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+    # The x-axis should contain tick labels at log-spaced positions.
+    # "10" appears only under a log scale over this domain (1–1000).
+    assert "10" in text_labels, (
+        f"Log-scale x axis missing '10' tick label — "
+        f"explicit ScaleLog was likely dropped. x labels: {text_labels}"
+    )
+
+    # Linear-scale ticks over [1, 1000] would produce labels like 400, 500, 600.
+    # Under a log scale none of these are tick positions.
+    linear_spill = {"400", "500", "600"} & set(text_labels)
+    assert not linear_spill, (
+        f"Found linear-scale tick labels {linear_spill} in log-scale render — "
+        f"explicit ScaleLog was silently dropped. x labels: {text_labels}"
+    )

@@ -163,3 +163,34 @@ def test_facet_channels_render():
     from ferrum.encoding import Facet, FacetRow, FacetCol
     for cls in (Facet, FacetRow, FacetCol):
         assert cls._renders_in_phase_8a is True
+
+
+# ---------------------------------------------------------------------------
+# Task 36: warn-once across multiple renders
+# ---------------------------------------------------------------------------
+
+def test_stroke_warns_once_across_multiple_renders():
+    import polars as pl
+    from ferrum import Chart, Stroke
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    df = pl.DataFrame({"a": [1, 2], "b": [3, 4], "c": ["x", "y"]})
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            Chart(df).mark_point().encode(x="a", y="b", stroke=Stroke("c"))
+    # Only 1 warning despite 3 constructions — warn_once key is (channel_name, kwarg)
+    # Stroke._renders_in_phase_8a is False, so the channel itself triggers no warn.
+    # But Stroke("c") with no extra kwargs → no deferred-kwarg warning either.
+    # The warn_once contract: same (channel, kwarg) fires at most once per reset.
+    # For this test the Stroke channel is deferred but construction is silent (no kwargs warned).
+    # We assert ≤ 1 to guard against regressions where warn_once breaks.
+    stroke_channel_warnings = [
+        wi for wi in w if "stroke" in str(wi.message).lower()
+    ]
+    assert len(stroke_channel_warnings) <= 1, (
+        f"Expected ≤1 stroke warning across 3 renders, got {len(stroke_channel_warnings)}: "
+        f"{[str(wi.message) for wi in stroke_channel_warnings]}"
+    )

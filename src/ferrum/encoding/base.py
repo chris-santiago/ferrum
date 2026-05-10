@@ -6,6 +6,63 @@ from typing import Any, ClassVar, Optional
 from ferrum._warn import warn_once
 
 
+def _scale_to_dict(scale: Any) -> Any:
+    """Convert a Python Scale object (LogScale, LinearScale, etc.) to a
+    JSON-serializable dict matching Rust's ScaleSpec serde shape.
+
+    If `scale` is already a dict or None, return it unchanged.
+    """
+    if scale is None or isinstance(scale, dict):
+        return scale
+
+    # Import here to avoid circular imports at module load time.
+    try:
+        from ferrum._core import (  # type: ignore[attr-defined]
+            LogScale, LinearScale, TimeScale, SymlogScale, OrdinalScale,
+        )
+    except ImportError:
+        return scale  # can't convert, pass through and let Rust raise
+
+    if isinstance(scale, LogScale):
+        d: dict = {"type": "log", "base": scale.base, "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, LinearScale):
+        d = {"type": "linear", "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, TimeScale):
+        d = {"type": "time", "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, SymlogScale):
+        d = {"type": "symlog", "constant": scale.constant, "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, OrdinalScale):
+        d = {"type": "ordinal", "padding": scale.padding}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+
+    # Unknown scale type — return as-is and let Rust surface the error.
+    return scale
+
+
 class ChannelBase:
     """Base class for all encoding-channel value objects.
 
@@ -47,7 +104,11 @@ class ChannelBase:
         out: dict = {"field": self.field}
         if (t := self._kwargs.get("type")) is not None:
             out["type_"] = t
-        for k in ("scale", "title", "axis", "legend", "sort", "stack",
+        # scale: convert Python Scale objects → JSON-serializable dict so that
+        # Rust's json_round helper (which calls json.dumps) can serialize them.
+        if (v := self._kwargs.get("scale")) is not None:
+            out["scale"] = _scale_to_dict(v)
+        for k in ("title", "axis", "legend", "sort", "stack",
                   "impute", "scheme", "format"):
             if (v := self._kwargs.get(k)) is not None:
                 out[k] = v

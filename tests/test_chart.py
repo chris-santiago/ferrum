@@ -113,3 +113,23 @@ def test_chart_properties_sets_metadata():
     assert c._width == 800
     assert c._height == 600
     assert c._title == "Hello"
+
+
+def test_chart_with_pandas_dataframe():
+    pd = pytest.importorskip("pandas")
+    df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    c = Chart(df).mark_point().encode(x="a", y="b")
+    spec = c.to_spec()
+    assert spec.mark == "point"
+
+
+def test_chart_immutability_chain_independence():
+    """base.encode(x='a') and base.encode(x='b') are independent."""
+    df = pl.DataFrame({"a": [1], "b": [2]})
+    base = Chart(df).mark_point()
+    ca = base.encode(x="a")
+    cb = base.encode(x="b")
+    assert ca._encoding["x"].field == "a"
+    assert cb._encoding["x"].field == "b"
+    # base unaffected
+    assert base._encoding == {}
