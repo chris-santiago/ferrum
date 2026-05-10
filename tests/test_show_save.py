@@ -47,3 +47,28 @@ def test_save_explicit_format_overrides_extension(chart, tmp_path):
     chart.save(out, format="svg")
     text = out.read_text()
     assert "<svg" in text or "<?xml" in text
+
+
+# Task 33: show browser fallback + Jupyter rich-display paths
+
+def test_show_in_non_jupyter_opens_browser(chart, monkeypatch):
+    """When not in Jupyter, .show() writes a temp HTML and calls webbrowser.open."""
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    monkeypatch.setattr("ferrum.display._is_jupyter", lambda: False)
+    chart.show()
+    assert len(opened) == 1
+    assert opened[0].startswith("file://")
+    assert opened[0].endswith(".html")
+
+
+def test_repr_svg_returns_string_for_jupyter(chart):
+    s = chart._repr_svg_()
+    assert s is not None
+    assert "<svg" in s or "<?xml" in s
+
+
+def test_repr_html_returns_div_wrapped_svg(chart):
+    s = chart._repr_html_()
+    assert s is not None
+    assert s.startswith("<div>")
