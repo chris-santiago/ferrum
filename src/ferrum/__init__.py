@@ -4,6 +4,7 @@ from ferrum._core import (
     Aggregate,
     AggregateOp,
     Bin,
+    BoxStats,
     ChartSpec,
     EncodingSpec,
     ErrorExtent,
@@ -52,7 +53,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     # Phase 1-7 core
-    "Aggregate", "AggregateOp", "Bin", "ChartSpec", "EncodingSpec", "ErrorExtent", "Kde",
+    "Aggregate", "AggregateOp", "Bin", "BoxStats", "ChartSpec", "EncodingSpec", "ErrorExtent", "Kde",
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
     "Outliers", "QuantileScale", "ThresholdScale", "Smooth", "Summary",
     "compute_layout", "process_batch", "render_png", "render_svg",

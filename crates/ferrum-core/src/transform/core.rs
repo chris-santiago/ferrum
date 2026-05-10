@@ -9,6 +9,7 @@ use crate::transform::context::TransformContext;
 use crate::transform::aggregate::AggregateSpec;
 use crate::transform::bin::{self, BinSpec};
 use crate::transform::error_extent::{self, ErrorExtentSpec};
+use crate::transform::box_stats::{self, BoxStatsSpec};
 use crate::transform::kde::KdeSpec;
 use crate::transform::outliers::{self, OutliersSpec};
 use crate::transform::smooth::SmoothSpec;
@@ -24,6 +25,7 @@ pub(crate) enum TransformSpec {
     Summary(SummarySpec),
     Outliers(OutliersSpec),
     ErrorExtent(ErrorExtentSpec),
+    BoxStats(BoxStatsSpec),
 }
 
 impl TransformSpec {
@@ -36,6 +38,7 @@ impl TransformSpec {
             Self::Summary(s)   => crate::transform::summary::apply(s, batch),
             Self::Outliers(s)  => outliers::apply(s, batch),
             Self::ErrorExtent(s) => error_extent::apply(s, batch),
+            Self::BoxStats(s)  => box_stats::apply(s, batch),
         }
     }
 }
@@ -114,6 +117,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Summary(s) => s.name.as_deref(),
         TransformSpec::Outliers(s) => s.name.as_deref(),
         TransformSpec::ErrorExtent(s) => s.name.as_deref(),
+        TransformSpec::BoxStats(s) => s.name.as_deref(),
     }
 }
 

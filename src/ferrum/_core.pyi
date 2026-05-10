@@ -212,6 +212,16 @@ class Bin:
         nice: bool = True,
     ) -> None: ...
 
+class BoxStats:
+    def __init__(
+        self,
+        field: str,
+        *,
+        groupby: List[str] = ...,
+        whisker_extent: Union[str, float] = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
 class Kde:
     def __init__(
         self,
