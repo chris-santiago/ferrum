@@ -108,3 +108,27 @@ def test_add_returns_notimplemented_for_non_chart(df):
     c = Chart(df).mark_point().encode(x="a", y="b")
     result = c.__add__(42)
     assert result is NotImplemented
+
+
+# ---------------------------------------------------------------------------
+# Test 2: compositor render integration (Phase 8a final review)
+# ---------------------------------------------------------------------------
+
+def test_hconcat_show_svg_produces_composed_output():
+    """End-to-end: (c1 | c2).show_svg() actually composes through the Rust compositor."""
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    c1 = Chart(df).mark_point().encode(x="a", y="b")
+    c2 = Chart(df).mark_line().encode(x="a", y="b")
+    svg = (c1 | c2).show_svg()
+    assert svg.startswith("<svg") or svg.startswith("<?xml")
+    # Composed output should contain at least 2 <g transform="translate(...)"> wrappers
+    assert svg.count('transform="translate(') >= 2
+
+
+def test_vconcat_show_svg_produces_composed_output():
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    c1 = Chart(df).mark_point().encode(x="a", y="b")
+    c2 = Chart(df).mark_bar().encode(x="a", y="b")
+    svg = (c1 & c2).show_svg()
+    assert svg.startswith("<svg") or svg.startswith("<?xml")
+    assert svg.count('transform="translate(') >= 2

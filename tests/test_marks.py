@@ -136,3 +136,36 @@ def test_encode_with_explicit_log_scale_renders_log_axis():
         f"Found linear-scale tick labels {linear_spill} in log-scale render — "
         f"explicit ScaleLog was silently dropped. x labels: {text_labels}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 1: stat-mark order independence (Phase 8a final review)
+# ---------------------------------------------------------------------------
+
+def test_mark_smooth_then_encode_resolves_correctly():
+    """Confirms _pending_stat_mark machinery in Chart works regardless of method order."""
+    from ferrum import Chart
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [1.0, 4.0, 9.0, 16.0]})
+    # Order: mark BEFORE encode (the e2e example pattern)
+    c = Chart(df).mark_smooth().encode(x="a", y="b")
+    spec = c.to_spec()
+    assert spec.mark == "line"  # smooth desugared to line + Smooth transform
+    assert any(t.__class__.__name__ == "Smooth" for t in spec.transforms)
+
+
+def test_mark_density_then_encode_resolves_correctly():
+    from ferrum import Chart
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0]})
+    c = Chart(df).mark_density().encode(x="a")
+    spec = c.to_spec()
+    assert spec.mark == "area"
+    assert any(t.__class__.__name__ == "Kde" for t in spec.transforms)
+
+
+def test_mark_histogram_then_encode_resolves_correctly():
+    from ferrum import Chart
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    c = Chart(df).mark_histogram().encode(x="a")
+    spec = c.to_spec()
+    assert spec.mark == "bar"
+    assert any(t.__class__.__name__ == "Bin" for t in spec.transforms)
