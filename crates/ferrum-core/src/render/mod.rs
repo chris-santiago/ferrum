@@ -226,13 +226,12 @@ pub fn render_svg(
         for layer in &prep.layers {
             // Build a synthetic ChartSpec with the layer's mark + encoding so
             // mark renderers (which read ctx.spec) see the correct per-layer values.
-            // Task 7 will replace MarkStyle::from_theme with resolve_mark_style(layer.mark_style).
             let layer_spec = ChartSpec {
                 mark: layer.mark,
                 encoding: layer.encoding.clone(),
                 ..spec.clone()
             };
-            let mark_style = draw::resolve_mark_style(theme, &layer.mark);
+            let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
             let ctx = draw::DrawCtx {
                 spec: &layer_spec,
                 panel,

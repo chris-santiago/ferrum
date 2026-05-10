@@ -105,7 +105,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        let mark_style = resolve_mark_style(&theme, &Mark::Point);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
         super::draw(&ctx, &mut out);
@@ -133,7 +133,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        let mark_style = resolve_mark_style(&theme, &Mark::Point);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
         super::draw(&ctx, &mut out);

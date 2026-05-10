@@ -73,7 +73,7 @@ mod tests {
         let mut spec_for_scales = spec.clone();
         spec_for_scales.encoding.x = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
         let (scales, _) = resolve_scales(&spec_for_scales, &batch, (0.0, 100.0), (0.0, 100.0)).unwrap();
-        let mark_style = resolve_mark_style(&theme, &Mark::Rule);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let mut out = SvgBuffer::new(panel.plot_area, None, false);
         super::draw(&ctx, &mut out);
