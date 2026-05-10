@@ -133,11 +133,12 @@ resvg   = "~0.47"
 base64  = "~0.22"
 ```
 
-Then **edit the existing `arrow` line** to add the `"compute"` feature (used by `arrow::compute::filter_record_batch` in Task 20 and `arrow::compute::concat_batches` in Task 22):
-
-```toml
-arrow      = { version = "58", default-features = false, features = ["ipc", "compute"] }
-```
+**Note (corrected during Task 1 execution 2026-05-09):** `arrow 58.x` exposes no
+`"compute"` feature — `arrow::compute::filter_record_batch` (used in Task 20)
+and `arrow::compute::concat_batches` (used in Task 22) are re-exports from
+non-optional sub-crates and are available without any feature flag. Leave the
+existing `arrow = { version = "58", default-features = false, features = ["ipc"] }`
+line **unchanged**.
 
 - [ ] **Step 3: Add deps to `crates/ferrum-core/Cargo.toml`**
 
@@ -153,22 +154,30 @@ base64      = { workspace = true }
 
 - [ ] **Step 4: Download Inter Regular font**
 
+**Working approach (verified during Task 1 execution 2026-05-09):**
+
 ```bash
 mkdir -p crates/ferrum-core/assets/fonts
-curl -L -o crates/ferrum-core/assets/fonts/Inter-Regular.ttf \
-  https://github.com/rsms/inter/raw/v4.0/docs/font-files/Inter-Regular.otf
-# Note: rsms/inter ships .otf; fontdue accepts .otf despite the .ttf extension.
-# If you prefer the .ttf format, use the inter-ui distribution at:
-#   https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf
-# (variable font; fontdue picks the regular axis automatically).
+# Download the rsms/inter v4.1 release zip (the v4.0 "raw" URLs in earlier plan drafts 404).
+curl -L -o /tmp/Inter-4.1.zip \
+  https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+unzip -p /tmp/Inter-4.1.zip "extras/ttf/Inter-Regular.ttf" \
+  > crates/ferrum-core/assets/fonts/Inter-Regular.ttf
+unzip -p /tmp/Inter-4.1.zip "LICENSE.txt" \
+  > crates/ferrum-core/assets/fonts/Inter-OFL.txt
 ls -la crates/ferrum-core/assets/fonts/Inter-Regular.ttf
 ```
 
-Expected: file present, ~300–400 KB. If the URL 404s, search for "Inter Regular OFL download" — any official OFL build is acceptable.
+Expected: file present, ~412 KB (Inter 4.1 hinted Regular). Slightly above the original 300–400 KB target — acceptable. Verify via `file Inter-Regular.ttf` that it reports a TrueType font with "Copyright 2016 The Inter Project Authors".
 
 - [ ] **Step 5: Create OFL license text**
 
-Create `crates/ferrum-core/assets/fonts/Inter-OFL.txt` with the standard SIL OFL 1.1 text (downloadable from `https://openfontlicense.org/` or copied from the Inter repo). Heading line must contain "Copyright 2016 The Inter Project Authors" and the file must include the full OFL 1.1 body verbatim.
+The Step 4 commands above already extract `LICENSE.txt` from the Inter-4.1.zip
+release into `crates/ferrum-core/assets/fonts/Inter-OFL.txt`. Verify the file
+contains "Copyright 2016 The Inter Project Authors" and the full OFL 1.1 body
+verbatim. If you obtained the font through a different path, fetch the OFL
+license body from `https://openfontlicense.org/` or
+`https://github.com/rsms/inter/raw/v4.1/LICENSE.txt`.
 
 - [ ] **Step 6: Create repo-level NOTICE**
 
