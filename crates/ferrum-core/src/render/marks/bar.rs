@@ -22,7 +22,26 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         ScaleKind::Ordinal(_) => x_strs.iter().flatten().collect::<std::collections::HashSet<_>>().len().max(1),
         _ => return,
     };
-    let bar_width = (panel.w / n_categories as f64) * 0.8;
+    // Phase 9c — if a position adjustment (Dodge) injected `__pos_x_offset__`
+    // / `__pos_y_offset__` columns, narrow each bar to fit a per-group sub-band.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let has_pos_offsets = ctx.batch.schema().index_of("__pos_x_offset__").is_ok();
+    let n_groups = if has_pos_offsets {
+        // Number of distinct non-zero offsets approximates n_groups; clamp to ≥1.
+        let mut set: std::collections::HashSet<u64> =
+            x_offsets.iter().map(|v| v.to_bits()).collect();
+        set.remove(&0.0_f64.to_bits()); // ignore exact zero (single-group fallback)
+        if set.is_empty() { 1 } else { set.len() + if x_offsets.iter().any(|v| *v == 0.0) { 1 } else { 0 } }
+    } else {
+        1
+    };
+    let bar_width = if has_pos_offsets {
+        // Per-category band width is panel.w / n_categories; per-group sub-band
+        // is bandwidth / n_groups. We keep the 0.8 fill ratio.
+        ((panel.w / n_categories as f64) / n_groups.max(1) as f64) * 0.8
+    } else {
+        (panel.w / n_categories as f64) * 0.8
+    };
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
 
@@ -32,6 +51,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let cx = match ctx.scales.x.to_pixel_str(xs) { Some(p) => p, None => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
         let height = (baseline_y - top_y).max(0.0);
+        let cx = cx + x_offsets[i];
+        let top_y = top_y + y_offsets[i];
         let r = Rect { x: cx - bar_width / 2.0, y: top_y, w: bar_width, h: height };
 
         let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {

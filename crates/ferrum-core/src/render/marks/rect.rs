@@ -24,12 +24,15 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let cell_h = panel.h / n_y as f64;
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     for i in 0..xs.len() {
         let xs_v = match &xs[i] { Some(s) => s.as_str(), None => continue };
         let ys_v = match &ys[i] { Some(s) => s.as_str(), None => continue };
         let cx = match ctx.scales.x.to_pixel_str(xs_v) { Some(p) => p, None => continue };
         let cy = match ctx.scales.y.to_pixel_str(ys_v) { Some(p) => p, None => continue };
+        let cx = cx + x_offsets[i];
+        let cy = cy + y_offsets[i];
 
         let r = Rect { x: cx - cell_w / 2.0, y: cy - cell_h / 2.0, w: cell_w, h: cell_h };
         let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {

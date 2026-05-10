@@ -33,6 +33,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         _ => vec![(None, (0..xs.len()).collect())],
     };
 
+    // Phase 9c — per-row position-adjustment pixel offsets (Stack).
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     for (key, rows) in groups {
         let mut top: Vec<(f64, f64)> = Vec::new();
         for i in rows {
@@ -42,6 +44,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             };
             let cx = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
             let cy = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+            let cx = cx + x_offsets.get(i).copied().unwrap_or(0.0);
+            let cy = cy + y_offsets.get(i).copied().unwrap_or(0.0);
             top.push((cx, cy));
         }
         if top.len() < 2 { continue; }

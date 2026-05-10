@@ -15,11 +15,14 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let baseline_y = panel.y + panel.h;
-    for xv in xs.into_iter().flatten() {
-        if !xv.is_finite() { continue; }
+    for (i, xopt) in xs.iter().enumerate() {
+        let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
         let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-        out.line(px, baseline_y, px, baseline_y - tick_len, &style);
+        let px = px + x_offsets[i];
+        let by = baseline_y + y_offsets[i];
+        out.line(px, by, px, by - tick_len, &style);
     }
     let _ = y_field(ctx, spec);
 }

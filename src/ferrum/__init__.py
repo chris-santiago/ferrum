@@ -51,6 +51,7 @@ from ferrum.themes import (
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
+from ferrum.position import Identity, Dodge
 from ferrum.coord import (
     CoordFlip, CoordCartesian, CoordPolar, CoordGeo, CoordFixed,
 )
@@ -93,4 +94,6 @@ __all__ = [
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
     # Phase 8b
     "ContinuousScheme", "continuous_palette", "Gradient",
+    # Phase 9c position adjustments
+    "Identity", "Dodge",
 ]

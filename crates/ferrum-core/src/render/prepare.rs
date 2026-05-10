@@ -34,6 +34,10 @@ pub struct LayerPrepared {
     /// Name of the chart-level transform output this layer reads from.
     /// `None` ⇒ pipeline final output (resolved via [`FINAL_OUTPUT_KEY`]).
     pub data_source: Option<String>,
+    /// Phase 9c — position adjustment for this layer. Merged from
+    /// `Layer.position` (preferred) or `ChartSpec.position` (chart-level
+    /// fallback for single-layer charts).
+    pub position: Option<crate::spec::position::PositionAdjust>,
 }
 
 impl LayerPrepared {
@@ -45,6 +49,7 @@ impl LayerPrepared {
             transforms: spec.transforms.clone(),
             mark_style: spec.mark_style.clone(),
             data_source: None,
+            position: spec.position.clone(),
         }
     }
 
@@ -87,6 +92,7 @@ impl LayerPrepared {
             transforms: layer.transforms.clone(),
             mark_style: layer.mark_style.clone().or_else(|| spec.mark_style.clone()),
             data_source: layer.data_source.clone(),
+            position: layer.position.clone().or_else(|| spec.position.clone()),
         }
     }
 }

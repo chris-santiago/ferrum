@@ -53,6 +53,7 @@ class Chart:
         "_facet", "_coord", "_theme", "_layers",
         "_width", "_height", "_title", "_description",
         "_pending_stat_mark",  # (kind, kwargs) when mark_* called before .encode()
+        "_position",           # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
     )
 
     def __init__(
@@ -78,6 +79,7 @@ class Chart:
         self._title = title
         self._description = description
         self._pending_stat_mark: Optional[tuple] = None  # (kind, kwargs)
+        self._position = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -95,6 +97,7 @@ class Chart:
         new._title = self._title
         new._description = self._description
         new._pending_stat_mark = self._pending_stat_mark
+        new._position = self._position
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -232,10 +235,17 @@ class Chart:
     # ---- Marks (primitives) ----
 
     def _set_mark(self, name: str, **kwargs: Any) -> "Chart":
+        # Phase 9c — pull `position=` out of kwargs and validate eligibility
+        # before constructing the MarkBase (which would reject unknown kwargs).
+        position = kwargs.pop("position", None)
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility(name, position)
         m = MarkBase(name, **kwargs)
         new = self._clone()
         new._mark = name
         new._mark_kwargs = m.to_mark_kwargs_dict()
+        new._position = position
         return new
 
     def mark_point(self, **kwargs):  return self._set_mark("point", **kwargs)
@@ -651,12 +661,14 @@ class Chart:
                 "encoding": dict(lhs._encoding),
                 "transforms": list(lhs._transforms),
                 "mark_style": dict(lhs._mark_kwargs),
+                "position": lhs._position,
             },
             {
                 "mark": rhs._mark,
                 "encoding": dict(rhs._encoding),
                 "transforms": list(rhs._transforms),
                 "mark_style": dict(rhs._mark_kwargs),
+                "position": rhs._position,
             },
         ]
         # Warn if secondary layer has conflicting theme/facet/coord
@@ -813,6 +825,15 @@ class Chart:
             raw_transforms = layer.get("transforms") or []
             if raw_transforms:
                 layer_dict["transforms"] = Chart._transforms_to_json_list(raw_transforms)
+            # Phase 9c — per-layer position adjustment. Serialize value classes
+            # via ``to_spec_dict``; allow already-dict payloads to pass through.
+            position = layer.get("position")
+            if position is not None:
+                layer_dict["position"] = (
+                    position.to_spec_dict()
+                    if hasattr(position, "to_spec_dict")
+                    else position
+                )
             out.append(layer_dict)
         return out
 
@@ -881,6 +902,8 @@ class Chart:
             kw["mark_style"] = dict(resolved._mark_kwargs)
         if resolved._layers is not None:
             kw["layers"] = resolved._build_layers_list()
+        if resolved._position is not None:
+            kw["position"] = resolved._position.to_spec_dict()
         return ChartSpec(**kw)
 
     def _build_spec(self):

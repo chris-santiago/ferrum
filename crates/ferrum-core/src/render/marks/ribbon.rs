@@ -57,6 +57,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         return;
     }
 
+    // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     // Map data values to pixel coordinates; drop any row that fails scale projection.
     let pixels: Vec<(f64, f64, f64)> = indices
         .iter()
@@ -67,7 +69,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             let cx = ctx.scales.x.to_pixel_f64(xv)?;
             let cy = ctx.scales.y.to_pixel_f64(yv)?;
             let cy2 = ctx.scales.y.to_pixel_f64(y2v)?;
-            Some((cx, cy, cy2))
+            let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+            let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+            Some((cx + xo, cy + yo, cy2 + yo))
         })
         .collect();
     if pixels.len() < 2 {

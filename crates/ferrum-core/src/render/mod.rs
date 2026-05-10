@@ -15,6 +15,7 @@ pub(crate) mod draw;
 pub(crate) mod png;
 pub(crate) mod binding;
 pub(crate) mod marks;
+pub(crate) mod position;
 pub mod compositor;
 pub(crate) mod grid_compose;
 pub use compositor::{
@@ -42,6 +43,10 @@ pub enum RenderError {
     ScaleResolutionFailed(String),
     LayoutFailed(String),
     ResvgFailed(String),
+    /// Phase 9c — open-ended error variant used by render passes (e.g. the
+    /// position-adjustment pass) where the failure does not match any of the
+    /// structured variants above.
+    Other(String),
 }
 
 impl std::fmt::Display for RenderError {
@@ -65,6 +70,8 @@ impl std::fmt::Display for RenderError {
                 write!(f, "layout failed: {s}"),
             Self::ResvgFailed(s) =>
                 write!(f, "PNG rasterization failed: {s}"),
+            Self::Other(s) =>
+                write!(f, "{s}"),
         }
     }
 }
@@ -265,6 +272,23 @@ pub fn render_svg(
             if layer_batch.num_rows() == 0 {
                 continue;
             }
+            // Phase 9c — apply layer (or chart-level) position adjustment to
+            // rewrite per-row coordinate columns / inject pixel-offset columns
+            // *after* scale resolution and *before* mark drawing. When
+            // `layer.position` is None the call is a clone (byte-identical
+            // pre-9c behavior).
+            let adjusted_owned;
+            let layer_batch: &arrow::record_batch::RecordBatch = if layer.position.is_some() {
+                adjusted_owned = position::apply_position(
+                    layer_batch,
+                    layer.position.as_ref(),
+                    &scales,
+                    &layer.encoding,
+                )?;
+                &adjusted_owned
+            } else {
+                layer_batch
+            };
             // Build a synthetic ChartSpec with the layer's mark + encoding so
             // mark renderers (which read ctx.spec) see the correct per-layer values.
             let layer_spec = ChartSpec {
