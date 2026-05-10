@@ -83,6 +83,7 @@ mod tests {
                 ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
         }
     }
 

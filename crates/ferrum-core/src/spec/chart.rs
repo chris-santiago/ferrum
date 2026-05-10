@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::spec::coord::CoordKind;
 use crate::spec::data_ref::DataRef;
 use crate::spec::encoding::Encoding;
 use crate::spec::layer::Layer;
@@ -25,12 +26,14 @@ pub struct ChartSpec {
     pub facet: Option<crate::layout::facet::FacetSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Vec<Layer>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coord: Option<CoordKind>,
 }
 
 #[pymethods]
 impl ChartSpec {
     #[new]
-    #[pyo3(signature = (*, mark, x = None, y = None, color = None, size = None, shape = None, opacity = None, data = None, transforms = None, layers = None))]
+    #[pyo3(signature = (*, mark, x = None, y = None, color = None, size = None, shape = None, opacity = None, data = None, transforms = None, layers = None, coord = None))]
     fn new(
         mark: &str,
         x: Option<&Bound<'_, PyAny>>,
@@ -42,6 +45,7 @@ impl ChartSpec {
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
+        coord: Option<&str>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -71,6 +75,15 @@ impl ChartSpec {
             Some(obj) => Some(coerce_layers(obj)?),
         };
 
+        let coord = match coord {
+            None => None,
+            Some("cartesian") => Some(CoordKind::Cartesian),
+            Some("flip") => Some(CoordKind::Flip),
+            Some(other) => return Err(PyValueError::new_err(format!(
+                "unknown coord kind: '{other}'; expected 'cartesian' or 'flip'"
+            ))),
+        };
+
         Ok(ChartSpec {
             data,
             mark,
@@ -78,6 +91,7 @@ impl ChartSpec {
             transforms,
             facet: None,
             layers,
+            coord,
         })
     }
 
@@ -155,6 +169,15 @@ impl ChartSpec {
             out.push(py_obj.unbind());
         }
         Ok(Some(out))
+    }
+
+    #[getter]
+    fn coord(&self) -> Option<&'static str> {
+        match self.coord {
+            None => None,
+            Some(CoordKind::Cartesian) => Some("cartesian"),
+            Some(CoordKind::Flip) => Some("flip"),
+        }
     }
 
     fn to_json(&self) -> PyResult<String> {
@@ -279,6 +302,7 @@ mod tests {
             transforms: Vec::new(),
             facet: None,
             layers: None,
+            coord: None,
         }
     }
 
@@ -361,6 +385,7 @@ mod tests {
             transforms: Vec::new(),
             facet: None,
             layers: None,
+            coord: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -386,6 +411,7 @@ mod tests {
             transforms: Vec::new(),
             facet: None,
             layers: None,
+            coord: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -408,6 +434,7 @@ mod tests {
             })],
             facet: None,
             layers: None,
+            coord: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -482,5 +509,30 @@ mod tests {
             json,
             r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"price"},"y":{"field":"weight","type":"quantitative"}}}"#,
         );
+    }
+
+    #[test]
+    fn test_chart_spec_coord_default_when_omitted() {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
+        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
+        assert!(parsed.coord.is_none());
+    }
+
+    #[test]
+    fn test_chart_spec_coord_omitted_in_canonical_json_when_none() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("coord"));
+    }
+
+    #[test]
+    fn test_chart_spec_coord_flip_round_trip() {
+        use crate::spec::coord::CoordKind;
+        let mut spec = minimal_scatter();
+        spec.coord = Some(CoordKind::Flip);
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""coord":{"kind":"flip"}"#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
     }
 }

@@ -4,3 +4,5 @@ pub(crate) mod encoding;
 pub(crate) mod chart;
 pub mod layer;
 pub use layer::Layer;
+pub mod coord;
+pub use coord::CoordKind;

@@ -211,6 +211,7 @@ mod tests {
                 spacing: None,
             }),
             layers: None,
+            coord: None,
         }
     }
 
