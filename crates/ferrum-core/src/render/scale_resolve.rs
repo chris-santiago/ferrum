@@ -232,8 +232,13 @@ pub fn resolve_scales(
             got: "None".into(),
         })?;
 
-    let x = build_axis_scale("x", x_enc, batch, x_pixel_range)?;
-    let y = build_axis_scale("y", y_enc, batch, y_pixel_range)?;
+    // Phase 8b: paired-channel endpoints (x2/y2) extend the primary axis domain
+    // when set, so e.g. ribbons whose y2 lies above y don't render past the
+    // resolved range and produce non-finite pixels downstream.
+    let x2_enc = spec.encoding.x2.as_ref();
+    let y2_enc = spec.encoding.y2.as_ref();
+    let x = build_axis_scale("x", x_enc, x2_enc, batch, x_pixel_range)?;
+    let y = build_axis_scale("y", y_enc, y2_enc, batch, y_pixel_range)?;
 
     let color = if let Some(c_enc) = &spec.encoding.color {
         let domain = distinct_values_in_order(batch, &c_enc.field)?;
@@ -267,6 +272,7 @@ pub fn resolve_scales(
 fn build_axis_scale(
     channel: &'static str,
     enc: &crate::spec::encoding::EncodingSpec,
+    paired_enc: Option<&crate::spec::encoding::EncodingSpec>,
     batch: &RecordBatch,
     pixel_range: (f64, f64),
 ) -> Result<ScaleKind, RenderError> {
@@ -286,9 +292,27 @@ fn build_axis_scale(
         return build_from_scale_spec(scale_spec, enc, batch, pr);
     }
 
+    // Helper: data extent over `enc.field`, optionally widened to also cover
+    // `paired_enc.field` (x2 / y2). Numeric/temporal axes only.
+    let combined_min_max = || -> Result<(f64, f64), String> {
+        let (mut mn, mut mx) = column_min_max_f64(col)?;
+        if let Some(p) = paired_enc {
+            if let Some(p_col) = batch.column_by_name(&p.field) {
+                let (pmn, pmx) = column_min_max_f64(p_col)?;
+                if pmn < mn {
+                    mn = pmn;
+                }
+                if pmx > mx {
+                    mx = pmx;
+                }
+            }
+        }
+        Ok((mn, mx))
+    };
+
     match dtype {
         SpecDataType::Quantitative => {
-            let (min, max) = column_min_max_f64(col)
+            let (min, max) = combined_min_max()
                 .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max],
@@ -306,7 +330,7 @@ fn build_axis_scale(
             )))
         }
         SpecDataType::Temporal => {
-            let (min, max) = column_min_max_f64(col)
+            let (min, max) = combined_min_max()
                 .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max],
@@ -871,6 +895,109 @@ mod tests {
         assert_eq!(scale.shapes[0], ShapeKind::Circle);
         assert_eq!(scale.shapes[1], ShapeKind::Square);
         assert_eq!(scale.shapes[2], ShapeKind::Cross);
+    }
+
+    // --- Phase 8b: y2/x2 extends the primary axis domain ---
+
+    #[test]
+    fn y2_field_extends_y_domain_when_set() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        // y in [0, 2], y2 in [1, 3]; without the fix the y domain would top out
+        // at 2.0 and y2=3.0 would scale to a non-finite/out-of-range pixel.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", ArrowDataType::Float64, false),
+            Field::new("lo", ArrowDataType::Float64, false),
+            Field::new("hi", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "t".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) =
+            resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        // The maximum y2 value (3.0) must scale to a finite pixel, proving y2
+        // was included when computing the y-axis data extent.
+        let pixel_at_y2_max = scales.y.to_pixel_f64(3.0).expect("linear y returns Some");
+        assert!(
+            pixel_at_y2_max.is_finite(),
+            "y-axis pixel for max y2 must be finite, got: {pixel_at_y2_max}"
+        );
+        // Sanity: pixel for y2=3.0 must lie inside the requested y pixel range
+        // [0.0, 80.0] (Y inverts so the bound is loosely [0, 80]).
+        assert!(
+            (0.0..=80.0).contains(&pixel_at_y2_max),
+            "y2 max should map within the y pixel range, got: {pixel_at_y2_max}"
+        );
+    }
+
+    #[test]
+    fn x2_field_extends_x_domain_when_set() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xa", ArrowDataType::Float64, false),
+            Field::new("xb", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 5.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "xa".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "xb".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) =
+            resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        // x2 max is 5.0 (outside [0, 2] range of x). Must map to a finite pixel
+        // and lie within the requested x pixel range [0.0, 100.0].
+        let px = scales.x.to_pixel_f64(5.0).expect("linear x returns Some");
+        assert!(px.is_finite(), "x-axis pixel for max x2 must be finite, got: {px}");
+        assert!(
+            (0.0..=100.0).contains(&px),
+            "x2 max should map within the x pixel range, got: {px}"
+        );
     }
 
     #[test]

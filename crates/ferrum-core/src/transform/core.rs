@@ -122,12 +122,15 @@ pub(crate) fn apply_transforms_with_context(
 /// resolve to this key.
 pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 
-/// Apply each transform in pipeline order; record named outputs.
+/// Apply each transform; record named outputs with fan-out semantics.
 ///
-/// Returns a map from each named transform's `name` (when present) → that
-/// transform's output (cloned), plus [`FINAL_OUTPUT_KEY`] → the final pipeline
-/// output. When `specs` is empty, the map contains only `FINAL_OUTPUT_KEY`
-/// mapped to the input batch.
+/// - **Named transforms** (`name = Some(...)`) run on the ORIGINAL `batch`
+///   (parallel/fan-out). They publish their output under their name and do
+///   NOT advance the chained pipeline pointer.
+/// - **Unnamed transforms** chain: each consumes the prior unnamed output.
+///
+/// [`FINAL_OUTPUT_KEY`] always points at the final UNNAMED-chain tail, or at
+/// the original input when no unnamed transforms ran.
 pub(crate) fn apply_transforms_named(
     specs: &[TransformSpec],
     batch: &RecordBatch,
@@ -136,14 +139,22 @@ pub(crate) fn apply_transforms_named(
     let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
     let mut current = batch.clone();
     for spec in specs {
-        current = spec.apply_with_context(&current, ctx)?;
-        // Secondary outputs first — a user's explicit `name` (registered below)
-        // wins on key collision.
-        for (key, batch) in spec.secondary_outputs(&current)? {
-            outputs.insert(key, batch);
-        }
         if let Some(name) = spec_name(spec) {
-            outputs.insert(name.to_string(), current.clone());
+            // Named: run on the ORIGINAL input (fan-out). Does not advance the
+            // chained pipeline pointer.
+            let result = spec.apply_with_context(batch, ctx)?;
+            // Secondary outputs first — explicit `name` (registered below)
+            // wins on key collision.
+            for (key, b) in spec.secondary_outputs(&result)? {
+                outputs.insert(key, b);
+            }
+            outputs.insert(name.to_string(), result);
+        } else {
+            // Unnamed: chained.
+            current = spec.apply_with_context(&current, ctx)?;
+            for (key, b) in spec.secondary_outputs(&current)? {
+                outputs.insert(key, b);
+            }
         }
     }
     outputs.insert(FINAL_OUTPUT_KEY.to_string(), current);

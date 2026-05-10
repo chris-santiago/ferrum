@@ -511,9 +511,16 @@ mod tests {
 
     /// Build a ChartSpec with one Bin transform whose `name` is configurable,
     /// and `bin_count` such that the transform succeeds on price_weight_batch().
+    ///
+    /// When `name` is None, the bin transform is unnamed → it chains, so
+    /// `__final__` has bin output schema and the encoding is pointed at bin
+    /// columns. When `name` is Some, fan-out semantics apply: `__final__`
+    /// retains the original schema, so the encoding stays on the original
+    /// columns to keep `resolve_scales` happy.
     fn spec_with_one_bin(name: Option<String>) -> ChartSpec {
         use crate::transform::bin::BinSpec;
         use crate::transform::core::TransformSpec;
+        let named = name.is_some();
         let mut spec = single_layer_spec();
         spec.transforms = vec![TransformSpec::Bin(BinSpec {
             field: "price".into(),
@@ -523,20 +530,24 @@ mod tests {
             nice: false,
             name,
         })];
-        // After Bin, the encoding fields ("price", "weight") no longer exist
-        // in the final batch — point at bin output columns instead so scale
-        // resolution doesn't fail. We don't actually render in these tests
-        // (we only call prepare_render_inputs), but resolve_scales runs.
-        spec.encoding.x = Some(crate::spec::encoding::EncodingSpec {
-            field: "bin_start".into(),
-            type_: None,
-            ..Default::default()
-        });
-        spec.encoding.y = Some(crate::spec::encoding::EncodingSpec {
-            field: "count".into(),
-            type_: None,
-            ..Default::default()
-        });
+        if !named {
+            // Unnamed/chained: after Bin, the encoding fields ("price", "weight")
+            // no longer exist in __final__ — point at bin output columns so
+            // resolve_scales doesn't fail.
+            spec.encoding.x = Some(crate::spec::encoding::EncodingSpec {
+                field: "bin_start".into(),
+                type_: None,
+                ..Default::default()
+            });
+            spec.encoding.y = Some(crate::spec::encoding::EncodingSpec {
+                field: "count".into(),
+                type_: None,
+                ..Default::default()
+            });
+        }
+        // Named/fan-out: __final__ keeps the original price/weight schema, so
+        // the chart-level encoding (price, weight) from `single_layer_spec()`
+        // still resolves against __final__ correctly.
         spec
     }
 
@@ -577,12 +588,38 @@ mod tests {
         let prep = prepare_render_inputs(&spec, &batch).unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
         assert!(prep.transform_outputs.contains_key("__final__"));
-        // Since "box" IS the only (and final) transform, its output equals
-        // __final__ row-wise and schema-wise.
+        // Under fan-out semantics, named transforms run on the ORIGINAL input
+        // and do NOT advance the chained pipeline. The named "box" output is
+        // the bin output; __final__ is the original input (since no unnamed
+        // transforms advanced the chain).
         let named = prep.transform_outputs.get("box").unwrap();
         let fin = prep.transform_outputs.get("__final__").unwrap();
-        assert_eq!(named.num_rows(), fin.num_rows());
-        assert_eq!(named.schema(), fin.schema());
+        // The named bin output has the bin schema (bin_start/bin_end/count/density).
+        let named_schema = named.schema();
+        let named_fields: Vec<&str> = named_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(
+            named_fields.contains(&"bin_start") && named_fields.contains(&"count"),
+            "named output should have bin schema, got: {:?}",
+            named_fields
+        );
+        // __final__ retains the original schema (price + weight).
+        let final_schema = fin.schema();
+        let final_fields: Vec<&str> = final_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert!(
+            final_fields.contains(&"price") && final_fields.contains(&"weight"),
+            "__final__ should have original schema, got: {:?}",
+            final_fields
+        );
+        // And — proving the change — the named output and __final__ schemas differ.
+        assert_ne!(named.schema(), fin.schema());
     }
 
     #[test]
