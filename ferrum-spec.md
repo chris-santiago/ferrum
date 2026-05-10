@@ -199,6 +199,26 @@ ModelSource(model, X, y=None, *, feature_names=None, class_names=None, sample_we
 
 ### 3.2 Encoding Channels
 
+> **2026-05-10 (Phase 9):** Adds **position adjustments** as a sibling concept
+> to encoding channels. Four immutable value classes — `Identity`, `Dodge`,
+> `Jitter`, `Stack` — are passed via `position=` on eligible marks (Chart- or
+> Layer-level). They serialize to `{"type": "<kind>", ...}` and are consumed
+> by the Rust ChartSpec. Eligibility is enforced at chart-build time. The
+> matrix below mirrors `src/ferrum/position.py`:
+>
+> | Position | Eligible marks |
+> |---|---|
+> | `Identity` | every mark (default; no-op) |
+> | `Dodge` | `bar`, `point`, `box`, `boxplot`, `boxen`, `swarm`, `violin`, `errorbar`, `errorband`, `ribbon`, `histogram`, `density` |
+> | `Jitter` | `point`, `swarm`, `tick` |
+> | `Stack` | `bar`, `area`, `ribbon`, `histogram`, `density` |
+>
+> `Stack.offset` accepts `"zero"` (default) or `"normalize"` (percent-fill
+> stacking). `Jitter.axis` accepts `"x"`, `"y"`, or `"both"`. `Dodge.by`
+> selects the grouping field; if omitted, the active color/fill encoding
+> field is used. Ineligible (mark, position) pairs raise `ValueError` at
+> build time, not at render time.
+
 Encoding channels are typed objects passed as keyword arguments to `.encode()`. All channels accept a field name string as a shorthand.
 
 #### Positional
@@ -280,6 +300,13 @@ All positional and appearance channels accept:
 
 Marks are constructors that accept visual property overrides as keyword arguments. All marks inherit from `MarkBase`.
 
+> **2026-05-10 (Phase 9):** `mark_segment` is shipped as a primitive mark in
+> Phase 9. It draws a line segment from `(x, y)` to `(x2, y2)` and is
+> diagonal-capable — distinct from `mark_rule`, which is axis-aligned.
+> Required encodings: `X`, `Y`, `X2`, `Y2`. Use cases: dumbbell charts,
+> slope graphs, network edges, free-form annotations. Removed from
+> `PHASE_9_PLUS_MARKS` warn-list.
+
 #### Primitive Marks
 
 | Mark | Description | Key Parameters |
@@ -300,9 +327,19 @@ Marks are constructors that accept visual property overrides as keyword argument
 
 #### Composite Marks (expand to multiple primitive layers)
 
+> **2026-05-10 (Phase 9):** Adds `mark_boxen` (letter-value plot) as a
+> composite mark. Expands to a stack of nested rectangles per letter-value
+> depth plus outlier points; uses the `LetterValue` stat transform. Key
+> parameters: `k_depth` (`"tukey"` \| `"proportion"` \| `"trustworthy"` \|
+> `"full"` \| `int`), `k_proportion` (float in `(0, 1)`, used when
+> `k_depth="proportion"`), `outlier_threshold` (float; rows beyond the
+> outermost letter value are flagged outliers), `palette` (sequential
+> palette name; nested rectangles fade toward the median).
+
 | Mark | Expands To | Key Parameters |
 |---|---|---|
 | `mark_boxplot(...)` | box + whisker + outlier points | `extent` (`"min-max"` or float IQR multiplier), `size`, `outliers` |
+| `mark_boxen(...)` | nested rectangles (letter values) + outlier points | `k_depth` (`"tukey"`\|`"proportion"`\|`"trustworthy"`\|`"full"`\|`int`), `k_proportion`, `outlier_threshold`, `palette` |
 | `mark_errorbar(...)` | rule + tick | `extent` (`"ci"`, `"stderr"`, `"stdev"`, `"iqr"`), `ticks` |
 | `mark_errorband(...)` | area + line | `extent`, `borders` |
 | `mark_ribbon(...)` | area between Y and Y2 | `opacity`, `interpolate` |
@@ -378,6 +415,30 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 ---
 
 ### 3.4 Stat Transforms
+
+> **2026-05-10 (Phase 9):** Adds eight new transforms — `Unpivot` (wide →
+> long reshape; homogeneous-or-numeric value dtype), `Linkage` (hierarchical
+> clustering with three named secondary outputs: `linkage`, `order`,
+> `coords` / segment table for dendrogram rendering), `Reorder`
+> (permutation by index column produced by `Linkage`), `Bin2D` (2D
+> rectangular binning over `(x, y)`), `Logistic` (binary logistic
+> regression via IRLS plus Wald CI), `Glm` (5 families × 7 links — see
+> compatibility table below), `Robust` (Huber M-estimator + sandwich CI),
+> `LetterValue` (boxen-plot statistics; outliers as named secondary
+> output). Extends existing transforms: `Bin` gains a `cumulative: bool`
+> parameter for ECDF support; `Smooth` gains `x_bins`, `x_estimator`, and
+> `output: "fitted" | "residuals"`; `Robust` accepts the same `output`
+> parameter for residual diagnostics.
+>
+> **GLM Family / Link Compatibility (Phase 9)**
+>
+> | Family | Canonical link | Other valid |
+> |---|---|---|
+> | Gaussian | Identity | Log, Inverse |
+> | Binomial | Logit | Probit, Log |
+> | Poisson | Log | Identity, Sqrt |
+> | Gamma | Inverse | Identity, Log |
+> | InverseGaussian | InverseSquared | Identity, Log |
 
 Stat transforms are applied before rendering, in the Rust engine. They receive a column-oriented Arrow table and return a transformed table. Applied via `.stat()` at the chart or layer level, or implicitly by statistical marks.
 
@@ -597,6 +658,22 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 
 ### 3.12 Compound Views
 
+> **2026-05-10 (Phase 9):** `JointChart` (sketched in 8b) is implemented as
+> a 2×2 layout (center + optional top/right marginals) backed by
+> `ferrum._core.compose_svg_grid`; it supports `.theme()`, `.properties()`,
+> `.save()`, `.show()`, and `_repr_svg_`. `RepeatChart` gains two new
+> parameters: `diagonal=` (a separate template chart used for cells where
+> `row_field == col_field` in symmetric n×n repeats) and `corner: bool`
+> (filters the expanded grid to the lower triangle, including the
+> diagonal). Per-cell field substitution is keyed by three typed
+> sentinels — `Repeat.column`, `Repeat.row`, `Repeat.layer` — passed to
+> the template's `.encode(...)`; string sentinels (e.g. `"repeat:column"`)
+> are not supported. A new compound view `ClusterMapChart` is added:
+> a 2×2 grid combining a clustered heatmap with row and/or column
+> dendrograms; `dendrogram_ratio: float in (0, 1)` controls relative
+> dendrogram-to-heatmap size. Most users construct `ClusterMapChart` via
+> `ferrum.clustermap(...)`.
+
 | Class / Operator | Description | Key Parameters |
 |---|---|---|
 | `HConcatChart(*charts)` / `chart1 \| chart2` | Horizontal concatenation | `spacing`, `resolve`, `title` |
@@ -702,6 +779,25 @@ with ferrum.theme_context(my_theme):
 ---
 
 ### 3.14 Figure-Level Functions
+
+> **2026-05-10 (Phase 9):** All 8 Group A figure-level functions —
+> `displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`,
+> `clustermap`, `jointplot` — land in Phase 9 with every parameter
+> advertised in this section honored (no `NotImplementedError`,
+> no silent warn-fallbacks). Each function returns either a `Chart` or
+> a compound view (`JointChart`, `RepeatChart`, `ClusterMapChart`) whose
+> `.spec` / `.charts` / `.expand()` is a fully-formed object that
+> round-trips through `ChartSpec.from_json`. Group B (model-diagnostic
+> figure-level functions: `roc_chart`, `pr_chart`,
+> `confusion_matrix_chart`, `calibration_chart`, `gain_chart`,
+> `lift_chart`, `residuals_chart`, `importance_chart`, `shap_chart`,
+> `learning_curve_chart`, `validation_curve_chart`,
+> `cluster_diagnostics`, `decision_boundary_chart`,
+> `discrimination_threshold_chart`, `parallel_coordinates_chart`,
+> `class_prediction_error_chart`, `pca_scree_chart`, `rank_chart`,
+> `alpha_selection_chart`, `intercluster_distance_chart`,
+> `cv_scores_chart`) remains scheduled for Phase 10, alongside
+> `ModelSource` and the model-diagnostic marks they depend on.
 
 Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
 
