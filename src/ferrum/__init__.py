@@ -60,6 +60,13 @@ from ferrum.composition import HConcatChart, VConcatChart, JointChart, RepeatCha
 from ferrum.repeat import Repeat
 from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
 
+# Phase 9e — figure-level convenience functions
+from ferrum.figure import (
+    displot, catplot, lmplot, residplot,
+    pairplot, heatmap, clustermap, jointplot,
+)
+import ferrum.figure as figure  # so users can also do ferrum.figure.displot
+
 import ferrum.encoding as encoding
 from ferrum.encoding import (
     X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
@@ -96,4 +103,8 @@ __all__ = [
     "ContinuousScheme", "continuous_palette", "Gradient",
     # Phase 9c position adjustments
     "Identity", "Dodge", "Jitter", "Stack",
+    # Phase 9e figure-level convenience
+    "figure",
+    "displot", "catplot", "lmplot", "residplot",
+    "pairplot", "heatmap", "clustermap", "jointplot",
 ]
