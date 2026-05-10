@@ -42,6 +42,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::letter_value::PyLetterValue>()?;
     m.add_class::<transform::logistic::PyLogistic>()?;
     m.add_class::<transform::glm::PyGlm>()?;
+    m.add_class::<transform::robust::PyRobust>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;

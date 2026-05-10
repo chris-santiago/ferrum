@@ -461,6 +461,22 @@ class Glm:
     ) -> None: ...
 
 
+class Robust:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        n_grid: int = 100,
+        ci: Optional[float] = None,
+        huber_c: float = 1.345,
+        max_iter: int = 25,
+        tol: float = 1e-8,
+        output: str = "fitted",
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
 def compute_layout(
     spec,
     *,

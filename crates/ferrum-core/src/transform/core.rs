@@ -25,6 +25,7 @@ use crate::transform::linkage::{self, LinkageSpec};
 use crate::transform::letter_value::{self, LetterValueSpec};
 use crate::transform::logistic::{self, LogisticSpec};
 use crate::transform::glm::{self, GlmSpec};
+use crate::transform::robust::{self, RobustSpec};
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -55,6 +56,7 @@ pub(crate) enum TransformSpec {
     LetterValue(LetterValueSpec),
     Logistic(LogisticSpec),
     Glm(GlmSpec),
+    Robust(RobustSpec),
 }
 
 impl TransformSpec {
@@ -82,6 +84,7 @@ impl TransformSpec {
             Self::LetterValue(s) => letter_value::apply(s, batch),
             Self::Logistic(s) => logistic::apply(s, batch),
             Self::Glm(s)      => glm::apply(s, batch),
+            Self::Robust(s)   => robust::apply(s, batch),
         }
     }
 }
@@ -219,6 +222,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::LetterValue(s) => s.name.as_deref(),
         TransformSpec::Logistic(s) => s.name.as_deref(),
         TransformSpec::Glm(s) => s.name.as_deref(),
+        TransformSpec::Robust(s) => s.name.as_deref(),
     }
 }
 

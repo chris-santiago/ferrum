@@ -26,4 +26,5 @@ pub(crate) mod linkage;
 pub(crate) mod letter_value;
 pub(crate) mod logistic;
 pub(crate) mod glm;
+pub(crate) mod robust;
 pub(crate) mod linalg;
