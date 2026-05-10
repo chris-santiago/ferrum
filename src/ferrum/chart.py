@@ -589,10 +589,15 @@ class Chart:
                 if agg: kw["aggregate"] = agg
                 channel = cls(field, **kw)
             else:
-                raise TypeError(
-                    f"encode({name}=...) expects str or {cls.__name__} instance, "
-                    f"got {type(value).__name__}"
-                )
+                # Phase 9: accept Repeat sentinels (Repeat.column / .row / .layer).
+                from ferrum.repeat import _RepeatPlaceholder
+                if isinstance(value, _RepeatPlaceholder):
+                    channel = cls(value)
+                else:
+                    raise TypeError(
+                        f"encode({name}=...) expects str, {cls.__name__} instance, "
+                        f"or Repeat placeholder; got {type(value).__name__}"
+                    )
 
             new._encoding[name] = channel
             new._transforms.extend(channel.to_implicit_transforms())
@@ -849,11 +854,18 @@ class Chart:
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": resolved._mark or "point", "data": "default"}
+        from ferrum.repeat import _RepeatPlaceholder
         for axis in ("x", "y", "color", "size", "shape", "opacity"):
             if axis in resolved._encoding:
                 ch = resolved._encoding[axis]
                 if ch.field is None:
                     continue   # Tooltip(*fields) etc. with no single field
+                # Phase 9: skip channels whose field is an unresolved Repeat
+                # placeholder. RepeatChart.expand() materializes concrete charts
+                # before render; the bare template's spec just omits placeholder
+                # channels (they're not meaningful standalone).
+                if isinstance(ch.field, _RepeatPlaceholder):
+                    continue
                 d = ch.to_encoding_spec_dict()
                 # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
                 # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
