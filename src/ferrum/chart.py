@@ -208,6 +208,79 @@ class Chart:
         new._transforms = list(self._transforms) + list(transforms)
         return new
 
+    # ---- Composition operators ----
+
+    def __add__(self, other: "Chart") -> "Chart":
+        """Overlay two charts.
+
+        If both charts share the same data object (identity check) or equivalent
+        data (value equality via Arrow), produces a multi-layer ``Chart``.
+        If the data differs, falls through to an ``HConcatChart`` with a
+        ``UserWarning``.
+        """
+        if not isinstance(other, Chart):
+            return NotImplemented
+
+        same_data = self._data is other._data
+        if not same_data:
+            try:
+                a = to_arrow_table(self._data)
+                b = to_arrow_table(other._data)
+                same_data = a.equals(b)
+            except Exception:
+                same_data = False
+
+        if not same_data:
+            import warnings
+            warnings.warn(
+                "Layered charts with differing data render as horizontal concatenation. "
+                "Use a shared DataFrame for true overlay.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self.__or__(other)
+
+        # Same data — build a multi-layer chart
+        new = self._clone()
+        new._layers = [
+            {
+                "mark": self._mark,
+                "encoding": dict(self._encoding),
+                "transforms": list(self._transforms),
+                "mark_style": dict(self._mark_kwargs),
+            },
+            {
+                "mark": other._mark,
+                "encoding": dict(other._encoding),
+                "transforms": list(other._transforms),
+                "mark_style": dict(other._mark_kwargs),
+            },
+        ]
+        # Warn if secondary layer has conflicting theme/facet/coord
+        if (
+            (other._theme is not None and other._theme != self._theme)
+            or other._facet != self._facet
+            or other._coord != self._coord
+        ):
+            import warnings
+            warnings.warn(
+                "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
+                "primary layer wins.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return new
+
+    def __or__(self, other: "Chart") -> "HConcatChart":
+        """Horizontal concatenation: ``chart1 | chart2``."""
+        from ferrum.composition import HConcatChart
+        return HConcatChart([self, other])
+
+    def __and__(self, other: "Chart") -> "VConcatChart":
+        """Vertical concatenation: ``chart1 & chart2``."""
+        from ferrum.composition import VConcatChart
+        return VConcatChart([self, other])
+
     # ---- Facet / coord / theme ----
 
     def facet(

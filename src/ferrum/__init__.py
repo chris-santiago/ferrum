@@ -29,12 +29,17 @@ import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
 from ferrum.coord import CoordFlip
+from ferrum.layer import Layer
+from ferrum.composition import HConcatChart, VConcatChart
 
 __version__ = "0.1.0"
 
 __all__ = [
     "Chart",
     "CoordFlip",
+    "Layer",
+    "HConcatChart",
+    "VConcatChart",
     "Aggregate",
     "AggregateOp",
     "Bin",
