@@ -151,5 +151,43 @@ def lmplot(
     return out
 
 
-def residplot(*args, **kwargs):
-    raise NotImplementedError("residplot — implementation lands in Task 31")
+def residplot(
+    data: Any, *, x: str, y: str,
+    lowess: bool = False, order: int = 1,
+    robust: bool = False, dropna: bool = True,
+    label: Any = None, color: Any = None, theme: Any = None,
+    **encode_kwargs: Any,
+) -> Chart:
+    """Residual-diagnostic figure-level function — see ferrum-spec.md §3.14.
+
+    Builds a scatter plot of (x, residual) using ``Smooth(output='residuals')``
+    (or ``Robust(output='residuals')`` when ``robust=True``); optionally
+    layers a lowess smoother over the residuals.
+    """
+    # Build the residuals transform.
+    if robust:
+        resid_transform = Robust(x=x, y=y, output="residuals", name="resid")
+    else:
+        resid_transform = Smooth(
+            x=x, y=y, method="lm", degree=order, ci=None,
+            output="residuals", name="resid",
+        )
+
+    # Base scatter against residuals.
+    chart = Chart(data).transform(resid_transform).mark_point()
+    enc: dict = {"x": x, "y": "residual"}
+    if color is not None:
+        enc["color"] = color
+    enc.update(encode_kwargs)
+    chart = chart.encode(**enc)
+
+    # Optional lowess smoother of the residuals (overlaid as a second layer).
+    if lowess:
+        lo = Chart(data).transform(resid_transform).mark_smooth(method="loess").encode(
+            x=x, y="residual",
+        )
+        chart = _merge_layers(chart, lo)
+
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart

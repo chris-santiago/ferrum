@@ -260,3 +260,46 @@ class TestLmplot:
         assert "<svg" in svg
 
 
+# ---------------------------------------------------------------------------
+# Task 31 — residplot
+# ---------------------------------------------------------------------------
+
+class TestResidplot:
+    def test_default(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y")
+        d = json.loads(chart.to_spec().to_json())
+        smooth_t = next(
+            (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
+            None,
+        )
+        assert smooth_t is not None
+        assert smooth_t.get("output") == "residuals"
+
+    def test_robust(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y", robust=True)
+        d = json.loads(chart.to_spec().to_json())
+        robust_t = next(
+            (t for t in d.get("transforms", []) if t.get("type") == "robust"),
+            None,
+        )
+        assert robust_t is not None
+        assert robust_t.get("output") == "residuals"
+
+    def test_lowess_adds_layer(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y", lowess=True)
+        d = json.loads(chart.to_spec().to_json())
+        # base (point) + lowess (line) → 2+ layers
+        assert d.get("layers") is not None
+        assert len(d["layers"]) >= 2
+
+    def test_no_lowess_single_layer(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y", lowess=False)
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("layers") is None or len(d.get("layers", [])) <= 1
+
+    def test_renders_e2e(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y")
+        svg = chart.show_svg()
+        assert "<svg" in svg
+
+
