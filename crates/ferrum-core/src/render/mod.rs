@@ -10,6 +10,7 @@ pub(crate) mod svg;
 pub(crate) mod embed_font;
 pub(crate) mod scale_resolve;
 pub(crate) mod prepare;
+pub(crate) mod rasterize;
 pub(crate) mod draw;
 pub(crate) mod png;
 pub(crate) mod binding;
