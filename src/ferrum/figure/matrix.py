@@ -225,5 +225,110 @@ def heatmap(
     return chart
 
 
-def clustermap(*args, **kwargs):
-    raise NotImplementedError("clustermap — implementation lands in Task 34")
+def clustermap(
+    data: Any, *,
+    method: str = "ward", metric: str = "euclidean",
+    cmap: str = "viridis",
+    z_score: Any = None, standard_scale: Any = None,
+    figsize: Any = None, dendrogram_ratio: float = 0.2,
+    theme: Any = None,
+    **encode_kwargs: Any,
+) -> Any:
+    """Clustered heatmap with row + column dendrograms — see ferrum-spec.md §3.14.
+
+    Returns a ``ClusterMapChart`` composing:
+      * a heatmap of the (reordered) wide-format DataFrame, and
+      * two ``mark_segment`` dendrograms reading the per-linkage ``segments``
+        named outputs.
+    """
+    from ferrum import (
+        ClusterMapChart, Linkage, Reorder, Unpivot,
+    )
+    from ferrum._coerce import to_arrow_table
+
+    tbl = to_arrow_table(data)
+    # Identify id column + numeric columns (same approach as heatmap).
+    id_col: str | None = None
+    value_cols: list[str] = []
+    for name in tbl.column_names:
+        t = str(tbl[name].type).lower()
+        is_numeric = any(s in t for s in ("int", "float", "double", "decimal"))
+        if is_numeric:
+            value_cols.append(name)
+        elif id_col is None:
+            id_col = name
+    if not value_cols:
+        raise ValueError("clustermap: no numeric columns found in data")
+
+    # Linkage transforms (rows + columns) with explicit names so we can route
+    # their `segments` named outputs to the dendrogram layers.
+    row_link = Linkage(
+        method=method, metric=metric, axis="rows",
+        z_score=z_score, standard_scale=standard_scale,
+        name="row_link",
+    )
+    col_link = Linkage(
+        method=method, metric=metric, axis="columns",
+        z_score=z_score, standard_scale=standard_scale,
+        name="col_link",
+    )
+
+    # Center heatmap: reorder rows + columns then unpivot.
+    unpivot = Unpivot(
+        id_vars=[id_col] if id_col else [],
+        value_vars=value_cols,
+        var_name="column", value_name="value",
+    )
+    center = (
+        Chart(data)
+        .transform(row_link, col_link,
+                   Reorder(by="row_link_order"),
+                   Reorder(by="col_link_order"),
+                   unpivot)
+        .mark_rect()
+        .encode(
+            x="column",
+            y=(id_col if id_col else "_row_id"),
+            color="value",
+        )
+    )
+
+    # Column dendrogram (top): reads col_link_segments and draws diagonal
+    # segments. mark_segment requires x, y, x2, y2 in encoding.
+    col_dendro_layer = {
+        "mark": "segment",
+        "encoding": {"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
+        "transforms": [],
+        "mark_style": {},
+        "data_source": "col_link_segments",
+    }
+    col_dendro = Chart(data).transform(col_link)
+    col_dendro._mark = None
+    col_dendro._layers = [col_dendro_layer]
+
+    # Row dendrogram (left): reads row_link_segments, rotated via CoordFlip.
+    from ferrum import CoordFlip
+    row_dendro_layer = {
+        "mark": "segment",
+        "encoding": {"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
+        "transforms": [],
+        "mark_style": {},
+        "data_source": "row_link_segments",
+    }
+    row_dendro = Chart(data).transform(row_link)
+    row_dendro._mark = None
+    row_dendro._layers = [row_dendro_layer]
+    row_dendro = row_dendro.coord(CoordFlip())
+
+    if theme is not None:
+        center = center.theme(theme)
+        col_dendro = col_dendro.theme(theme)
+        row_dendro = row_dendro.theme(theme)
+
+    cm = ClusterMapChart(
+        center,
+        row_dendrogram=row_dendro,
+        col_dendrogram=col_dendro,
+        dendrogram_ratio=dendrogram_ratio,
+    )
+    return cm

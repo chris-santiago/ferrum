@@ -431,3 +431,68 @@ class TestHeatmap:
             fe.heatmap(df)
 
 
+# ---------------------------------------------------------------------------
+# Task 34 — clustermap
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def cluster_data():
+    rng = np.random.default_rng(4)
+    return pl.DataFrame({
+        "row":  [f"r{i}" for i in range(5)],
+        "A":    rng.normal(0, 1, 5).tolist(),
+        "B":    rng.normal(0, 1, 5).tolist(),
+        "C":    rng.normal(0, 1, 5).tolist(),
+        "D":    rng.normal(0, 1, 5).tolist(),
+    })
+
+
+class TestClustermap:
+    def test_returns_clustermap_chart(self, cluster_data):
+        cm = fe.clustermap(cluster_data)
+        assert isinstance(cm, fe.ClusterMapChart)
+
+    def test_heatmap_center_has_linkage_transforms(self, cluster_data):
+        cm = fe.clustermap(cluster_data)
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        # row_link + col_link + 2 reorders + unpivot
+        types = [t.get("type") for t in d.get("transforms", [])]
+        assert types.count("linkage") == 2
+        assert types.count("reorder") == 2
+        assert "unpivot" in types
+
+    def test_dendrograms_present(self, cluster_data):
+        cm = fe.clustermap(cluster_data)
+        assert cm.row_dendrogram is not None
+        assert cm.col_dendrogram is not None
+
+    def test_col_dendrogram_reads_segments(self, cluster_data):
+        cm = fe.clustermap(cluster_data)
+        d = json.loads(cm.col_dendrogram.to_spec().to_json())
+        layers = d.get("layers") or []
+        assert any(L.get("data_source") == "col_link_segments" for L in layers)
+
+    def test_row_dendrogram_reads_segments(self, cluster_data):
+        cm = fe.clustermap(cluster_data)
+        d = json.loads(cm.row_dendrogram.to_spec().to_json())
+        layers = d.get("layers") or []
+        assert any(L.get("data_source") == "row_link_segments" for L in layers)
+
+    def test_dendrogram_ratio_passes_through(self, cluster_data):
+        cm = fe.clustermap(cluster_data, dendrogram_ratio=0.3)
+        assert cm.dendrogram_ratio == 0.3
+
+    def test_z_score_threads_to_linkage(self, cluster_data):
+        cm = fe.clustermap(cluster_data, z_score="rows")
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        assert link_t.get("z_score") == "rows"
+
+    def test_method_metric_threads_to_linkage(self, cluster_data):
+        cm = fe.clustermap(cluster_data, method="average", metric="cosine")
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        assert link_t.get("method") == "average"
+        assert link_t.get("metric") == "cosine"
+
+
