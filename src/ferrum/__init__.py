@@ -31,6 +31,7 @@ from ferrum.chart import Chart
 from ferrum.coord import CoordFlip
 from ferrum.layer import Layer
 from ferrum.composition import HConcatChart, VConcatChart
+from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
 
 __version__ = "0.1.0"
 
@@ -64,4 +65,8 @@ __all__ = [
     "set_default_theme",
     "get_default_theme",
     "theme_context",
+    "annotate_hline",
+    "annotate_vline",
+    "annotate_rect",
+    "annotate_text",
 ]
