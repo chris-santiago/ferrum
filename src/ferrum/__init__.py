@@ -51,7 +51,7 @@ from ferrum.themes import (
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
-from ferrum.position import Identity, Dodge, Jitter
+from ferrum.position import Identity, Dodge, Jitter, Stack
 from ferrum.coord import (
     CoordFlip, CoordCartesian, CoordPolar, CoordGeo, CoordFixed,
 )
@@ -95,5 +95,5 @@ __all__ = [
     # Phase 8b
     "ContinuousScheme", "continuous_palette", "Gradient",
     # Phase 9c position adjustments
-    "Identity", "Dodge", "Jitter",
+    "Identity", "Dodge", "Jitter", "Stack",
 ]

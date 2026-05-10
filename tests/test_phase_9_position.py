@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 import ferrum as fe
-from ferrum import Dodge, Identity, Jitter
+from ferrum import Dodge, Identity, Jitter, Stack
 
 
 # ---------------------------------------------------------------------------
@@ -180,3 +180,64 @@ class TestJitter:
             .show_svg()
         )
         assert a != b
+
+
+# ---------------------------------------------------------------------------
+# Task 22 — Stack
+# ---------------------------------------------------------------------------
+
+class TestStack:
+    def test_construction_default(self):
+        s = Stack()
+        assert s.by is None
+        assert s.offset == "zero"
+
+    def test_to_spec_dict_normalize(self):
+        s = Stack(by="hue", offset="normalize")
+        assert s.to_spec_dict() == {
+            "type": "stack",
+            "offset": "normalize",
+            "by": "hue",
+        }
+
+    def test_invalid_offset_errors(self):
+        with pytest.raises(ValueError, match="offset"):
+            Stack(offset="bogus")
+
+    def test_eligibility_rejects_point(self):
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+        with pytest.raises(TypeError, match="Stack"):
+            fe.Chart(df).mark_point(position=Stack())
+
+    def test_eligibility_accepts_bar_area_ribbon(self):
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+        fe.Chart(df).mark_bar(position=Stack()).encode(x="x", y="y")
+        fe.Chart(df).mark_area(position=Stack()).encode(x="x", y="y")
+
+    def test_stack_zero_renders(self):
+        df = pl.DataFrame({
+            "x": ["1", "2", "1", "2"],
+            "y": [10.0, 20.0, 5.0, 8.0],
+            "g": ["a", "a", "b", "b"],
+        })
+        chart = (
+            fe.Chart(df)
+            .mark_bar(position=Stack(by="g"))
+            .encode(x="x", y="y", color="g")
+        )
+        svg = chart.show_svg()
+        assert "<svg" in svg
+
+    def test_stack_normalize_total_y_is_one(self):
+        df = pl.DataFrame({
+            "x": ["1", "1", "2", "2"],
+            "y": [3.0, 7.0, 1.0, 9.0],
+            "g": ["a", "b", "a", "b"],
+        })
+        chart = (
+            fe.Chart(df)
+            .mark_bar(position=Stack(by="g", offset="normalize"))
+            .encode(x="x", y="y", color="g")
+        )
+        svg = chart.show_svg()
+        assert "<svg" in svg
