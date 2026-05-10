@@ -178,6 +178,24 @@ impl SvgBuffer {
         self.buf.push_str("/>");
     }
 
+    /// Emit a batch of <circle> elements at pre-resolved positions, wrapped in a <g>.
+    /// Equivalent to N circle() calls with deterministic ordering, but more compact DOM.
+    /// Used by mark_swarm to keep beeswarm SVG manageable.
+    pub fn beeswarm(&mut self, points: &[(f64, f64)], radius: f64, style: &FillStroke) {
+        if points.is_empty() { return; }
+        self.buf.push_str("<g");
+        push_fill_stroke(&mut self.buf, style);
+        self.buf.push('>');
+        let r = fmt_f(radius);
+        for (x, y) in points {
+            self.buf.push_str(&format!(
+                r#"<circle cx="{}" cy="{}" r="{}"/>"#,
+                fmt_f(*x), fmt_f(*y), r
+            ));
+        }
+        self.buf.push_str("</g>");
+    }
+
     pub fn clip_open(&mut self, id: &str, rect: Rect) {
         self.buf.push_str(&format!(
             "<defs><clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
@@ -437,5 +455,56 @@ mod tests {
             svg.finish()
         };
         assert_eq!(make(), make(), "polygon emission must be deterministic");
+    }
+
+    #[test]
+    fn beeswarm_emits_group_with_n_circles() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let pts = vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)];
+        let style = FillStroke {
+            fill: Some(from_rgb(0, 0, 0)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        svg.beeswarm(&pts, 3.0, &style);
+        let out = svg.finish();
+        let circle_count = out.matches("<circle").count();
+        assert_eq!(circle_count, 3, "expected 3 circles in beeswarm: {out}");
+        assert!(out.contains("<g "), "beeswarm should wrap in <g>: {out}");
+    }
+
+    #[test]
+    fn beeswarm_circles_in_input_order() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut svg = SvgBuffer::new(viewport, None, false);
+        let pts = vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)];
+        let style = FillStroke {
+            fill: Some(from_rgb(0, 0, 0)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        svg.beeswarm(&pts, 1.0, &style);
+        let out = svg.finish();
+        let pos1 = out.find(r#"cx="1""#).unwrap();
+        let pos2 = out.find(r#"cx="2""#).unwrap();
+        let pos3 = out.find(r#"cx="3""#).unwrap();
+        assert!(pos1 < pos2 && pos2 < pos3, "circles must emit in input order");
+    }
+
+    #[test]
+    fn beeswarm_byte_identical_across_runs() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let style = FillStroke {
+            fill: Some(from_rgb(50, 50, 50)),
+            stroke: None,
+            stroke_width: 0.0,
+        };
+        let make = || {
+            let mut svg = SvgBuffer::new(viewport, None, false);
+            svg.beeswarm(&[(1.0, 2.0), (3.0, 4.0)], 2.0, &style);
+            svg.finish()
+        };
+        assert_eq!(make(), make(), "beeswarm must be deterministic");
     }
 }
