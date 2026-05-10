@@ -4,6 +4,8 @@
 //! Phase 8a adds: LogScale, SymlogScale (via explicit ScaleSpec override);
 //! SizeScale, ShapeScale, OpacityScale for new encoding channels.
 
+use std::collections::HashMap;
+
 use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
@@ -204,9 +206,34 @@ pub struct ResolvedScales {
 
 /// Build scales from spec + post-transform batch + pixel ranges.
 /// Pixel ranges are panel-relative; caller passes panel.plot_area bounds.
+///
+/// This is the back-compat single-batch entry point. For Phase 8b layered charts
+/// where encoding fields may live in named transform outputs other than
+/// `__final__`, prefer `resolve_scales_with_outputs`.
 pub fn resolve_scales(
     spec: &ChartSpec,
     batch: &RecordBatch,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+    theme: &ThemeInputs,
+) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
+    // Empty map → behavior is identical to the pre-8b single-batch path:
+    // build_axis_scale falls through to `primary_batch` only.
+    let outputs: HashMap<String, RecordBatch> = HashMap::new();
+    resolve_scales_with_outputs(spec, batch, &outputs, x_pixel_range, y_pixel_range, theme)
+}
+
+/// Phase 8b variant: numeric axis domains union the encoding field's range
+/// across `primary_batch` and every batch in `transform_outputs` that contains
+/// the field. Categorical scales (color/shape/size/opacity) and ordinal axis
+/// scales remain primary-batch-driven; for composite marks the categorical
+/// axis field (e.g. boxplot's `x="group"`) is preserved on every named output
+/// produced by the composite mark's transform pipeline, so the primary batch
+/// is sufficient there.
+pub fn resolve_scales_with_outputs(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
@@ -237,11 +264,15 @@ pub fn resolve_scales(
     // resolved range and produce non-finite pixels downstream.
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
-    let x = build_axis_scale("x", x_enc, x2_enc, batch, x_pixel_range)?;
-    let y = build_axis_scale("y", y_enc, y2_enc, batch, y_pixel_range)?;
+    let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range)?;
+    let y = build_axis_scale("y", y_enc, y2_enc, primary_batch, transform_outputs, y_pixel_range)?;
 
+    // Color/size/shape/opacity scales are primary-batch only. These channels
+    // do not currently participate in cross-layer scale unification: each is
+    // resolved against the chart-level transformed batch (i.e. __final__),
+    // matching Phase 8a behavior.
     let color = if let Some(c_enc) = &spec.encoding.color {
-        let domain = distinct_values_in_order(batch, &c_enc.field)?;
+        let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
         let palette: &'static [Color] = match &c_enc.scheme {
             Some(name) => palette::categorical_palette(name),
             None => &*palette::OKABE_ITO,
@@ -256,12 +287,12 @@ pub fn resolve_scales(
         None
     };
 
-    let size = build_size_scale(&spec.encoding, batch, theme)?;
-    let (shape, shape_warn) = build_shape_scale(&spec.encoding, batch)?;
+    let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
     if let Some(w) = shape_warn {
         warnings.push(w);
     }
-    let opacity = build_opacity_scale(&spec.encoding, batch, theme)?;
+    let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
 
     Ok((
         ResolvedScales { x, y, color, size, shape, opacity },
@@ -273,12 +304,26 @@ fn build_axis_scale(
     channel: &'static str,
     enc: &crate::spec::encoding::EncodingSpec,
     paired_enc: Option<&crate::spec::encoding::EncodingSpec>,
-    batch: &RecordBatch,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
     pixel_range: (f64, f64),
 ) -> Result<ScaleKind, RenderError> {
-    let col = batch
-        .column_by_name(&enc.field)
+    // Phase 8b: composite-mark layers (boxplot/errorbar/errorband/etc.) read
+    // from named transform outputs whose schemas differ from `__final__`. The
+    // primary batch may not even contain `enc.field`. Prefer the primary batch
+    // when present (preserves single-batch behavior + back-compat goldens), but
+    // otherwise pick any named output that does carry the field. The dtype is
+    // inferred from whichever batch we ended up using to look up `enc.field`.
+    //
+    // For the numeric-extent computation below we additionally union across
+    // every named output that carries `enc.field`; for Utf8/categorical axes,
+    // the lookup batch is sufficient (composite marks preserve the categorical
+    // axis field in every named output, so the primary batch suffices).
+    let lookup_batch = locate_field_batch(&enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
+    let col = lookup_batch
+        .column_by_name(&enc.field)
+        .expect("locate_field_batch guarantees field presence");
     let dtype = infer_spec_type(enc, col.data_type());
     // Y-axis pixel range is inverted (top of plot is min y, bottom is max y).
     let pr = if channel == "y" {
@@ -289,23 +334,58 @@ fn build_axis_scale(
 
     // If an explicit ScaleSpec is present, honor it (Phase 8a).
     if let Some(scale_spec) = &enc.scale {
-        return build_from_scale_spec(scale_spec, enc, batch, pr);
+        return build_from_scale_spec(scale_spec, enc, lookup_batch, pr);
     }
 
-    // Helper: data extent over `enc.field`, optionally widened to also cover
-    // `paired_enc.field` (x2 / y2). Numeric/temporal axes only.
+    // Numeric / temporal extent.
+    //
+    // Back-compat rule: if `primary_batch` contains `enc.field`, the extent is
+    // computed from `primary_batch` alone — single-batch and faceted-panel
+    // semantics are preserved (panels keep their per-panel-filtered domain).
+    //
+    // Phase 8b composite-mark rule: when `primary_batch` does NOT contain the
+    // field (e.g. boxplot's `lower_whisker` lives in the `box` named output,
+    // not in `__final__`), union the field's extent across every batch in
+    // `transform_outputs` that does contain it. The same rule applies
+    // independently to the paired (x2/y2) field.
     let combined_min_max = || -> Result<(f64, f64), String> {
-        let (mut mn, mut mx) = column_min_max_f64(col)?;
-        if let Some(p) = paired_enc {
-            if let Some(p_col) = batch.column_by_name(&p.field) {
-                let (pmn, pmx) = column_min_max_f64(p_col)?;
-                if pmn < mn {
-                    mn = pmn;
-                }
-                if pmx > mx {
-                    mx = pmx;
+        let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut accumulate = |c: &dyn Array| -> Result<(), String> {
+            let (a, b) = column_min_max_f64(c)?;
+            if a < mn {
+                mn = a;
+            }
+            if b > mx {
+                mx = b;
+            }
+            Ok(())
+        };
+
+        // Primary field.
+        if let Some(c) = primary_batch.column_by_name(&enc.field) {
+            accumulate(c.as_ref())?;
+        } else {
+            for batch in transform_outputs.values() {
+                if let Some(c) = batch.column_by_name(&enc.field) {
+                    accumulate(c.as_ref())?;
                 }
             }
+        }
+        // Paired (x2/y2) field — same lookup discipline.
+        if let Some(p) = paired_enc {
+            if let Some(c) = primary_batch.column_by_name(&p.field) {
+                accumulate(c.as_ref())?;
+            } else {
+                for batch in transform_outputs.values() {
+                    if let Some(c) = batch.column_by_name(&p.field) {
+                        accumulate(c.as_ref())?;
+                    }
+                }
+            }
+        }
+
+        if !mn.is_finite() || !mx.is_finite() {
+            return Err(format!("no usable values found for field '{}'", enc.field));
         }
         Ok((mn, mx))
     };
@@ -322,7 +402,7 @@ fn build_axis_scale(
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let domain = distinct_values_in_order(batch, &enc.field)?;
+            let domain = distinct_values_in_order(lookup_batch, &enc.field)?;
             Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
                 domain,
                 vec![pr.0, pr.1],
@@ -340,6 +420,27 @@ fn build_axis_scale(
             )))
         }
     }
+}
+
+/// Pick the batch whose schema contains `field`. Prefer `primary_batch` for
+/// back-compat single-batch behavior; fall back to any named output (iteration
+/// order is HashMap-undefined but only matters when the field appears in
+/// multiple named outputs and not in primary, which is unusual). Returns None
+/// if no batch contains the field.
+fn locate_field_batch<'a>(
+    field: &str,
+    primary_batch: &'a RecordBatch,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+) -> Option<&'a RecordBatch> {
+    if primary_batch.column_by_name(field).is_some() {
+        return Some(primary_batch);
+    }
+    for batch in transform_outputs.values() {
+        if batch.column_by_name(field).is_some() {
+            return Some(batch);
+        }
+    }
+    None
 }
 
 /// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.

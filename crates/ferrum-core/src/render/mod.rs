@@ -241,9 +241,10 @@ pub fn render_svg(
             ..spec.clone()
         };
 
-        let (scales, scale_warnings) = scale_resolve::resolve_scales(
+        let (scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_panel,
             &panel_batch,
+            &prep.transform_outputs,
             (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
             (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
             theme,
@@ -292,9 +293,10 @@ pub fn render_svg(
             ..spec.clone()
         };
         let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
-            let (gs, _) = scale_resolve::resolve_scales(
+            let (gs, _) = scale_resolve::resolve_scales_with_outputs(
                 &rendering_spec_for_legend,
                 &prep.transformed,
+                &prep.transform_outputs,
                 (0.0, 1.0),
                 (0.0, 1.0),
                 theme,

@@ -20,7 +20,7 @@ use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
 use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 
-use super::scale_resolve::{resolve_scales, ResolvedScales};
+use super::scale_resolve::ResolvedScales;
 use super::{RenderError, RenderWarning};
 
 /// Per-layer prepared rendering data. When ChartSpec.layers.is_none(), exactly one
@@ -257,8 +257,14 @@ pub fn prepare_render_inputs(
         ..spec.clone()
     };
 
-    let (provisional_scales, scale_warnings) =
-        resolve_scales(&rendering_spec, &transformed, (0.0, 1.0), (0.0, 1.0), &crate::layout::ThemeInputs::default())?;
+    let (provisional_scales, scale_warnings) = crate::render::scale_resolve::resolve_scales_with_outputs(
+        &rendering_spec,
+        &transformed,
+        &transform_outputs,
+        (0.0, 1.0),
+        (0.0, 1.0),
+        &crate::layout::ThemeInputs::default(),
+    )?;
 
     let x_field = rendering_encoding.x.as_ref().map(|e| e.field.clone());
     let y_field = rendering_encoding.y.as_ref().map(|e| e.field.clone());
