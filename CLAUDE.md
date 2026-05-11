@@ -110,3 +110,27 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 - **Themes are values; one documented contextvar exception.** `Theme` is an immutable Python value class (phase 8a+). `Chart.theme(t)` per-chart override always wins. `ferrum.set_default_theme(t)` returns a context manager backed by a per-thread `contextvars.ContextVar` for notebook ergonomics — the only sanctioned process-scoped theme state. See the **Hard constraints** section above for the full statement. (Decision made 2026-05-10.)
 - **Composite marks desugar Python-side; no Rust `Composite` Mark variant.** Composite marks (`mark_boxplot`, `mark_errorbar`, `mark_errorband`, `mark_ribbon`, `mark_violin`, `mark_boxen`, …) build multi-layer `ChartSpec`s in Python via `chart.layer(...)` over primitive marks (rect, rule, point, line, ribbon). Rust has no awareness that a layered spec came from a composite — it just renders layers. Multi-output transforms (`BoxStats`, `Outliers`, `Violin`, `Hex`, …) feed individual layers via `Layer.data_source: Option<String>` matched against `TransformSpec.name: Option<String>`; when both are `None`, behavior is byte-identical to single-layer 8a. (Decision made 2026-05-10: alternative was a Rust `MarkSpec::Composite { layers: Vec<Mark> }` variant — rejected because it duplicates the multi-layer machinery already in `ChartSpec.layers`, and would force every composite-mark expansion to cross the PyO3 boundary as opaque payloads. Same pattern applies to Phase 9's `mark_boxen` and any future composite.)
 - **Byte-deterministic randomness via seeded `rand_chacha`.** Every transform that uses randomness — bootstrap CI (`Smooth`, `Aggregate`), beeswarm tiebreak, Phase 9 `Jitter` — seeds `ChaCha8Rng` from a `u64` (transform's `seed` field or `spec.seed`, default `0`). Never `rand::thread_rng()`, never `SystemRandom`, never platform RNG. This makes SVG goldens byte-identical across macOS / Linux / CI and across Rust toolchain versions. The same rule applies to any future transform or mark that introduces randomness — pick a seed field, document the default, plumb it through `ChaCha8Rng`. (Decision made 2026-05-10: existing 8b transforms ship this way; codified here so Phase 9+ doesn't accidentally reintroduce non-determinism.)
+
+
+## Docs site work in progress
+
+  - **Worktree**: `.claude/worktrees/docs-continue/`
+  - **Branch**: `docs/continue` (based on `main`, 2 commits ahead)
+  - **Spec**: `design-docs/DOCS_SITE_PLAN.md`
+
+  **Status (paused 2026-05-11):**
+  - Phase 1 scaffold landed: Zensical at repo root (`zensical.toml`), docs source at `docs/site/`, `docs_dir = "docs/site"` set so the legacy
+  `docs/superpowers/` tree stays out of scope. mkdocstrings + mkdocstrings-python wired with NumPy docstring style.
+  - 6 source-independent pages authored: Home, Get Started/{Install, Why Ferrum}, Concepts/{One chart model, Stats in the pipeline, Performance & scale}.
+  - Remaining stubs are blocked on either (a) source-backed code examples — First plot, the six Guide pages — or (b) unmerged Phase 10 surface (Model
+  diagnostics, Model outputs as data, Interactive rendering, two gallery examples, the yellowbrick + scikit-plot comparisons).
+  
+  **Resume path after Phase 10 merges to main:**
+  1. From the docs worktree: `git fetch && git rebase origin/main`.
+  2. Expect conflicts in `pyproject.toml` (dev deps list — usually auto-mergeable), `uv.lock` (resolve by `git checkout --theirs uv.lock && uv sync`), and
+  `.gitignore` (additive). No other overlap.
+  3. Run `uv run zensical build --clean` to verify (~5–9s) and check the new `griffe` warning count from Phase 10 visualizers.
+  4. Author the unblocked pages against the now-real surface.
+  
+  **Do not** delete the worktree or branch — both docs commits live in `.git/` and survive worktree removal, but the convention is to leave both in place
+  until the work merges.
