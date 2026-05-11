@@ -454,6 +454,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -528,6 +529,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 

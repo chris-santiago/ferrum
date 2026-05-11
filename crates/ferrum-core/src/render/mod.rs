@@ -194,6 +194,24 @@ pub fn render_svg(
 
     let mut out = svg::SvgBuffer::new(layout.viewport, background, true);
 
+    // Chart-level title (Themes-T2.5a). Emits at the position computed by
+    // compute_layout in the reserved top band.
+    if let Some(title) = &layout.chart_title {
+        let style = svg::TextStyle {
+            fill: theme.title_color,
+            font_size: theme.title_font_size,
+            anchor: title.anchor,
+            angle: 0.0,
+            font_family: &theme.title_font_family,
+            font_weight: if theme.title_font_weight == "normal" {
+                None
+            } else {
+                Some(&theme.title_font_weight)
+            },
+        };
+        out.text(title.x, title.y, &title.text, &style);
+    }
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
@@ -415,6 +433,7 @@ mod orchestration_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -508,6 +527,7 @@ mod orchestration_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec,
@@ -559,6 +579,7 @@ mod png_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -590,6 +611,7 @@ mod png_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -667,6 +689,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -715,6 +738,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -747,6 +771,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -778,6 +803,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -809,6 +835,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -848,6 +875,7 @@ mod golden_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

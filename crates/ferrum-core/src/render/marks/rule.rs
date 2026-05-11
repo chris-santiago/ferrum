@@ -111,7 +111,7 @@ mod tests {
                 ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None,
+            coord: None, mark_style: None, position: None, title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", arrow::datatypes::DataType::Utf8, false),
@@ -148,7 +148,7 @@ mod tests {
                 ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None,
+            coord: None, mark_style: None, position: None, title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", arrow::datatypes::DataType::Utf8, false),
@@ -185,6 +185,7 @@ mod tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),

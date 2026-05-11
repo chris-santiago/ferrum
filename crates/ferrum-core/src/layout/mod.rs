@@ -40,8 +40,22 @@ pub struct LayoutResult {
     pub axes: Vec<AxisLayout>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub legend: Option<LegendLayout>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub chart_title: Option<ChartTitleLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LayoutWarning>,
+}
+
+/// Chart-level (top-of-SVG) title placement. Positioned in the band reserved
+/// at the top of the inner rect by `compute_layout`. The renderer reads
+/// `theme.title_color`, `theme.title_font_family`, `theme.title_font_size`,
+/// and `theme.title_font_weight` for styling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChartTitleLayout {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub anchor: TextAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -271,6 +285,30 @@ pub fn compute_layout(
         });
     }
 
+    // 2b. Reserve chart-level title band (Themes-T2.5a) above plot region.
+    // Band height ≈ title_font_size * 1.4 + title_offset. Stored absolute x/y for render emission.
+    let (chart_title_layout, inner) = if let Some(title_text) = spec.title.as_ref() {
+        let title_line_h = metrics.line_height(theme.title_font_size);
+        let band_h = title_line_h + theme.title_offset;
+        let (band, rest) = inner.split_top(band_h);
+        // x position derived from anchor; y baseline lands at top of remaining inner (just above plot region)
+        let x = match theme.title_anchor {
+            TextAnchor::Start => band.x,
+            TextAnchor::Middle => band.x + band.w / 2.0,
+            TextAnchor::End => band.x + band.w,
+        };
+        let y = band.y + title_line_h;
+        let chart_title = ChartTitleLayout {
+            text: title_text.clone(),
+            x,
+            y,
+            anchor: theme.title_anchor,
+        };
+        (Some(chart_title), rest)
+    } else {
+        (None, inner)
+    };
+
     // 3. Reserve legend strip.
     let (legend_layout, inner_after_legend) = legend::layout_legend(
         legend_entries,
@@ -433,6 +471,7 @@ pub fn compute_layout(
         panels,
         axes: axis_layouts,
         legend: legend_layout,
+        chart_title: chart_title_layout,
         warnings,
     })
 }
@@ -448,6 +487,7 @@ mod tests {
             panels: vec![],
             axes: vec![],
             legend: None,
+            chart_title: None,
             warnings: vec![],
         };
         let json = serde_json::to_string(&r).unwrap();
@@ -495,6 +535,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 

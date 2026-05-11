@@ -106,6 +106,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None,
         position: None,
+        title: None,
         }
     }
 

@@ -229,6 +229,7 @@ mod tests {
             coord: None,
             mark_style: Some(kwargs),
         position: None,
+        title: None,
         }
     }
 
