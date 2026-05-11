@@ -174,8 +174,9 @@ def roc_chart(
         Averaging method used when ``per_class=False``. Ignored when
         ``per_class=True``.
     annotate_auc : bool, default False
-        Reserved for future use (no-op today). When wired (Phase 10h),
-        will annotate each curve with its AUC value.
+        When ``True``, injects one text label per class showing the AUC
+        value to 3 decimal places, anchored in the lower-right corner
+        of the plot.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay. Keys become model labels.
         ``model_or_source`` is treated as the base model (label
@@ -719,9 +720,11 @@ def shap_chart(
         Row index (0-based) of the sample to explain. Required when
         ``kind="waterfall"``; ignored for other kinds.
     order : {"abs_mean", "abs_max"}, default "abs_mean"
-        Feature ranking criterion for ``kind="beeswarm"``. ``"abs_mean"``
+        Feature ranking criterion across all three kinds. ``"abs_mean"``
         ranks by mean absolute SHAP value; ``"abs_max"`` by max absolute
-        SHAP value.
+        SHAP value. Drives both the top-``max_display`` selection and
+        the bar/waterfall layout order so all three chart types agree
+        on "most important".
     background : array-like or None, default None
         Background dataset for kernel SHAP explainers. When ``None``,
         the full training set is used. Ignored for tree SHAP.
@@ -769,6 +772,7 @@ def shap_chart(
         return _shap_bar_chart_from_source(
             source,
             max_display=max_display,
+            order=order,
             background=background,
             theme=theme,
         )
@@ -781,6 +785,7 @@ def shap_chart(
             source,
             sample_idx=sample_idx,
             max_display=max_display,
+            order=order,
             background=background,
             theme=theme,
         )

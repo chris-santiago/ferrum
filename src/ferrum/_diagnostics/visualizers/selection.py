@@ -82,10 +82,14 @@ class LearningCurveVisualizer(FerrumVisualizer):
         df = self._source.learning_curve(
             cv=self.cv, scoring=self.scoring, train_sizes=self.train_sizes,
         )
+        # mean_score is already aggregated per (train_size, split) in
+        # the source schema, so collapsing per-fold rows is explicit
+        # deduplication — not a group-then-aggregate. Use
+        # df.unique(...maintain_order=True) for that intent (same pattern
+        # as ValidationCurveVisualizer / AlphaSelectionVisualizer).
         test_rows = (
             df.filter(pl.col("split") == "test")
-            .group_by("train_size")
-            .agg(pl.col("mean_score").first())
+            .unique(subset=["train_size"], keep="first", maintain_order=True)
             .sort("train_size")
         )
         if test_rows.height:
