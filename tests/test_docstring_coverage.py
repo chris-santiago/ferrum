@@ -30,6 +30,12 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 5 — composition / layer / repeat
     "HConcatChart", "VConcatChart", "JointChart", "RepeatChart", "ClusterMapChart",
     "Layer", "Repeat",
+    # Task 6 — themes / position / coord / annotations / schemes
+    "Theme", "set_default_theme", "get_default_theme", "theme_context",
+    "Identity", "Dodge", "Jitter", "Stack",
+    "CoordFlip", "CoordCartesian", "CoordPolar", "CoordGeo", "CoordFixed",
+    "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
+    "continuous_palette",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

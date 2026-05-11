@@ -1,7 +1,4 @@
-"""8 built-in themes. Color and font choices for `dark`, `fivethirtyeight`,
-`economist`, `solarized_*` reference vega-lite theme JSONs where the spec
-is ambiguous. See spec §3.13 + §10 row 12.
-"""
+"""Named built-in themes: default, minimal, dark, publication, economist, fivethirtyeight, solarized."""
 from __future__ import annotations
 
 from ferrum.themes import Theme

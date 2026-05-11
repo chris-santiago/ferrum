@@ -1,13 +1,4 @@
-"""Color scheme lookups (Phase 8a categorical + Phase 8b continuous).
-
-Public surface:
-
-- :func:`continuous_palette(name)` — look up one of the built-in continuous
-  colormaps (``viridis``, ``plasma``, ``magma``, ``inferno``, ``cividis``).
-- :func:`continuous_palette.list()` — return the list of built-in names.
-- :class:`Gradient` — construct a custom gradient scheme from a list of
-  ``(t, color)`` stops.
-"""
+"""Color scheme lookups — ``continuous_palette`` and the ``Gradient`` factory."""
 from __future__ import annotations
 
 from ferrum._core import ContinuousScheme as _ContinuousScheme
@@ -19,18 +10,24 @@ def continuous_palette(name: str):
 
     Parameters
     ----------
-    name : str
-        One of ``"viridis"``, ``"plasma"``, ``"magma"``, ``"inferno"``,
-        ``"cividis"``.
+    name : {"viridis", "plasma", "magma", "inferno", "cividis"}
+        Built-in colormap name.
 
     Returns
     -------
     ContinuousScheme
+        A ferrum continuous scheme suitable for ``Color(scale=...)``.
 
     Raises
     ------
     ValueError
-        If ``name`` is not one of the known colormaps.
+        If ``name`` is not one of the built-in colormaps.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> scheme = fm.continuous_palette("viridis")
+    >>> fm.Chart(df).encode(x="x", y="y", color=fm.Color("val", scale=scheme))
     """
     return _ContinuousScheme.from_name(name)
 
