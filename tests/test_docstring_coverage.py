@@ -1,14 +1,12 @@
 """Ratcheting docstring coverage test.
 
-Symbols in _DOC_ALLOWLIST must have a non-empty __doc__. The allowlist grows
+Symbols in _DOC_ALLOWLIST must have a non-empty __doc__. The allowlist grew
 commit-by-commit during the docstring sweep (see
-docs/superpowers/specs/2026-05-11-docstrings-design.md §7). After the final
-sweep commit the allowlist covers all of ferrum.__all__ except the three
+docs/superpowers/specs/2026-05-11-docstrings-design.md §7). The sweep is now
+complete: the allowlist covers all of ferrum.__all__ except the three
 namespace re-exports (themes, encoding, figure).
 """
 from __future__ import annotations
-
-import pytest
 
 import ferrum
 
@@ -69,13 +67,7 @@ def test_allowlist_symbols_have_docstrings() -> None:
 
 
 def test_allowlist_covers_all_public_api_after_sweep() -> None:
-    """Final assertion: after the final sweep commit the allowlist guards all of __all__.
-
-    Skipped while the allowlist is incomplete. Once the final sweep commit lands, this
-    test starts running and stays as a permanent guardrail.
-    """
+    """The allowlist must guard every entry in ferrum.__all__ except namespaces."""
     expected = set(ferrum.__all__) - _NAMESPACE_EXEMPT
-    if not _DOC_ALLOWLIST >= expected:
-        missing = expected - _DOC_ALLOWLIST
-        pytest.skip(f"Allowlist incomplete (sweep in progress); missing: {sorted(missing)}")
-    assert _DOC_ALLOWLIST >= expected
+    missing = expected - _DOC_ALLOWLIST
+    assert not missing, f"Allowlist missing public API entries: {sorted(missing)}"

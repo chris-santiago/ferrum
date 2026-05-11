@@ -1,3 +1,5 @@
+"""Arrow-CDI transport bridge between the Python API and the Rust core."""
+
 from __future__ import annotations
 
 from typing import Any

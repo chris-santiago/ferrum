@@ -52,6 +52,3 @@ convention = "numpy"
 "src/ferrum/marks/**" = ["D"]  # internal-only subpackage; not in __all__
 "tests/**" = ["D"]
 "src/ferrum/_core.pyi" = ["D"]
-
-# Ratcheting exemptions — each row is removed by the commit that completes that scope.
-"src/ferrum/__init__.py" = ["D"]
