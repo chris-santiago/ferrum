@@ -37,7 +37,7 @@ pub(crate) fn apply_position(
             apply_jitter(batch, axis, *width, *seed, scales, encoding)
         }
         PositionAdjust::Stack { by, offset } => {
-            apply_stack(batch, by.as_deref(), offset, scales, encoding)
+            apply_stack(batch, by.as_deref(), offset, encoding)
         }
     }
 }
@@ -280,11 +280,10 @@ fn apply_jitter(
 // Stack
 // ---------------------------------------------------------------------------
 
-fn apply_stack(
+pub(crate) fn apply_stack(
     batch: &RecordBatch,
     by_field: Option<&str>,
     offset: &crate::spec::position::StackOffset,
-    _scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::StackOffset;
@@ -378,7 +377,12 @@ fn apply_stack(
         .map(|(k, rows)| (*k, rows.iter().map(|(_, _, y)| y).sum::<f64>()))
         .collect();
 
+    // new_y holds the cumulative TOP of each segment; new_y_base holds the
+    // cumulative BOTTOM (the previous segment's top within the same bin, or
+    // 0 / -mid for the first segment). Bar / area renderers draw each
+    // segment from new_y_base[i] to new_y[i] so segments don't overlap.
     let mut new_y = vec![0.0_f64; ya_len];
+    let mut new_y_base = vec![0.0_f64; ya_len];
     for (xkey, rows) in bins.iter_mut() {
         rows.sort_by_key(|(gi, _, _)| *gi);
         let total = totals.get(xkey).copied().unwrap_or(0.0);
@@ -395,6 +399,7 @@ fn apply_stack(
                 }
                 StackOffset::Center => *y,
             };
+            new_y_base[*row_idx] = acc;
             acc += normalized;
             new_y[*row_idx] = acc;
         }
@@ -402,6 +407,7 @@ fn apply_stack(
             let mid = acc / 2.0;
             for (_, row_idx, _) in rows.iter() {
                 new_y[*row_idx] -= mid;
+                new_y_base[*row_idx] -= mid;
             }
         }
     }
@@ -417,6 +423,13 @@ fn apply_stack(
         .map(|f| f.as_ref().clone())
         .collect();
     new_fields[yi] = Field::new(new_fields[yi].name(), DataType::Float64, true);
+
+    // Append a synthetic __stack_y_base__ column so mark drawers can emit
+    // per-segment rects (base → top) instead of drawing every segment from
+    // y=0. Bar / area renderers look this up via `col_as_f64` when present.
+    cols.push(Arc::new(Float64Array::from(new_y_base)));
+    new_fields.push(Field::new("__stack_y_base__", DataType::Float64, true));
+
     let new_schema = Arc::new(Schema::new(new_fields));
     RecordBatch::try_new(new_schema, cols)
         .map_err(|e| crate::render::RenderError::Other(format!("Stack: {e}")))

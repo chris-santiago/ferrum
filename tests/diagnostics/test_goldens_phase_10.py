@@ -134,9 +134,16 @@ def test_golden_confusion_matrix_multiclass():
     _check_golden(chart.show_svg(), "confusion_matrix_multiclass")
 
 
-# NOTE: The Task 19 golden (class_prediction_error_multiclass) is held back
-# pending the mark_bar + Stack rendering fix tracked in
-# handoff-phase9-golden-bugs.md. Current renderer emits only 1 segment per
-# stacked bar instead of one per (actual, predicted) cell, and
-# offset='normalize' emits 0 rects. Locking a golden against that broken
-# output would repeat the earlier mistake from heatmap_annot.svg.
+# The Task 19 golden was held back pending the mark_bar + Stack rendering
+# fix (see handoff-phase9-golden-bugs.md). That fix landed alongside Task
+# 20: scale_resolve.rs now reads the post-Stack y extent so cumulative
+# tops are inside the y-scale domain, apply_stack emits a
+# __stack_y_base__ column with per-segment lower bounds, and bar.rs
+# draws each segment from base→top instead of every segment from y=0.
+# Goldens visually verified before locking (rect+text PNG snapshot).
+
+
+def test_golden_class_prediction_error_multiclass():
+    model, X, y = _multi_xy()
+    chart = ferrum.class_prediction_error_chart(model, X, y)
+    _check_golden(chart.show_svg(), "class_prediction_error_multiclass")

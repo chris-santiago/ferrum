@@ -26,6 +26,12 @@ fn draw_ordinal(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
     if x_strs.len() != ys.len() { return; }
 
+    // Stacked-bar segments carry their lower bound in `__stack_y_base__`
+    // (injected by `position::apply_stack`). When absent, every segment is
+    // anchored at the plot baseline.
+    let y_bases: Option<Vec<Option<f64>>> =
+        col_as_f64(ctx.batch, "__stack_y_base__").ok();
+
     let panel = ctx.panel.plot_area;
     let baseline_y = panel.y + panel.h;
 
@@ -56,7 +62,15 @@ fn draw_ordinal(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
         let cx = match ctx.scales.x.to_pixel_str(xs) { Some(p) => p, None => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-        let height = (baseline_y - top_y).max(0.0);
+        // Segment bottom comes from __stack_y_base__ if present; otherwise
+        // the bar grows from the plot baseline (single-bar / unstacked path).
+        let bottom_y = match y_bases.as_ref().and_then(|v| v[i]) {
+            Some(b) if b.is_finite() => {
+                ctx.scales.y.to_pixel_f64(b).unwrap_or(baseline_y)
+            }
+            _ => baseline_y,
+        };
+        let height = (bottom_y - top_y).max(0.0);
         let cx = cx + x_offsets[i];
         let top_y = top_y + y_offsets[i];
         let r = Rect { x: cx - bar_width / 2.0, y: top_y, w: bar_width, h: height };

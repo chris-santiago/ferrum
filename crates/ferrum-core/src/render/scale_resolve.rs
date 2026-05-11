@@ -301,7 +301,30 @@ pub fn resolve_scales_with_outputs(
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
     let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range)?;
-    let y = build_axis_scale("y", y_enc, y2_enc, primary_batch, transform_outputs, y_pixel_range)?;
+
+    // Stack-aware y-axis: when a Stack position adjustment is in play, the
+    // y values rendered by mark drawers are the *cumulative* values from
+    // apply_stack, not the original y column. Resolving the y-scale from
+    // the raw batch would clip stacked tops outside the domain — LinearScale
+    // returns NaN for out-of-domain inputs, and bar.rs drops every row whose
+    // top falls past it. To keep stacked bars visible, build the y-scale
+    // from the post-Stack batch when the spec carries a Stack adjustment.
+    let stacked_batch_owned;
+    let y_batch: &RecordBatch = match find_stack_for_y(spec, &y_enc.field) {
+        Some((by, offset, layer_enc)) => {
+            match crate::render::position::apply_stack(
+                primary_batch, by, offset, layer_enc,
+            ) {
+                Ok(b) => {
+                    stacked_batch_owned = b;
+                    &stacked_batch_owned
+                }
+                Err(_) => primary_batch,
+            }
+        }
+        None => primary_batch,
+    };
+    let y = build_axis_scale("y", y_enc, y2_enc, y_batch, transform_outputs, y_pixel_range)?;
 
     // Color/size/shape/opacity scales are primary-batch only. These channels
     // do not currently participate in cross-layer scale unification: each is
@@ -371,6 +394,57 @@ pub fn resolve_scales_with_outputs(
         warnings,
     ))
 }
+
+/// Find the first Stack position adjustment in the spec whose layer (or
+/// the chart itself, in the single-layer case) encodes the given y-field.
+///
+/// Returns `(by, offset, encoding)` so the caller can pass them straight
+/// to `position::apply_stack`. Returns `None` if no Stack is in play, in
+/// which case the y-scale resolves from the raw batch as usual.
+///
+/// Multi-Stack layers (separate Stacks in different layers) are not yet
+/// merged here — the first match wins. The Phase 10c
+/// `class_prediction_error` path uses a single Stack layer, which is the
+/// only call site that needs this today.
+fn find_stack_for_y<'a>(
+    spec: &'a ChartSpec,
+    y_field: &str,
+) -> Option<(
+    Option<&'a str>,
+    &'a crate::spec::position::StackOffset,
+    &'a crate::spec::encoding::Encoding,
+)> {
+    use crate::spec::position::PositionAdjust;
+
+    // Layered charts: scan each layer for a Stack whose encoded y matches.
+    if let Some(layers) = spec.layers.as_ref() {
+        for layer in layers {
+            let layer_y = layer
+                .encoding
+                .y
+                .as_ref()
+                .map(|e| e.field.as_str())
+                .or_else(|| spec.encoding.y.as_ref().map(|e| e.field.as_str()));
+            if layer_y != Some(y_field) {
+                continue;
+            }
+            if let Some(PositionAdjust::Stack { by, offset }) =
+                layer.position.as_ref().or(spec.position.as_ref())
+            {
+                return Some((by.as_deref(), offset, &layer.encoding));
+            }
+        }
+    }
+    // Single-layer chart: check the spec-level position.
+    if let Some(PositionAdjust::Stack { by, offset }) = spec.position.as_ref() {
+        let spec_y = spec.encoding.y.as_ref().map(|e| e.field.as_str());
+        if spec_y == Some(y_field) {
+            return Some((by.as_deref(), offset, &spec.encoding));
+        }
+    }
+    None
+}
+
 
 fn build_axis_scale(
     channel: &'static str,
