@@ -1318,7 +1318,7 @@ class Chart:
                     enc_json_dict: dict = {"field": field}
                     if d.get("type"):
                         enc_json_dict["type_"] = d["type"]
-                    for opt_key in ("title", "aggregate", "scheme", "format", "formatType"):
+                    for opt_key in ("title", "aggregate", "scheme", "format", "formatType", "scale"):
                         if d.get(opt_key):
                             enc_json_dict[opt_key] = d[opt_key]
                     encoding_dict[axis] = enc_json_dict

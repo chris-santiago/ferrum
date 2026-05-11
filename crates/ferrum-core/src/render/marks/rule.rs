@@ -1,6 +1,8 @@
-//! mark_rule: reference lines. Three modes:
+//! mark_rule: reference lines. Four modes:
 //!   y only → horizontal span; x only → vertical span;
 //!   ordinal x + y + y2 → ranged vertical segment (boxplot whisker, Phase 10c-pre).
+//!   ordinal y + x + x2 → ranged horizontal segment (Phase 10d-pre,
+//!     feature-importance error bars).
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::svg::{Stroke, SvgBuffer};
@@ -18,6 +20,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let xf_opt = x_field(ctx, spec);
     let yf_opt = y_field(ctx, spec);
     let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
+    let x2f_opt = spec.encoding.x2.as_ref().map(|e| e.field.as_str());
 
     // Ranged rule: ordinal x + quantitative y + y2 → vertical segment per row.
     if let (Some(xf), Some(yf), Some(y2f)) = (xf_opt, yf_opt, y2f_opt) {
@@ -37,6 +40,25 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             return;
         }
         // x column is not a string (quantitative x with y2) — fall through to spans below.
+    }
+
+    // Ranged rule: ordinal y + quantitative x + x2 → horizontal segment per row.
+    if let (Some(yf), Some(xf), Some(x2f)) = (yf_opt, xf_opt, x2f_opt) {
+        if let Ok(ys) = col_as_str(ctx.batch, yf) {
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
+            let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return };
+            for i in 0..ys.len() {
+                let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let py = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+                let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+                let py = py + y_offsets[i];
+                out.line(px + x_offsets[i], py, px2 + x_offsets[i], py, &style);
+            }
+            return;
+        }
     }
 
     // Horizontal span: y only (no x).
@@ -110,6 +132,43 @@ mod tests {
         super::draw(&ctx, &mut out);
         let s = out.finish();
         assert_eq!(s.matches("<line ").count(), 2, "expected 2 ranged rule lines");
+    }
+
+    #[test]
+    fn ranged_rule_emits_horizontal_segments_for_ordinal_y() {
+        // Phase 10d-pre: ordinal y + x + x2 → horizontal segment per row
+        // (feature-importance error bars on horizontal-bar charts).
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rule,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                x: Some(EncodingSpec { field: "lo".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", arrow::datatypes::DataType::Utf8, false),
+            Field::new("lo",  arrow::datatypes::DataType::Float64, false),
+            Field::new("hi",  arrow::datatypes::DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![5.0, 8.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let mut out = SvgBuffer::new(panel.plot_area, None, false);
+        super::draw(&ctx, &mut out);
+        let s = out.finish();
+        assert_eq!(s.matches("<line ").count(), 2, "expected 2 horizontal-ranged rule lines");
     }
 
     #[test]
