@@ -112,6 +112,7 @@ pub fn layout_legend(
     inner: Rect,
     label_font_size: f64,
     metrics: &dyn TextMetrics,
+    direction_override: Option<LegendDirection>,
 ) -> (Option<LegendLayout>, Rect) {
     if entries.is_empty() {
         return (None, inner);
@@ -141,10 +142,10 @@ pub fn layout_legend(
         }
     };
 
-    let direction = match orient {
+    let direction = direction_override.unwrap_or_else(|| match orient {
         LegendOrient::Right | LegendOrient::Left => LegendDirection::Vertical,
         LegendOrient::Top | LegendOrient::Bottom => LegendDirection::Horizontal,
-    };
+    });
 
     let line_h = metrics.line_height(label_font_size);
     let entries_laid_out: Vec<LegendEntryLayout> = match direction {
@@ -282,7 +283,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None);
         let legend = legend.expect("legend should be Some");
         assert_eq!(legend.orient, LegendOrient::Right);
         assert_eq!(legend.direction, LegendDirection::Vertical);
@@ -296,7 +297,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None);
         let legend = legend.unwrap();
         assert_eq!(legend.rect.x, inner.x);
         assert!((plot_inner.x - (inner.x + legend.rect.w)).abs() < 1e-6);
@@ -307,7 +308,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert_eq!(legend.rect.y, inner.y);
@@ -319,7 +320,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert!((legend.rect.y - (inner.y + plot_inner.h)).abs() < 1e-6);
@@ -329,7 +330,7 @@ mod tests {
     fn legend_layout_empty_entries_returns_none_and_inner_unchanged() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None);
         assert!(legend.is_none());
         assert_eq!(plot_inner, inner);
     }
@@ -339,7 +340,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let es = entries(50, 4);
         let m = mock(10.0);
-        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m);
+        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None);
         let legend = legend.unwrap();
         assert!(legend.entries.len() < 50, "expected overflow drop; got {} entries", legend.entries.len());
     }

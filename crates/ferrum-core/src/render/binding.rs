@@ -332,7 +332,7 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
     }
     if let Some(v) = d.get_item("legend_direction")? {
         let s: String = v.extract()?;
-        t.legend_direction = match s.as_str() {
+        t.legend_direction = Some(match s.as_str() {
             "horizontal" => LegendDirection::Horizontal,
             "vertical" => LegendDirection::Vertical,
             other => {
@@ -340,7 +340,7 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
                     "legend_direction must be one of 'horizontal'|'vertical', got '{other}'"
                 )))
             }
-        };
+        });
     }
     if let Some(v) = d.get_item("legend_title_font_size")? {
         t.legend_title_font_size = v.extract()?;

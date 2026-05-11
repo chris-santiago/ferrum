@@ -150,7 +150,7 @@ pub struct ThemeInputs {
     pub color_scheme: String,
 
     // Legend
-    pub legend_direction: LegendDirection,
+    pub legend_direction: Option<LegendDirection>,
     pub legend_title_font_size: f64,
 }
 
@@ -223,7 +223,7 @@ impl Default for ThemeInputs {
 
             color_scheme: "okabe_ito".into(),         // T4 → "tableau10"
 
-            legend_direction: LegendDirection::Vertical,
+            legend_direction: None,                   // None = auto-derive from legend_orient
             legend_title_font_size: 13.0,             // matches title_font_size
         }
     }
@@ -278,6 +278,7 @@ pub fn compute_layout(
         inner,
         theme.label_font_size,
         metrics,
+        theme.legend_direction,
     );
     let legend_dropped = legend_entries
         .len()
