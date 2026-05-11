@@ -178,11 +178,21 @@ class JointChart:
                 "JointChart.show_svg() requires compose_svg_grid; "
                 "wire-up lands in Phase 9a Task 12"
             ) from e
-        center_svg = self.center.show_svg()
+        # The grid compositor uses each cell's actual rendered size, ignoring
+        # row_ratios/col_ratios — so we must resize the marginals here. Without
+        # this, all charts render at 600x400 and the top-right corner becomes
+        # a huge empty rectangle the size of a full chart.
+        center_w = self.center._width or 600.0
+        center_h = self.center._height or 400.0
+        marg_h = center_h / self.ratio
+        marg_w = center_w / self.ratio
+        top_chart = self.top.properties(width=center_w, height=marg_h) if self.top is not None else None
+        right_chart = self.right.properties(width=marg_w, height=center_h) if self.right is not None else None
         # Layout per docstring: top-left = top marginal (shares x with center),
         # top-right = empty, bottom-left = center, bottom-right = right marginal.
-        cells = [self.top.show_svg() if self.top is not None else None, None,
-                 center_svg, self.right.show_svg() if self.right is not None else None]
+        cells = [top_chart.show_svg() if top_chart is not None else None, None,
+                 self.center.show_svg(),
+                 right_chart.show_svg() if right_chart is not None else None]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         return compose_svg_grid(
@@ -470,10 +480,21 @@ class ClusterMapChart:
             ) from e
         d = self.dendrogram_ratio
         h = 1.0 - d
+        # Compositor ignores row_ratios/col_ratios; resize each component so
+        # the heatmap fills (h × h) of the grid and dendrograms occupy the
+        # remaining (d) on the row/col axis they sit beside.
+        hm_w = self.heatmap._width or 600.0
+        hm_h = self.heatmap._height or 400.0
+        dendro_w = hm_w * d / h
+        dendro_h = hm_h * d / h
+        col_dendro = (self.col_dendrogram.properties(width=hm_w, height=dendro_h)
+                      if self.col_dendrogram is not None else None)
+        row_dendro = (self.row_dendrogram.properties(width=dendro_w, height=hm_h)
+                      if self.row_dendrogram is not None else None)
         cells = [
             None,
-            self.col_dendrogram.show_svg() if self.col_dendrogram is not None else None,
-            self.row_dendrogram.show_svg() if self.row_dendrogram is not None else None,
+            col_dendro.show_svg() if col_dendro is not None else None,
+            row_dendro.show_svg() if row_dendro is not None else None,
             self.heatmap.show_svg(),
         ]
         return compose_svg_grid(
