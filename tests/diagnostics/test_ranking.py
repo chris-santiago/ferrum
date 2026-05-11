@@ -221,3 +221,51 @@ def test_parallel_coordinates_from_numpy_array():
     svg = chart.show_svg()
     assert "<svg" in svg
     assert svg.count("<polyline") == 50
+
+
+# --- Visualizers ----------------------------------------------------
+
+
+def test_rank1d_visualizer_shapiro():
+    X = load_dataset("regression").select(_REGRESSION_FEATURES)
+    viz = ferrum.Rank1DVisualizer(algorithm="shapiro").fit(X)
+    assert "top_feature_score=" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_rank1d_visualizer_covariance_requires_y():
+    X = load_dataset("regression").select(_REGRESSION_FEATURES)
+    viz = ferrum.Rank1DVisualizer(algorithm="covariance")
+    with pytest.raises(ValueError, match="requires y"):
+        viz.fit(X)
+    # With y supplied it works.
+    y = load_dataset("regression")["y"]
+    viz.fit(X, y)
+    assert viz._fitted
+
+
+def test_rank2d_visualizer_pearson():
+    X = load_dataset("regression").select(_REGRESSION_FEATURES)
+    viz = ferrum.Rank2DVisualizer(algorithm="pearson").fit(X)
+    assert "max_abs_corr=" in repr(viz)
+    # On the regression fixture the features are independent → small
+    # off-diagonal correlations.
+    assert viz._metrics["max_abs_corr"] < 0.3
+
+
+def test_parallel_coordinates_visualizer():
+    df = load_dataset("multiclass_classification")
+    viz = ferrum.ParallelCoordinatesVisualizer(
+        features=_MULTICLASS_FEATURES, hue="y",
+    ).fit(df)
+    assert viz._fitted
+    assert "n_samples=" in repr(viz)
+    assert viz._metrics["n_samples"] == df.height
+    svg = viz.show().show_svg()
+    assert svg.count("<polyline") == df.height
+
+
+def test_visualizer_show_before_fit_raises():
+    viz = ferrum.Rank1DVisualizer()
+    with pytest.raises(RuntimeError, match="must be fit"):
+        viz.show()

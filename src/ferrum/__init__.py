@@ -86,6 +86,9 @@ from ferrum._diagnostics.visualizers import (
     ManifoldVisualizer,
     InterclusterDistanceVisualizer,
     PCAVarianceVisualizer,
+    Rank1DVisualizer,
+    Rank2DVisualizer,
+    ParallelCoordinatesVisualizer,
 )
 from ferrum.figures import (
     residuals_chart,
@@ -172,6 +175,7 @@ __all__ = [
     "CVScoresVisualizer", "AlphaSelectionVisualizer",
     "SilhouetteVisualizer", "ElbowVisualizer", "ManifoldVisualizer",
     "InterclusterDistanceVisualizer", "PCAVarianceVisualizer",
+    "Rank1DVisualizer", "Rank2DVisualizer", "ParallelCoordinatesVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",

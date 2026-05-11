@@ -33,6 +33,11 @@ from .selection import (
     LearningCurveVisualizer,
     ValidationCurveVisualizer,
 )
+from .ranking import (
+    ParallelCoordinatesVisualizer,
+    Rank1DVisualizer,
+    Rank2DVisualizer,
+)
 
 __all__ = [
     "FerrumVisualizer",
@@ -58,4 +63,7 @@ __all__ = [
     "ManifoldVisualizer",
     "InterclusterDistanceVisualizer",
     "PCAVarianceVisualizer",
+    "Rank1DVisualizer",
+    "Rank2DVisualizer",
+    "ParallelCoordinatesVisualizer",
 ]
