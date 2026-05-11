@@ -78,6 +78,21 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
 | Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
+| Gallery audit skill | `.claude/skills/gallery-audit/` |
+| Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
+
+---
+
+## Gallery audit (default-output comparison)
+
+A reproducible side-by-side audit of ferrum's default plot output against canonical Python libraries (sklearn, seaborn, yellowbrick, scikit-plot). Use it to find where ferrum's defaults lack information or visual quality that competitors ship out of the box — missing AUC annotations, missing reference lines, wrong axis labels, missing per-cell counts on confusion matrices, etc.
+
+- **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 12-row scaffold; 10 wired today, 2 historically blocked rows tracked in `RESUME.md` (row 07 unblocks with Task 21 `importance_chart`; row 05 still needs a `learning_curve_chart`). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
+- **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
+- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see "Composite marks desugar Python-side" below).
+- **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
+- **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
+- **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
 
 ---
 
