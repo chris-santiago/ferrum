@@ -62,14 +62,13 @@ def test_sequential_scheme_falls_back_to_tableau10_on_nominal() -> None:
     assert svg_viridis == svg_tab
 
 
-def test_encoding_scheme_overrides_theme() -> None:
-    # mark_heatmap-style: encoding.color.scheme set per-call. Although
-    # heatmap uses a numeric color column (continuous path), the nominal
-    # path also honors encoding.scheme as a per-encoding override. Verify
-    # by passing a categorical column with `scale=fm.Scale(scheme=...)`
-    # via the encode API if exposed; otherwise verify Theme's lack of
-    # influence when no theme is supplied (defaults match T1 = okabe_ito).
+def test_no_theme_equals_explicit_default_scheme() -> None:
+    # When no theme is supplied, the renderer uses ThemeInputs::default()
+    # which carries color_scheme="tableau10" (themes-T4). Verify that an
+    # explicit Theme(color_scheme="tableau10") produces a byte-identical
+    # SVG — confirms the default theme path doesn't drift from the
+    # explicit-theme path.
     chart = _multi_series_chart()
     svg_default = chart.show_svg()
-    svg_explicit = chart.theme(fm.Theme(color_scheme="okabe_ito")).show_svg()
+    svg_explicit = chart.theme(fm.Theme(color_scheme="tableau10")).show_svg()
     assert svg_default == svg_explicit

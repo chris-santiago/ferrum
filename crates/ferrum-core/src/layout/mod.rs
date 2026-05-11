@@ -170,75 +170,85 @@ pub struct ThemeInputs {
 
 impl Default for ThemeInputs {
     fn default() -> Self {
-        // OKABE_ITO[0] = #E69F00 = (230, 159, 0).
-        let okabe_orange = palette::Srgba::new(0xE6, 0x9F, 0x00, 0xFF);
-        let neutral_888  = palette::Srgba::new(0x88, 0x88, 0x88, 0xFF);
-        let neutral_eee  = palette::Srgba::new(0xEE, 0xEE, 0xEE, 0xFF);
-        let text_222     = palette::Srgba::new(0x22, 0x22, 0x22, 0xFF);
-        let bg_white     = palette::Srgba::new(0xFF, 0xFF, 0xFF, 0xFF);
-        let strip_bg     = palette::Srgba::new(0xF0, 0xF0, 0xF0, 0xFF);
+        // Themes-T4 (2026-05-11) — Observable Plot–flavored visual identity.
+        // Section 2 of docs/superpowers/specs/2026-05-11-themes-overhaul-design.md.
+        let mark_blue = palette::Srgba::new(0x4C, 0x78, 0xA8, 0xFF);   // tableau blue
+        let text_222  = palette::Srgba::new(0x22, 0x22, 0x22, 0xFF);
+        let label_555 = palette::Srgba::new(0x55, 0x55, 0x55, 0xFF);
+        let axis_888  = palette::Srgba::new(0x88, 0x88, 0x88, 0xFF);
+        let grid_ddd  = palette::Srgba::new(0xDD, 0xDD, 0xDD, 0xFF);
+        let bg_white  = palette::Srgba::new(0xFF, 0xFF, 0xFF, 0xFF);
+        let strip_bg  = palette::Srgba::new(0xF0, 0xF0, 0xF0, 0xFF);
 
         Self {
-            // Phase 6.
-            padding: DEFAULT_PADDING,
-            column_padding: DEFAULT_PADDING,
-            row_padding: DEFAULT_PADDING,
-            axis_title_padding: DEFAULT_AXIS_TITLE_PADDING,
-            label_font_size: DEFAULT_LABEL_FONT_SIZE,
-            title_font_size: DEFAULT_TITLE_FONT_SIZE,
-            legend_orient: LegendOrient::Right,
-
-            // Phase 7 sizes / widths / opacities.
-            point_size: 30.0,
-            line_stroke_width: 1.5,
-            bar_corner_radius: 0.0,
-            area_opacity: 0.4,
-            default_opacity: 1.0,
-            axis_line_width: 1.0,
-            tick_size: 4.0,
-            grid_width: 1.0,
-            grid: true,
-            strip_text_size: 13.0,
-            strip_padding: 4.0,
-
-            // Phase 7 colors.
-            mark_color: okabe_orange,
-            axis_line_color: neutral_888,
-            tick_color: neutral_888,
-            grid_color: neutral_eee,
-            font_color: text_222,
+            // Canvas
+            padding: 16.0,
+            column_padding: 12.0,
+            row_padding: 12.0,
+            axis_title_padding: 8.0,
             background_color: bg_white,
-            strip_background_color: strip_bg,
 
-            // Phase 8a size/opacity ranges.
-            point_size_min: 3.0,
-            point_size_max: 30.0,
-            opacity_min: 0.1,
-            opacity_max: 1.0,
-
-            // Themes-T1 — values match current visual identity. T4 will flip these.
-            font_family: "Inter".into(),       // resvg default; T4 → "DejaVu Sans"
+            // Typography. Font family kept as "Inter" per user override of
+            // Section 2's "DejaVu Sans" — Inter is already bundled and
+            // deterministic across machines for goldens; DejaVu Sans would
+            // resolve via the system font path and risks CI divergence.
+            font_family: "Inter".into(),
             font_weight: "normal".into(),
-            title_font_family: "Inter".into(),
-            title_font_weight: "normal".into(),       // T4 → "600"; "normal" suppresses attr emission to preserve current SVG
-            title_color: text_222,
-            title_anchor: TextAnchor::Middle,         // T4 → Start
-            title_offset: 4.0,                        // T4 → 6.0
+            font_color: text_222,
             label_font_family: "Inter".into(),
-            label_color: text_222,                    // T4 → label_555 = #555555
+            label_font_size: DEFAULT_LABEL_FONT_SIZE,
+            label_color: label_555,
+            title_font_family: "Inter".into(),
+            title_font_size: DEFAULT_TITLE_FONT_SIZE,
+            title_font_weight: "600".into(),
+            title_color: text_222,
+            title_anchor: TextAnchor::Start,
+            title_offset: 6.0,
 
-            axis_line: true,
-            tick_width: 1.0,
-
+            // Grid (faint but visible at default zoom)
+            grid: true,
+            grid_color: grid_ddd,
+            grid_width: 0.5,
             grid_dash: None,
             grid_opacity: 1.0,
 
+            // Axes
+            axis_line: true,
+            axis_line_color: axis_888,
+            axis_line_width: 1.0,
+            tick_size: 4.0,
+            tick_width: 1.0,
+            tick_color: axis_888,
+
+            // Marks
+            mark_color: mark_blue,
+            point_size: 36.0,
+            point_size_min: 4.0,
+            point_size_max: 36.0,
             point_opacity: 1.0,
+            line_stroke_width: 1.5,
+            bar_corner_radius: 0.0,
+            area_opacity: 0.35,
+            default_opacity: 1.0,
+            opacity_min: 0.1,
+            opacity_max: 1.0,
 
-            color_scheme: "okabe_ito".into(),         // T4 → "tableau10"
+            // Color scheme — flipped from §3.6's stated `okabe_ito` to
+            // `tableau10` to match the Observable Plot aesthetic.
+            // `okabe_ito` remains accessible via Theme(color_scheme=...).
+            color_scheme: "tableau10".into(),
 
-            legend_direction: None,                   // None = auto-derive from legend_orient
-            legend_title_font_size: 13.0,             // matches title_font_size
+            // Strip (facet headers)
+            strip_background_color: strip_bg,
+            strip_text_size: 12.0,
+            strip_padding: 6.0,
+
+            // Legend — kept legend_direction=None so the renderer auto-derives
+            // Vertical from legend_orient=Right (Section 2 wants Vertical
+            // explicitly; None is the equivalent and minimizes goldens churn).
+            legend_orient: LegendOrient::Right,
+            legend_direction: None,
+            legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
         }
     }
 }
@@ -776,7 +786,8 @@ mod tests {
             let strip = panel.strip_title.as_ref()
                 .unwrap_or_else(|| panic!("panel {i} missing strip_title"));
             assert!(!strip.text.is_empty());
-            assert_eq!(strip.font_size, 13.0);
+            // Themes-T4: strip_text_size default flipped 13.0 → 12.0.
+            assert_eq!(strip.font_size, 12.0);
             assert!(strip.anchor.0 >= panel.plot_area.x);
             assert!(strip.anchor.0 <= panel.plot_area.x + panel.plot_area.w);
         }
@@ -803,21 +814,30 @@ mod tests {
 
     #[test]
     fn theme_inputs_default_includes_render_fields() {
+        // Themes-T4 (2026-05-11) — values flipped to Observable Plot identity;
+        // see Section 2 of docs/superpowers/specs/2026-05-11-themes-overhaul-design.md.
         let t = ThemeInputs::default();
-        // Phase 6 fields preserved.
-        assert_eq!(t.padding, DEFAULT_PADDING);
+        assert_eq!(t.padding, 16.0);
+        assert_eq!(t.column_padding, 12.0);
+        assert_eq!(t.row_padding, 12.0);
         assert_eq!(t.label_font_size, DEFAULT_LABEL_FONT_SIZE);
-        // Phase 7 additions.
-        assert_eq!(t.point_size, 30.0);
+        assert_eq!(t.point_size, 36.0);
+        assert_eq!(t.point_size_min, 4.0);
+        assert_eq!(t.point_size_max, 36.0);
         assert_eq!(t.line_stroke_width, 1.5);
         assert_eq!(t.bar_corner_radius, 0.0);
-        assert_eq!(t.area_opacity, 0.4);
+        assert_eq!(t.area_opacity, 0.35);
         assert_eq!(t.default_opacity, 1.0);
         assert_eq!(t.axis_line_width, 1.0);
         assert_eq!(t.tick_size, 4.0);
-        assert_eq!(t.grid_width, 1.0);
+        assert_eq!(t.grid_width, 0.5);
         assert_eq!(t.grid, true);
-        assert_eq!(t.strip_text_size, 13.0);
-        assert_eq!(t.strip_padding, 4.0);
+        assert_eq!(t.strip_text_size, 12.0);
+        assert_eq!(t.strip_padding, 6.0);
+        assert_eq!(t.axis_title_padding, 8.0);
+        assert_eq!(t.color_scheme, "tableau10");
+        assert_eq!(t.title_font_weight, "600");
+        assert_eq!(t.title_anchor, TextAnchor::Start);
+        assert_eq!(t.title_offset, 6.0);
     }
 }

@@ -130,11 +130,11 @@ mod tests {
     fn image_spec(x_domain: (f64, f64), y_domain: (f64, f64)) -> ChartSpec {
         let x_scale = ScaleSpec::Linear {
             domain: Some(vec![x_domain.0, x_domain.1]),
-            range: None, nice: false, zero: false, clamp: false,
+            range: None, nice: false, zero: false, clamp: false, padding: None,
         };
         let y_scale = ScaleSpec::Linear {
             domain: Some(vec![y_domain.0, y_domain.1]),
-            range: None, nice: false, zero: false, clamp: false,
+            range: None, nice: false, zero: false, clamp: false, padding: None,
         };
         ChartSpec {
             data: DataRef::default(),

@@ -317,9 +317,10 @@ mod tests {
 
     #[test]
     fn resolve_style_for_area_uses_area_opacity() {
+        // Themes-T4: area_opacity default flipped 0.4 → 0.35; alpha 0.35*255 ≈ 89.
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Area);
-        assert!((style.fill.alpha as i32 - 102).abs() <= 1);
+        assert!((style.fill.alpha as i32 - 89).abs() <= 1);
     }
 
     #[test]
