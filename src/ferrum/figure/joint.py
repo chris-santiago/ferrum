@@ -1,4 +1,4 @@
-"""Phase 9e — jointplot."""
+"""Joint distribution convenience functions (jointplot)."""
 from __future__ import annotations
 from typing import Any
 
@@ -20,11 +20,73 @@ def jointplot(
     height: float | None = None, theme: Any = None,
     **encode_kwargs: Any,
 ) -> JointChart:
-    """Joint-distribution figure-level function — see ferrum-spec.md §3.14.
+    """Joint-distribution plot with marginals.
 
-    Returns a JointChart with a center scatter/kde/hist/hex/reg chart and
-    matching marginal histograms / KDEs / rugs / boxplots along the x and y
-    axes.
+    Builds a ``JointChart`` composed of a central bivariate plot flanked by
+    univariate marginals along the ``x`` (top) and ``y`` (right) axes.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str
+        Column name for the horizontal axis (required).
+    y : str
+        Column name for the vertical axis (required).
+    hue : str or encoding, optional
+        Column name to map to color in both the center and marginal charts.
+    kind : {"scatter", "kde", "hist", "hex", "reg"}, default "scatter"
+        Mark to use for the central panel.  ``"scatter"`` draws
+        ``mark_point``; ``"kde"`` draws ``mark_density``; ``"hist"``
+        draws a 2-D histogram via ``Bin2D`` + ``mark_rect``; ``"hex"``
+        draws ``mark_hex``; ``"reg"`` layers ``mark_point`` + a
+        ``mark_smooth(method="lm")`` fit line.
+    marginal_kind : {"hist", "kde", "rug", "box"}, default "hist"
+        Mark to use for the marginal panels (same kind applied to both
+        the top x-marginal and the right y-marginal).
+    ratio : int, default 5
+        Size ratio of the center panel to the marginal panels.
+    space : float, default 0.05
+        Gap (in layout units) between the center and marginal panels.
+    xlim : tuple, optional
+        ``(min, max)`` domain for the x-axis (reserved; passed to
+        ``JointChart`` for future renderer support).
+    ylim : tuple, optional
+        ``(min, max)`` domain for the y-axis (reserved; passed to
+        ``JointChart`` for future renderer support).
+    joint_kws : dict, optional
+        Extra keyword arguments forwarded to the center-panel mark call.
+    marginal_kws : dict, optional
+        Extra keyword arguments forwarded to the marginal mark calls.
+    height : float or None, optional
+        Height and width of the square central panel in pixels.
+    theme : Theme, optional
+        Visual theme applied to all three panels via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()`` on
+        the center chart.
+
+    Returns
+    -------
+    JointChart
+        Compound view with ``center``, ``top``, and ``right`` sub-charts.
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` or ``marginal_kind`` is not one of the supported values.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.jointplot(df, x="sepal_length", y="sepal_width")
+
+    2-D histogram center with KDE marginals, colored by species:
+
+    >>> fm.jointplot(
+    ...     df, x="sepal_length", y="petal_length",
+    ...     kind="hist", marginal_kind="kde", hue="species",
+    ... )
     """
     if kind not in _VALID_CENTER_KINDS:
         raise ValueError(

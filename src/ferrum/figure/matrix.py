@@ -1,4 +1,4 @@
-"""Phase 9e — pairplot, heatmap, clustermap."""
+"""Matrix-of-plots convenience functions (pairplot, heatmap, clustermap)."""
 from __future__ import annotations
 from typing import Any
 
@@ -18,11 +18,81 @@ def pairplot(
     corner: bool = False, dropna: bool = False, theme: Any = None,
     **encode_kwargs: Any,
 ) -> RepeatChart:
-    """Pairwise-scatter grid — see ferrum-spec.md §3.14.
+    """Pairwise-scatter grid (scatterplot matrix).
 
-    Returns a RepeatChart whose template repeats over the cartesian product of
-    ``row`` × ``column`` field lists (resolved from ``vars`` or
-    ``x_vars``/``y_vars``).
+    Returns a ``RepeatChart`` whose template repeats over the cartesian
+    product of ``row`` × ``column`` field lists, resolved from ``vars`` or
+    ``x_vars``/``y_vars``.  When neither is supplied, all numeric columns
+    in ``data`` are used.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    vars : sequence of str, optional
+        Column names to plot on both axes (symmetric grid).  Cannot be
+        combined with ``x_vars``/``y_vars``.
+    x_vars : sequence of str, optional
+        Column names for the columns of the grid.  Must be paired with
+        ``y_vars``.
+    y_vars : sequence of str, optional
+        Column names for the rows of the grid.  Must be paired with
+        ``x_vars``.
+    hue : str or encoding, optional
+        Column name to map to color across all panels.
+    kind : {"scatter", "kde", "hist", "reg"}, default "scatter"
+        Mark for the off-diagonal cells.  ``"scatter"`` calls
+        ``mark_point``; ``"kde"`` calls ``mark_density``; ``"hist"``
+        calls ``mark_histogram``; ``"reg"`` calls
+        ``mark_smooth(method="lm")``.
+    diag_kind : {"auto", "hist", "kde", None, "none"}, default "auto"
+        Mark for the diagonal cells (only when ``vars`` is symmetric).
+        ``"auto"`` resolves to ``"hist"``.  Pass ``None`` or ``"none"``
+        to suppress diagonal marks.
+    markers : any, optional
+        Reserved for future point-marker customisation (no-op today).
+    height : float or None, optional
+        Reserved for future use (no-op today). When wired, will control the
+        height of each individual panel in pixels.
+    aspect : float or None, optional
+        Reserved for future use (no-op today). When wired, will control the
+        aspect ratio per panel (width = height * aspect).
+    corner : bool, default False
+        Render only the lower-triangle panels.
+    dropna : bool, default False
+        Reserved for future NaN-dropping logic (no-op today).
+    theme : Theme, optional
+        Visual theme applied to all panels.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()`` on
+        every panel template.
+
+    Returns
+    -------
+    RepeatChart
+        Grid of panels sharing the same off-diagonal and (optionally)
+        diagonal chart templates.
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` or ``diag_kind`` is not one of the supported values.
+    ValueError
+        If both ``vars`` and ``x_vars``/``y_vars`` are supplied.
+    ValueError
+        If only one of ``x_vars`` / ``y_vars`` is supplied.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.pairplot(df)
+
+    Specific variables with KDE off-diagonal and per-species color:
+
+    >>> fm.pairplot(
+    ...     df, vars=["sepal_length", "sepal_width", "petal_length"],
+    ...     kind="kde", hue="species",
+    ... )
     """
     if kind not in _VALID_PAIR_KINDS:
         raise ValueError(
@@ -123,12 +193,67 @@ def heatmap(
     square: bool = False, mask: Any = None, theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
-    """2D heatmap of a wide-format DataFrame — see ferrum-spec.md §3.14.
+    """2-D heatmap of a wide-format DataFrame.
 
-    Each row of ``data`` becomes a row of the heatmap; numeric columns become
-    columns. The id column (first non-numeric column, if any) is used as the
-    row label. The DataFrame is unpivoted to long form, then rendered with
-    ``mark_rect`` + a continuous color scale.
+    Each row of ``data`` becomes a row of the heatmap; each numeric column
+    becomes a column.  The first non-numeric column (if any) is used as the
+    row-label axis; rows without a label column get a synthetic integer index.
+    The DataFrame is unpivoted to long form via ``Unpivot``, then rendered
+    with ``mark_rect`` and an optional annotation layer (``mark_text``).
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Wide-format input.  Numeric columns become the heatmap cells; the
+        first non-numeric column (if present) labels the rows.
+    annot : bool, default True
+        Overlay cell values as text using ``mark_text``.
+    fmt : str, default ".2f"
+        Python format specifier applied to cell values in the annotation layer.
+    cmap : str, default "blues"
+        Color scheme name (e.g. ``"blues"``, ``"viridis"``, ``"rdbu"``).
+    linewidths : float, default 0.5
+        Width of the cell border stroke in pixels.  ``0`` disables borders.
+    linecolor : str, default "white"
+        Color of the cell border stroke.
+    vmin : float or None, optional
+        Minimum of the color scale domain.  Overrides ``robust`` when set.
+    vmax : float or None, optional
+        Maximum of the color scale domain.  Overrides ``robust`` when set.
+    center : float or None, optional
+        Value to center a diverging color scale on (maps to
+        ``scale.domainMid``).
+    robust : bool, default False
+        When ``True`` and ``vmin``/``vmax`` are unset, clip the color scale
+        to the 2nd and 98th percentiles of the data.
+    square : bool, default False
+        Force equal width and height per cell so the heatmap is square.
+    mask : any, optional
+        Reserved for future cell-masking support (no-op today).
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Possibly layered chart (``mark_rect`` + ``mark_text`` when
+        ``annot=True``).
+
+    Raises
+    ------
+    ValueError
+        If ``data`` has no numeric columns.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.heatmap(corr_df, cmap="rdbu", center=0)
+
+    Suppress annotations and use a custom domain:
+
+    >>> fm.heatmap(wide_df, annot=False, vmin=0, vmax=1, cmap="greens")
     """
     from ferrum import Unpivot
     from ferrum._coerce import to_arrow_table
@@ -239,12 +364,67 @@ def clustermap(
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Any:
-    """Clustered heatmap with row + column dendrograms — see ferrum-spec.md §3.14.
+    """Clustered heatmap with row and column dendrograms.
 
-    Returns a ``ClusterMapChart`` composing:
-      * a heatmap of the (reordered) wide-format DataFrame, and
-      * two ``mark_segment`` dendrograms reading the per-linkage ``segments``
-        named outputs.
+    Returns a ``ClusterMapChart`` composed of:
+
+    * a center heatmap of the hierarchically-reordered wide-format
+      DataFrame (``Linkage`` + ``Reorder`` + ``Unpivot`` + ``mark_rect``),
+    * a column dendrogram (top, ``mark_segment``, reading
+      ``col_link_segments``), and
+    * a row dendrogram (left, ``mark_segment`` + ``CoordFlip``, reading
+      ``row_link_segments``).
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Wide-format input.  Same layout requirements as ``heatmap``.
+    method : str, default "ward"
+        Linkage algorithm forwarded to ``Linkage`` (e.g. ``"ward"``,
+        ``"average"``, ``"complete"``, ``"single"``).
+    metric : str, default "euclidean"
+        Distance metric forwarded to ``Linkage`` (e.g. ``"euclidean"``,
+        ``"cosine"``, ``"correlation"``).
+    cmap : str, default "viridis"
+        Reserved for future use (no-op today). When wired, will select the
+        colormap for the center heatmap.
+    z_score : {0, 1, None}, optional
+        Standardise data along rows (``0``) or columns (``1``) before
+        clustering; forwarded to ``Linkage``.
+    standard_scale : {0, 1, None}, optional
+        Normalise to [0, 1] along rows (``0``) or columns (``1``);
+        forwarded to ``Linkage``.
+    figsize : tuple of (float, float), optional
+        Reserved for future use (no-op today). When wired, will control the
+        overall figure size.
+    dendrogram_ratio : float, default 0.2
+        Fraction of the total width/height allocated to each dendrogram
+        panel, forwarded to ``ClusterMapChart``.
+    theme : Theme, optional
+        Visual theme applied to the center and dendrogram charts.
+    **encode_kwargs
+        Reserved for future use (no-op today). Currently accepted but not
+        forwarded to the underlying chart.
+
+    Returns
+    -------
+    ClusterMapChart
+        Compound view with ``center``, ``row_dendrogram``, and
+        ``col_dendrogram`` sub-charts.
+
+    Raises
+    ------
+    ValueError
+        If ``data`` has no numeric columns.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.clustermap(expr_df, method="average", cmap="rdbu", z_score=1)
+
+    Correlation matrix with euclidean ward clustering:
+
+    >>> fm.clustermap(corr_df, cmap="viridis")
     """
     from ferrum import (
         ClusterMapChart, Linkage, Reorder, Unpivot,

@@ -1,4 +1,4 @@
-"""Phase 9e — lmplot and residplot."""
+"""Regression-plot convenience functions (lmplot, residplot)."""
 from __future__ import annotations
 from typing import Any
 
@@ -11,11 +11,10 @@ _VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
 
 
 def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
-    """Compose a scatter Chart and a (possibly layered) fit Chart into one
-    multi-layer Chart sharing the same data.
+    """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
 
-    Returns a new Chart with `_layers` = scatter-layer + fit-layers,
-    transforms accumulated.
+    Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
+    with transforms accumulated from both inputs.
     """
     s_resolved = scatter_chart._resolve_pending()
     f_resolved = fit_chart._resolve_pending()
@@ -74,10 +73,91 @@ def lmplot(
     logx: bool = False, theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
-    """Regression figure-level function — see ferrum-spec.md §3.14.
+    """Linear (and non-linear) regression scatter overlay.
 
-    Builds a scatter + fit overlay using the appropriate Phase 9b transform:
-    Smooth (lm/loess), Logistic, Glm, or Robust.
+    Builds a layered chart with an optional scatter (``mark_point``) and a
+    regression fit line, dispatching to the appropriate transform:
+
+    * ``"lm"``       -- ``mark_smooth(method="lm")`` (polynomial degree
+      controlled by ``order``).
+    * ``"loess"``    -- ``mark_smooth(method="loess")``.
+    * ``"logistic"`` -- ``Logistic`` transform + ``mark_line``.
+    * ``"glm"``      -- ``Glm`` transform + ``mark_line``.
+    * ``"robust"``   -- ``Robust`` transform + ``mark_line``.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str
+        Column name for the horizontal (predictor) axis (required).
+    y : str
+        Column name for the vertical (response) axis (required).
+    hue : str or encoding, optional
+        Column name to map to color; fit lines are drawn per hue level.
+    col : str, optional
+        Column name for faceting across columns.
+    row : str, optional
+        Column name for faceting across rows.
+    method : {"lm", "logistic", "glm", "loess", "robust"}, default "lm"
+        Fitting method.
+    ci : int or None, default 95
+        Confidence interval level (0–100) shown as a band around the fit
+        line.  Pass ``None`` to suppress.
+    order : int, default 1
+        Polynomial degree forwarded to ``mark_smooth`` when
+        ``method="lm"``.
+    scatter : bool, default True
+        Include a scatter layer (``mark_point``).  Set to ``False`` to
+        show only the fit line.
+    scatter_kws : dict, optional
+        Reserved for future use (no-op today). When wired, will forward extra
+        keyword arguments to the scatter ``mark_point`` call.
+    line_kws : dict, optional
+        Reserved for future use (no-op today). When wired, will forward extra
+        keyword arguments to the regression-line mark call.
+    truncate : bool, default False
+        Reserved for future line-truncation support (no-op today; the
+        fit line already extends to the data range via the Smooth grid).
+    x_bins : any, optional
+        Forwarded as ``x_bins`` to ``mark_smooth`` for binning the
+        x-axis before fitting (``method="lm"`` only).
+    x_estimator : any, optional
+        Forwarded as ``x_estimator`` to ``mark_smooth`` (``method="lm"``
+        only).
+    x_jitter : float or None, optional
+        When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
+        scatter layer.
+    logx : bool, default False
+        Apply a ``log`` scale to the x-axis on both scatter and fit layers.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Layered chart (scatter + fit) or fit-only when ``scatter=False``.
+        May be faceted.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not one of the supported values.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.lmplot(df, x="total_bill", y="tip")
+
+    Logistic regression with per-sex fit lines:
+
+    >>> fm.lmplot(df, x="total_bill", y="smoker_int", method="logistic", hue="sex")
+
+    Polynomial fit (degree 2) with no confidence band:
+
+    >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
     if method not in _VALID_METHODS:
         raise ValueError(
@@ -168,11 +248,55 @@ def residplot(
     label: Any = None, color: Any = None, theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
-    """Residual-diagnostic figure-level function — see ferrum-spec.md §3.14.
+    """Residual-diagnostic scatter plot.
 
-    Builds a scatter plot of (x, residual) using ``Smooth(output='residuals')``
-    (or ``Robust(output='residuals')`` when ``robust=True``); optionally
-    layers a lowess smoother over the residuals.
+    Computes regression residuals via ``Smooth(output="residuals")`` (or
+    ``Robust(output="residuals")`` when ``robust=True``) and plots
+    ``(x, residual)`` with ``mark_point``.  When ``lowess=True``, a
+    ``mark_line`` lowess smoother is layered over the residuals to help
+    diagnose non-linearity.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str
+        Column name for the horizontal axis (predictor; required).
+    y : str
+        Column name used to compute residuals (response; required).
+    lowess : bool, default False
+        Overlay a lowess smoother on the residuals using
+        ``Smooth(method="loess")``.
+    order : int, default 1
+        Polynomial degree of the regression used to compute residuals
+        (forwarded to ``Smooth`` when ``robust=False``).
+    robust : bool, default False
+        Use ``Robust`` regression (MM-estimator) instead of OLS when
+        computing residuals.
+    dropna : bool, default True
+        Reserved for future NaN-dropping logic (no-op today).
+    label : any, optional
+        Reserved for future legend-label support (no-op today).
+    color : str or encoding, optional
+        Column name or constant color forwarded to ``Chart.encode(color=)``.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Scatter of residuals (possibly with a lowess layer).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.residplot(df, x="total_bill", y="tip")
+
+    Robust residuals with a lowess overlay:
+
+    >>> fm.residplot(df, x="size", y="tip", robust=True, lowess=True)
     """
     # Build the residuals transform — unnamed so it advances the chained
     # output. Smooth/Robust's residuals output schema is literal [x, residual]

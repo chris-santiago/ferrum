@@ -17,6 +17,9 @@ import ferrum
 _DOC_ALLOWLIST: set[str] = {
     # Task 2 — top-level Chart class
     "Chart",
+    # Task 3 — figure-level functions
+    "displot", "catplot", "lmplot", "residplot",
+    "pairplot", "heatmap", "clustermap", "jointplot",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
