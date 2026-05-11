@@ -787,6 +787,17 @@ Theme(
 )
 ```
 
+> **2026-05-11 (Themes-T1):** Every key listed in the `Theme(...)` block above
+> is now plumbed end-to-end. The Python `Theme` class validates unknown
+> kwargs at construction time (raises `ValueError`); the Rust `theme_from_dict`
+> binding likewise rejects unknown keys. Spec key aliases (e.g. `background`
+> ↔ `background_color`) are accepted by both. Fallback chains (`title_color
+> → font_color`, `label_color → font_color`, `title_font_family →
+> font_family`, `label_font_family → font_family`) are resolved Python-side
+> in `Theme.to_theme_inputs_dict()` so the Rust binding sees a fully-populated
+> dict. Render-side consumption of the newly-plumbed keys lands in Themes-T2
+> through T4; defaults remain at their pre-T1 values in this sub-phase.
+
 **Built-in themes** (`ferrum.themes`)
 
 | Name | Description |
