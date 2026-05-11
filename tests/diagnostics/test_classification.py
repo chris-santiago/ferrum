@@ -133,13 +133,17 @@ def test_calibration_chart_figure_function(binary_source):
     assert "<svg" in svg
 
 
-def test_calibration_chart_multi_model_rejected():
+def test_calibration_chart_multi_model_variadic_overlay():
+    """Multi-model calibration_chart (Phase 10h) routes through
+    ComparedModelSource, auto-naming each positional model 'model_0',
+    'model_1', etc., and overlays the resulting reliability curves.
+    """
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     src = ferrum.ModelSource(model, X, df["y"])
-    with pytest.raises(NotImplementedError, match="Multi-model calibration"):
-        ferrum.calibration_chart(src, src)
+    chart = ferrum.calibration_chart(src, src)
+    assert "<svg" in chart.show_svg()
 
 
 def test_gain_chart_figure_function(binary_source):

@@ -311,3 +311,17 @@ def test_golden_parallel_coordinates_multiclass():
         rescale="minmax",
     )
     _check_golden(chart.show_svg(), "parallel_coordinates_multiclass")
+
+
+# --- 10h goldens (multi-model compare) ---
+
+
+def test_golden_roc_chart_compare_two_models():
+    """ROC overlay with two named models. Uses the same fixture for both
+    so the two curves overlap — the value here is regression detection on
+    the multi-model serialization path, not a visual demonstration of
+    diverging curves.
+    """
+    model, X, y = _binary_xy()
+    chart = ferrum.roc_chart({"a": model, "b": model}, X, y)
+    _check_golden(chart.show_svg(), "roc_chart_compare_two_models")

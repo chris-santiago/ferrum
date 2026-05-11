@@ -61,7 +61,7 @@ from ferrum.repeat import Repeat
 from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
 
 # Phase 10 — model diagnostics
-from ferrum._diagnostics import ModelSource
+from ferrum._diagnostics import ComparedModelSource, ModelSource
 from ferrum._diagnostics.visualizers import (
     CalibrationVisualizer,
     ClassBalanceVisualizer,
@@ -163,7 +163,7 @@ __all__ = [
     "displot", "catplot", "lmplot", "residplot",
     "pairplot", "heatmap", "clustermap", "jointplot",
     # Phase 10 — model diagnostics
-    "ModelSource",
+    "ModelSource", "ComparedModelSource",
     "FerrumVisualizer",
     "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
     "ROCVisualizer", "PRVisualizer", "CalibrationVisualizer",

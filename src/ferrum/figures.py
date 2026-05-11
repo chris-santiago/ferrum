@@ -18,19 +18,39 @@ def _resolve_source(
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ModelSource (or comparable)."""
+    """Resolve a figure-function input into a ``ModelSource`` or
+    ``ComparedModelSource``.
+
+    Dispatch order:
+    - If ``model_or_source`` is already a ``ComparedModelSource``, return it.
+    - If ``compare`` is a dict, build a ``ComparedModelSource`` over
+      ``{"base": model_or_source, **compare}``.
+    - If ``model_or_source`` itself is a dict (one-arg compare form), build
+      a ``ComparedModelSource`` from it.
+    - If ``model_or_source`` is a ``ModelSource``, return it.
+    - Otherwise wrap ``model_or_source`` in a fresh ``ModelSource``.
+    """
     import ferrum
+    from ferrum._diagnostics.source import ComparedModelSource
+
+    if isinstance(model_or_source, ComparedModelSource):
+        return model_or_source
     if compare is not None:
-        raise NotImplementedError(
-            "compare= support lands in Phase 10h; for now pass a single model "
-            "or a pre-built ModelSource."
+        if not isinstance(compare, dict):
+            raise TypeError(
+                f"compare= must be dict[str, model] or None; got "
+                f"{type(compare).__name__}."
+            )
+        models = {"base": model_or_source, **compare}
+        return ferrum.ModelSource.compare(
+            models, X, y, random_state=random_state,
+        )
+    if isinstance(model_or_source, dict):
+        return ferrum.ModelSource.compare(
+            model_or_source, X, y, random_state=random_state,
         )
     if isinstance(model_or_source, ferrum.ModelSource):
         return model_or_source
-    if isinstance(model_or_source, dict):
-        raise NotImplementedError(
-            "Multi-model dict input lands in Phase 10h."
-        )
     return ferrum.ModelSource(model_or_source, X, y, random_state=random_state)
 
 
@@ -138,21 +158,45 @@ def calibration_chart(
 ):
     """Calibration (reliability) curve — see ferrum-spec.md §3.14.
 
-    Variadic in ``*model_or_sources`` for the eventual multi-model overlay
-    (Phase 10h). Phase 10b accepts a single model or source only.
+    Variadic in ``*model_or_sources``: pass a single model / ``ModelSource``
+    for a one-curve diagram, or two or more for an overlay. Multi-model
+    inputs may be supplied as separate positional arguments
+    (``calibration_chart(model_a, model_b, X=..., y=...)``) or as a single
+    dict positional argument
+    (``calibration_chart({"a": model_a, "b": model_b}, X=..., y=...)``).
+    The dict form preserves user-supplied model names; the positional form
+    auto-names them ``"model_0"``, ``"model_1"``, etc.
     """
     if len(model_or_sources) == 0:
         raise TypeError(
             "calibration_chart requires at least one model or ModelSource"
         )
-    if len(model_or_sources) > 1:
-        raise NotImplementedError(
-            "Multi-model calibration_chart ships in Phase 10h."
-        )
     from ferrum._diagnostics.charts import _calibration_chart_from_source
-    source = _resolve_source(
-        model_or_sources[0], X, y, random_state=random_state,
-    )
+    if len(model_or_sources) == 1:
+        source = _resolve_source(
+            model_or_sources[0], X, y, random_state=random_state,
+        )
+    else:
+        # Multiple positional inputs → build a ComparedModelSource. When
+        # the inputs are already ModelSource instances, wrap them directly
+        # (X/y are already bound on each source). When they're raw fitted
+        # models, build new ModelSources sharing the supplied X/y via
+        # ModelSource.compare.
+        import ferrum
+        from ferrum._diagnostics.source import ComparedModelSource
+
+        if all(isinstance(m, ferrum.ModelSource) for m in model_or_sources):
+            sources = {
+                f"model_{i}": m for i, m in enumerate(model_or_sources)
+            }
+            source = ComparedModelSource(sources)
+        else:
+            models = {
+                f"model_{i}": m for i, m in enumerate(model_or_sources)
+            }
+            source = _resolve_source(
+                models, X, y, random_state=random_state,
+            )
     return _calibration_chart_from_source(
         source, n_bins=n_bins, strategy=strategy, theme=theme,
     )

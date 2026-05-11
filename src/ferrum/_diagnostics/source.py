@@ -97,6 +97,27 @@ class ModelSource:
     def capabilities(self) -> frozenset[str]:
         return self._capabilities
 
+    @classmethod
+    def compare(
+        cls,
+        models: dict[str, Any],
+        X: Any,
+        y: Any = None,
+        **kwargs: Any,
+    ) -> "ComparedModelSource":
+        """Build a ``ComparedModelSource`` over one ``ModelSource`` per model.
+
+        Each value in ``models`` is wrapped in its own ``ModelSource`` with the
+        shared ``X`` and ``y``. The returned ``ComparedModelSource`` proxies
+        every derived-data method through all wrapped sources and stamps the
+        model name as a ``model`` column on the concatenated output, so
+        downstream chart builders can route ``color="model"``.
+        """
+        sources = {
+            name: cls(model, X, y, **kwargs) for name, model in models.items()
+        }
+        return ComparedModelSource(sources)
+
     def _require_capability(self, attr: str, method_name: str) -> None:
         if attr not in self._capabilities:
             raise AttributeError(
@@ -1412,3 +1433,95 @@ def _compute_avg_roc(y_true, y_score_matrix, classes, average, drop_intermediate
          "class": average, "auc": auc}
         for f, t in zip(grid, tpr_avg)
     ]
+
+
+# ---- Phase 10h: ComparedModelSource ----
+
+
+# Tuple of method names that `ComparedModelSource.__getattr__` proxies to
+# the underlying ``ModelSource`` instances. Mirrors every Phase 10
+# derived-data method on ``ModelSource``. When adding a new diagnostic
+# method, append it here so the multi-model dispatch picks it up.
+_COMPARED_METHODS: frozenset[str] = frozenset({
+    "predictions",
+    "probabilities",
+    "roc_curve",
+    "pr_curve",
+    "calibration_curve",
+    "cumulative_gain",
+    "lift_curve",
+    "discrimination_threshold",
+    "confusion_matrix",
+    "importances",
+    "shap_values",
+    "partial_dependence",
+    "learning_curve",
+    "validation_curve",
+    "cv_scores",
+    "alpha_selection",
+    "silhouette",
+    "pca_variance",
+    "embeddings",
+    "intercluster_distance",
+    "rank1d",
+    "rank2d",
+})
+
+
+class ComparedModelSource:
+    """Multi-model wrapper exposing the same surface as ``ModelSource``.
+
+    Every derived-data method is proxied through each underlying
+    ``ModelSource`` and the per-model outputs are concatenated with a
+    ``model: Utf8`` column stamped on each frame, so downstream chart
+    builders can route ``color="model"`` to render one curve per model.
+
+    ``_X`` and ``_y`` resolve to the first source's data (every wrapped
+    source shares ``X`` / ``y`` by construction in ``ModelSource.compare``,
+    so any one will do); accessing ``_model`` raises since there is no
+    single estimator. ``model_names`` reports the configured ordering.
+    """
+
+    __slots__ = ("_sources",)
+
+    def __init__(self, sources: dict[str, ModelSource]):
+        if not sources:
+            raise ValueError("ComparedModelSource requires at least one source.")
+        self._sources = dict(sources)
+
+    @property
+    def model_names(self) -> list[str]:
+        return list(self._sources.keys())
+
+    def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> pl.DataFrame:
+        frames: list[pl.DataFrame] = []
+        for name, src in self._sources.items():
+            df = getattr(src, method)(*args, **kwargs)
+            frames.append(df.with_columns(pl.lit(name).alias("model")))
+        return pl.concat(frames, how="vertical_relaxed")
+
+    def __getattr__(self, name: str) -> Any:
+        # __slots__ makes attribute access strict; the runtime falls through
+        # to __getattr__ only for unknown names. We route a frozen list of
+        # ModelSource methods through `_dispatch`, expose `_X`/`_y` from the
+        # first wrapped source (chart builders sometimes need them), and
+        # explicitly forbid `_model` access since the answer would be
+        # nonsensical for a multi-model wrapper.
+        if name in _COMPARED_METHODS:
+            method = name
+            return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
+        if name in ("_X", "_y", "_feature_names", "_class_names"):
+            return getattr(next(iter(self._sources.values())), name)
+        if name == "_model":
+            raise AttributeError(
+                "ComparedModelSource has no single _model. Iterate "
+                "ComparedModelSource._sources.values() to access each "
+                "wrapped ModelSource's model."
+            )
+        raise AttributeError(
+            f"ComparedModelSource has no attribute {name!r}. "
+            f"Methods routed through .compare: {sorted(_COMPARED_METHODS)}"
+        )
+
+    def __repr__(self) -> str:
+        return f"ComparedModelSource({list(self._sources.keys())!r})"

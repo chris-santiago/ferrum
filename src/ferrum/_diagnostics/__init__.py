@@ -6,6 +6,6 @@ Public surface:
 """
 from __future__ import annotations
 
-from .source import ModelSource
+from .source import ComparedModelSource, ModelSource
 
-__all__ = ["ModelSource"]
+__all__ = ["ComparedModelSource", "ModelSource"]
