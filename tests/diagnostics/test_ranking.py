@@ -265,6 +265,22 @@ def test_parallel_coordinates_visualizer():
     assert svg.count("<polyline") == df.height
 
 
+def test_parallel_coordinates_visualizer_y_attached_as_hue():
+    """When hue is unset and fit(X, y) is called, y should drive the
+    color encoding under '_hue' — sklearn convention that y is the
+    supervisory signal.
+    """
+    df = load_dataset("multiclass_classification")
+    X = df.select(_MULTICLASS_FEATURES)
+    y = df["y"]
+    viz = ferrum.ParallelCoordinatesVisualizer().fit(X, y)
+    assert viz._fitted
+    svg = viz.show().show_svg()
+    # n_classes distinct color groups should mean >=2 stroke colors
+    # in the SVG (mark_parallel_coordinates groups polylines by hue).
+    assert svg.count("<polyline") == df.height
+
+
 def test_visualizer_show_before_fit_raises():
     viz = ferrum.Rank1DVisualizer()
     with pytest.raises(RuntimeError, match="must be fit"):

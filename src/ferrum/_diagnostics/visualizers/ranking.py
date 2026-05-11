@@ -220,8 +220,10 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         Subset of column names to include as axes.  When ``None``, all
         non-``hue`` columns are used.
     hue : str, optional
-        Column name used to color-encode each sample line.  ``None``
-        produces a single-color chart.
+        Column name used to color-encode each sample line. ``None``
+        produces a single-color chart unless ``fit(X, y)`` is called
+        with ``y`` — in that case ``y`` is attached as the hue column
+        automatically.
     rescale : {"minmax", "zscore", None}, default "minmax"
         Per-axis normalization applied before plotting.
 
@@ -264,12 +266,20 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         self.alpha = alpha
 
     def fit(self, X: Any, y: Any = None) -> "ParallelCoordinatesVisualizer":
-        del y
+        # When the caller passes y but didn't set hue, route y as the
+        # color encoding under a reserved column name. Matches the
+        # sklearn convention that y is the supervisory signal — using it
+        # as the visual grouping is the natural default when no explicit
+        # hue column is named.
+        effective_hue = self.hue
+        if self.hue is None and y is not None:
+            X = _attach_hue_from_y(X, y)
+            effective_hue = "_hue"
         # n_samples / n_features bookkeeping for the repr.
         if isinstance(X, pl.DataFrame):
             n_samples = X.height
             n_features = len(self.features) if self.features else (
-                X.width - (1 if self.hue in X.columns else 0)
+                X.width - (1 if effective_hue in X.columns else 0)
             )
         elif hasattr(X, "shape"):
             n_samples = int(X.shape[0])
@@ -287,13 +297,40 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         self._chart = _parallel_coords_chart_from_dataframe(
             X,
             features=self.features,
-            hue=self.hue,
+            hue=effective_hue,
             rescale=self.rescale,
             alpha=self.alpha,
             theme=self.theme,
         )
         self._fitted = True
         return self
+
+
+def _attach_hue_from_y(X: Any, y: Any) -> Any:
+    """Attach ``y`` as a ``_hue`` column on ``X`` for the parallel
+    coordinates color encoding.
+
+    Handles polars DataFrame, pandas DataFrame, and 2D numpy. Returns a
+    new DataFrame; never mutates the input.
+    """
+    if isinstance(y, pl.Series):
+        hue_vals = y.to_list()
+    elif hasattr(y, "to_list"):
+        hue_vals = list(y.to_list())
+    else:
+        hue_vals = list(np.asarray(y).tolist())
+
+    if isinstance(X, pl.DataFrame):
+        return X.with_columns(pl.Series("_hue", hue_vals))
+    if hasattr(X, "assign") and hasattr(X, "columns"):
+        # pandas DataFrame.
+        return X.assign(_hue=hue_vals)
+    # 2D numpy → polars first.
+    arr = np.asarray(X, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"X must be 2D; got shape {arr.shape}")
+    df = pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    return df.with_columns(pl.Series("_hue", hue_vals))
 
 
 def _columns_and_array(X: Any) -> tuple[list[str], np.ndarray]:
