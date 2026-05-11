@@ -277,3 +277,13 @@ def test_golden_intercluster_distance_kmeans():
         model, df, k=3, method="mds", random_state=0,
     )
     _check_golden(chart.show_svg(), "intercluster_distance_mds_3cluster")
+
+
+def test_golden_decision_boundary_binary():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.decision_boundary_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        features=(0, 1), grid_resolution=50, proba=True,
+    )
+    _check_golden(chart.show_svg(), "decision_boundary_binary_logistic")

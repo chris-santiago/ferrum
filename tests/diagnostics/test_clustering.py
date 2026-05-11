@@ -187,3 +187,59 @@ def test_mark_intercluster_distance_rejects_unknown_kwarg():
             .mark_intercluster_distance(strokr="red")
             .show_svg()
         )
+
+
+# --- Task 32: decision_boundary --------------------------------------
+
+
+def test_decision_boundary_chart_binary():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    # binary_logistic was trained on all four features; pass the full
+    # feature set and let features=(0, 1) select the two plotting axes.
+    # The remaining columns get fixed at their column means inside the
+    # builder when sweeping the grid.
+    chart = ferrum.decision_boundary_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        features=(0, 1), grid_resolution=50, proba=True,
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_decision_boundary_rejects_three_features():
+    """features=(0, 1, 2) must raise; the path needs exactly 2 axes."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    with pytest.raises(ValueError, match="exactly 2"):
+        ferrum.decision_boundary_chart(
+            model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+            features=(0, 1, 2), grid_resolution=10,
+        )
+
+
+def test_decision_boundary_predict_path_no_proba():
+    """Models without predict_proba use the class-index path."""
+    from sklearn.svm import SVC
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1"])
+    model = SVC(kernel="linear", probability=False).fit(
+        X.to_numpy(), df["y"].to_numpy(),
+    )
+    chart = ferrum.decision_boundary_chart(
+        model, X, df["y"], features=(0, 1), grid_resolution=20, proba=False,
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_mark_decision_boundary_rejects_unknown_kwarg():
+    """Random df-shaped frame triggers the rect quant-range path."""
+    import polars as pl
+    grid = pl.DataFrame({
+        "x":  [0.0, 1.0],
+        "x2": [1.0, 2.0],
+        "y":  [0.0, 0.0],
+        "y2": [1.0, 1.0],
+        "z":  [0.0, 1.0],
+    })
+    with pytest.raises(TypeError, match="unknown keyword"):
+        ferrum.Chart(grid).mark_decision_boundary(strokr="red").show_svg()

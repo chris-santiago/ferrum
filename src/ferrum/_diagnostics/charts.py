@@ -796,17 +796,19 @@ def _decision_boundary_chart_from_source(
     features: tuple = (0, 1),
     grid_resolution: int = 200,
     proba: bool = False,
-    scatter: bool = True,
+    scatter: bool = False,
     theme: Any = None,
 ):
-    """Decision-boundary heatmap + optional scatter overlay of (X, y).
+    """Decision-boundary heatmap of model predictions over a 2D feature grid.
 
     Pre-computes a grid_resolution × grid_resolution grid of x/x2/y/y2
     cell bounds and the model's prediction (class index when
     ``proba=False``, probability when ``proba=True``). The grid is fed to
-    ``mark_decision_boundary`` (rect-based); when ``scatter=True`` and
-    the source has ``y``, a ``mark_point`` layer is composed on top via
-    the multi-data ``+`` compositor.
+    ``mark_decision_boundary`` (rect-based). When ``scatter=True`` an
+    overlay scatter of the training points is composed via ferrum's
+    ``+`` compositor — note that multi-data layering currently renders
+    as horizontal concatenation per the ChartSpec one-batch contract;
+    ``scatter=False`` (default) keeps the focus on the boundary itself.
     """
     import ferrum
     import numpy as np
