@@ -371,3 +371,17 @@ identically. **Documented in this sweep.**
 
 ---
 
+
+## Post-sweep additions
+
+### `clustermap` dendrogram panels show faint gridlines behind tree lines
+
+Dendrograms are internally rendered as charts with axes, so the chart-wide
+gridlines layer paints faint lines behind the dendrogram tree branches.
+Users can suppress via `Theme(grid=False)` if desired. Not a regression —
+the dendrograms themselves render correctly; this is purely a visual
+cleanup concern.
+
+**File:** `src/ferrum/figure/matrix.py` — `clustermap`.
+
+---
