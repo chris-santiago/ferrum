@@ -2,12 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the full model-diagnostics layer (`ferrum-spec.md §3.1 / §3.3 / §3.14 / §3.15`) — `ModelSource` adapter with 22 derived-data methods, 26 model-diagnostic marks, 21 Group B figure functions, 25 sklearn-protocol Visualizers, one new Rust function (`kendall_tau_b`), one new `RenderConfig` field (`numeric_precision`). Every spec parameter implemented fully; no warn-fallbacks; sklearn never imported unless the user's model is from sklearn.
+**Goal:** Ship the full model-diagnostics layer (`ferrum-spec.md §3.1 / §3.3 / §3.14 / §3.15`) — `ModelSource` adapter with 22 derived-data methods, 26 model-diagnostic marks, 21 Group B figure functions, 25 sklearn-protocol Visualizers, one new Rust function (`kendall_tau_b`). Every spec parameter implemented fully; no warn-fallbacks; sklearn never imported unless the user's model is from sklearn.
 
 **Architecture:**
 - **Three-layer Python adapter:** ModelSource (Python, lazy-imported sklearn delegation) → private chart builders → public figure functions + visualizers. Zero new Rust `Mark` or `Transform` variants — all 26 marks desugar Python-side over existing Phase 5/8b/9 primitives.
 - **Single Rust addition:** `ferrum._core.kendall_tau_b` (Knight's O(n log n)) for the one statistic where vectorized NumPy can't compete at training-set scale.
-- **Tiered SVG goldens:** pre-fit sklearn models serialized via `skops` in `tests/fixtures/models/` make ~25 figures byte-identical; ~12 solver-sensitive figures use `RenderConfig(numeric_precision=4)` to absorb cross-platform float variance.
+- **Single-tier SVG goldens:** pre-fit sklearn models serialized via `skops` in `tests/fixtures/models/` make every Phase 10 figure byte-identical to render at the renderer's existing 3-decimal-place quantization (`fmt_f` in `crates/ferrum-core/src/render/svg.rs`). No new Rust quantization knob required.
 
 **Tech Stack:** Rust 2021 (PyO3 0.28, abi3-py310). Python ≥3.10 (numpy, polars, pyarrow). New optional extras: `ferrum[models]` (sklearn), `[shap]`, `[umap]`, `[ml-all]`. Dev-only deps: `scipy` (parity tests), `skops` (fixture serialization).
 
@@ -27,9 +27,9 @@
    - `cargo test -p ferrum-core` → **496 passed**
    - `uv run pytest` → **480 passed, 5 skipped**
 3. **Final targets at Phase 10 done:**
-   - `cargo test -p ferrum-core` ≥ **510** (≈14 new tests: kendall_tau_b correctness + numeric_precision formatter)
+   - `cargo test -p ferrum-core` ≥ **501** (≈5 new tests: kendall_tau_b correctness against scipy + edge cases)
    - `uv run pytest` ≥ **610** (≈130 new tests across ModelSource methods, parity vs scipy, mark coverage, no-sklearn-at-import, figure functions, visualizers, e2e renders)
-   - ~25 byte-identical + ~12 quantized-4dp SVG goldens.
+   - ~35 SVG goldens at the renderer's existing 3-dp quantization (single tier).
    - 0 new pytest skips, 0 new xfails on top of Phase 9's 5 skipped.
 4. **Conventions (from `CLAUDE.md`):**
    - Plain feature branch, NOT a worktree (per memory `feedback_ferrum_workflow_branches`).
@@ -48,18 +48,18 @@ Sub-batches and their tasks, in build order. Each sub-batch lands on `feat/phase
 | Sub-batch | Tasks | Theme |
 |---|---|---|
 | **Pre-flight** | 0–4 | Branch creation; `pyproject.toml` extras + dev deps; sklearn version pin; `tests/fixtures/` infrastructure; verify shap/umap install. |
-| **10a-foundation** | 5–11 | Rust `RenderConfig.numeric_precision` + Python plumbing; `_diagnostics` package skeleton; `ModelSource` class + protocol detection + lazy-import helpers; `.predictions()`, `.probabilities()`; `mark_residuals` + `mark_prediction_error`; `residuals_chart`; `ResidualsVisualizer` + `PredictionErrorVisualizer` + `CooksDistanceVisualizer`; first goldens. |
-| **10b-cls-curves** | 12–17 | `.roc_curve()`, `.pr_curve()`, `.calibration_curve()`, `.cumulative_gain()`, `.lift_curve()`, `.discrimination_threshold()`; 6 marks; 6 figure functions; 4 visualizers; goldens (all byte-identical). |
+| **10a-foundation** | 5–11 | Task 5 DROPPED (renderer already 3-dp quantized). `_diagnostics` package skeleton; `ModelSource` class + protocol detection + lazy-import helpers; `.predictions()`, `.probabilities()`; `mark_residuals` + `mark_prediction_error`; `residuals_chart`; `ResidualsVisualizer` + `PredictionErrorVisualizer` + `CooksDistanceVisualizer`; first goldens. |
+| **10b-cls-curves** | 12–17 | `.roc_curve()`, `.pr_curve()`, `.calibration_curve()`, `.cumulative_gain()`, `.lift_curve()`, `.discrimination_threshold()`; 6 marks; 6 figure functions; 4 visualizers; goldens at 3 dp. |
 | **10c-cls-matrix** | 18–20 | `.confusion_matrix()`; 2 marks (`mark_confusion`, `mark_class_prediction_error`); 2 figure functions; 4 visualizers (`Confusion`, `ClassificationReport`, `ClassPredictionError`, `ClassBalance`); goldens. |
-| **10d-explain** | 21–25 | `.importances()`, `.shap_values()`, `.partial_dependence()`; 5 marks (`mark_importance`, `mark_shap_beeswarm`, `mark_shap_bar`, `mark_shap_waterfall`, `mark_pdp`); 2 figure functions; 2 visualizers; SHAP optional extra wired; goldens (mixed byte-identical + quantized). |
-| **10e-cv** | 26–29 | `.learning_curve()`, `.validation_curve()`, `.cv_scores()`, `.alpha_selection()`; 4 marks; 4 figure functions; 4 visualizers; goldens (all quantized-4dp). |
-| **10f-cluster** | 30–34 | `.silhouette()`, `.intercluster_distance()`, `.embeddings()`, `.pca_variance()`; 4 marks (`mark_silhouette`, `mark_intercluster_distance`, `mark_pca_scree`, `mark_decision_boundary`); 4 figure functions; 5 visualizers; UMAP optional extra wired; goldens (mixed). |
-| **10g-rank** | 35–39 | Rust `kendall_tau_b` (Knight's algorithm); Python `_diagnostics/stats.py` with vectorized NumPy implementations (pearson, spearman, shapiro_w, variance/covariance ranking); scipy parity tests; `.rank1d()`, `.rank2d()`; 3 marks; 2 figure functions; 3 visualizers; goldens (all byte-identical). |
+| **10d-explain** | 21–25 | `.importances()`, `.shap_values()`, `.partial_dependence()`; 5 marks (`mark_importance`, `mark_shap_beeswarm`, `mark_shap_bar`, `mark_shap_waterfall`, `mark_pdp`); 2 figure functions; 2 visualizers; SHAP optional extra wired; goldens at 3 dp. |
+| **10e-cv** | 26–29 | `.learning_curve()`, `.validation_curve()`, `.cv_scores()`, `.alpha_selection()`; 4 marks; 4 figure functions; 4 visualizers; goldens at 3 dp. |
+| **10f-cluster** | 30–34 | `.silhouette()`, `.intercluster_distance()`, `.embeddings()`, `.pca_variance()`; 4 marks (`mark_silhouette`, `mark_intercluster_distance`, `mark_pca_scree`, `mark_decision_boundary`); 4 figure functions; 5 visualizers; UMAP optional extra wired; goldens at 3 dp. |
+| **10g-rank** | 35–39 | Rust `kendall_tau_b` (Knight's algorithm); Python `_diagnostics/stats.py` with vectorized NumPy implementations (pearson, spearman, shapiro_w, variance/covariance ranking); scipy parity tests; `.rank1d()`, `.rank2d()`; 3 marks; 2 figure functions; 3 visualizers; goldens at 3 dp. |
 | **10h-finalize** | 40–44 | `ModelSource.compare(...)` + `ComparedModelSource`; spec drift notes applied to `ferrum-spec.md`; `PHASE_9_PLUS_MARKS` audit; `ferrum-phases.md` Phase 10 → `done`; user-confirmed merge to `main`. |
 
 **Parallelization guidance (for subagent-driven execution):**
 - Pre-flight tasks (0–4) are **strictly sequential**.
-- Within 10a, Tasks 5 (Rust numeric_precision) and 6 (Python `_diagnostics/` skeleton + deps) are parallelizable. Task 7 (ModelSource shell) depends on 6. Tasks 8–11 depend on 7.
+- Within 10a, Task 5 DROPPED (renderer already 3-dp quantized). Task 6 lands the `_diagnostics/` skeleton + deps. Task 7 (ModelSource shell) depends on 6. Tasks 8–11 depend on 7. Strictly sequential 6→7→8→9→10→11.
 - Within 10b, the six diagnostic families (ROC, PR, calibration, gain, lift, discrimination_threshold) are **mutually parallel** — each adds one ModelSource method + one mark + one figure + one visualizer + one golden. Recommend grouping as 3 parallel tasks (12: ROC+PR, 13: calibration+gain+lift, 14: discrimination_threshold; 15–17: visualizers).
 - 10c is small (3 tasks); recommend sequential.
 - 10d: Task 21 (importances + mark_importance + importance_chart) is independent of Task 22 (SHAP family) and Task 23 (PDP). All three parallelizable. Tasks 24–25 (visualizers) come after.
@@ -85,8 +85,7 @@ When subagents run in parallel, the orchestrator merges sequentially with `cargo
 | Path | Change |
 |---|---|
 | `lib.rs` | Register `kendall_tau_b` as a module function via `#[pyfunction]`. |
-| `spec/render.rs` | Add `numeric_precision: Option<u8>` field on `RenderConfig` with `#[serde(default, skip_serializing_if = "Option::is_none")]`; constructor handling; PyO3 getter/setter; round-trip test. |
-| `render/svg.rs` | Add `fmt_float(buf, val, precision)` helper; route all existing float-emit sites through it; pass `render_config.numeric_precision` into the formatter at draw entry. |
+| *(Task 5 DROPPED)* | The renderer already routes every float through `fmt_f` which quantizes to `FLOAT_PRECISION = 3`. No `RenderConfig` change required for cross-platform-stable goldens. |
 
 ### New Python files (`src/ferrum/`)
 
@@ -115,7 +114,7 @@ When subagents run in parallel, the orchestrator merges sequentially with `cargo
 | Path | Change |
 |---|---|
 | `__init__.py` | Re-export `ModelSource`, `ComparedModelSource`, 26 diagnostic marks, 21 figure functions, 25 visualizers; thread `figures` and `_diagnostics.visualizers` submodules into the public namespace. |
-| `_core.pyi` | Type stub for `kendall_tau_b(x: np.ndarray, y: np.ndarray) -> dict`; `RenderConfig.numeric_precision: int | None` attribute. |
+| `_core.pyi` | Type stub for `kendall_tau_b(x: np.ndarray, y: np.ndarray) -> dict`. |
 | `chart.py` | Add `mark_residuals` / `mark_prediction_error` / `mark_confusion` / `mark_roc` / ...26 mark methods (each delegating to the value class's `_expand`). |
 | `marks/deferred.py` | Audit `PHASE_9_PLUS_MARKS` at Phase 10 close-out — must retain only `arc`, `image`, `geoshape`, `label`. |
 
@@ -147,8 +146,7 @@ When subagents run in parallel, the orchestrator merges sequentially with `cargo
 | `diagnostics/test_ranking.py` | rank1d, rank2d, parallel_coordinates (10g). |
 | `diagnostics/test_compare.py` | `ModelSource.compare()` + every figure function with `compare=` kwarg (10h). |
 | `diagnostics/test_mark_coverage.py` | Asserts every Phase 10 mark is implemented and not in `PHASE_9_PLUS_MARKS`. |
-| `goldens/phase_10/byte_identical/*.svg` | ~25 byte-identical goldens. |
-| `goldens/phase_10/quantized_4dp/*.svg` | ~12 quantized goldens. |
+| `goldens/phase_10/*.svg` | ~35–40 SVG goldens at 3-dp quantization (single tier — see Task 5 note). |
 | `conftest.py` | Session-level fixture asserting sklearn/shap/umap/scipy/skops are installed and that sklearn version matches `SKLEARN_VERSION`. |
 
 ### Modified docs
@@ -644,141 +642,32 @@ No file changes from this task. Tracking-only.
 
 ## 10a — Foundation + regression diagnostics
 
-### Task 5: `RenderConfig.numeric_precision` field (Rust)
+### Task 5: ~~`RenderConfig.numeric_precision` field~~ — DROPPED
 
-**Files:**
-- Modify: `crates/ferrum-core/src/spec/render.rs`
-- Modify: `crates/ferrum-core/src/render/svg.rs`
-- Modify: `src/ferrum/_core.pyi`
+**This task is dropped.** During 10a execution we discovered that
+`crates/ferrum-core/src/render/svg.rs` already routes every emitted float
+through `fmt_f(x)` which quantizes to `FLOAT_PRECISION = 3` decimal places
+(constant at `crates/ferrum-core/src/render/mod.rs:26`). Phase 9 SVG goldens
+are therefore already 3-dp quantized — tighter than the 4-dp the plan
+originally proposed.
 
-- [ ] **Step 1: Locate the existing RenderConfig struct**
+**Consequences:**
 
-```bash
-grep -n "pub struct RenderConfig\|pub format\|pub width" crates/ferrum-core/src/spec/render.rs | head
-```
+- **No Rust change required for golden stability.** The proposed
+  `RenderConfig.numeric_precision: Option<u8>` field is redundant.
+- **Tiered-goldens scheme collapses to a single tier.** All Phase 10
+  goldens render at the existing 3-dp precision; the
+  `tests/goldens/phase_10/` directory is not created.
+- **Drift note for §3.16 RenderConfig is dropped** from Task 41.
+- **Phase 10's only Rust touchpoint becomes `kendall_tau_b`** in Task 35.
 
-- [ ] **Step 2: Add the `numeric_precision` field**
-
-In `crates/ferrum-core/src/spec/render.rs`, add the field to `RenderConfig`:
-
-```rust
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RenderConfig {
-    // ... existing fields ...
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub numeric_precision: Option<u8>,
-}
-```
-
-Update any `RenderConfig::new` or `#[pymethods]` constructor to accept `numeric_precision: Option<u8> = None`. Add PyO3 getter/setter via `#[pyo3(get, set)]` or explicit `#[getter]` / `#[setter]` per existing field pattern in the file.
-
-- [ ] **Step 3: Write a serde round-trip test**
-
-In `crates/ferrum-core/src/spec/render.rs` (or its tests submodule):
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn render_config_numeric_precision_round_trip() {
-        let cfg = RenderConfig { numeric_precision: Some(4), ..Default::default() };
-        let s = serde_json::to_string(&cfg).unwrap();
-        assert!(s.contains("\"numeric_precision\":4"));
-        let back: RenderConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.numeric_precision, Some(4));
-    }
-
-    #[test]
-    fn render_config_default_omits_numeric_precision() {
-        let cfg = RenderConfig::default();
-        let s = serde_json::to_string(&cfg).unwrap();
-        assert!(!s.contains("numeric_precision"));
-        assert_eq!(cfg.numeric_precision, None);
-    }
-}
-```
-
-- [ ] **Step 4: Add `fmt_float` helper to SVG renderer**
-
-In `crates/ferrum-core/src/render/svg.rs`, add:
-
-```rust
-use std::fmt::Write;
-
-#[inline]
-pub(crate) fn fmt_float(buf: &mut String, val: f64, precision: Option<u8>) {
-    match precision {
-        None => write!(buf, "{}", val).unwrap(),
-        Some(p) => write!(buf, "{:.*}", p as usize, val).unwrap(),
-    }
-}
-```
-
-- [ ] **Step 5: Route all float emits through `fmt_float`**
-
-Grep for existing float-emission patterns in `crates/ferrum-core/src/render/`:
-
-```bash
-grep -rn 'write!\(.*{}.*\.[xy0-9]\|push_str.*format!' crates/ferrum-core/src/render/ | head -30
-```
-
-For each site that emits a coordinate/length/color-component float, replace with `fmt_float(&mut buf, val, render_cfg.numeric_precision)`. The render context is already threaded — `RenderConfig` is in scope.
-
-- [ ] **Step 6: Add formatter test**
-
-```rust
-#[test]
-fn fmt_float_respects_precision() {
-    let mut buf = String::new();
-    fmt_float(&mut buf, 3.141592653589793, Some(4));
-    assert_eq!(buf, "3.1416");
-    buf.clear();
-    fmt_float(&mut buf, 3.141592653589793, None);
-    // Default formatting uses Rust's Display impl for f64.
-    assert_eq!(buf, "3.141592653589793");
-}
-```
-
-- [ ] **Step 7: Update `_core.pyi` stub**
-
-In `src/ferrum/_core.pyi`, on the `RenderConfig` class:
-
-```python
-class RenderConfig:
-    # ... existing attrs ...
-    numeric_precision: int | None
-```
-
-- [ ] **Step 8: Build + test**
-
-```bash
-source ~/.cargo/env && unset CONDA_PREFIX && uv run --no-sync maturin develop 2>&1 | tail -5
-DYLD_LIBRARY_PATH=$(uv run --no-sync python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test -p ferrum-core --quiet 2>&1 | tail -5
-```
-Expected: `cargo test` passes; new tests included in the count.
-
-- [ ] **Step 9: Smoke test from Python**
-
-```bash
-unset CONDA_PREFIX && uv run --no-sync python -c "
-import ferrum
-from ferrum._core import RenderConfig
-cfg = RenderConfig(numeric_precision=4)
-assert cfg.numeric_precision == 4
-print('OK')
-"
-```
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add crates/ferrum-core/src/spec/render.rs crates/ferrum-core/src/render/svg.rs src/ferrum/_core.pyi
-git commit -m "feat(phase-10a): RenderConfig.numeric_precision field for SVG float quantization"
-```
+If, in 10d/10e/10f, solver-sensitive figures (SHAP-Kernel, UMAP, t-SNE,
+MDS, learning_curve, etc.) prove not to be byte-identical across platforms
+even at 3 dp, address it empirically as a per-figure issue — don't
+preemptively reintroduce this field.
 
 ---
+
 
 ### Task 6: `_diagnostics/` package skeleton + lazy-import helpers
 
@@ -1345,110 +1234,158 @@ git commit -m "feat(phase-10a): ModelSource class with predictions() + probabili
 
 **Files:**
 - Create: `src/ferrum/marks/diagnostic.py`
-- Modify: `src/ferrum/chart.py` (add `mark_residuals` + `mark_prediction_error` methods)
-- Modify: `src/ferrum/__init__.py` (re-export both classes)
+- Modify: `src/ferrum/chart.py` (add `mark_residuals` + `mark_prediction_error` methods following the `mark_boxplot` pattern from Phase 8b/9)
 - Create: `tests/diagnostics/test_regression.py`
 
-- [ ] **Step 1: Write `src/ferrum/marks/diagnostic.py` (initial — two marks)**
+**Pattern reference:** `src/ferrum/marks/composite.py:15-61` (`desugar_boxplot`) and `src/ferrum/chart.py:379-410` (`Chart.mark_boxplot`). Phase 10 diagnostic marks follow the same shape:
+
+- Module-level `desugar_<name>(x_field, y_field, **kwargs) -> tuple` that returns a 5-tuple `("__layered__", transforms: list, None, None, layers: list[dict])`.
+- Each layer dict has shape `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+- Chart method: clone the chart, set `_mark = "point"` (placeholder), set `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, return.
+- There is no `LayerSpec` class, no `chart_ctx`, no `_expand` method. Plain dict layers.
+- For Phase 10 diagnostic marks the data has hard-coded column names from a `ModelSource` method (`y_pred`, `residual`, `studentized_residual`, etc.), so the desugar references those columns literally rather than relying on user-supplied `x_field`/`y_field`.
+
+- [ ] **Step 1: Write `src/ferrum/marks/diagnostic.py` (initial — two desugars)**
 
 ```python
-"""Phase 10 model-diagnostic marks (Python-side desugar).
+"""Phase 10 model-diagnostic mark desugars (Python-side).
 
-Each mark is an immutable value class with an `_expand(chart_ctx)` method
-that returns a list of `LayerSpec` over existing Phase 5/8b/9 primitives.
-No new Rust Mark variants are introduced.
+Each `desugar_<name>(x_field, y_field, **kwargs)` returns the 5-tuple
+`("__layered__", transforms: list, None, None, layers: list[dict])`
+consumed by `Chart` when the user calls `chart.mark_<name>(...)`.
+
+These desugars operate on DataFrames with hard-coded column names from a
+`ModelSource` method (e.g. `y_pred`, `residual`, `studentized_residual`).
+They ignore `x_field`/`y_field` — the user shouldn't `.encode()` x or y on
+a diagnostic chart; the figure-level wrapper builds the chart from the
+ModelSource output directly. No new Rust Mark or Transform variants.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(frozen=True)
-class mark_residuals:
-    """Residuals diagnostic mark.
-
-    Desugars to: mark_point + mark_rule(y=0).
-    """
-    kind: str = "studentized"          # "raw" | "studentized" | "scaled"
-    reference_line: bool = True
-    cook_threshold: float | None = None  # if set, color points by Cook's distance > threshold
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_point, mark_rule
-        from ferrum import LayerSpec  # type: ignore[attr-defined]
-        layers = [
-            LayerSpec(
-                mark=mark_point(),
-                encoding={"x": "y_pred", "y": self._y_field(), "color": chart_ctx.color_field_or_default()},
-            )
-        ]
-        if self.reference_line:
-            layers.append(LayerSpec(
-                mark=mark_rule(),
-                encoding={"y": 0.0},
-            ))
-        return layers
-
-    def _y_field(self) -> str:
-        if self.kind in ("studentized", "scaled"):
-            return "studentized_residual"
-        return "residual"
+def desugar_residuals(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    kind: str = "studentized",
+    reference_line: bool = True,
+    cook_threshold: float | None = None,
+    color_field: str | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Residuals diagnostic: scatter of (y_pred, residual) + reference line at 0."""
+    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
+    point_enc: dict[str, Any] = {"x": "y_pred", "y": y_col}
+    if color_field is not None:
+        point_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "point", "encoding": point_enc}]
+    if reference_line:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"y": 0.0},
+            "mark_kwargs": {"strokeDash": [4, 4]},
+        })
+    return ("__layered__", [], None, None, layers)
 
 
-@dataclass(frozen=True)
-class mark_prediction_error:
-    """Actual vs Predicted diagnostic mark.
-
-    Desugars to: mark_point + mark_line (identity y=x) + optional reference band.
-    """
-    identity_line: bool = True
-    ci: float | None = None
-    reference_band: bool = False
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_point, mark_line
-        from ferrum import LayerSpec  # type: ignore[attr-defined]
-        layers = [
-            LayerSpec(
-                mark=mark_point(),
-                encoding={"x": "y_true", "y": "y_pred", "color": chart_ctx.color_field_or_default()},
-            )
-        ]
-        if self.identity_line:
-            layers.append(LayerSpec(
-                mark=mark_line(strokeDash=[4, 4]),
-                encoding={"x": "y_true", "y": "y_true"},
-            ))
-        return layers
+def desugar_prediction_error(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    identity_line: bool = True,
+    ci: float | None = None,
+    reference_band: bool = False,
+    color_field: str | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Actual vs predicted: scatter of (y_true, y_pred) + optional identity line."""
+    point_enc: dict[str, Any] = {"x": "y_true", "y": "y_pred"}
+    if color_field is not None:
+        point_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "point", "encoding": point_enc}]
+    if identity_line:
+        layers.append({
+            "mark": "line",
+            "encoding": {"x": "y_true", "y": "y_true"},
+            "mark_kwargs": {"strokeDash": [4, 4]},
+        })
+    return ("__layered__", [], None, None, layers)
 ```
 
-> **Note:** `chart_ctx` is a lightweight context object passed by `Chart.compile()` that exposes helpers like `color_field_or_default()` (returns `"model"` if the data has a `model` column, else `None`). It's defined in `src/ferrum/chart.py` already — Phase 9 added it for composite-mark desugaring. If not present, add a minimal version (see Step 2).
+- [ ] **Step 2: Wire `mark_residuals` + `mark_prediction_error` into `Chart`**
 
-- [ ] **Step 2: Wire `mark_residuals` and `mark_prediction_error` into `Chart`**
-
-In `src/ferrum/chart.py`, find the existing composite-mark methods (e.g. `mark_boxplot`, `mark_boxen`) and add parallel methods:
+In `src/ferrum/chart.py`, after the existing `mark_boxplot` / `mark_boxen` methods, add:
 
 ```python
-def mark_residuals(self, **kwargs) -> "Chart":
-    """Residuals diagnostic mark — see ferrum-spec.md §3.3."""
-    from ferrum.marks.diagnostic import mark_residuals as _ResMark
-    return self._add_composite_mark(_ResMark(**kwargs))
+def mark_residuals(
+    self,
+    *,
+    kind: str = "studentized",
+    reference_line: bool = True,
+    cook_threshold: float | None = None,
+    color_field: str | None = None,
+    position=None,
+    **mark_kwargs,
+) -> "Chart":
+    """Residuals diagnostic mark — see ferrum-spec.md §3.3.
 
-def mark_prediction_error(self, **kwargs) -> "Chart":
-    """Actual vs Predicted mark — see ferrum-spec.md §3.3."""
-    from ferrum.marks.diagnostic import mark_prediction_error as _PEMark
-    return self._add_composite_mark(_PEMark(**kwargs))
+    Expects the chart's data to have columns `y_pred`, `residual`,
+    `studentized_residual` (the schema emitted by `ModelSource.predictions()`).
+    """
+    from ferrum.marks.diagnostic import desugar_residuals
+    new = self._clone()
+    new._mark = "point"  # placeholder; layered mode overrides
+    new._pending_stat_mark = (
+        "residuals",
+        {
+            "kind": kind,
+            "reference_line": reference_line,
+            "cook_threshold": cook_threshold,
+            "color_field": color_field,
+            **mark_kwargs,
+        },
+        desugar_residuals,
+    )
+    new._position = position
+    return new
+
+
+def mark_prediction_error(
+    self,
+    *,
+    identity_line: bool = True,
+    ci: float | None = None,
+    reference_band: bool = False,
+    color_field: str | None = None,
+    position=None,
+    **mark_kwargs,
+) -> "Chart":
+    """Actual-vs-predicted mark — see ferrum-spec.md §3.3."""
+    from ferrum.marks.diagnostic import desugar_prediction_error
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = (
+        "prediction_error",
+        {
+            "identity_line": identity_line,
+            "ci": ci,
+            "reference_band": reference_band,
+            "color_field": color_field,
+            **mark_kwargs,
+        },
+        desugar_prediction_error,
+    )
+    new._position = position
+    return new
 ```
 
-If `_add_composite_mark` doesn't exist, reuse the existing composite expansion path (see how `mark_boxplot` is wired in Phase 9's `marks/composite.py`).
+> **Pattern note:** the existing `Chart._resolve_pending` machinery (the path that handles `_pending_stat_mark` at compile time) calls the desugar function with `x_field` and `y_field` extracted from `self._encoding` (or None if not set). The Phase 10 desugars ignore those positional args and reference hard-coded column names. This works because the chart's data already has the right shape from `ModelSource.predictions()`.
 
-- [ ] **Step 3: Re-export from `src/ferrum/__init__.py`**
+- [ ] **Step 3: No `__init__.py` change required**
 
-```python
-from ferrum.marks.diagnostic import mark_residuals, mark_prediction_error
-# Append to __all__.
-```
+Unlike Phase 9 composite marks, Phase 10 diagnostic mark names are accessed only as `Chart.mark_<name>(...)` methods. The `desugar_<name>` functions are internal. No re-export needed in `src/ferrum/__init__.py`.
 
 - [ ] **Step 4: Write `tests/diagnostics/test_regression.py`**
 
@@ -1456,28 +1393,11 @@ from ferrum.marks.diagnostic import mark_residuals, mark_prediction_error
 from __future__ import annotations
 
 import numpy as np
+import polars as pl
 import pytest
 
 import ferrum
 from tests.fixtures import load_fixture, load_dataset
-
-
-def test_mark_residuals_class():
-    m = ferrum.mark_residuals()
-    assert m.kind == "studentized"
-    assert m.reference_line is True
-
-
-def test_mark_residuals_kind_validation():
-    # Phase 10 spec: kind ∈ {"raw", "studentized", "scaled"}.
-    # No validation enforced today; just check the field is stored.
-    m = ferrum.mark_residuals(kind="raw")
-    assert m.kind == "raw"
-
-
-def test_mark_prediction_error_class():
-    m = ferrum.mark_prediction_error()
-    assert m.identity_line is True
 
 
 def test_chart_mark_residuals_renders():
@@ -1492,6 +1412,30 @@ def test_chart_mark_residuals_renders():
     assert "<svg" in svg
 
 
+def test_chart_mark_residuals_raw_kind():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pred = source.predictions()
+
+    chart = ferrum.Chart(pred).mark_residuals(kind="raw")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_chart_mark_residuals_no_reference_line():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pred = source.predictions()
+
+    chart = ferrum.Chart(pred).mark_residuals(reference_line=False)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
 def test_chart_mark_prediction_error_renders():
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
@@ -1500,6 +1444,18 @@ def test_chart_mark_prediction_error_renders():
     pred = source.predictions()
 
     chart = ferrum.Chart(pred).mark_prediction_error()
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_chart_mark_prediction_error_no_identity():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pred = source.predictions()
+
+    chart = ferrum.Chart(pred).mark_prediction_error(identity_line=False)
     svg = chart.show_svg()
     assert "<svg" in svg
 ```
@@ -1514,7 +1470,7 @@ Expected: 5 tests pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/ferrum/marks/diagnostic.py src/ferrum/chart.py src/ferrum/__init__.py tests/diagnostics/test_regression.py
+git add src/ferrum/marks/diagnostic.py src/ferrum/chart.py tests/diagnostics/test_regression.py
 git commit -m "feat(phase-10a): mark_residuals + mark_prediction_error (desugar)"
 ```
 
@@ -1953,8 +1909,8 @@ git commit -m "feat(phase-10a): residuals_chart + Residuals/PredictionError/Cook
 ### Task 11: First Phase 10 SVG goldens (residuals + prediction_error)
 
 **Files:**
-- Create: `tests/goldens/phase_10/byte_identical/residuals_chart_regression.svg` (generated)
-- Create: `tests/goldens/phase_10/byte_identical/prediction_error_regression.svg` (generated)
+- Create: `tests/goldens/phase_10/residuals_chart_regression.svg` (generated)
+- Create: `tests/goldens/phase_10/prediction_error_regression.svg` (generated)
 - Create: `tests/diagnostics/test_goldens_phase_10.py`
 
 - [ ] **Step 1: Write `tests/diagnostics/test_goldens_phase_10.py`**
@@ -1962,10 +1918,8 @@ git commit -m "feat(phase-10a): residuals_chart + Residuals/PredictionError/Cook
 ```python
 """Phase 10 SVG golden tests.
 
-Two tiers:
-- byte_identical/  : SVGs that must match exactly across platforms.
-- quantized_4dp/   : SVGs rendered with RenderConfig(numeric_precision=4)
-                     to absorb cross-platform solver variance.
+Single tier — all goldens render at the renderer's default 3-decimal-place
+quantization (`fmt_f` in `crates/ferrum-core/src/render/svg.rs`).
 """
 from __future__ import annotations
 
@@ -1981,7 +1935,7 @@ _GOLDEN_ROOT = Path(__file__).parent.parent / "goldens" / "phase_10"
 _REGENERATE = bool(os.environ.get("FERRUM_REGENERATE_GOLDENS"))
 
 
-def _check_golden(svg: str, name: str, tier: str = "byte_identical") -> None:
+def _check_golden(svg: str, name: str, tier: str = '') -> None:
     path = _GOLDEN_ROOT / tier / f"{name}.svg"
     if _REGENERATE or not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2023,7 +1977,7 @@ def test_golden_prediction_error_regression():
 ```bash
 FERRUM_REGENERATE_GOLDENS=1 uv run --no-sync pytest tests/diagnostics/test_goldens_phase_10.py -v 2>&1 | tail -10
 ```
-Expected: 2 SVG files created under `tests/goldens/phase_10/byte_identical/`.
+Expected: 2 SVG files created under `tests/goldens/phase_10/`.
 
 - [ ] **Step 3: Verify goldens are byte-stable on rerun**
 
@@ -2045,7 +1999,7 @@ git commit -m "test(phase-10a): residuals + prediction_error SVG goldens"
 DYLD_LIBRARY_PATH=$(uv run --no-sync python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test -p ferrum-core --quiet 2>&1 | tail -3
 uv run --no-sync pytest 2>&1 | tail -3
 ```
-Expected: `cargo test` ≥ 499 passed (3+ new from numeric_precision); `pytest` ≥ 495 passed, 5 skipped (15+ new from 10a).
+Expected: `cargo test` ≥ 496 passed (unchanged from Phase 9 — Rust touchpoints in 10a are zero after Task 5 was dropped). `pytest` ≥ 495 passed, 5 skipped (15+ new from 10a).
 
 ---
 
@@ -2632,158 +2586,210 @@ git commit -m "feat(phase-10b): ModelSource.discrimination_threshold (queue_rate
 ### Task 15: Six 10b marks (`mark_roc`, `mark_pr`, `mark_calibration`, `mark_gain`, `mark_lift`, `mark_discrimination_threshold`)
 
 **Files:**
-- Modify: `src/ferrum/marks/diagnostic.py`
-- Modify: `src/ferrum/chart.py` (add six `mark_*` methods)
-- Modify: `src/ferrum/__init__.py` (re-export six)
-- Modify: `tests/diagnostics/test_classification.py` (create)
+- Modify: `src/ferrum/marks/diagnostic.py` (append six desugars)
+- Modify: `src/ferrum/chart.py` (add six `mark_*` methods following the Task 8 pattern)
+- Create: `tests/diagnostics/test_classification.py`
 
-- [ ] **Step 1: Append the six marks to `src/ferrum/marks/diagnostic.py`**
+**Pattern:** Follow Task 8's `desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", [], None, None, layers)` shape with dict layers. Wire each Chart method as `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`. See Task 8 for full canonical example.
 
-```python
-@dataclass(frozen=True)
-class mark_roc:
-    average: str | None = None
-    reference_line: bool = True
-    annotate_auc: bool = True
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line, mark_rule, mark_text
-        from ferrum import LayerSpec
-        layers = [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "fpr", "y": "tpr",
-                       "color": chart_ctx.color_field_or("class")},
-        )]
-        if self.reference_line:
-            layers.append(LayerSpec(
-                mark=mark_rule(strokeDash=[4, 4]),
-                encoding={"x": "fpr", "y": "fpr"},
-            ))
-        return layers
-
-
-@dataclass(frozen=True)
-class mark_pr:
-    average: str | None = None
-    annotate_ap: bool = True
-    iso_lines: bool = False
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line
-        from ferrum import LayerSpec
-        return [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "recall", "y": "precision",
-                       "color": chart_ctx.color_field_or("class")},
-        )]
-
-
-@dataclass(frozen=True)
-class mark_calibration:
-    n_bins: int = 10
-    strategy: str = "uniform"
-    reference_line: bool = True
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line, mark_rule
-        from ferrum import LayerSpec
-        layers = [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "mean_predicted", "y": "fraction_positive",
-                       "color": chart_ctx.color_field_or_default()},
-        )]
-        if self.reference_line:
-            layers.append(LayerSpec(
-                mark=mark_rule(strokeDash=[4, 4]),
-                encoding={"x": "mean_predicted", "y": "mean_predicted"},
-            ))
-        return layers
-
-
-@dataclass(frozen=True)
-class mark_gain:
-    reference_lines: bool = True
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line
-        from ferrum import LayerSpec
-        return [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "percent_population", "y": "gain",
-                       "color": chart_ctx.color_field_or("class")},
-        )]
-
-
-@dataclass(frozen=True)
-class mark_lift:
-    reference_line: bool = True
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line
-        from ferrum import LayerSpec
-        return [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "percent_population", "y": "lift",
-                       "color": chart_ctx.color_field_or("class")},
-        )]
-
-
-@dataclass(frozen=True)
-class mark_discrimination_threshold:
-    metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate")
-    n_thresholds: int = 50
-    threshold_line: bool = True
-
-    def _expand(self, chart_ctx: Any) -> list[Any]:
-        from ferrum.marks import mark_line
-        from ferrum import LayerSpec
-        # One line per metric — assumes the input DataFrame is in long form with
-        # columns (threshold, metric, value). Builder will reshape.
-        return [LayerSpec(
-            mark=mark_line(),
-            encoding={"x": "threshold", "y": "value", "color": "metric"},
-        )]
-```
-
-- [ ] **Step 2: Wire six Chart methods**
-
-In `src/ferrum/chart.py`:
+- [ ] **Step 1: Append the six desugars to `src/ferrum/marks/diagnostic.py`**
 
 ```python
-def mark_roc(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_roc as _M
-    return self._add_composite_mark(_M(**kw))
+def desugar_roc(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    average: str | None = None,
+    reference_line: bool = True,
+    annotate_auc: bool = True,
+    color_field: str = "class",   # set to "model" by builder when input has model column
+    **mark_kwargs: Any,
+) -> tuple:
+    """ROC curve(s). Data shape: (fpr, tpr, threshold, class, auc) per ModelSource.roc_curve()."""
+    layers: list[dict] = [
+        {"mark": "line", "encoding": {"x": "fpr", "y": "tpr", "color": color_field}},
+    ]
+    if reference_line:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"x": "fpr", "y": "fpr"},
+            "mark_kwargs": {"strokeDash": [4, 4]},
+        })
+    return ("__layered__", [], None, None, layers)
 
-def mark_pr(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_pr as _M
-    return self._add_composite_mark(_M(**kw))
 
-def mark_calibration(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_calibration as _M
-    return self._add_composite_mark(_M(**kw))
+def desugar_pr(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    average: str | None = None,
+    annotate_ap: bool = True,
+    iso_lines: bool = False,
+    color_field: str = "class",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Precision-recall curve(s). Data shape: (precision, recall, threshold, class, ap)."""
+    layers: list[dict] = [
+        {"mark": "line", "encoding": {"x": "recall", "y": "precision", "color": color_field}},
+    ]
+    return ("__layered__", [], None, None, layers)
 
-def mark_gain(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_gain as _M
-    return self._add_composite_mark(_M(**kw))
 
-def mark_lift(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_lift as _M
-    return self._add_composite_mark(_M(**kw))
+def desugar_calibration(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    n_bins: int = 10,
+    strategy: str = "uniform",
+    reference_line: bool = True,
+    color_field: str | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Calibration curve. Data shape: (mean_predicted, fraction_positive, count)."""
+    line_enc: dict[str, Any] = {"x": "mean_predicted", "y": "fraction_positive"}
+    if color_field is not None:
+        line_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "line", "encoding": line_enc}]
+    if reference_line:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"x": "mean_predicted", "y": "mean_predicted"},
+            "mark_kwargs": {"strokeDash": [4, 4]},
+        })
+    return ("__layered__", [], None, None, layers)
 
-def mark_discrimination_threshold(self, **kw) -> "Chart":
-    from ferrum.marks.diagnostic import mark_discrimination_threshold as _M
-    return self._add_composite_mark(_M(**kw))
+
+def desugar_gain(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    reference_lines: bool = True,
+    color_field: str = "class",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Cumulative gain curve. Data shape: (percent_population, gain, class)."""
+    return ("__layered__", [], None, None, [
+        {"mark": "line", "encoding": {"x": "percent_population", "y": "gain", "color": color_field}},
+    ])
+
+
+def desugar_lift(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    reference_line: bool = True,
+    color_field: str = "class",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Lift curve. Data shape: (percent_population, lift, class)."""
+    return ("__layered__", [], None, None, [
+        {"mark": "line", "encoding": {"x": "percent_population", "y": "lift", "color": color_field}},
+    ])
+
+
+def desugar_discrimination_threshold(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
+    n_thresholds: int = 50,
+    threshold_line: bool = True,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Discrimination-threshold sweep. Builder pre-melts to long form
+    (threshold, metric, value); this desugar plots one line per metric."""
+    return ("__layered__", [], None, None, [
+        {"mark": "line", "encoding": {"x": "threshold", "y": "value", "color": "metric"}},
+    ])
 ```
 
-- [ ] **Step 3: Re-export from `src/ferrum/__init__.py`**
+- [ ] **Step 2: Wire six Chart methods in `src/ferrum/chart.py`**
+
+Following the Task 8 / `mark_boxplot` pattern:
 
 ```python
-from ferrum.marks.diagnostic import (
-    mark_roc, mark_pr, mark_calibration, mark_gain, mark_lift,
-    mark_discrimination_threshold,
-)
-# Append all six to __all__.
+def mark_roc(self, *, average=None, reference_line=True, annotate_auc=True,
+              color_field="class", position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_roc
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("roc", {
+        "average": average, "reference_line": reference_line,
+        "annotate_auc": annotate_auc, "color_field": color_field, **mark_kwargs,
+    }, desugar_roc)
+    new._position = position
+    return new
+
+
+def mark_pr(self, *, average=None, annotate_ap=True, iso_lines=False,
+             color_field="class", position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_pr
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("pr", {
+        "average": average, "annotate_ap": annotate_ap,
+        "iso_lines": iso_lines, "color_field": color_field, **mark_kwargs,
+    }, desugar_pr)
+    new._position = position
+    return new
+
+
+def mark_calibration(self, *, n_bins=10, strategy="uniform",
+                      reference_line=True, color_field=None,
+                      position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_calibration
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("calibration", {
+        "n_bins": n_bins, "strategy": strategy,
+        "reference_line": reference_line, "color_field": color_field, **mark_kwargs,
+    }, desugar_calibration)
+    new._position = position
+    return new
+
+
+def mark_gain(self, *, reference_lines=True, color_field="class",
+               position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_gain
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("gain", {
+        "reference_lines": reference_lines, "color_field": color_field, **mark_kwargs,
+    }, desugar_gain)
+    new._position = position
+    return new
+
+
+def mark_lift(self, *, reference_line=True, color_field="class",
+               position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_lift
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("lift", {
+        "reference_line": reference_line, "color_field": color_field, **mark_kwargs,
+    }, desugar_lift)
+    new._position = position
+    return new
+
+
+def mark_discrimination_threshold(self, *,
+                                    metrics=("precision", "recall", "f1", "queue_rate"),
+                                    n_thresholds=50, threshold_line=True,
+                                    position=None, **mark_kwargs) -> "Chart":
+    from ferrum.marks.diagnostic import desugar_discrimination_threshold
+    new = self._clone()
+    new._mark = "point"
+    new._pending_stat_mark = ("discrimination_threshold", {
+        "metrics": metrics, "n_thresholds": n_thresholds,
+        "threshold_line": threshold_line, **mark_kwargs,
+    }, desugar_discrimination_threshold)
+    new._position = position
+    return new
 ```
+
+- [ ] **Step 3: No `__init__.py` change required** — diagnostic marks are accessed via `Chart.mark_<name>(...)`, not as importable symbols.
+
+> **`color_field` resolution at builder layer:** when a chart builder in `_diagnostics/charts.py` constructs the chart from a `ComparedModelSource` output (DataFrame contains a `model` column), it passes `color_field="model"` to the Chart method so the line is colored by model rather than by class. The `desugar_*` functions don't auto-detect — the builder is responsible.
 
 - [ ] **Step 4: Create `tests/diagnostics/test_classification.py`**
 
@@ -2848,13 +2854,25 @@ def test_mark_lift_renders(binary_source):
     lift = binary_source.lift_curve()
     svg = ferrum.Chart(lift).mark_lift().show_svg()
     assert "<svg" in svg
+
+
+def test_mark_discrimination_threshold_renders(binary_source):
+    dt = binary_source.discrimination_threshold(n_thresholds=20)
+    long = dt.unpivot(
+        index="threshold",
+        on=["precision", "recall", "f1", "queue_rate"],
+        variable_name="metric",
+        value_name="value",
+    )
+    svg = ferrum.Chart(long).mark_discrimination_threshold().show_svg()
+    assert "<svg" in svg
 ```
 
 - [ ] **Step 5: Run + commit**
 
 ```bash
 uv run --no-sync pytest tests/diagnostics/test_classification.py -v 2>&1 | tail -15
-git add src/ferrum/marks/diagnostic.py src/ferrum/chart.py src/ferrum/__init__.py tests/diagnostics/test_classification.py
+git add src/ferrum/marks/diagnostic.py src/ferrum/chart.py tests/diagnostics/test_classification.py
 git commit -m "feat(phase-10b): 6 classification curve marks (roc/pr/calibration/gain/lift/disc_threshold)"
 ```
 
@@ -3098,12 +3116,12 @@ def test_golden_discrimination_threshold_binary():
 FERRUM_REGENERATE_GOLDENS=1 uv run --no-sync pytest tests/diagnostics/test_goldens_phase_10.py -v 2>&1 | tail -15
 uv run --no-sync pytest tests/diagnostics/test_goldens_phase_10.py -v 2>&1 | tail -15
 ```
-Expected: 7 new SVGs created under `byte_identical/`; all golden tests pass on second run.
+Expected: 7 new SVGs created under `tests/goldens/phase_10/`; all golden tests pass on second run.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/ferrum/_diagnostics/charts.py src/ferrum/figures.py src/ferrum/__init__.py tests/diagnostics/test_classification.py tests/diagnostics/test_goldens_phase_10.py tests/goldens/phase_10/byte_identical/
+git add src/ferrum/_diagnostics/charts.py src/ferrum/figures.py src/ferrum/__init__.py tests/diagnostics/test_classification.py tests/diagnostics/test_goldens_phase_10.py tests/goldens/phase_10/
 git commit -m "feat(phase-10b): 6 classification curve figure functions + goldens"
 ```
 
@@ -3326,6 +3344,19 @@ Expected: ~40 tests pass cumulatively (10a + 10b).
 - Modify: `tests/diagnostics/test_classification.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Add schema + ModelSource method**
 
 ```python
@@ -3506,6 +3537,19 @@ git commit -m "feat(phase-10c): confusion_matrix method + mark_confusion + confu
 - Modify: `tests/diagnostics/test_classification.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Add `mark_class_prediction_error`**
 
 ```python
@@ -3591,7 +3635,7 @@ def test_golden_class_prediction_error_multiclass():
 FERRUM_REGENERATE_GOLDENS=1 uv run --no-sync pytest tests/diagnostics/test_goldens_phase_10.py -k class_prediction -v 2>&1 | tail -5
 uv run --no-sync pytest tests/diagnostics/ 2>&1 | tail -3
 git add -u src/ferrum/ tests/diagnostics/
-git add tests/goldens/phase_10/byte_identical/class_prediction_error_multiclass.svg
+git add tests/goldens/phase_10/class_prediction_error_multiclass.svg
 git commit -m "feat(phase-10c): mark_class_prediction_error + figure function + golden"
 ```
 
@@ -3828,6 +3872,19 @@ Expected: ~55 tests cumulative.
 - Create: `tests/diagnostics/test_explanation.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Schema + ModelSource method**
 
 ```python
@@ -4062,25 +4119,11 @@ def test_golden_importance_chart_permutation():
         model, df.select(["f0", "f1", "f2", "f3", "f4"]), df["y"],
         method="permutation", random_state=0,
     )
-    _check_golden(chart.show_svg(), "importance_chart_permutation", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "importance_chart_permutation")
 
 
-def test_golden_importance_chart_permutation_quantized():
-    # The quantized check uses RenderConfig(numeric_precision=4) at render time.
-    from ferrum._core import RenderConfig
-    model = load_fixture("regression_rf")
-    df = load_dataset("regression")
-    chart = ferrum.importance_chart(
-        model, df.select(["f0", "f1", "f2", "f3", "f4"]), df["y"],
-        method="permutation", random_state=0,
-    )
-    cfg = RenderConfig(numeric_precision=4)
-    svg = chart.show_svg(config=cfg) if hasattr(chart, "show_svg") else chart.show_svg()
-    # If show_svg() doesn't accept a config kwarg, fall back to chart.with_render_config(cfg).
-    _check_golden(svg, "importance_chart_permutation", tier="quantized_4dp")
+
 ```
-
-> **Implementation note:** if `Chart.show_svg()` doesn't already accept a `config=RenderConfig(...)` arg, extend it in this task: thread the kwarg through to the underlying `ferrum._core.render_chart_to_svg` PyO3 binding. This is a small Phase 9 change site.
 
 - [ ] **Step 5: Run + commit**
 
@@ -4106,6 +4149,19 @@ git commit -m "feat(phase-10d): importances + mark_importance + importance_chart
 - Modify: `src/ferrum/__init__.py`
 - Modify: `tests/diagnostics/test_explanation.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
+
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
 
 - [ ] **Step 1: Schema + `.shap_values()` method**
 
@@ -4406,7 +4462,7 @@ def test_shap_visualizer():
     assert "top_abs_shap=" in repr(viz)
 
 
-# test_goldens_phase_10.py — LinearExplainer is deterministic so byte_identical.
+# test_goldens_phase_10.py — LinearExplainer is deterministic so byte-identical at 3 dp.
 def test_golden_shap_chart_beeswarm_linear():
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
@@ -4455,6 +4511,19 @@ git commit -m "feat(phase-10d): shap_values + 3 shap marks + shap_chart + SHAPVi
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
 
 > Note: `mark_pdp` does NOT have its own §3.14 figure function — PDP is exposed via `shap_chart` only when `kind="pdp"` is added by user code, OR by direct chart construction. Phase 10 spec lists `mark_pdp` but no `pdp_chart`. We ship the mark + builder; visualizer wiring goes through `FeatureImportancesVisualizer` users who add PDP layers manually.
+
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
 
 - [ ] **Step 1: Schema + method**
 
@@ -4909,6 +4978,19 @@ git add -u && git commit -m "feat(phase-10e): cv_scores + alpha_selection method
 - Modify: `src/ferrum/__init__.py`
 - Create: `tests/diagnostics/test_selection.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Four marks**
 
 ```python
@@ -5155,14 +5237,7 @@ def test_alpha_selection_chart():
     assert "<svg" in chart.show_svg()
 
 
-# test_goldens_phase_10.py — all quantized
-def _render_quantized(chart):
-    from ferrum._core import RenderConfig
-    cfg = RenderConfig(numeric_precision=4)
-    # Assume Chart.show_svg accepts a config kwarg (added in Task 5).
-    return chart.show_svg(config=cfg)
-
-
+# test_goldens_phase_10.py
 def test_golden_learning_curve_quantized():
     from sklearn.linear_model import Ridge
     df = load_dataset("regression")
@@ -5170,7 +5245,7 @@ def test_golden_learning_curve_quantized():
         Ridge(random_state=0), df.select(["f0", "f1", "f2", "f3", "f4"]),
         df["y"], cv=3, random_state=0,
     )
-    _check_golden(_render_quantized(chart), "learning_curve_ridge", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "learning_curve_ridge")
 
 
 def test_golden_validation_curve_quantized():
@@ -5180,7 +5255,7 @@ def test_golden_validation_curve_quantized():
         Ridge(), df.select(["f0", "f1", "f2", "f3", "f4"]),
         df["y"], "alpha", [0.1, 1.0, 10.0], cv=3,
     )
-    _check_golden(_render_quantized(chart), "validation_curve_ridge_alpha", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "validation_curve_ridge_alpha")
 
 
 def test_golden_cv_scores_quantized():
@@ -5190,7 +5265,7 @@ def test_golden_cv_scores_quantized():
         Ridge(random_state=0), df.select(["f0", "f1", "f2", "f3", "f4"]),
         df["y"], cv=3, kind="box", random_state=0,
     )
-    _check_golden(_render_quantized(chart), "cv_scores_ridge_box", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "cv_scores_ridge_box")
 
 
 def test_golden_alpha_selection_quantized():
@@ -5200,7 +5275,7 @@ def test_golden_alpha_selection_quantized():
         Ridge(), df.select(["f0", "f1", "f2", "f3", "f4"]),
         df["y"], alphas=[0.01, 0.1, 1.0, 10.0], cv=3,
     )
-    _check_golden(_render_quantized(chart), "alpha_selection_ridge", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "alpha_selection_ridge")
 ```
 
 - [ ] **Step 5: Run + commit**
@@ -5399,6 +5474,19 @@ Expected: ~95 tests cumulative.
 - Modify: `src/ferrum/figures.py`
 - Modify: `src/ferrum/__init__.py`
 - Create: `tests/diagnostics/test_clustering.py`
+
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
 
 - [ ] **Step 1: Schemas + methods**
 
@@ -5675,6 +5763,19 @@ git commit -m "feat(phase-10f): silhouette + pca_variance + their marks + figure
 - Modify: `tests/diagnostics/test_clustering.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Methods**
 
 ```python
@@ -5850,7 +5951,7 @@ def test_golden_intercluster_distance_quantized():
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     chart = ferrum.intercluster_distance_chart(model, df, k=3, method="mds", random_state=0)
-    _check_golden(_render_quantized(chart), "intercluster_distance_mds", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "intercluster_distance_mds")
 ```
 
 - [ ] **Step 5: Run + commit**
@@ -5874,6 +5975,19 @@ git commit -m "feat(phase-10f): embeddings + intercluster_distance + UMAP-aware 
 - Modify: `src/ferrum/__init__.py`
 - Modify: `tests/diagnostics/test_clustering.py`
 - Modify: `tests/diagnostics/test_goldens_phase_10.py`
+
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
 
 - [ ] **Step 1: Mark**
 
@@ -6002,7 +6116,7 @@ def test_golden_decision_boundary_quantized():
         model, df.select(["f0", "f1"]), df["y"],
         features=(0, 1), grid_resolution=50, proba=True,
     )
-    _check_golden(_render_quantized(chart), "decision_boundary_binary", tier="quantized_4dp")
+    _check_golden(chart.show_svg(), "decision_boundary_binary")
 ```
 
 - [ ] **Step 4: Run + commit**
@@ -6880,6 +6994,19 @@ git commit -m "feat(phase-10g): full _diagnostics/stats.py with scipy-parity tes
 - Modify: `src/ferrum/__init__.py`
 - Create: `tests/diagnostics/test_ranking.py`
 
+> ⚠ **Pattern correction (plan-vs-codebase):** The mark code blocks below were originally drafted using a `@dataclass(frozen=True) class mark_X: ... def _expand(self, chart_ctx) -> list[LayerSpec]` pattern that **does not exist in the codebase**. Before implementing, translate every mark in this task to the real pattern used in Phase 8b/9 composite marks:
+>
+> - Module-level `def desugar_<name>(x_field, y_field, **kwargs) -> ("__layered__", transforms, None, None, layers)` in `src/ferrum/marks/diagnostic.py`.
+> - Layers are plain dicts: `{"mark": str, "encoding": dict, "mark_kwargs": dict (opt), "data_source": str | None (opt)}`.
+> - No `LayerSpec`. No `chart_ctx`. No `_expand`.
+> - Chart method clones, sets `_mark = "point"` (placeholder), sets `_pending_stat_mark = (kind, kwargs_dict, desugar_fn)`, returns.
+> - The user does not import or instantiate `mark_X` — they call `Chart(df).mark_X(...)`.
+> - For diagnostic marks, the data has hard-coded columns from a `ModelSource` method, so the desugar references those columns literally and ignores positional `x_field` / `y_field`.
+>
+> **Canonical reference:** Task 8 (`desugar_residuals` / `desugar_prediction_error`) and Task 15 (six 10b desugars). Pattern reference in code: `src/ferrum/marks/composite.py:15-220`.
+>
+> Keep the **layer encodings, kwargs, and behavior** below as the spec for what each mark should produce, but rewrite the implementation in the corrected pattern.
+
 - [ ] **Step 1: Schemas + methods**
 
 ```python
@@ -7521,15 +7648,7 @@ Append a dated note documenting per-function whether `random_state` affects comp
 
 Append a dated note adding `random_state: int | None = None` to every Visualizer's constructor.
 
-- [ ] **Step 6: Add §3.16 `RenderConfig.numeric_precision`**
-
-In the §3.16 RenderConfig field table, add a row:
-
-```markdown
-| `numeric_precision` | `int \| None = None` | When set, rounds all emitted SVG float coordinates to this many decimal places. Used by Phase 10 quantized goldens to absorb cross-platform solver variance. Default `None` keeps current SVG numeric formatting. |
-```
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add ferrum-spec.md
@@ -7666,10 +7785,8 @@ Expected:
 
 ```bash
 find tests/goldens/phase_10 -name "*.svg" | wc -l
-find tests/goldens/phase_10/byte_identical -name "*.svg" | wc -l
-find tests/goldens/phase_10/quantized_4dp -name "*.svg" | wc -l
 ```
-Expected: ≥ 35 total; ≥ 23 byte_identical; ≥ 10 quantized_4dp.
+Expected: ≥ 35 golden SVGs at single-tier 3-dp quantization.
 
 - [ ] **Step 3: Verify `import ferrum` cold-cache time hasn't regressed**
 
@@ -7717,7 +7834,7 @@ git merge --no-ff feat/phase-10 -m "Merge Phase 10 — Model Diagnostics layer
 ModelSource adapter (22 derived-data methods), 26 model-diagnostic marks,
 21 Group B figure functions, 25 sklearn-protocol Visualizers. One new
 Rust function (kendall_tau_b, Knight's algorithm). One new RenderConfig
-field (numeric_precision). ~25 byte-identical + ~12 quantized goldens.
+(none — Task 5 dropped after discovering renderer already 3-dp quantized). ~35 byte-identical goldens at 3 dp.
 0 new pytest skips, 0 new xfails. Phase 9+ no-defer principle upheld:
 every spec parameter ships with full implementation.
 
