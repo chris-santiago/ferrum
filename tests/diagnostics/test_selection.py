@@ -149,3 +149,54 @@ def test_alpha_selection_chart_requires_alphas():
     model, X, y = _ridge_xy()
     with pytest.raises(ValueError, match="alphas"):
         ferrum.alpha_selection_chart(model, X, y)
+
+
+# --- 10e visualizers ------------------------------------------------------
+
+
+def test_learning_curve_visualizer_records_final_test_score():
+    model, X, y = _ridge_xy()
+    viz = ferrum.LearningCurveVisualizer(model, cv=3, random_state=0).fit(X, y)
+    r = repr(viz)
+    assert "final_test_score=" in r
+    assert viz._fitted
+
+
+def test_validation_curve_visualizer_records_best_param():
+    model, X, y = _ridge_xy()
+    viz = ferrum.ValidationCurveVisualizer(
+        model, "alpha", [0.1, 1.0, 10.0], cv=3,
+    ).fit(X, y)
+    r = repr(viz)
+    assert "best_param=" in r
+    assert "best_test_score=" in r
+
+
+def test_cv_scores_visualizer_records_mean_and_std():
+    model, X, y = _ridge_xy()
+    viz = ferrum.CVScoresVisualizer(model, cv=3, random_state=0).fit(X, y)
+    r = repr(viz)
+    assert "test_mean=" in r
+    assert "test_std=" in r
+
+
+def test_alpha_selection_visualizer_records_best_alpha():
+    model, X, y = _ridge_xy()
+    viz = ferrum.AlphaSelectionVisualizer(
+        model, [0.01, 0.1, 1.0, 10.0], cv=3,
+    ).fit(X, y)
+    r = repr(viz)
+    assert "best_alpha=" in r
+
+
+def test_visualizer_show_returns_chart():
+    model, X, y = _ridge_xy()
+    viz = ferrum.LearningCurveVisualizer(model, cv=3, random_state=0).fit(X, y)
+    chart = viz.show()
+    assert "<svg" in chart.show_svg()
+
+
+def test_visualizer_show_before_fit_raises():
+    viz = ferrum.LearningCurveVisualizer(model=None)
+    with pytest.raises(RuntimeError, match="must be fit"):
+        viz.show()

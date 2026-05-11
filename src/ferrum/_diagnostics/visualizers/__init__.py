@@ -20,6 +20,12 @@ from .regression import (
     PredictionErrorVisualizer,
     ResidualsVisualizer,
 )
+from .selection import (
+    AlphaSelectionVisualizer,
+    CVScoresVisualizer,
+    LearningCurveVisualizer,
+    ValidationCurveVisualizer,
+)
 
 __all__ = [
     "FerrumVisualizer",
@@ -36,4 +42,8 @@ __all__ = [
     "ClassBalanceVisualizer",
     "FeatureImportancesVisualizer",
     "SHAPVisualizer",
+    "LearningCurveVisualizer",
+    "ValidationCurveVisualizer",
+    "CVScoresVisualizer",
+    "AlphaSelectionVisualizer",
 ]

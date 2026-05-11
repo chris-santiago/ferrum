@@ -77,6 +77,10 @@ from ferrum._diagnostics.visualizers import (
     ResidualsVisualizer,
     ROCVisualizer,
     SHAPVisualizer,
+    LearningCurveVisualizer,
+    ValidationCurveVisualizer,
+    CVScoresVisualizer,
+    AlphaSelectionVisualizer,
 )
 from ferrum.figures import (
     residuals_chart,
@@ -153,6 +157,8 @@ __all__ = [
     "ConfusionMatrixVisualizer", "ClassificationReportVisualizer",
     "ClassPredictionErrorVisualizer", "ClassBalanceVisualizer",
     "FeatureImportancesVisualizer", "SHAPVisualizer",
+    "LearningCurveVisualizer", "ValidationCurveVisualizer",
+    "CVScoresVisualizer", "AlphaSelectionVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
