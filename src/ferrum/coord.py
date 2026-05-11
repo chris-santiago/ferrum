@@ -1,4 +1,4 @@
-"""Coordinate-system declarations: CoordFlip (functional), others planned for Phase 9+."""
+"""Coordinate-system declarations: CoordFlip (functional), others planned for Phase 11+."""
 from __future__ import annotations
 
 
@@ -30,7 +30,7 @@ class CoordFlip:
 
 
 class CoordCartesian:
-    """Standard Cartesian coordinates — planned for Phase 9+.
+    """Standard Cartesian coordinates — planned for Phase 11+.
 
     Currently raises ``NotImplementedError`` on construction. The default
     coordinate system (no explicit ``Chart.coord()`` call) is already
@@ -39,56 +39,56 @@ class CoordCartesian:
     Raises
     ------
     NotImplementedError
-        ``CoordCartesian`` is planned for Phase 9+; omit ``Chart.coord()``
+        ``CoordCartesian`` is planned for Phase 11+; omit ``Chart.coord()``
         for Cartesian behavior today.
     """
 
     def __init__(self) -> None:
         raise NotImplementedError(
-            "CoordCartesian is planned for Phase 9+; use the default coordinate system."
+            "CoordCartesian is planned for Phase 11+; use the default coordinate system."
         )
 
 
 class CoordPolar:
-    """Polar coordinates for pie and radial charts — planned for Phase 9+.
+    """Polar coordinates for pie and radial charts — planned for Phase 11+.
 
     Raises
     ------
     NotImplementedError
-        ``CoordPolar`` is planned for Phase 9+.
+        ``CoordPolar`` is planned for Phase 11+.
     """
 
     def __init__(self) -> None:
         raise NotImplementedError(
-            "CoordPolar is planned for Phase 9+."
+            "CoordPolar is planned for Phase 11+."
         )
 
 
 class CoordGeo:
-    """Geographic map-projection coordinates — planned for Phase 9+.
+    """Geographic map-projection coordinates — planned for Phase 11+.
 
     Raises
     ------
     NotImplementedError
-        ``CoordGeo`` is planned for Phase 9+.
+        ``CoordGeo`` is planned for Phase 11+.
     """
 
     def __init__(self) -> None:
         raise NotImplementedError(
-            "CoordGeo is planned for Phase 9+."
+            "CoordGeo is planned for Phase 11+."
         )
 
 
 class CoordFixed:
-    """Fixed aspect-ratio coordinates — planned for Phase 9+.
+    """Fixed aspect-ratio coordinates — planned for Phase 11+.
 
     Raises
     ------
     NotImplementedError
-        ``CoordFixed`` is planned for Phase 9+.
+        ``CoordFixed`` is planned for Phase 11+.
     """
 
     def __init__(self) -> None:
         raise NotImplementedError(
-            "CoordFixed is planned for Phase 9+."
+            "CoordFixed is planned for Phase 11+."
         )

@@ -102,9 +102,11 @@ def desugar_prediction_error(
     the line layer renders as a clean y=x diagonal (handled by
     ``Chart.mark_prediction_error``).
 
-    ``ci`` and ``reference_band`` are reserved for Phase 10h; passing
-    non-default values raises ``NotImplementedError`` (per the Phase 9+
-    no-defer principle).
+    When ``ci is not None`` or ``reference_band=True``, the data must also
+    carry the injected ``_pe_band_lo`` / ``_pe_band_hi`` columns (the chart
+    builder pre-computes these as the ``ci``-width band around the identity
+    line), and this desugar emits a ``ribbon`` layer between those bounds with
+    ``opacity=0.2`` so the underlying scatter remains visible.
     """
     point_enc: dict[str, Any] = {"x": "y_true", "y": "y_pred"}
     if color_field is not None:
@@ -205,10 +207,12 @@ def desugar_pr(
     ``_ap_label`` columns — one non-null row per class — and this
     desugar emits a ``mark_text`` layer that references them.
 
-    When ``iso_lines=True`` the chart builder appends F-score iso-curve
-    rows for F in {0.2, 0.4, 0.6, 0.8} with synthetic ``_iso_recall``,
-    ``_iso_precision``, ``_iso_label`` columns; the desugar emits a
-    grey dashed line layer plus a text layer for the iso labels.
+    When ``iso_lines=True`` the chart builder appends F-score iso-curve rows
+    for F in {0.2, 0.4, 0.6, 0.8} with synthetic columns ``_iso_recall``,
+    ``_iso_precision``, ``_iso_f`` (Utf8 F-score label used as the line color
+    grouping key), ``_iso_label_x``, ``_iso_label_y``, and ``_iso_label``; the
+    desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
+    layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
     """
     del average  # informational at the mark layer
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
@@ -1145,9 +1149,9 @@ def desugar_intercluster_distance(
     ``size`` (Int64). When ``label_clusters=True`` a text layer overlays
     the cluster id at each point. ``min_size`` and ``max_size`` set the
     point-area range (in pixel² units, before sqrt → radius); the
-    default ``[100, 1500]`` produces ~6–22 px radii, well above the
-    theme default ``[3, 30]`` that collapses to a 1–3 px speck on
-    typical KMeans cluster counts.
+    defaults ``min_size=60.0`` / ``max_size=600.0`` produce ~8–24 px radii,
+    well above the theme default ``[3, 30]`` that collapses to a 1–3 px
+    speck on typical KMeans cluster counts.
     """
     del x_field, y_field
     from ferrum.encoding import Size

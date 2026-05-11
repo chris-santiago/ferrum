@@ -25,25 +25,76 @@ def desugar_density(
     smooth: bool = True,
     cmap: str = "viridis",
 ) -> tuple:
-    """mark_density desugar.
+    """Kernel-density-estimate area/line mark desugar.
 
-    1D path (only x encoded): ``mark_area`` (when ``fill=True``, the default)
-    or ``mark_line`` (when ``fill=False``) over ``Kde(field)`` with remap
-    ``x → value``, ``y → density``. Returns the legacy 3-tuple
-    ``(mark, transforms, remap)``.
+    Routes to either a 1D or bivariate 2D KDE path based on the chart's
+    encoding state.
 
-    Bivariate path (both x AND y encoded — Phase 8b): routes through
-    ``desugar_contour(fill=True)`` to emit a filled-contour layer over a
-    2D KDE. Returns the 5-tuple
+    **1D path** (only x encoded): returns the legacy 3-tuple
+    ``(mark, transforms, remap)`` with ``mark="area"`` (when ``fill=True``)
+    or ``mark="line"`` (when ``fill=False``), a single ``Kde`` transform, and
+    the encoding remap ``{"x": "value", "y": "density"}``.
+
+    **2D/bivariate path** (both x AND y encoded): routes through
+    ``desugar_contour(fill=True)`` and returns the 5-tuple
     ``("__layered__", transforms, None, None, layers)``.
 
-    Every kwarg is explicitly named so Python rejects unknown kwargs at
-    the call boundary — no silent-drop fallthrough. ``bw_adjust`` scales
-    a numeric ``bandwidth`` multiplicatively; combining it with the
-    string ``"scott"`` rule requires resolving Scott's factor against
-    the data which the Kde transform does in Rust, so the no-op default
-    1.0 passes through and any non-default value raises (the path-of-
-    correctness fix lives in the Rust transform).
+    Data contract (1D path)
+    -----------------------
+    Input: DataFrame with numeric column ``field``.
+
+    ``Kde`` (unnamed) produces: ``[value (Float64), density (Float64)]``
+
+    Layers emitted (1D)
+    -------------------
+    Returns legacy 3-tuple, not a layer list.  The chart's x encoding
+    remaps to ``"value"`` and y to ``"density"``.
+
+    Parameters
+    ----------
+    field : str
+        Numeric column to estimate density from.
+    chart_encoding : dict or None, default None
+        The chart's current encoding dict.  If both ``"x"`` and ``"y"``
+        are bound, routes through ``desugar_contour``.
+    bandwidth : str or float, default "scott"
+        KDE bandwidth rule or numeric value.
+    bw_adjust : float, default 1.0
+        Multiplier applied to a numeric ``bandwidth``.  Raises
+        ``NotImplementedError`` when combined with a string bandwidth rule
+        (e.g. ``"scott"``).
+    kernel : str, default "gaussian"
+        Reserved for future use (no-op today — the ``Kde`` transform uses
+        Gaussian exclusively).
+    n : int, default 512
+        Number of evaluation points.
+    extent : tuple[float, float] or None, default None
+        Explicit ``[min, max]`` range for the KDE.
+    cumulative : bool, default False
+        Whether to emit the cumulative density rather than the PDF.
+    multiple : str, default "layer"
+        Reserved for future use (only ``"layer"`` is supported today;
+        other values raise ``NotImplementedError``).
+    fill : bool, default True
+        If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
+    thresholds : int, default 6
+        Passed through to ``desugar_contour`` on the bivariate path.
+    smooth : bool, default True
+        Passed through to ``desugar_contour`` on the bivariate path.
+    cmap : str, default "viridis"
+        Passed through to ``desugar_contour`` on the bivariate path.
+
+    Returns
+    -------
+    tuple
+        3-tuple ``(mark, transforms, remap)`` on the 1D path, or 5-tuple
+        ``("__layered__", transforms, None, None, layers)`` on the 2D path.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``multiple != "layer"`` or if ``bw_adjust`` is combined with a
+        string bandwidth rule.
     """
     # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
     # contour fill instead of a 1D KDE area.
@@ -100,10 +151,62 @@ def desugar_histogram(
     multiple: str = "layer",
     groupby: Any = None,
 ) -> tuple[str, list, dict]:
-    """mark_histogram → mark_bar + Bin(field, ...) + count or density on y.
+    """Histogram mark desugar.
 
-    Every kwarg is explicitly named so Python rejects unknown kwargs at
-    the call boundary — no silent-drop fallthrough.
+    Converts ``chart.mark_histogram(...)`` into a ``Bin`` transform plus a
+    bar layer that reads the binned output columns.
+
+    Data contract
+    -------------
+    Input: DataFrame with numeric column ``field``.
+
+    ``Bin`` (unnamed) produces:
+    ``[bin_start (Float64), bin_end (Float64), count (Int64),
+    density (Float64)]``
+
+    Encoding remap
+    --------------
+    ``x → bin_start``, ``x2 → bin_end``,
+    ``y → "density"`` (when ``density=True``) or ``"count"`` (default).
+
+    Parameters
+    ----------
+    field : str
+        Numeric column to bin.
+    bin_count : int or None, default None
+        Desired number of bins.  ``None`` uses Sturges' rule.
+    bin_width : float or None, default None
+        Explicit bin width in data units; overrides ``bin_count``.
+    extent : tuple[float, float] or None, default None
+        Explicit ``[min, max]`` range for the binning.
+    nice : bool, default True
+        Whether to extend the bin range to round numbers.
+    density : bool, default False
+        If ``True``, encode y as ``"density"`` (area = 1) instead of
+        ``"count"``.
+    cumulative : bool, default False
+        Whether to accumulate counts/density across bins.
+    right : str, default False
+        Reserved for future use (no-op today — bin intervals are always
+        left-closed, right-open ``[lo, hi)``).
+    multiple : str, default "layer"
+        Reserved for future use (no-op today — only ``"layer"`` overlap
+        is supported; stacking deferred).
+    groupby : list or None, default None
+        Optional grouping columns forwarded to the ``Bin`` transform.
+
+    Returns
+    -------
+    tuple
+        3-tuple ``("bar", transforms, encoding_remap)``.
+
+    Examples
+    --------
+    >>> result = desugar_histogram("tip")
+    >>> result[0]
+    'bar'
+    >>> result[2]
+    {'x': 'bin_start', 'x2': 'bin_end', 'y': 'count'}
     """
     del right, multiple  # forwarded to renderer in a later phase
     bin_kwargs: dict = dict(bin_count=bin_count, bin_width=bin_width, extent=extent,
@@ -130,18 +233,70 @@ def desugar_smooth(
     x_bins: Any = None,
     x_estimator: Any = None,
 ) -> tuple:
-    """mark_smooth → mark_line + Smooth(x, y, ...).
+    """Smoothed-regression line (LOESS/etc.) mark desugar.
 
-    With ``ci=None`` (the default): single ``line`` mark layer, returns the
-    legacy 3-tuple ``(mark, transforms, remap)``.
+    Converts ``chart.mark_smooth(...)`` into a ``Smooth`` transform plus
+    either a single line layer (no CI) or a ribbon + line layer pair (with CI).
 
-    With ``ci`` set (e.g. ``0.95``) — Phase 8b: layered output emitting a
-    ribbon (CI band, semi-transparent) below a line, both bound to the same
-    named ``Smooth`` transform output. Returns the 5-tuple
-    ``("__layered__", transforms, None, None, layers)``.
+    Data contract
+    -------------
+    Input: DataFrame with numeric columns ``x_field`` and ``y_field``.
 
-    Every kwarg is explicitly named so Python rejects unknown kwargs at
-    the call boundary — no silent-drop fallthrough.
+    Without CI — ``Smooth`` (unnamed) produces: ``[x (Float64), y (Float64)]``
+
+    With CI — ``Smooth`` (named ``"smooth"``) produces:
+    ``[x (Float64), y (Float64), ci_lower (Float64), ci_upper (Float64)]``
+
+    Layers emitted
+    --------------
+    *No CI*: returns the legacy 3-tuple ``("line", transforms, remap)``
+    with remap ``{"x": "x", "y": "y"}``.
+
+    *With CI*:
+    1. ``ribbon`` — ``y="ci_lower"``, ``y2="ci_upper"``, ``opacity=0.3``
+       (CI band).
+    2. ``line``   — ``y="y"`` (mean/fitted line).
+
+    Parameters
+    ----------
+    x_field : str
+        Numeric predictor column.
+    y_field : str
+        Numeric response column.
+    method : str, default "loess"
+        Smoothing method (e.g. ``"loess"``, ``"linear"``, ``"quadratic"``).
+    ci : float or None, default None
+        Confidence interval level (e.g. ``0.95``).  ``None`` disables the
+        CI band and returns a single-line legacy 3-tuple.
+    bandwidth : float, default 0.75
+        Smoothing bandwidth fraction (LOESS).
+    degree : int, default 2
+        Polynomial degree for the smoother.
+    n : int, default 200
+        Number of evaluation points in the output.
+    seed : int, default 0
+        RNG seed for bootstrap CI (``ci`` path only).  Pinned to
+        ``ChaCha8Rng`` for byte-deterministic SVG goldens.
+    x_bins : int or None, default None
+        Optional number of x bins for aggregated scatter smoothing.
+    x_estimator : str or None, default None
+        Aggregation function per x bin (e.g. ``"mean"``).
+
+    Returns
+    -------
+    tuple
+        3-tuple ``("line", transforms, remap)`` when ``ci=None``, or
+        5-tuple ``("__layered__", transforms, None, None, layers)``
+        when ``ci`` is set.
+
+    Examples
+    --------
+    >>> result = desugar_smooth("x", "y")
+    >>> result[0]
+    'line'
+    >>> result_ci = desugar_smooth("x", "y", ci=0.95)
+    >>> result_ci[0]
+    '__layered__'
     """
 
     if ci is None:

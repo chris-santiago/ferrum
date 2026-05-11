@@ -139,7 +139,8 @@ class TooltipField(ChannelBase):
     Examples
     --------
     >>> import ferrum as fm
-    >>> fm.Tooltip("hp", fm.TooltipField("mpg", title="MPG", format=".1f"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg",
+    ...     tooltip=fm.Tooltip("hp", fm.TooltipField("mpg", title="MPG", format=".1f")))
     """
 
     _channel_name = "tooltip_field"

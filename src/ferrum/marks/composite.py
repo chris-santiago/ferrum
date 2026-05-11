@@ -22,6 +22,70 @@ def desugar_boxplot(
     color_field: Optional[str] = None,
     horizontal: bool = False,
 ) -> tuple:
+    """Box-plot composite mark desugar.
+
+    Converts ``chart.mark_boxplot(...)`` into a ``BoxStats`` transform plus
+    three (or four) primitive layers: a whisker rule, an IQR rect, a median
+    tick, and an optional outlier point layer.
+
+    Data contract
+    -------------
+    Input: any DataFrame with categorical column ``x_field`` and numeric
+    column ``y_field`` (or the reverse when ``horizontal=True``).
+
+    Output — ``BoxStats`` named ``"box"`` produces:
+    ``[<groupby cols>, q1, median, q3, lower_whisker, upper_whisker]``
+
+    When ``outliers=True``, an ``Outliers`` transform named ``"outliers"``
+    produces rows of the original ``val`` column for observations outside
+    the whiskers: ``[<groupby cols>, <val>]``.
+
+    Layers emitted
+    --------------
+    1. ``rule``   — ``y=lower_whisker``, ``y2=upper_whisker`` (whiskers).
+    2. ``rect``   — ``y=q1``, ``y2=q3`` (IQR box, ``width=size``).
+    3. ``tick``   — ``y=median`` (median line).
+    4. ``point``  — ``y=<val>`` from the ``"outliers"`` output (when
+       ``outliers=True``).
+
+    Parameters
+    ----------
+    x_field : str or None
+        Categorical (grouping) field name. Required.
+    y_field : str or None
+        Numeric (value) field name. Required.
+    extent : float or "min-max", default 1.5
+        IQR multiplier for whisker length, or ``"min-max"`` to extend
+        whiskers to the data minimum/maximum.
+    outliers : bool, default True
+        Whether to overlay an outlier point layer.
+    size : float or None, default None
+        Box half-width as a fraction of the band (default ``0.6``).
+    color_field : str or None, default None
+        Optional column to use for color encoding (also added to the
+        ``groupby`` list for the transforms).
+    horizontal : bool, default False
+        If ``True``, flip axes so that categories are on the y-axis.
+
+    Returns
+    -------
+    tuple
+        5-tuple ``("__layered__", transforms, None, None, layers)``
+        consumed by ``Chart._resolve_pending``.
+
+    Raises
+    ------
+    ValueError
+        If either ``x_field`` or ``y_field`` is ``None``.
+
+    Examples
+    --------
+    >>> result = desugar_boxplot("species", "sepal_length")
+    >>> result[0]
+    '__layered__'
+    >>> len(result[4])  # 4 layers: whisker, box, median, outlier
+    4
+    """
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
@@ -67,6 +131,58 @@ def desugar_errorbar(
     extent: str = "ci",
     ticks: bool = True,
 ) -> tuple:
+    """Error-bar composite mark desugar.
+
+    Converts ``chart.mark_errorbar(...)`` into an ``ErrorExtent`` transform
+    plus a ranged-rule layer (and optional endpoint tick layers).
+
+    Data contract
+    -------------
+    Input: DataFrame with categorical column ``x_field`` and numeric column
+    ``y_field`` (one row per observation; the transform aggregates).
+
+    Output — ``ErrorExtent`` named ``"err"`` produces:
+    ``[<x_field>, lower, upper]``
+
+    Layers emitted
+    --------------
+    1. ``rule``  — ``y=lower``, ``y2=upper`` (vertical error span).
+    2. ``tick``  — ``y=lower`` (bottom cap, ``band_size=6``).  When
+       ``ticks=True`` only.
+    3. ``tick``  — ``y=upper`` (top cap, ``band_size=6``).  When
+       ``ticks=True`` only.
+
+    Parameters
+    ----------
+    x_field : str or None
+        Categorical (grouping) field. Required.
+    y_field : str or None
+        Numeric value field. Required.
+    extent : str, default "ci"
+        Aggregation method passed to ``ErrorExtent``.  One of ``"ci"``
+        (95 % bootstrap CI), ``"stderr"``, ``"stdev"``, or ``"iqr"``.
+    ticks : bool, default True
+        Whether to add endpoint tick marks at the top and bottom of each
+        error bar.
+
+    Returns
+    -------
+    tuple
+        5-tuple ``("__layered__", transforms, None, None, layers)``.
+
+    Raises
+    ------
+    ValueError
+        If either ``x_field`` or ``y_field`` is ``None``.
+
+    Examples
+    --------
+    >>> result = desugar_errorbar("day", "tip")
+    >>> result[0]
+    '__layered__'
+    >>> [l["mark"] for l in result[4]]
+    ['rule', 'tick', 'tick']
+    """
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
@@ -90,6 +206,56 @@ def desugar_errorband(
     extent: str = "ci",
     borders: bool = False,
 ) -> tuple:
+    """Error-band (shaded CI ribbon) composite mark desugar.
+
+    Converts ``chart.mark_errorband(...)`` into an ``ErrorExtent`` transform
+    plus a translucent ribbon layer (and optional border line layers).
+
+    Data contract
+    -------------
+    Input: DataFrame with continuous ``x_field`` and numeric ``y_field``
+    (one row per observation; the transform aggregates by x).
+
+    Output — ``ErrorExtent`` named ``"err"`` produces:
+    ``[<x_field>, lower, upper]``
+
+    Layers emitted
+    --------------
+    1. ``ribbon`` — ``y=lower``, ``y2=upper``, ``opacity=0.3`` (shaded band).
+    2. ``line``   — ``y=lower`` (bottom border).  When ``borders=True`` only.
+    3. ``line``   — ``y=upper`` (top border).  When ``borders=True`` only.
+
+    Parameters
+    ----------
+    x_field : str or None
+        Continuous x field. Required.
+    y_field : str or None
+        Numeric value field. Required.
+    extent : str, default "ci"
+        Aggregation method passed to ``ErrorExtent``.  One of ``"ci"``,
+        ``"stderr"``, ``"stdev"``, or ``"iqr"``.
+    borders : bool, default False
+        Whether to draw solid border lines at the upper and lower edges of
+        the ribbon.
+
+    Returns
+    -------
+    tuple
+        5-tuple ``("__layered__", transforms, None, None, layers)``.
+
+    Raises
+    ------
+    ValueError
+        If either ``x_field`` or ``y_field`` is ``None``.
+
+    Examples
+    --------
+    >>> result = desugar_errorband("x", "y")
+    >>> result[0]
+    '__layered__'
+    >>> result[4][0]["mark"]
+    'ribbon'
+    """
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
@@ -113,11 +279,56 @@ def desugar_ribbon(
     opacity: float = 0.3,
     interpolate: str = "linear",
 ) -> tuple:
-    """mark_ribbon directly emits a ribbon layer; no transform.
+    """Primitive ribbon (shaded band) mark desugar — no transform.
 
-    y2_field is read from the chart's encoding state (passed in by the
-    Chart._resolve_pending special case for kind == "ribbon") since
-    ribbon is invoked AFTER .encode(x=..., y=..., y2=...).
+    Emits a single ribbon layer directly.  Unlike ``desugar_errorband``,
+    no aggregation transform is applied; the data must already carry the
+    lower and upper bound columns.
+
+    ``y2_field`` is resolved from the chart's encoding state and passed in
+    by ``Chart._resolve_pending`` (the special case for ``kind == "ribbon"``)
+    because ribbon is always called after ``.encode(x=..., y=..., y2=...)``.
+
+    Data contract
+    -------------
+    Input: DataFrame pre-computed with columns ``x_field``, ``y_field``
+    (lower bound), and ``y2_field`` (upper bound).  No transforms emitted.
+
+    Layers emitted
+    --------------
+    1. ``ribbon`` — ``x=x_field``, ``y=y_field``, ``y2=y2_field``,
+       ``opacity=opacity``.
+
+    Parameters
+    ----------
+    x_field : str or None
+        Continuous x field. Required.
+    y_field : str or None
+        Lower-bound y field. Required.
+    y2_field : str or None, default None
+        Upper-bound y field.  Required (must be supplied by the caller
+        from the chart's encoding state).
+    opacity : float, default 0.3
+        Ribbon fill opacity.
+    interpolate : str, default "linear"
+        Reserved for future use (no-op today — the renderer uses linear
+        interpolation unconditionally).
+
+    Returns
+    -------
+    tuple
+        5-tuple ``("__layered__", [], None, None, layers)``.
+
+    Raises
+    ------
+    ValueError
+        If ``x_field``, ``y_field``, or ``y2_field`` is ``None``.
+
+    Examples
+    --------
+    >>> result = desugar_ribbon("x", "lower", y2_field="upper")
+    >>> result[4][0]["mark"]
+    'ribbon'
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_ribbon() requires .encode(x=..., y=...)")

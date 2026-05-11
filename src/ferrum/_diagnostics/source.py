@@ -141,10 +141,35 @@ class ModelSource:
 
     @property
     def feature_names(self) -> list[str]:
+        """Column labels for the feature matrix.
+
+        Returns the names supplied at construction time, or the DataFrame
+        column names when ``X`` was a DataFrame, or ``["f0", "f1", ...]``
+        for unlabeled array inputs.
+
+        Returns
+        -------
+        list[str]
+            Feature names in the same order as the columns of ``X``.
+        """
         return list(self._feature_names)
 
     @property
     def capabilities(self) -> frozenset[str]:
+        """Protocol attributes present on the wrapped estimator.
+
+        A frozen subset of ``_PROTOCOL_ATTRS`` (``"predict"``,
+        ``"predict_proba"``, ``"coef_"``, ``"feature_importances_"``, …)
+        detected at construction time via ``hasattr``. Derived-data methods
+        gate on this set to pick the appropriate code path and raise
+        ``AttributeError`` with a clear message when a required attribute
+        is absent.
+
+        Returns
+        -------
+        frozenset[str]
+            Attribute names that are present on the wrapped model.
+        """
         return self._capabilities
 
     @classmethod
@@ -162,6 +187,42 @@ class ModelSource:
         every derived-data method through all wrapped sources and stamps the
         model name as a ``model`` column on the concatenated output, so
         downstream chart builders can route ``color="model"``.
+
+        Parameters
+        ----------
+        models : dict[str, Any]
+            Mapping from display name to fitted estimator. Each estimator is
+            wrapped in its own ``ModelSource`` constructed with the shared
+            ``X``, ``y``, and any additional ``kwargs`` (e.g.
+            ``random_state``, ``feature_names``, ``class_names``).
+        X : array-like
+            Feature matrix shared by all models. Accepted types match
+            ``ModelSource.__init__``.
+        y : array-like, optional
+            Target shared by all models. Required by most derived-data
+            methods (same constraints as ``ModelSource``).
+        **kwargs : Any
+            Keyword arguments forwarded verbatim to each ``ModelSource``
+            constructor (e.g. ``random_state``, ``feature_names``,
+            ``class_names``, ``sample_weight``).
+
+        Returns
+        -------
+        ComparedModelSource
+            Multi-model wrapper whose derived-data methods return long-form
+            DataFrames with an extra ``model: Utf8`` column.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> from sklearn.linear_model import Ridge, Lasso
+        >>> cms = fm.ModelSource.compare(
+        ...     {"ridge": Ridge().fit(X, y), "lasso": Lasso().fit(X, y)},
+        ...     X, y, random_state=0,
+        ... )
+        >>> fm.roc_chart(cms)          # overlay both ROC curves
+        >>> cms.model_names
+        ['ridge', 'lasso']
         """
         sources = {
             name: cls(model, X, y, **kwargs) for name, model in models.items()
@@ -1670,6 +1731,17 @@ class ComparedModelSource:
 
     @property
     def model_names(self) -> list[str]:
+        """Ordered list of model display names.
+
+        Returns the keys of the ``sources`` dict supplied at construction time,
+        in insertion order. Each name corresponds to the value written into the
+        ``model`` column on every derived-data DataFrame.
+
+        Returns
+        -------
+        list[str]
+            Model names in the order they were registered.
+        """
         return list(self._sources.keys())
 
     def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> pl.DataFrame:

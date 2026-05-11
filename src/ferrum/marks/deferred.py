@@ -16,7 +16,25 @@ PHASE_9_PLUS_MARKS = frozenset([
 
 
 def deferred_mark_error(mark_name: str) -> NotImplementedError:
-    """Build an informative NotImplementedError for a deferred mark."""
+    """Build an informative ``NotImplementedError`` for a deferred mark.
+
+    Parameters
+    ----------
+    mark_name : str
+        The mark name without the ``mark_`` prefix (e.g. ``"arc"``).
+
+    Returns
+    -------
+    NotImplementedError
+        Exception with a human-readable message indicating which phase the
+        mark is planned for.
+
+    Examples
+    --------
+    >>> err = deferred_mark_error("arc")
+    >>> "Phase 9+" in str(err)
+    True
+    """
     if mark_name in PHASE_8B_MARKS:
         return NotImplementedError(
             f"mark_{mark_name} is planned for Phase 8b. "

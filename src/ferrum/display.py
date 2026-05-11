@@ -12,7 +12,46 @@ if TYPE_CHECKING:
 
 def save_chart(chart: "Chart", path: Union[str, Path], *,
                format: str | None = None, **render_kwargs) -> None:
-    """Save chart to disk. Format inferred from extension when format=None."""
+    """Save a chart to disk as SVG or PNG.
+
+    The output format is derived from ``path``'s file extension when
+    ``format`` is not supplied.  HTML and JSON output raise
+    ``NotImplementedError`` (planned for Phase 11+).
+
+    Parameters
+    ----------
+    chart : Chart
+        The chart to save.
+    path : str or Path
+        Destination file path.  The extension determines the format unless
+        ``format`` is given explicitly.
+    format : {"svg", "png"}, optional
+        Explicit format override.  When omitted the extension of ``path``
+        is used.  Raises ``ValueError`` if the path has no extension and
+        ``format`` is also omitted.
+    **render_kwargs
+        Additional keyword arguments forwarded to ``chart.show_svg()`` or
+        ``chart.show_png()``.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If the format cannot be determined or is not ``"svg"`` / ``"png"``.
+    NotImplementedError
+        If ``format`` is ``"html"`` or ``"json"`` (planned for Phase 11+).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
+    >>> fm.save_chart(chart, "scatter.svg")
+    >>> fm.save_chart(chart, "scatter.png")
+    >>> fm.save_chart(chart, "output", format="svg")
+    """
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
     if fmt == "svg":
@@ -21,8 +60,8 @@ def save_chart(chart: "Chart", path: Union[str, Path], *,
         path.write_bytes(chart.show_png(**render_kwargs))
     elif fmt in ("html", "json"):
         raise NotImplementedError(
-            f"save({fmt!r}) is planned for Phase 9. "
-            f"Use 'svg' or 'png' in Phase 8a."
+            f"save({fmt!r}) is planned for Phase 11+. "
+            f"Use 'svg' or 'png' today."
         )
     elif fmt == "":
         raise ValueError(
@@ -31,12 +70,32 @@ def save_chart(chart: "Chart", path: Union[str, Path], *,
     else:
         raise ValueError(
             f"unknown extension {fmt!r}; supported: svg, png. "
-            f"(html, json planned for Phase 9.)"
+            f"(html, json planned for Phase 11+.)"
         )
 
 
 def show_chart(chart: "Chart") -> None:
-    """Display chart. Order: Jupyter inline → browser fallback."""
+    """Display a chart inline in Jupyter or open it in a browser.
+
+    Attempts Jupyter inline display first (``IPython.display.SVG``); falls
+    back to writing a temporary HTML file and opening it with
+    ``webbrowser.open`` when not running inside a kernel.
+
+    Parameters
+    ----------
+    chart : Chart
+        The chart to display.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
+    >>> fm.show_chart(chart)
+    """
     if _is_jupyter():
         try:
             from IPython.display import display, SVG

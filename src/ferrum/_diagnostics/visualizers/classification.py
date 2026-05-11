@@ -255,7 +255,7 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
     >>> viz = fm.ConfusionMatrixVisualizer(clf).fit(X, y)
     >>> viz._metrics["accuracy"]
     0.94
-    >>> viz.show_svg()
+    >>> viz.show()
     """
 
     def __init__(
@@ -313,7 +313,7 @@ class ClassificationReportVisualizer(FerrumVisualizer):
     >>> viz = fm.ClassificationReportVisualizer(clf).fit(X, y)
     >>> viz._metrics["f1_macro"]
     0.91
-    >>> viz.show_svg()
+    >>> viz.show()
     """
 
     def __init__(

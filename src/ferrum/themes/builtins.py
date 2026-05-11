@@ -1,4 +1,35 @@
-"""Named built-in themes: default, minimal, dark, publication, economist, fivethirtyeight, solarized."""
+"""Named built-in themes shipped with ferrum.
+
+Eight pre-built ``Theme`` instances are exported here and re-exported at
+``ferrum.themes.<name>``:
+
+``default``
+    All properties at Rust renderer defaults (equivalent to ``Theme()``).
+
+``minimal``
+    No grid lines, no axis lines, generous padding (20 px).
+
+``dark``
+    Dark navy background (``#1a1a2e``), light text, dark2 color scheme.
+
+``publication``
+    Print-ready: no background, no grid, Tableau10 palette, bold titles,
+    Inter typeface.
+
+``economist``
+    Light blue background (``#d3e0e6``), red title accents, no axis lines,
+    Set1 palette.
+
+``fivethirtyeight``
+    Grey background (``#f0f0f0``), Set1 palette, no axis lines, Inter
+    typeface.
+
+``solarized_light``
+    Warm cream background (``#fdf6e3``), muted teal text, Set2 palette.
+
+``solarized_dark``
+    Dark teal background (``#002b36``), warm-light text, Set2 palette.
+"""
 from __future__ import annotations
 
 from ferrum.themes import Theme

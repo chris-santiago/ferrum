@@ -16,7 +16,7 @@ def test_coord_other_kinds_raise_notimplemented():
     df = pl.DataFrame({"a": [1]})
     chart = Chart(df).mark_point().encode(x="a", y="a")
     for cls in (CoordPolar, CoordGeo, CoordFixed, CoordCartesian):
-        with pytest.raises(NotImplementedError, match="Phase 9"):
+        with pytest.raises(NotImplementedError, match="Phase 11"):
             cls()  # constructors raise immediately
 
 

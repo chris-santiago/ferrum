@@ -17,6 +17,7 @@ SCHEMA_PREDICTIONS = pl.Schema({
     "residual": pl.Float64,
     "studentized_residual": pl.Float64,
     "cooks_distance": pl.Float64,  # NaN for non-linear estimators
+    "leverage": pl.Float64,        # hat-matrix diagonal; NaN for non-linear estimators
     # "model": pl.Utf8 (optional, present in ComparedModelSource output)
 })
 

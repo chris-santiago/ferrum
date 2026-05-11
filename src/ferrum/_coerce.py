@@ -15,12 +15,43 @@ from typing import Any
 
 
 def to_arrow_table(data: Any) -> "pyarrow.Table":
-    """Normalize any supported input to a pyarrow.Table.
+    """Normalize any supported input to a ``pyarrow.Table``.
 
-    Raises:
-        ValueError: if data is None.
-        TypeError: if input is numpy 1D, or an unsupported type.
-        ImportError: if narwhals is required for the input type but not installed.
+    Dispatch order (fastest first):
+
+    1. ``polars.DataFrame`` / ``polars.LazyFrame`` — zero-copy via Arrow CDI.
+    2. ``pyarrow.Table`` / ``pyarrow.RecordBatch`` — passthrough or single-batch wrap.
+    3. ``dict[str, list]`` — ``pa.Table.from_pydict``.
+    4. ``list[dict]`` — ``pa.Table.from_pylist``.
+    5. ``numpy.ndarray`` (2D) — columns named ``col_0``, ``col_1``, …
+    6. Pandas / modin / cuDF / dask / ibis — via ``narwhals``.
+
+    Parameters
+    ----------
+    data : Any
+        Input data in any of the supported formats listed above.
+
+    Returns
+    -------
+    pyarrow.Table
+        A fully materialized Arrow table with named columns.
+
+    Raises
+    ------
+    ValueError
+        If ``data`` is ``None``, or if a ``list`` input is empty.
+    TypeError
+        If ``data`` is a 1D numpy array (column name required), a numpy
+        array with ``ndim > 2``, or a list of non-dict items.
+    ImportError
+        If the input type requires ``narwhals`` and it is not installed.
+
+    Examples
+    --------
+    >>> import pyarrow as pa
+    >>> tbl = to_arrow_table({"a": [1, 2], "b": [3.0, 4.0]})
+    >>> tbl.schema.names
+    ['a', 'b']
     """
     import pyarrow as pa
 

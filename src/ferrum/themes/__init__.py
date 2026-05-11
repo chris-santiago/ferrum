@@ -18,7 +18,7 @@ class Theme:
 
     Parameters
     ----------
-    background_color : str, optional
+    background : str, optional
         Chart background color as a CSS hex string (e.g. ``"#ffffff"``).
     mark_color : str, optional
         Default mark fill/stroke color for marks that have no explicit color
@@ -44,10 +44,10 @@ class Theme:
     Examples
     --------
     >>> import ferrum as fm
-    >>> t = fm.Theme(background_color="#f9f9f9", grid=False, padding=16)
+    >>> t = fm.Theme(background="#f9f9f9", grid=False, padding=16)
     >>> t2 = t.update(mark_color="#e74c3c")
     >>> t2
-    Theme(background_color='#f9f9f9', grid=False, mark_color='#e74c3c', padding=16)
+    Theme(background='#f9f9f9', grid=False, mark_color='#e74c3c', padding=16)
     """
 
     __slots__ = ("_props",)

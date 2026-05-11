@@ -97,9 +97,10 @@ def annotate_rect(x1: float, x2: float, y1: float, y2: float, *,
     the same DataFrame.
 
     .. note::
-       ``x2`` and ``y2`` are accepted but deferred — the renderer currently
-       anchors the rect at ``(x1, y1)`` only. Full X2/Y2 support lands in
-       Phase 9.
+       ``x2`` and ``y2`` are accepted and stored in the underlying DataFrame
+       but are not currently bound to X2/Y2 encoding channels — the renderer
+       anchors the rect at ``(x1, y1)`` only. Full X2/Y2 encoding is planned
+       for Phase 11+.
 
     Parameters
     ----------
@@ -150,10 +151,10 @@ def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0
     DataFrame.
 
     .. note::
-       Text content is not rendered in the current phase; the ``text``
-       argument is stored in a ``_text`` column but that column is never
-       bound to an encoding channel, so the mark renders as a positioned but
-       empty text element. Full Text channel support lands in Phase 9+.
+       Text content is not rendered today; the ``text`` argument is stored
+       in a ``_text`` column but that column is never bound to an encoding
+       channel, so the mark renders as a positioned but empty text element.
+       Full Text channel wiring is planned for Phase 11+.
 
     Parameters
     ----------

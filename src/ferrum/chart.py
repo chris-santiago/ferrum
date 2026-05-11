@@ -46,7 +46,39 @@ def _channel_class_for(name: str):
 
 
 class Chart:
-    """Top-level chart value class. Immutable — every method returns a new Chart."""
+    """Top-level chart value class.
+
+    Every method returns a new ``Chart`` — the object is effectively immutable and
+    safe to reuse across branches of a pipeline.  The fluent API follows the pattern::
+
+        fm.Chart(df).mark_point().encode(x="sepal_length", y="sepal_width")
+
+    Parameters
+    ----------
+    data : DataFrame-like or None, optional
+        Input data.  Accepts Polars ``DataFrame``, pandas ``DataFrame``, PyArrow
+        ``Table`` / ``RecordBatch``, dict-of-arrays, list-of-records, or a 2-D
+        NumPy array.  Passed through ``ferrum._coerce.to_arrow_table`` at render
+        time.  ``None`` is allowed when composing layered charts that share a
+        parent's data.
+    width : int or "container", optional
+        Chart width in pixels, or ``"container"`` to fill the parent element.
+        Default is ``600``.
+    height : int or "container", optional
+        Chart height in pixels.  Default is ``400``.
+    title : str, optional
+        Title rendered above the plot area.
+    description : str, optional
+        Accessible description attached to the SVG root (``<title>`` element).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+    >>> svg = chart.show_svg()
+    """
 
     __slots__ = (
         "_data", "_mark", "_mark_kwargs", "_encoding", "_transforms",
@@ -256,21 +288,344 @@ class Chart:
         new._position = position
         return new
 
-    def mark_point(self, **kwargs):  return self._set_mark("point", **kwargs)
-    def mark_line(self, **kwargs):   return self._set_mark("line", **kwargs)
-    def mark_bar(self, **kwargs):    return self._set_mark("bar", **kwargs)
-    def mark_area(self, **kwargs):   return self._set_mark("area", **kwargs)
-    def mark_rule(self, **kwargs):   return self._set_mark("rule", **kwargs)
-    def mark_text(self, **kwargs):   return self._set_mark("text", **kwargs)
-    def mark_tick(self, **kwargs):   return self._set_mark("tick", **kwargs)
-    def mark_rect(self, **kwargs):   return self._set_mark("rect", **kwargs)
+    def mark_point(self, **kwargs) -> "Chart":
+        """Render data as points (scatter plot).
+
+        Parameters
+        ----------
+        size : float, optional
+            Point area in square pixels.  Default is ``36``.
+        fill : str, optional
+            Fill colour override (CSS colour string or hex).  Normally driven
+            by the ``color`` encoding.
+        stroke : str, optional
+            Stroke colour for the point outline.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        filled : bool, optional
+            Whether points are filled.  Default is ``True``.
+        shape : str, optional
+            Point shape: ``"circle"``, ``"square"``, ``"cross"``, ``"diamond"``,
+            ``"triangle-up"``, ``"triangle-down"``.
+        stroke_width : float, optional
+            Stroke width in pixels.
+        position : Position, optional
+            Position adjustment — ``fm.Jitter()``, ``fm.Dodge()``, etc.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"point"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> fm.Chart(df).mark_point(size=60, opacity=0.7).encode(x="x", y="y")
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        return self._set_mark("point", **kwargs)
+
+    def mark_line(self, **kwargs) -> "Chart":
+        """Render data as a connected line.
+
+        Parameters
+        ----------
+        stroke : str, optional
+            Stroke colour override.
+        stroke_width : float, optional
+            Line width in pixels.  Default is ``2``.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        interpolate : str, optional
+            Line interpolation: ``"linear"``, ``"monotone"``, ``"step"``,
+            ``"step-before"``, ``"step-after"``, ``"basis"``, ``"cardinal"``.
+        stroke_cap : str, optional
+            Line cap: ``"butt"``, ``"round"``, ``"square"``.
+        stroke_join : str, optional
+            Line join: ``"miter"``, ``"round"``, ``"bevel"``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"line"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> fm.Chart(df).mark_line(stroke_width=3, interpolate="monotone").encode(x="x", y="y")
+        Chart(mark='line', encoding=['x', 'y'])
+        """
+        return self._set_mark("line", **kwargs)
+
+    def mark_bar(self, **kwargs) -> "Chart":
+        """Render data as bars.
+
+        Parameters
+        ----------
+        fill : str, optional
+            Bar fill colour override.
+        stroke : str, optional
+            Bar stroke colour.
+        stroke_width : float, optional
+            Bar stroke width in pixels.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        corner_radius : float, optional
+            Rounded corner radius in pixels.
+        orient : str, optional
+            ``"vertical"`` (default) or ``"horizontal"``.
+        position : Position, optional
+            Position adjustment — ``fm.Stack()``, ``fm.Dodge()``, etc.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"bar"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10, 20, 15]})
+        >>> fm.Chart(df).mark_bar(corner_radius=4).encode(x="cat", y="val")
+        Chart(mark='bar', encoding=['x', 'y'])
+        """
+        return self._set_mark("bar", **kwargs)
+
+    def mark_area(self, **kwargs) -> "Chart":
+        """Render data as a filled area between the line and a baseline.
+
+        Parameters
+        ----------
+        fill : str, optional
+            Fill colour override.
+        stroke : str, optional
+            Border stroke colour.
+        stroke_width : float, optional
+            Border stroke width in pixels.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        interpolate : str, optional
+            Area boundary interpolation: ``"linear"``, ``"monotone"``,
+            ``"step"``, ``"basis"``, ``"cardinal"``.
+        line : bool, optional
+            Whether to draw the top boundary as a line.  Default is ``False``.
+        position : Position, optional
+            Position adjustment — e.g. ``fm.Stack()``.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"area"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> fm.Chart(df).mark_area(opacity=0.5, line=True).encode(x="x", y="y")
+        Chart(mark='area', encoding=['x', 'y'])
+        """
+        return self._set_mark("area", **kwargs)
+
+    def mark_rule(self, **kwargs) -> "Chart":
+        """Render a horizontal or vertical reference rule spanning the plot area.
+
+        A rule spans the full width (when ``y`` is encoded) or full height
+        (when ``x`` is encoded).  Encoding both ``x``/``x2`` or ``y``/``y2``
+        draws finite line segments instead.
+
+        Parameters
+        ----------
+        stroke : str, optional
+            Rule colour override.
+        stroke_width : float, optional
+            Rule width in pixels.  Default is ``1``.
+        stroke_dash : str or list, optional
+            Dash pattern, e.g. ``"4,2"``.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"rule"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"y": [0.0]})
+        >>> fm.Chart(df).mark_rule(stroke="red", stroke_width=2).encode(y="y")
+        Chart(mark='rule', encoding=['y'])
+        """
+        return self._set_mark("rule", **kwargs)
+
+    def mark_text(self, **kwargs) -> "Chart":
+        """Render data values as text labels.
+
+        Requires a ``text`` encoding channel pointing at the column to display.
+
+        Parameters
+        ----------
+        fill : str, optional
+            Text colour override.
+        font_size : float, optional
+            Font size in points.  Default is ``11``.
+        font_weight : str or int, optional
+            CSS font-weight, e.g. ``"bold"``, ``400``, ``700``.
+        align : str, optional
+            Horizontal alignment: ``"left"``, ``"center"``, ``"right"``.
+        baseline : str, optional
+            Vertical alignment: ``"top"``, ``"middle"``, ``"bottom"``,
+            ``"alphabetic"``.
+        dx : float, optional
+            Horizontal pixel offset from the anchor point.
+        dy : float, optional
+            Vertical pixel offset from the anchor point.
+        angle : float, optional
+            Rotation in degrees.
+        limit : float, optional
+            Maximum rendered width in pixels; clips overflow.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"text"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "label": ["A", "B"]})
+        >>> fm.Chart(df).mark_text(dy=-8).encode(x="x", y="y", text="label")
+        Chart(mark='text', encoding=['x', 'y', 'text'])
+        """
+        return self._set_mark("text", **kwargs)
+
+    def mark_tick(self, **kwargs) -> "Chart":
+        """Render data as short tick marks (rug / strip plot).
+
+        Parameters
+        ----------
+        stroke : str, optional
+            Tick colour override.
+        stroke_width : float, optional
+            Tick stroke width in pixels.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        band_size : float, optional
+            Tick length in pixels.
+        orient : str, optional
+            ``"vertical"`` (default ticks perpendicular to x) or
+            ``"horizontal"``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"tick"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.1, 2.3, 3.5, 2.2, 1.8]})
+        >>> fm.Chart(df).mark_tick().encode(x="x")
+        Chart(mark='tick', encoding=['x'])
+        """
+        return self._set_mark("tick", **kwargs)
+
+    def mark_rect(self, **kwargs) -> "Chart":
+        """Render data as rectangles (heatmap cells, Gantt bars).
+
+        Requires ``x``/``x2`` or ``y``/``y2`` encoding pairs (or ordinal
+        ``x``/``y`` for a heatmap cell grid).
+
+        Parameters
+        ----------
+        fill : str, optional
+            Rectangle fill colour override.
+        stroke : str, optional
+            Rectangle border stroke colour.
+        stroke_width : float, optional
+            Border stroke width in pixels.
+        opacity : float, optional
+            Overall opacity in ``[0, 1]``.
+        corner_radius : float, optional
+            Rounded corner radius in pixels.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"rect"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"row": ["A", "B"], "col": ["X", "Y"], "val": [1.0, 0.5]})
+        >>> fm.Chart(df).mark_rect().encode(x="col", y="row", color="val")
+        Chart(mark='rect', encoding=['x', 'y', 'color'])
+        """
+        return self._set_mark("rect", **kwargs)
 
     # ---- Marks (statistical) ----
 
     def mark_density(self, *, position=None, **kwargs) -> "Chart":
-        """Density plot. 1D KDE when only x is encoded; bivariate (filled
-        contour over 2D KDE — Phase 8b) when both x and y are encoded.
-        Can be called before or after ``.encode()``.
+        """Render a kernel-density estimate (KDE) curve or filled contour.
+
+        When only ``x`` is encoded, draws a 1-D KDE area curve.  When both
+        ``x`` and ``y`` are encoded, renders a bivariate filled-contour density
+        (routes through ``desugar_contour(fill=True)``).  Can be called before
+        or after ``.encode()``.
+
+        Parameters
+        ----------
+        bandwidth : float or "scott" or "silverman", optional
+            KDE bandwidth.  ``"scott"`` and ``"silverman"`` use the
+            corresponding rule-of-thumb estimates.  Default is ``"scott"``.
+        kernel : str, optional
+            Kernel type: ``"gaussian"``, ``"tophat"``, ``"epanechnikov"``,
+            ``"exponential"``, ``"linear"``, ``"cosine"``.  Default is
+            ``"gaussian"``.
+        extent : list of float or None, optional
+            ``[min, max]`` evaluation range.  Defaults to data extent.
+        cumulative : bool, optional
+            Produce a CDF instead of a PDF.  Default is ``False``.
+        n : int, optional
+            Number of evaluation points.  Default is ``200``.
+        multiple : str, optional
+            How to handle multiple densities when a ``color`` encoding is
+            present: ``"layer"`` (default), ``"stack"``, ``"fill"``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for density rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"val": [1.0, 2.1, 1.8, 3.0, 2.5]})
+        >>> fm.Chart(df).mark_density().encode(x="val")
+        Chart(mark='area', encoding=['x'])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -307,7 +662,44 @@ class Chart:
         return new
 
     def mark_histogram(self, *, position=None, **kwargs) -> "Chart":
-        """Histogram. Can be called before or after .encode(x=...)."""
+        """Render data as a histogram.
+
+        Bins the ``x``-encoded column and encodes bin extents as ``x``/``x2``
+        with counts (or densities) on ``y``.  Can be called before or after
+        ``.encode(x=...)``.
+
+        Parameters
+        ----------
+        bin_count : int, optional
+            Target number of bins.  Ignored when ``bin_width`` is set.
+            Default is chosen automatically from Sturges' rule.
+        bin_width : float, optional
+            Exact bin width in data units.  Overrides ``bin_count``.
+        density : bool, optional
+            Normalise counts to a probability density.  Default is ``False``.
+        right : bool, optional
+            Whether bins are closed on the right.  Default is ``True``.
+        cumulative : bool, optional
+            Render a cumulative histogram.  Default is ``False``.
+        multiple : str, optional
+            How to handle grouped histograms when a ``color`` encoding is
+            present: ``"layer"`` (default), ``"stack"``, ``"dodge"``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for histogram rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"val": [1.0, 1.2, 2.3, 3.1, 2.8, 1.5]})
+        >>> fm.Chart(df).mark_histogram(bin_count=5).encode(x="val")
+        Chart(mark='bar', encoding=['x', 'x2', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("histogram", position)
@@ -331,9 +723,41 @@ class Chart:
         return new
 
     def mark_smooth(self, *, position=None, **kwargs) -> "Chart":
-        """Smooth/regression line. Can be called before or after .encode(x=..., y=...).
+        """Render a smoothed regression line with optional confidence interval band.
 
-        With ``ci=`` set, emits a layered ribbon (CI band) + line (Phase 8b).
+        Fits a smooth curve through ``(x, y)`` data using the method specified by
+        ``method``.  When ``ci`` is set, emits a layered ribbon (CI band) + line
+        chart.  Can be called before or after ``.encode(x=..., y=...)``.
+
+        Parameters
+        ----------
+        method : str, optional
+            Smoothing method: ``"loess"`` (default), ``"linear"``, ``"quadratic"``,
+            ``"cubic"``, ``"log"``, ``"sqrt"``.
+        degree : int, optional
+            Polynomial degree for ``"linear"``/``"quadratic"``/``"cubic"``.
+        bandwidth : float, optional
+            LOESS bandwidth fraction in ``(0, 1]``.  Default is ``0.75``.
+        n : int, optional
+            Number of evaluation points along the x range.  Default is ``200``.
+        ci : float or None, optional
+            Confidence level for the interval band, e.g. ``0.95``.  When set,
+            produces a layered ribbon + line chart.  Default is ``None``.
+        position : Position, optional
+            Position adjustment.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for smooth rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.1, 1.9, 3.1, 4.0]})
+        >>> fm.Chart(df).mark_smooth(method="linear", ci=0.95).encode(x="x", y="y")
+        Chart(mark='line', encoding=['x', 'y'])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -387,7 +811,44 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Composite boxplot. Desugars to box+whisker+median (+optional outlier) layers."""
+        """Render a Tukey boxplot via composite mark desugaring.
+
+        Desugars to a multi-layer chart: box (IQR rect), upper and lower
+        whisker rules, median rule, and (optionally) outlier points.  Requires
+        a categorical ``x`` encoding and a continuous ``y`` (or the reverse
+        when ``horizontal=True``).
+
+        Parameters
+        ----------
+        extent : float, optional
+            Whisker reach as a multiple of IQR.  Default is ``1.5``.
+        size : float or None, optional
+            Box width in pixels.  ``None`` (default) lets the renderer choose.
+        outliers : bool, optional
+            Whether to draw outlier points beyond the whiskers.  Default is
+            ``True``.
+        color_field : str or None, optional
+            Column name to drive per-group fill colour on the box layer.
+        horizontal : bool, optional
+            Swap x and y axes so boxes run horizontally.  Default is ``False``.
+        position : Position, optional
+            Position adjustment — e.g. ``fm.Dodge()`` for side-by-side boxes.
+        **mark_kwargs
+            Additional mark-style overrides forwarded to each constituent layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` representing the boxplot.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"species": ["a"]*5 + ["b"]*5, "val": [1,2,3,2,1,4,5,4,5,6]})
+        >>> fm.Chart(df).mark_boxplot().encode(x="species", y="val")
+        Chart(mark='point', encoding=[])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("boxplot", position)
@@ -421,9 +882,48 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Letter-value (boxen) plot. Composite mark — desugars to nested rect
-        bands per letter-value depth, plus a median rule and an outlier-point
-        layer, via the ``LetterValue`` transform.
+        """Render a letter-value (boxen) plot via composite mark desugaring.
+
+        Produces nested rectangular bands for each letter-value depth, a median
+        rule, and an outlier-point layer via the ``LetterValue`` transform.
+        Requires a categorical ``x`` encoding and a continuous ``y`` (or the
+        reverse when ``horizontal=True``).
+
+        Parameters
+        ----------
+        k_depth : {"proportion", "trustworthy", "full"}, default "proportion"
+            Rule for choosing the number of letter-value levels.
+        k_proportion : float, optional
+            Proportion parameter used when ``k_depth="proportion"``.  Default
+            is ``0.007``.
+        outlier_threshold : float, optional
+            IQR multiple beyond which points are considered outliers.  Default
+            is ``1.5``.
+        palette : list of str or None, optional
+            Colour palette applied to successive depth bands.  ``None`` uses
+            the active theme's categorical palette.
+        horizontal : bool, optional
+            Swap axes so bands run horizontally.  Default is ``False``.
+        color_field : str or None, optional
+            Column name to drive per-group colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Additional mark-style overrides forwarded to constituent layers.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` representing the boxen plot.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"group": ["a"]*20 + ["b"]*20,
+        ...                    "val": list(range(20)) + list(range(10, 30))})
+        >>> fm.Chart(df).mark_boxen().encode(x="group", y="val")
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -448,7 +948,40 @@ class Chart:
         return new
 
     def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
-        """Errorbar mark via ErrorExtent transform."""
+        """Render error bars via the ``ErrorExtent`` transform.
+
+        Computes extent values (CI, SD, SEM, or IQR) per group defined by the
+        ``x`` encoding, then draws a vertical rule spanning the extent with
+        optional tick caps.
+
+        Parameters
+        ----------
+        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
+            Extent measure: confidence interval (``"ci"``), standard error
+            (``"stderr"``), standard deviation (``"stdev"``), or
+            interquartile range (``"iqr"``).
+        ticks : bool, optional
+            Whether to draw horizontal tick caps at the extent endpoints.
+            Default is ``True``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to constituent rule/tick layers.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` representing the error bars.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"group": ["a"]*10 + ["b"]*10,
+        ...                    "val": list(range(10)) + list(range(5, 15))})
+        >>> fm.Chart(df).mark_errorbar(extent="stdev").encode(x="group", y="val")
+        Chart(mark='point', encoding=[])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("errorbar", position)
@@ -464,7 +997,38 @@ class Chart:
         return new
 
     def mark_errorband(self, *, extent="ci", borders=False, position=None, **mark_kwargs) -> "Chart":
-        """Errorband mark (ribbon) via ErrorExtent transform."""
+        """Render an error band (ribbon) via the ``ErrorExtent`` transform.
+
+        Similar to ``mark_errorbar`` but renders the extent as a filled ribbon
+        rather than whisker rules.  Optionally draws border lines at the upper
+        and lower extent edges.
+
+        Parameters
+        ----------
+        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
+            Extent measure: confidence interval (``"ci"``), standard error
+            (``"stderr"``), standard deviation (``"stdev"``), or
+            interquartile range (``"iqr"``).
+        borders : bool, optional
+            Whether to draw line borders at the band edges.  Default is ``False``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides (e.g. ``opacity``) forwarded to the ribbon layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` representing the error band.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": list(range(10)), "y": [float(i) for i in range(10)]})
+        >>> fm.Chart(df).mark_errorband(extent="ci", borders=True).encode(x="x", y="y")
+        Chart(mark='point', encoding=[])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("errorband", position)
@@ -480,7 +1044,37 @@ class Chart:
         return new
 
     def mark_ribbon(self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs) -> "Chart":
-        """Ribbon mark — fills closed area between y and y2 along x. Requires y2 in encoding."""
+        """Render a ribbon (filled area between ``y`` and ``y2`` along ``x``).
+
+        Requires both ``y`` and ``y2`` encoding channels.  Typically used to
+        visualise confidence intervals alongside a ``mark_line`` in the same
+        layered chart.
+
+        Parameters
+        ----------
+        opacity : float, optional
+            Fill opacity of the ribbon.  Default is ``0.3``.
+        interpolate : str, optional
+            Boundary interpolation: ``"linear"``, ``"monotone"``, ``"step"``,
+            ``"basis"``, ``"cardinal"``.  Default is ``"linear"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Additional mark-style overrides (e.g. ``fill``, ``stroke``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for ribbon rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y_lo": [0.5, 1.5, 2.5], "y_hi": [1.5, 2.5, 3.5]})
+        >>> fm.Chart(df).mark_ribbon().encode(x="x", y="y_lo", y2="y_hi")
+        Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("ribbon", position)
@@ -506,7 +1100,45 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Contour plot via Kde2D + Contour transforms."""
+        """Render a bivariate contour plot via ``Kde2D`` + ``Contour`` transforms.
+
+        Estimates a 2-D kernel density and draws iso-contour lines (or filled
+        contour regions when ``fill=True``).  Requires both ``x`` and ``y``
+        encodings.
+
+        Parameters
+        ----------
+        bandwidth : float or "scott" or "silverman", optional
+            Bandwidth for the 2-D KDE.  Default is ``"scott"``.
+        thresholds : int or list of float, optional
+            Number of evenly-spaced contour levels, or an explicit list of
+            density thresholds.  Default is ``6``.
+        smooth : bool, optional
+            Whether to smooth contour paths via Gaussian filtering before
+            contouring.  Default is ``True``.
+        fill : bool, optional
+            Render filled contour regions instead of contour lines.  Default is
+            ``False``.
+        cmap : str, optional
+            Colour map name applied to contour levels.  Default is ``"viridis"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the polygon/path layers.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for contour rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 2.0, 1.5], "y": [4.0, 5.0, 4.5, 3.0, 4.0]})
+        >>> fm.Chart(df).mark_contour(thresholds=4, fill=True).encode(x="x", y="y")
+        Chart(mark='polygon', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("contour", position)
@@ -525,7 +1157,42 @@ class Chart:
         return new
 
     def mark_violin(self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs) -> "Chart":
-        """Violin plot via Violin transform; optional inner box/quartile/point overlay."""
+        """Render violin plots via the ``Violin`` transform.
+
+        Estimates a mirrored KDE per group and overlays an optional inner
+        summary (box, quartile lines, or individual points).  Requires a
+        categorical ``x`` and continuous ``y`` encoding (or swapped when
+        ``horizontal`` is set).
+
+        Parameters
+        ----------
+        bandwidth : float or "scott" or "silverman", optional
+            KDE bandwidth.  Default is ``"scott"``.
+        inner : {"box", "quartile", "point", "none"}, default "box"
+            Inner mark drawn on top of each violin:
+            ``"box"`` — IQR box + median rule,
+            ``"quartile"`` — three horizontal quartile rules,
+            ``"point"`` — individual data points (strip),
+            ``"none"`` — no inner mark.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the violin polygon layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for violin rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"group": ["a"]*10 + ["b"]*10,
+        ...                    "val": list(range(10)) + list(range(5, 15))})
+        >>> fm.Chart(df).mark_violin(inner="quartile").encode(x="group", y="val")
+        Chart(mark='polygon', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("violin", position)
@@ -541,7 +1208,38 @@ class Chart:
         return new
 
     def mark_qq(self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs) -> "Chart":
-        """QQ plot. Reads `field` from x encoding (single-column input)."""
+        """Render a quantile-quantile plot.
+
+        Computes theoretical vs. sample quantiles via the ``QQ`` transform.
+        Reads the sample column from the ``x`` encoding; ``y`` is ignored.
+
+        Parameters
+        ----------
+        distribution : {"normal", "uniform", "exponential", "lognormal"}, default "normal"
+            Theoretical distribution to compare the sample against.
+        dequantize : bool, optional
+            Whether to apply rank-based dequantization before comparison.
+            Default is ``False``.
+        line : bool, optional
+            Whether to overlay a 45-degree reference line.  Default is ``True``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the scatter layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for QQ rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"val": [1.2, 0.8, 1.5, -0.5, 0.3, 2.1, -1.0, 0.6]})
+        >>> fm.Chart(df).mark_qq(distribution="normal").encode(x="val")
+        Chart(mark='point', encoding=['x'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("qq", position)
@@ -576,7 +1274,51 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """2D raster (heatmap) via Raster transform."""
+        """Render a 2-D raster (pixel heatmap) via the ``Raster`` transform.
+
+        Bins data into a pixel grid and colours each pixel by an aggregate
+        statistic.  Most useful for very large datasets where a scatter plot
+        would overplot.  Requires ``x`` and ``y`` encodings.
+
+        Parameters
+        ----------
+        aggregate : str, optional
+            Aggregate function applied to each pixel bin: ``"count"`` (default),
+            ``"sum"``, ``"mean"``, ``"min"``, ``"max"``.  When ``aggregate`` is
+            not ``"count"``, ``field`` must be provided.
+        field : str or None, optional
+            Column name to aggregate.  Required unless ``aggregate="count"``.
+        cmap : str, optional
+            Colour map name.  Default is ``"viridis"``.
+        resolution : "screen" or int, optional
+            Pixel grid resolution.  ``"screen"`` (default) matches the rendered
+            chart dimensions; pass an integer to set an explicit grid width.
+        blend : str, optional
+            Alpha-compositing blend mode.  Default is ``"alpha"``.
+        min_count : int or None, optional
+            Minimum count threshold; pixels below this are rendered transparent.
+            ``None`` (default) shows all pixels.
+        log_scale : bool, optional
+            Apply a log transform to pixel values before colour mapping.
+            Default is ``False``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the image layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for raster rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 2.5], "y": [4.0, 5.0, 4.5, 4.0]})
+        >>> fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y")
+        Chart(mark='image', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("raster", position)
@@ -606,7 +1348,45 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Hexagonal binning via Hex transform."""
+        """Render a hexagonal bin plot via the ``Hex`` transform.
+
+        Bins data into a regular hexagonal grid and colours each cell by an
+        aggregate statistic.  Requires ``x`` and ``y`` encodings.
+
+        Parameters
+        ----------
+        bin_size : float or None, optional
+            Hexagon radius in data units.  ``None`` (default) chooses a size
+            automatically from the data range and chart dimensions.
+        aggregate : str, optional
+            Aggregate function: ``"count"`` (default), ``"sum"``, ``"mean"``,
+            ``"min"``, ``"max"``.
+        field : str or None, optional
+            Column to aggregate.  Required unless ``aggregate="count"``.
+        cmap : str, optional
+            Colour map name.  Default is ``"viridis"``.
+        stroke : str or None, optional
+            Hex border colour.  ``None`` (default) means no border.
+        stroke_width : float, optional
+            Hex border width in pixels.  Default is ``0``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the polygon layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for hexagonal binning.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 1.5, 3.0, 2.5], "y": [4.0, 5.0, 4.5, 3.0, 4.0]})
+        >>> fm.Chart(df).mark_hex(bin_size=0.5).encode(x="x", y="y")
+        Chart(mark='polygon', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("hex", position)
@@ -635,7 +1415,46 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Beeswarm plot via Swarm transform."""
+        """Render a beeswarm (strip swarm) plot via the ``Swarm`` transform.
+
+        Computes non-overlapping point positions along the categorical axis
+        using a deterministic placement algorithm seeded for reproducibility.
+        Requires a continuous ``y`` (or ``x``) and an optional categorical
+        grouping axis.
+
+        Parameters
+        ----------
+        size : float, optional
+            Point diameter in pixels.  Default is ``4``.
+        orient : {"vertical", "horizontal"}, default "vertical"
+            Orientation of the swarm axis.  ``"vertical"`` spreads points
+            along x; ``"horizontal"`` spreads along y.
+        spacing : float, optional
+            Minimum spacing between point centres as a fraction of ``size``.
+            Default is ``1.0``.
+        side : {"both", "left", "right"}, default "both"
+            Side of the axis on which points can be placed.
+        dodge : str or None, optional
+            Column name to use as a secondary grouping variable for dodging.
+            ``None`` (default) means no dodging.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the point layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for beeswarm rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"group": ["a"]*8 + ["b"]*8, "val": list(range(16))})
+        >>> fm.Chart(df).mark_swarm(size=6).encode(x="group", y="val")
+        Chart(mark='point', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("swarm", position)
@@ -654,7 +1473,54 @@ class Chart:
         return new
 
     def mark_function(self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs) -> "Chart":
-        """Function plot. Materializes synthetic data via fn(xs)."""
+        """Render a mathematical function as a line.
+
+        Evaluates ``fn(xs)`` on ``n`` evenly-spaced ``x`` values in the
+        specified domain and renders the result as a line.  The input data on
+        the chart is replaced with the synthetic dataset; use ``+`` composition
+        to overlay a function on a scatter chart.
+
+        Parameters
+        ----------
+        fn : callable
+            A function accepting a 1-D NumPy array of x values and returning a
+            1-D array of y values.
+        domain : list of float or None, optional
+            ``[x_min, x_max]`` evaluation range.  ``None`` (default) infers
+            the range from the parent chart's ``x`` column if available,
+            otherwise raises ``ValueError``.
+        n : int, optional
+            Number of evaluation points.  Default is ``200``.
+        clip : bool, optional
+            Whether to clip rendered line to the plot viewport.  Default is
+            ``True``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to the line layer (e.g. ``stroke``,
+            ``stroke_width``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` whose data is the synthetic ``(x, y)`` table.
+
+        Raises
+        ------
+        NotImplementedError
+            When called on a chart that already has layers (use ``+`` instead).
+        ValueError
+            When ``domain`` is not provided and no parent ``x`` data can be
+            inferred.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import numpy as np
+        >>> import polars as pl
+        >>> fm.Chart(None).mark_function(np.sin, domain=[0, 6.28], n=100)
+        Chart(mark='line', encoding=['x', 'y'])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("function", position)
@@ -705,22 +1571,51 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Residuals diagnostic mark — see ferrum-spec.md §3.3.
+        """Render a residuals diagnostic plot.
 
-        Expects the chart's data to carry the schema emitted by
+        Plots fitted values (``y_pred``) on x against residuals (raw or
+        studentized) on y.  Data must carry the schema emitted by
         ``ModelSource.predictions()``: ``y_true``, ``y_pred``, ``residual``,
-        ``studentized_residual``, and (since Phase 10h) ``cooks_distance``.
-        When ``reference_line`` is true, a sentinel ``_ref_zero`` column
-        (one row at 0.0, rest null) is injected so the downstream
-        ``mark_rule`` renders exactly one horizontal line at y=0.
+        ``studentized_residual``, and ``cooks_distance``.
 
-        ``cook_threshold`` accepts a float (the absolute Cook's D
-        threshold), the literal ``"auto"`` (the conventional ``4 / n``
-        rule), or ``None`` (no highlighting). When set, the chart
-        builder injects ``_cook_outlier_x/y`` columns containing the
-        ``(y_pred, residual)`` coordinates of outliers, and the desugar
-        emits a second ``mark_point`` layer drawn in red with a black
-        outline.
+        When ``reference_line=True`` a sentinel ``_ref_zero`` column is
+        injected so the downstream ``mark_rule`` draws a single horizontal line
+        at y=0.
+
+        When ``cook_threshold`` is set, high-leverage points (Cook's D above
+        the threshold) are highlighted as a second ``mark_point`` layer drawn
+        in red with a black outline.
+
+        Parameters
+        ----------
+        kind : {"studentized", "raw"}, default "studentized"
+            Residual type to plot on the y axis.  ``"studentized"`` uses
+            ``studentized_residual``; ``"raw"`` uses ``residual``.
+        reference_line : bool, optional
+            Whether to draw a horizontal reference line at y=0.  Default is
+            ``True``.
+        cook_threshold : float, "auto", or None, optional
+            Cook's Distance threshold for outlier highlighting.  ``"auto"``
+            uses the conventional ``4 / n`` rule.  ``None`` (default) disables
+            outlier highlighting.
+        color_field : str or None, optional
+            Column name to drive per-group colour on the scatter layer.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the scatter layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for residuals rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.predictions()).mark_residuals(cook_threshold="auto")
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -760,11 +1655,43 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Actual-vs-predicted mark — see ferrum-spec.md §3.3.
+        """Render an actual-vs-predicted plot.
 
-        Expects ``y_true`` and ``y_pred`` columns. When ``identity_line`` is
-        true, the data is pre-sorted ascending by ``y_true`` so the downstream
-        ``mark_line`` renders a monotonic y=x diagonal.
+        Plots ``y_true`` on x against ``y_pred`` on y as scatter points.
+        When ``identity_line=True`` the data is pre-sorted ascending by
+        ``y_true`` so the downstream ``mark_line`` renders a monotonic y=x
+        diagonal.  Data must carry ``y_true`` and ``y_pred`` columns (schema
+        from ``ModelSource.predictions()``).
+
+        Parameters
+        ----------
+        identity_line : bool, optional
+            Whether to overlay a y=x identity reference line.  Default is
+            ``True``.
+        ci : float or None, optional
+            Confidence level for a prediction-interval band (e.g. ``0.95``).
+            ``None`` (default) omits the band.
+        reference_band : bool, optional
+            Whether to draw a shaded reference band around the identity line.
+            Default is ``False``.
+        color_field : str or None, optional
+            Column name to drive per-group colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the scatter layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for prediction-error rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.predictions()).mark_prediction_error(ci=0.95)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -804,12 +1731,44 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """ROC curve mark — see ferrum-spec.md §3.3.
+        """Render a Receiver Operating Characteristic (ROC) curve.
 
-        Expects the data shape emitted by ``ModelSource.roc_curve()``:
-        ``fpr``, ``tpr``, ``threshold``, ``class``, ``auc``. When
-        ``reference_line=True`` the data is pre-sorted ascending by ``fpr``
-        so the downstream ``mark_line`` renders a monotonic y=x diagonal.
+        Plots false-positive rate (``fpr``) on x against true-positive rate
+        (``tpr``) on y as a line per class.  Data must carry the schema emitted
+        by ``ModelSource.roc_curve()``: ``fpr``, ``tpr``, ``threshold``,
+        ``class``, ``auc``.  When ``reference_line=True`` the data is
+        pre-sorted ascending by ``fpr`` before rendering.
+
+        Parameters
+        ----------
+        average : str or None, optional
+            When the data contains a macro/micro average row with
+            ``class=average``, pass ``"macro"`` or ``"micro"`` to keep only
+            that average line.  ``None`` (default) renders all classes.
+        reference_line : bool, optional
+            Whether to overlay a diagonal chance-level reference line
+            (TPR=FPR).  Default is ``True``.
+        annotate_auc : bool, optional
+            Whether to annotate each curve with its AUC value.  Default is
+            ``False``.
+        color_field : str or None, optional
+            Column name to drive per-class colour.  Default is ``"class"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for ROC rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.roc_curve()).mark_roc(annotate_auc=True)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -849,10 +1808,41 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Precision-recall curve mark — see ferrum-spec.md §3.3.
+        """Render a Precision-Recall (PR) curve.
 
-        Expects the data shape emitted by ``ModelSource.pr_curve()``:
+        Plots recall on x against precision on y as a line per class.  Data
+        must carry the schema emitted by ``ModelSource.pr_curve()``:
         ``precision``, ``recall``, ``threshold``, ``class``, ``ap``.
+
+        Parameters
+        ----------
+        average : str or None, optional
+            Filter to a specific average type row (e.g. ``"macro"``).
+            ``None`` (default) renders all classes.
+        annotate_ap : bool, optional
+            Whether to annotate each curve with its average-precision (AP)
+            value.  Default is ``False``.
+        iso_lines : bool, optional
+            Whether to draw iso-F1 reference lines in the background.
+            Default is ``False``.
+        color_field : str or None, optional
+            Column name to drive per-class colour.  Default is ``"class"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for PR-curve rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.pr_curve()).mark_pr(annotate_ap=True)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -884,12 +1874,45 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Calibration (reliability) curve mark — see ferrum-spec.md §3.3.
+        """Render a calibration (reliability) curve.
 
-        Expects the data shape emitted by ``ModelSource.calibration_curve()``:
-        ``mean_predicted``, ``fraction_positive``, ``count``. When
-        ``reference_line=True`` the data is pre-sorted ascending by
-        ``mean_predicted``.
+        Plots mean predicted probability on x against fraction of positive
+        outcomes (empirical probability) on y.  A perfectly calibrated model
+        lies on the diagonal.  Data must carry the schema emitted by
+        ``ModelSource.calibration_curve()``: ``mean_predicted``,
+        ``fraction_positive``, ``count``.
+
+        When ``reference_line=True`` the data is pre-sorted ascending by
+        ``mean_predicted`` before rendering.
+
+        Parameters
+        ----------
+        n_bins : int, optional
+            Number of calibration bins.  Default is ``10``.
+        strategy : {"uniform", "quantile"}, default "uniform"
+            Binning strategy.  ``"uniform"`` uses equally-spaced bins;
+            ``"quantile"`` uses equal-frequency bins.
+        reference_line : bool, optional
+            Whether to overlay a perfect-calibration diagonal reference line.
+            Default is ``True``.
+        color_field : str or None, optional
+            Column name to drive per-group colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for calibration rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.calibration_curve()).mark_calibration(n_bins=15)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -927,11 +1950,37 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Cumulative-gain mark — see ferrum-spec.md §3.3.
+        """Render a cumulative gain chart.
 
-        Expects the data shape emitted by ``ModelSource.cumulative_gain()``:
-        ``percent_population``, ``gain``, ``class``. The baseline diagonal
-        is encoded in the data via ``class='baseline'`` rows.
+        Plots percent of population contacted on x against the cumulative gain
+        (fraction of positive cases captured) on y.  Data must carry the schema
+        emitted by ``ModelSource.cumulative_gain()``: ``percent_population``,
+        ``gain``, ``class``.  The no-skill diagonal baseline is encoded as rows
+        with ``class='baseline'``.
+
+        Parameters
+        ----------
+        reference_lines : bool, optional
+            Whether to draw the no-skill baseline diagonal.  Default is
+            ``True``.
+        color_field : str or None, optional
+            Column name to drive per-class colour.  Default is ``"class"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for cumulative-gain rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.cumulative_gain()).mark_gain()
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -959,11 +2008,36 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Lift curve mark — see ferrum-spec.md §3.3.
+        """Render a lift curve chart.
 
-        Expects the data shape emitted by ``ModelSource.lift_curve()``:
-        ``percent_population``, ``lift``, ``class``. The lift=1 baseline
-        is encoded via ``class='baseline'`` rows.
+        Plots percent of population targeted on x against lift (ratio of
+        positive-case density to baseline) on y.  Data must carry the schema
+        emitted by ``ModelSource.lift_curve()``: ``percent_population``,
+        ``lift``, ``class``.  The no-skill lift=1 baseline is encoded as rows
+        with ``class='baseline'``.
+
+        Parameters
+        ----------
+        reference_line : bool, optional
+            Whether to draw the lift=1 baseline rule.  Default is ``True``.
+        color_field : str or None, optional
+            Column name to drive per-class colour.  Default is ``"class"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for lift-curve rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.lift_curve()).mark_lift()
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -992,12 +2066,42 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Discrimination-threshold sweep mark — see ferrum-spec.md §3.3.
+        """Render a discrimination-threshold sweep plot.
 
-        Expects long-form data ``threshold``, ``metric``, ``value`` —
-        callers are responsible for unpivoting
-        ``ModelSource.discrimination_threshold()`` output (the figure
-        builder handles this).
+        Sweeps the decision threshold from 0 to 1 and plots multiple metrics
+        (precision, recall, F1, queue rate) as lines against the threshold
+        value.  Data must be in long form with columns ``threshold``, ``metric``,
+        ``value`` — the figure builder handles unpivoting from
+        ``ModelSource.discrimination_threshold()`` output.
+
+        Parameters
+        ----------
+        metrics : tuple of str, optional
+            Metric names to include.  Default is
+            ``("precision", "recall", "f1", "queue_rate")``.
+        n_thresholds : int, optional
+            Number of evenly-spaced threshold steps to evaluate.  Default is
+            ``50``.
+        threshold_line : bool, optional
+            Whether to draw a vertical rule at the optimal threshold.  Default
+            is ``False``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for discrimination-threshold
+            rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.discrimination_threshold()).mark_discrimination_threshold()
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1027,13 +2131,40 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Confusion-matrix mark — see ferrum-spec.md §3.3.
+        """Render a confusion matrix as an annotated heatmap.
 
-        Expects the long-form data shape from ``ModelSource.confusion_matrix()``:
-        ``actual``, ``predicted``, ``value``, ``value_fmt``. Renders an
-        ordinal heatmap of cell values with optional per-cell text labels
-        (controlled by ``annotate``; reads ``value_fmt`` via the Phase 10c
-        text channel).
+        Renders an ordinal heatmap with actual class on one axis and predicted
+        class on the other.  Data must carry the long-form schema emitted by
+        ``ModelSource.confusion_matrix()``: ``actual``, ``predicted``,
+        ``value``, ``value_fmt``.  When ``annotate=True``, a second
+        ``mark_text`` layer reads ``value_fmt`` for per-cell text labels.
+
+        Parameters
+        ----------
+        normalize : {"true", "pred", "all"} or None, optional
+            Normalise cell counts.  ``None`` (default) shows raw counts.
+        annotate : bool, optional
+            Whether to overlay per-cell count / percentage text.  Default is
+            ``True``.
+        color_field : str, optional
+            Column name driving the heatmap colour scale.  Default is
+            ``"value"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the rect layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for confusion-matrix rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.confusion_matrix()).mark_confusion(normalize="true")
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1062,12 +2193,37 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Class prediction error mark — see ferrum-spec.md §3.3.
+        """Render a class prediction error bar chart.
 
-        Expects long-form data ``(actual, predicted, value)`` (same shape
-        as ``ModelSource.confusion_matrix(normalize=None)``). Renders one
-        bar per ``predicted`` value with segments stacked by ``actual``.
-        Per-bar 100% stack via ``normalize=True``.
+        Renders one stacked bar per predicted class, with segments coloured by
+        actual class.  This surfaces systematic mis-classification patterns not
+        obvious in a confusion matrix.  Data must carry long-form columns
+        ``(actual, predicted, value)`` — same shape as
+        ``ModelSource.confusion_matrix(normalize=None)``.
+
+        Parameters
+        ----------
+        normalize : bool, optional
+            Whether to normalise each bar to 100%.  Default is ``False``.
+        color_field : str, optional
+            Column driving the segment colour.  Default is ``"actual"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for class-prediction-error
+            rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.confusion_matrix()).mark_class_prediction_error(normalize=True)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1097,12 +2253,44 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Feature-importance mark — see ferrum-spec.md §3.3.
+        """Render a feature-importance bar chart.
 
-        Expects the schema emitted by ``ModelSource.importances()``:
-        ``feature``, ``importance``, ``std``. The chart builder is
-        responsible for computing ``imp_lower``/``imp_upper`` columns and
-        truncating to ``top_k`` rows before invoking this method.
+        Renders one bar per feature, sorted descending by importance.  When
+        ``error_bars=True`` and the data carries ``imp_lower``/``imp_upper``
+        columns a second errorbar layer is added.  Data must carry the schema
+        emitted by ``ModelSource.importances()``: ``feature``, ``importance``,
+        ``std``.  The chart builder computes the bound columns and truncates to
+        ``top_k`` rows before calling this method.
+
+        Parameters
+        ----------
+        orient : {"horizontal", "vertical"}, default "horizontal"
+            Bar orientation.  ``"horizontal"`` places features on the y axis
+            with importance on x (default); ``"vertical"`` swaps axes.
+        error_bars : bool, optional
+            Whether to draw error bars from ``imp_lower``/``imp_upper``.
+            Default is ``True``.
+        top_k : int or None, optional
+            Reserved for future use (no-op today — truncation is the chart
+            builder's responsibility before calling this method).
+        color_field : str or None, optional
+            Column name to drive per-feature colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for feature-importance rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.importances()).mark_importance(top_k=10)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1133,10 +2321,39 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """SHAP beeswarm mark — see ferrum-spec.md §3.3.
+        """Render a SHAP beeswarm summary plot.
 
-        Expects long-form data from ``ModelSource.shap_values()`` pre-filtered
-        to the top ``max_display`` features by the chart builder.
+        Visualises the distribution of SHAP values across samples for each
+        feature as a swarm of points, coloured by the feature's original value.
+        Data must carry the long-form schema from ``ModelSource.shap_values()``
+        pre-filtered to the top ``max_display`` features by the chart builder.
+
+        Parameters
+        ----------
+        max_display : int, optional
+            Maximum number of top features to show.  Default is ``20``.
+        color_bar : bool, optional
+            Whether to render a colour bar for the feature-value scale.
+            Default is ``True``.
+        order : {"abs_mean", "mean", "none"}, default "abs_mean"
+            Feature ordering: by mean absolute SHAP (``"abs_mean"``), signed
+            mean SHAP (``"mean"``), or original order (``"none"``).
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the point layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for SHAP beeswarm rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.shap_values()).mark_shap_beeswarm(max_display=15)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1164,7 +2381,33 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """SHAP aggregated-bar mark — see ferrum-spec.md §3.3."""
+        """Render a SHAP aggregated-bar feature importance chart.
+
+        Shows mean absolute SHAP values per feature as a horizontal bar chart.
+        Data must carry the long-form schema from ``ModelSource.shap_values()``
+        pre-filtered to the top ``max_display`` features by the chart builder.
+
+        Parameters
+        ----------
+        max_display : int, optional
+            Maximum number of top features to show.  Default is ``20``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for SHAP bar rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.shap_values()).mark_shap_bar(max_display=10)
+        Chart(mark='point', encoding=[])
+        """
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("shap_bar", position)
@@ -1189,13 +2432,44 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Partial-dependence mark — see ferrum-spec.md §3.3.
+        """Render partial-dependence plots (PDP / ICE).
 
-        Expects long-form data from ``ModelSource.partial_dependence()``:
-        ``feature``, ``feature_value``, ``pd_value`` (one polyline per
-        feature, colored by feature). The chart builder is responsible
-        for sorting ascending by ``feature_value`` so the line renders
-        monotonically.
+        Visualises how the model's output varies as a function of one feature
+        while marginalising over all others.  Data must carry the long-form
+        schema from ``ModelSource.partial_dependence()``: ``feature``,
+        ``feature_value``, ``pd_value``.  The chart builder pre-sorts ascending
+        by ``feature_value``.
+
+        Parameters
+        ----------
+        kind : {"average", "individual", "both"}, default "average"
+            What to render.  ``"average"`` draws the mean PD line;
+            ``"individual"`` draws ICE lines (one per sample);
+            ``"both"`` overlays average on top of ICE lines.
+        ice_alpha : float, optional
+            Opacity of individual ICE lines when ``kind`` is ``"individual"``
+            or ``"both"``.  Default is ``0.2``.
+        center : bool, optional
+            Whether to centre ICE lines at their first value (centred ICE).
+            Default is ``False``.
+        color_field : str or None, optional
+            Column name driving per-feature colour.  Default is ``"feature"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for PDP / ICE rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.partial_dependence()).mark_pdp(kind="both", center=True)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1225,10 +2499,43 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """SHAP waterfall mark — see ferrum-spec.md §3.3.
+        """Render a SHAP waterfall chart for one sample.
 
-        ``sample_idx`` is required; passing the default ``-1`` raises
-        ``TypeError`` at desugar time.
+        Shows how each feature pushes the model output from the base value
+        toward the final prediction for a single observation.  Data must carry
+        the long-form schema from ``ModelSource.shap_values()`` for the chosen
+        ``sample_idx``.
+
+        Parameters
+        ----------
+        sample_idx : int
+            Row index of the sample to explain.  The default ``-1`` is a
+            sentinel that causes a ``TypeError`` at desugar time — callers
+            must pass an explicit index.
+        max_display : int, optional
+            Maximum number of features to show (smallest-magnitude features
+            are collapsed into an ``"other"`` row).  Default is ``20``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for SHAP waterfall rendering.
+
+        Raises
+        ------
+        TypeError
+            If ``sample_idx`` is left at its default value of ``-1``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.shap_values()).mark_shap_waterfall(sample_idx=0)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1256,10 +2563,37 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Learning-curve mark — see ferrum-spec.md §3.3.
+        """Render a learning curve (train size vs. CV score).
 
-        Expects the schema emitted by ``ModelSource.learning_curve()``,
-        pre-deduped per (train_size, split) by the chart builder.
+        Plots training set size on x against CV score on y, with separate
+        lines for training and validation splits.  Data must carry the schema
+        emitted by ``ModelSource.learning_curve()``, pre-deduped per
+        ``(train_size, split)`` by the chart builder.
+
+        Parameters
+        ----------
+        ci_style : {"band", "bars", "none"}, default "band"
+            How to display cross-validation variance.  ``"band"`` draws a
+            shaded ribbon; ``"bars"`` draws error bars; ``"none"`` omits CI.
+        color_field : str or None, optional
+            Column name to drive per-split line colour.  Default is
+            ``"split"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for learning-curve rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_train, y_train)
+        >>> fm.Chart(src.learning_curve()).mark_learning_curve(ci_style="band")
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1285,13 +2619,45 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Validation-curve mark — see ferrum-spec.md §3.3.
+        """Render a validation curve (hyperparameter vs. CV score).
 
-        Expects the schema emitted by ``ModelSource.validation_curve()``,
-        pre-deduped per (param_value, split) by the chart builder.
+        Plots a swept hyperparameter value on x against CV score on y, with
+        separate lines for training and validation splits.  Data must carry the
+        schema emitted by ``ModelSource.validation_curve()``, pre-deduped per
+        ``(param_value, split)`` by the chart builder.
 
-        ``param_label`` names the swept hyperparameter for the x-axis
-        title; the chart builder forwards the user's ``param`` argument.
+        Parameters
+        ----------
+        log_scale : bool, optional
+            Whether to use a log scale on the x axis.  Useful for parameters
+            like regularisation strength that span orders of magnitude.
+            Default is ``False``.
+        ci_style : {"band", "bars", "none"}, default "band"
+            How to display cross-validation variance.
+        color_field : str or None, optional
+            Column name to drive per-split line colour.  Default is
+            ``"split"``.
+        param_label : str or None, optional
+            Human-readable x-axis title for the hyperparameter being swept.
+            The chart builder forwards the user's ``param`` argument here.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for validation-curve rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_train, y_train)
+        >>> fm.Chart(src.validation_curve(param="C")).mark_validation_curve(
+        ...     log_scale=True, param_label="C"
+        ... )
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1321,11 +2687,36 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Per-fold CV-score mark — see ferrum-spec.md §3.3.
+        """Render a per-fold cross-validation score summary.
 
-        Expects the schema emitted by ``ModelSource.cv_scores()``. The
-        chart builder pre-aggregates per split when ``kind="bar"`` and
-        leaves raw per-fold rows for ``"box"``/``"strip"``.
+        Shows the distribution of CV scores across folds as a box plot, strip
+        plot, or bar chart.  Data must carry the schema emitted by
+        ``ModelSource.cv_scores()``.  The chart builder pre-aggregates per
+        split when ``kind="bar"`` and passes raw per-fold rows for ``"box"``
+        or ``"strip"``.
+
+        Parameters
+        ----------
+        kind : {"box", "strip", "bar"}, default "box"
+            Summary plot type.
+        split : {"train", "test", "both"}, default "both"
+            Which CV split(s) to display.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to constituent layers.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for CV-score rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_train, y_train)
+        >>> fm.Chart(src.cv_scores()).mark_cv_scores(kind="strip", split="test")
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1350,14 +2741,40 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Regularization-strength selection mark — see ferrum-spec.md §3.3.
+        """Render a regularisation-strength (alpha) selection curve.
 
-        Expects the schema emitted by ``ModelSource.alpha_selection()``.
-        When ``highlight_best=True`` and the data carries ``alpha`` plus
-        ``mean_score`` columns, the chart's data is augmented with a
-        ``_best_alpha`` sentinel column (one non-null row at the alpha
-        maximizing ``mean_score``) so the downstream ``mark_rule`` draws
-        exactly one vertical reference line.
+        Sweeps the regularisation parameter ``alpha`` and plots CV score as a
+        function of alpha, with variance bands.  When ``highlight_best=True``
+        a vertical rule is drawn at the alpha that maximises ``mean_score``.
+        Data must carry the schema emitted by ``ModelSource.alpha_selection()``:
+        ``alpha``, ``mean_score``, ``score_lo``, ``score_hi``, ``split``.
+
+        Parameters
+        ----------
+        log_scale : bool, optional
+            Whether to use a log scale on the x axis.  Default is ``True``
+            (regularisation parameters typically span orders of magnitude).
+        highlight_best : bool, optional
+            Whether to draw a vertical reference rule at the optimal alpha.
+            Default is ``True``.
+        ci_style : {"band", "bars", "none"}, default "band"
+            How to display CV variance.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides forwarded to constituent layers.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for alpha-selection rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(lasso, X_train, y_train)
+        >>> fm.Chart(src.alpha_selection()).mark_alpha_selection(log_scale=True)
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1410,13 +2827,44 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Rousseeuw silhouette plot mark — see ferrum-spec.md §3.3.
+        """Render a Rousseeuw silhouette plot.
 
-        Expects the schema emitted by ``ModelSource.silhouette()``:
+        Displays one horizontal bar per sample whose width encodes its
+        silhouette coefficient, coloured by cluster assignment.  Samples within
+        each cluster are stacked vertically in descending coefficient order.
+        Data must carry the schema emitted by ``ModelSource.silhouette()``:
         ``sample_id``, ``y_position``, ``cluster``, ``silhouette_value``.
-        When ``zero_line=True`` a sentinel ``_ref_zero`` column (one row
-        at 0.0, rest null) is injected so the downstream ``mark_rule``
-        renders exactly one vertical line at x=0.
+
+        When ``zero_line=True`` a sentinel ``_ref_zero`` column is injected
+        so the downstream ``mark_rule`` renders a single vertical rule at x=0.
+
+        The method pre-computes ``_silhouette_x_lo``, ``_silhouette_x_hi``,
+        ``_silhouette_y_lo``, and ``_silhouette_y_hi`` columns from the raw
+        data so the renderer can draw rect marks directly.
+
+        Parameters
+        ----------
+        zero_line : bool, optional
+            Whether to draw a vertical reference rule at silhouette = 0.
+            Default is ``True``.
+        color_field : str or None, optional
+            Column name driving per-cluster colour.  Default is ``"cluster"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the rect layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for silhouette rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(kmeans, X)
+        >>> fm.Chart(src.silhouette()).mark_silhouette()
+        Chart(mark='rect', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1467,14 +2915,42 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """PCA scree plot mark — see ferrum-spec.md §3.3.
+        """Render a PCA scree plot.
 
-        Expects the schema emitted by ``ModelSource.pca_variance()``:
-        ``component``, ``explained_variance_ratio``,
-        ``cumulative_variance_ratio``. When ``threshold_line`` is
-        non-None, a sentinel ``_threshold_line`` column (one row at the
-        threshold value, rest null) is injected so the downstream
-        ``mark_rule`` renders exactly one horizontal reference line.
+        Displays explained variance ratio per component as bars and optionally
+        overlays the cumulative variance ratio as a line.  Data must carry the
+        schema emitted by ``ModelSource.pca_variance()``: ``component``,
+        ``explained_variance_ratio``, ``cumulative_variance_ratio``.
+
+        When ``threshold_line`` is non-None a sentinel ``_threshold_line``
+        column is injected so the downstream ``mark_rule`` draws a single
+        horizontal reference line at the threshold value.
+
+        Parameters
+        ----------
+        cumulative_line : bool, optional
+            Whether to overlay a cumulative explained variance line.  Default
+            is ``True``.
+        threshold_line : float or None, optional
+            Y-position of an optional horizontal threshold reference line
+            (e.g. ``0.95`` for 95% explained variance).  ``None`` (default)
+            omits the line.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for PCA scree rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(pca_model, X)
+        >>> fm.Chart(src.pca_variance()).mark_pca_scree(threshold_line=0.95)
+        Chart(mark='rect', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1578,13 +3054,37 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Cluster-center 2D embedding mark — see ferrum-spec.md §3.3.
+        """Render a 2-D intercluster distance (MDS) plot.
 
-        Expects the schema emitted by
-        ``ModelSource.intercluster_distance()``: ``cluster``, ``x``,
-        ``y``, ``size``. The ``size`` channel maps to point area; with
-        ``label_clusters=True`` a text overlay labels each point by
-        cluster id.
+        Embeds cluster centres into 2-D using MDS and visualises each centre
+        as a point whose area encodes cluster size.  With ``label_clusters=True``
+        a ``mark_text`` overlay labels each point by its cluster id.  Data must
+        carry the schema emitted by ``ModelSource.intercluster_distance()``:
+        ``cluster``, ``x``, ``y``, ``size``.
+
+        Parameters
+        ----------
+        label_clusters : bool, optional
+            Whether to overlay cluster-id text labels.  Default is ``True``.
+        color_field : str or None, optional
+            Column name driving per-cluster colour.  Default is ``"cluster"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the point layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for intercluster-distance
+            rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(kmeans, X)
+        >>> fm.Chart(src.intercluster_distance()).mark_intercluster_distance()
+        Chart(mark='point', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1612,13 +3112,38 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Decision-boundary heatmap mark — see ferrum-spec.md §3.3.
+        """Render a decision-boundary heatmap.
 
-        Expects pre-computed grid columns ``x``, ``x2``, ``y``, ``y2``
-        (cell bounds) and ``z`` (the prediction value — class index for
-        ``proba=False`` or probability for ``proba=True``). The chart
-        builder ``_decision_boundary_chart_from_source`` produces these
-        columns.
+        Colours a pixel grid by the model's predicted class (``proba=False``)
+        or class probability (``proba=True``) at each grid point.  Data must
+        carry pre-computed cell bound columns ``x``, ``x2``, ``y``, ``y2``
+        and a prediction column ``z``.  The chart builder helper
+        ``_decision_boundary_chart_from_source`` produces these columns from a
+        ``ModelSource``.
+
+        Parameters
+        ----------
+        proba : bool, optional
+            Whether to colour by predicted probability rather than class index.
+            Default is ``False``.
+        color_field : str, optional
+            Column name for the colour encoding.  Default is ``"z"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the rect layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for decision-boundary rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(clf, X_test, y_test)
+        >>> fm.Chart(src.decision_boundary()).mark_decision_boundary(proba=True)
+        Chart(mark='rect', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1646,12 +3171,36 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Univariate feature-ranking bar chart — see ferrum-spec.md §3.3.
+        """Render a univariate feature-ranking bar chart.
 
-        Expects the schema emitted by ``ModelSource.rank1d()``:
-        ``feature``, ``score``, ``rank``. ``orient='horizontal'``
-        (default) places features on the y axis with score on x; pass
-        ``orient='vertical'`` to swap.
+        Ranks features by a univariate score (e.g. mutual information, ANOVA
+        F-statistic) and displays them as a bar chart sorted by rank.  Data must
+        carry the schema emitted by ``ModelSource.rank1d()``: ``feature``,
+        ``score``, ``rank``.
+
+        Parameters
+        ----------
+        orient : {"horizontal", "vertical"}, default "horizontal"
+            Bar orientation.  ``"horizontal"`` places features on the y axis
+            with score on x; ``"vertical"`` places features on x.
+        color_field : str or None, optional
+            Column name driving per-feature colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the bar layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for rank-1D rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.rank1d()).mark_rank1d()
+        Chart(mark='bar', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1680,12 +3229,40 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Pairwise feature-ranking heatmap — see ferrum-spec.md §3.3.
+        """Render a pairwise feature-ranking correlation heatmap.
 
-        Expects the schema emitted by ``ModelSource.rank2d()``:
-        ``feature_x``, ``feature_y``, ``correlation``. The chart builder
-        appends a ``correlation_fmt`` (Utf8) column when ``annot=True``
-        so the text layer can render each cell's value at 2 dp.
+        Displays pairwise feature correlation scores as a colour-coded matrix.
+        When ``annot=True`` a text overlay renders each cell's value to 2 dp.
+        Data must carry the schema emitted by ``ModelSource.rank2d()``:
+        ``feature_x``, ``feature_y``, ``correlation``.  The chart builder
+        appends a ``correlation_fmt`` (Utf8) column when ``annot=True``.
+
+        Parameters
+        ----------
+        annot : bool, optional
+            Whether to overlay per-cell correlation value text.  Default is
+            ``True``.
+        color_field : str, optional
+            Column driving the heatmap colour scale.  Default is
+            ``"correlation"``.
+        text_field : str, optional
+            Column read by the text layer.  Default is ``"correlation_fmt"``.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the rect layer.
+
+        Returns
+        -------
+        Chart
+            New layered ``Chart`` configured for rank-2D rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> src = fm.ModelSource(model, X_test, y_test)
+        >>> fm.Chart(src.rank2d()).mark_rank2d(annot=True)
+        Chart(mark='rect', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1714,15 +3291,41 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Parallel coordinates — one polyline per sample.
+        """Render a parallel coordinates plot.
 
-        Expects the long-form schema produced by
+        Draws one polyline per sample across normalised feature axes.  Data
+        must carry the long-form schema produced by
         ``_parallel_coords_chart_from_dataframe``: ``feature`` (Utf8),
-        ``value`` (Float64), ``sample_id`` (Utf8), and optionally the
-        hue column passed via ``color_field``. The line layer routes
-        ``sample_id`` through ``mark_style.detail`` so each sample
-        renders as its own polyline (see ``crates/ferrum-core/src/render/
-        marks/line.rs``).
+        ``value`` (Float64), ``sample_id`` (Utf8), and (optionally) a hue
+        column passed via ``color_field``.  The line layer uses
+        ``mark_style.detail = "sample_id"`` so each sample renders as its own
+        polyline.
+
+        Parameters
+        ----------
+        alpha : float, optional
+            Line opacity.  Default is ``0.5``.
+        color_field : str or None, optional
+            Column name driving per-sample (or per-class) line colour.
+        position : Position, optional
+            Position adjustment.
+        **mark_kwargs
+            Mark-style overrides for the line layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for parallel-coordinates rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"feature": ["a","a","b","b"],
+        ...                    "value": [0.5, 0.3, 0.8, 0.2],
+        ...                    "sample_id": ["s0", "s1", "s0", "s1"]})
+        >>> fm.Chart(df).mark_parallel_coordinates(color_field="sample_id")
+        Chart(mark='line', encoding=[])
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1742,9 +3345,44 @@ class Chart:
         new._position = position
         return new
 
-    def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
-    def mark_image(self, **kwargs):         raise deferred_mark_error("image")
-    def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
+    def mark_arc(self, **kwargs):
+        """Render data as arcs (pie/donut slices).
+
+        .. note::
+            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to a future phase.
+        """
+        raise deferred_mark_error("arc")
+
+    def mark_image(self, **kwargs):
+        """Render data as raster images.
+
+        .. note::
+            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to a future phase.
+        """
+        raise deferred_mark_error("image")
+
+    def mark_geoshape(self, **kwargs):
+        """Render geographic shape data.
+
+        .. note::
+            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to a future phase.
+        """
+        raise deferred_mark_error("geoshape")
     def mark_segment(self, *, position=None, **kwargs) -> "Chart":
         """Diagonal line segment from (x, y) to (x2, y2).
 
@@ -1757,11 +3395,83 @@ class Chart:
         new = self._set_mark("segment", **kwargs)
         new._position = position
         return new
-    def mark_label(self, **kwargs):         raise deferred_mark_error("label")
+    def mark_label(self, **kwargs):
+        """Render smart text labels with automatic collision avoidance.
+
+        .. note::
+            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to a future phase.
+        """
+        raise deferred_mark_error("label")
 
     # ---- Encoding ----
 
     def encode(self, **channels: Any) -> "Chart":
+        """Set or update encoding channels on this chart.
+
+        Each keyword argument maps a channel name to a field shorthand string
+        (e.g. ``"species:N"``) or an explicit channel object (e.g.
+        ``fm.X("sepal_length", type="Q")``).
+
+        Parameters
+        ----------
+        x : str or X
+            Field mapped to the x position.  Shorthand format:
+            ``"field"`` (type inferred), ``"field:Q"`` (quantitative),
+            ``"field:N"`` (nominal), ``"field:O"`` (ordinal),
+            ``"field:T"`` (temporal), or ``"agg(field):Q"`` (aggregation).
+        y : str or Y
+            Field mapped to the y position.
+        x2 : str or X2, optional
+            Secondary x position (band / segment end).
+        y2 : str or Y2, optional
+            Secondary y position.
+        color : str or Color, optional
+            Field or value driving mark colour.
+        fill : str or Fill, optional
+            Field or value driving mark fill colour.
+        stroke : str or Stroke, optional
+            Field or value driving mark stroke colour.
+        size : str or Size, optional
+            Field or value driving mark size.
+        shape : str or Shape, optional
+            Field or value driving mark shape.
+        opacity : str or Opacity, optional
+            Field or value driving mark opacity.
+        text : str or Text, optional
+            Field rendered as text labels (used with ``mark_text``).
+        detail : str or Detail, optional
+            Additional grouping field that does not map to any visual property.
+        tooltip : str or Tooltip, optional
+            Field shown on hover.
+        **channels
+            Any other valid channel names (``x_error``, ``y_error``, ``theta``,
+            ``radius``, etc.).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with updated encoding channels.
+
+        Raises
+        ------
+        ValueError
+            If an unknown channel name is passed.
+        TypeError
+            If a value is not a string, channel instance, or Repeat placeholder.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6], "c": ["a", "b", "a"]})
+        >>> fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="c:N")
+        Chart(mark='point', encoding=['x', 'y', 'color'])
+        """
         new = self._clone()
         for name, value in channels.items():
             cls = _channel_class_for(name)
@@ -1792,6 +3502,35 @@ class Chart:
         return new
 
     def transform(self, *transforms) -> "Chart":
+        """Append one or more data transforms to the chart's pipeline.
+
+        Transforms are executed in order by the Rust engine before rendering.
+        Multiple calls to ``transform()`` accumulate — each appends to the
+        existing pipeline.
+
+        Parameters
+        ----------
+        *transforms
+            One or more transform objects (e.g. ``fm.Filter(...)``,
+            ``fm.Aggregate(...)``, ``fm.Sort(...)``, ``fm.Window(...)``).
+            Accepts any object that serialises to a valid ``TransformSpec`` JSON
+            shape.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the additional transforms appended.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").transform(
+        ...     fm.Filter("datum.x > 1")
+        ... )
+        Chart(mark='point', encoding=['x', 'y'])
+        """
         new = self._clone()
         new._transforms = list(self._transforms) + list(transforms)
         return new
@@ -1799,12 +3538,39 @@ class Chart:
     # ---- Composition operators ----
 
     def __add__(self, other: "Chart") -> "Chart":
-        """Overlay two charts.
+        """Overlay two charts as a multi-layer composite.
 
-        If both charts share the same data object (identity check) or equivalent
-        data (value equality via Arrow), produces a multi-layer ``Chart``.
-        If the data differs, falls through to an ``HConcatChart`` with a
-        ``UserWarning``.
+        When both sides share the same data (identity check or Arrow value
+        equality), produces a single multi-layer ``Chart`` that renders all
+        layers within one plot area with shared x/y scales.
+
+        When data differs, falls back to horizontal concatenation (same
+        behaviour as ``__or__``) and emits a ``UserWarning`` so the caller
+        knows the result is side-by-side rather than overlaid.
+
+        Parameters
+        ----------
+        other : Chart
+            The chart to overlay on top of this one.
+
+        Returns
+        -------
+        Chart or HConcatChart
+            Multi-layer ``Chart`` when data matches; ``HConcatChart`` otherwise.
+
+        Raises
+        ------
+        TypeError
+            (via ``NotImplemented``) if ``other`` is not a ``Chart``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> scatter = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> line = fm.Chart(df).mark_line().encode(x="x", y="y")
+        >>> layered = scatter + line
         """
         if not isinstance(other, Chart):
             return NotImplemented
@@ -1879,12 +3645,61 @@ class Chart:
         return new
 
     def __or__(self, other: "Chart") -> "HConcatChart":
-        """Horizontal concatenation: ``chart1 | chart2``."""
+        """Place two charts side-by-side (horizontal concatenation).
+
+        Produces an ``HConcatChart`` that renders both charts at the same height
+        in adjacent columns.  Use ``|`` to build multi-panel layouts.
+
+        Parameters
+        ----------
+        other : Chart
+            The chart to place to the right.
+
+        Returns
+        -------
+        HConcatChart
+            Horizontally concatenated composite chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> left = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> right = fm.Chart(df).mark_bar().encode(x="x", y="y")
+        >>> left | right
+        HConcatChart(n=2)
+        """
         from ferrum.composition import HConcatChart
         return HConcatChart([self, other])
 
     def __and__(self, other: "Chart") -> "VConcatChart":
-        """Vertical concatenation: ``chart1 & chart2``."""
+        """Stack two charts vertically (vertical concatenation).
+
+        Produces a ``VConcatChart`` that renders both charts stacked on top of
+        each other in the same column.  Use ``&`` to build vertically-stacked
+        panel layouts.
+
+        Parameters
+        ----------
+        other : Chart
+            The chart to place below.
+
+        Returns
+        -------
+        VConcatChart
+            Vertically concatenated composite chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> top = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> bottom = fm.Chart(df).mark_bar().encode(x="x", y="y")
+        >>> top & bottom
+        VConcatChart(n=2)
+        """
         from ferrum.composition import VConcatChart
         return VConcatChart([self, other])
 
@@ -1899,10 +3714,49 @@ class Chart:
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
     ) -> "Chart":
-        """Set faceting on this chart.
+        """Facet this chart into small multiples by a field.
 
-        Single-field wrap mode: ``facet(field="col")`` or ``facet(col="col")``.
-        Grid mode: ``facet(row="year", col="species")``.
+        Two modes are supported:
+
+        - **Wrap** — a single field is wrapped across columns (rows auto).
+          Pass ``field=`` or equivalently ``col=`` alone.
+        - **Grid** — two fields define row × column layout.  Pass both
+          ``row=`` and ``col=``.
+
+        Parameters
+        ----------
+        field : str, optional
+            Column name used for wrap-mode faceting.  Mutually exclusive with
+            using both ``row`` and ``col`` together.
+        row : str, optional
+            Column name for the row dimension (grid mode).  When used alone,
+            behaves as wrap mode on the row axis.
+        col : str, optional
+            Column name for the column dimension (wrap or grid mode).
+        ncols : int or None, optional
+            Maximum number of columns in wrap mode.  ``None`` lets the renderer
+            choose.
+        nrows : int or None, optional
+            Maximum number of rows.  ``None`` lets the renderer choose.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with faceting configured.
+
+        Raises
+        ------
+        ValueError
+            If neither ``field``, ``row``, nor ``col`` is provided.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1,2,3]*3, "y": [4,5,6]*3,
+        ...                    "g": ["a","a","b","b","c","c","a","b","c"]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").facet(col="g", ncols=2)
+        Chart(mark='point', encoding=['x', 'y'])
         """
         new = self._clone()
         if field is not None:
@@ -1939,13 +3793,65 @@ class Chart:
         return new
 
     def theme(self, theme: Any) -> "Chart":
-        """Attach a Theme to this chart instance (overrides the process default)."""
+        """Attach a ``Theme`` to this chart, overriding the process-level default.
+
+        Per-chart theme always wins over ``ferrum.set_default_theme()``.
+        Theme objects are immutable value classes — modifying the original
+        ``Theme`` after calling ``.theme()`` has no effect on the chart.
+
+        Parameters
+        ----------
+        theme : Theme
+            A ``ferrum.Theme`` instance (e.g. ``fm.themes.dark()``,
+            ``fm.Theme(background="white", font="serif")``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the specified theme attached.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> dark = fm.themes.dark()
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").theme(dark)
+        Chart(mark='point', encoding=['x', 'y'])
+        """
         new = self._clone()
         new._theme = theme
         return new
 
     def coord(self, coord: Any) -> "Chart":
-        """Set the coordinate system. Only CoordFlip is supported in Phase 8a."""
+        """Set the coordinate system for this chart.
+
+        Currently only ``CoordFlip`` is supported (swaps x and y axes).
+
+        Parameters
+        ----------
+        coord : CoordFlip
+            A coordinate-system object.  Pass ``fm.CoordFlip()`` to swap the
+            horizontal and vertical axes.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the coordinate system set.
+
+        Raises
+        ------
+        TypeError
+            If ``coord`` is not a supported coordinate-system type.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10, 20, 15]})
+        >>> fm.Chart(df).mark_bar().encode(x="cat", y="val").coord(fm.CoordFlip())
+        Chart(mark='bar', encoding=['x', 'y'])
+        """
         from ferrum.coord import CoordFlip
         new = self._clone()
         if isinstance(coord, CoordFlip):
@@ -2050,6 +3956,37 @@ class Chart:
     # ---- Properties ----
 
     def properties(self, *, width=None, height=None, title=None, description=None) -> "Chart":
+        """Set chart-level display properties.
+
+        Only the keyword arguments that are explicitly provided are updated;
+        unset properties inherit from the existing chart.
+
+        Parameters
+        ----------
+        width : int or "container" or None, optional
+            Chart width in pixels, or ``"container"`` to fill the parent.
+        height : int or "container" or None, optional
+            Chart height in pixels.
+        title : str or None, optional
+            Chart title rendered above the plot area.
+        description : str or None, optional
+            Accessible description attached to the SVG root.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the specified properties updated.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").properties(
+        ...     width=400, height=300, title="My Chart"
+        ... )
+        Chart(mark='point', encoding=['x', 'y'])
+        """
         new = self._clone()
         if width is not None: new._width = width
         if height is not None: new._height = height
@@ -2060,6 +3997,26 @@ class Chart:
     # ---- Spec output ----
 
     def to_spec(self):
+        """Build the Rust ``ChartSpec`` for this chart.
+
+        Resolves any pending statistical-mark desugar, converts Python encoding
+        channel objects to ``EncodingSpec`` instances, and constructs the
+        ``ChartSpec`` PyO3 object that the Rust renderer consumes.
+
+        Returns
+        -------
+        ChartSpec
+            The fully-resolved ``ferrum._core.ChartSpec`` for this chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> spec = fm.Chart(df).mark_point().encode(x="x", y="y").to_spec()
+        >>> spec.mark
+        'point'
+        """
         # Resolve any pending statistical mark desugar (mark called before encode).
         resolved = self._resolve_pending()
         from ferrum import ChartSpec, EncodingSpec
@@ -2118,10 +4075,55 @@ class Chart:
         return _SpecView(spec, resolved._layers)
 
     def to_json(self, *, indent=None) -> str:
+        """Serialise the chart specification to a JSON string.
+
+        Calls ``to_spec()`` to build the ``ChartSpec`` and then serialises it
+        via the Rust ``serde_json`` encoder.  The ``indent`` parameter is
+        accepted for API compatibility but is currently a no-op — the Rust
+        encoder produces compact JSON.
+
+        Parameters
+        ----------
+        indent : int or None, optional
+            Reserved for future use (no-op today).  Pass ``None`` (default).
+
+        Returns
+        -------
+        str
+            JSON representation of the chart specification.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1], "y": [2]})
+        >>> spec_json = fm.Chart(df).mark_point().encode(x="x", y="y").to_json()
+        >>> '"mark"' in spec_json
+        True
+        """
         spec = self.to_spec()
         return spec.to_json()
 
     def show_svg(self) -> str:
+        """Render the chart to an SVG string.
+
+        Calls the Rust ``render_svg`` engine with the chart's spec, data, viewport,
+        and theme.  The returned string is a complete ``<svg>…</svg>`` document.
+
+        Returns
+        -------
+        str
+            SVG markup for the chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        >>> svg.startswith("<svg")
+        True
+        """
         # Stub — full impl in Task 32
         from ferrum._core import render_svg
         spec = self.to_spec()
@@ -2131,6 +4133,26 @@ class Chart:
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
     def show_png(self) -> bytes:
+        """Render the chart to PNG bytes.
+
+        Calls the Rust ``render_png`` engine (SVG → PNG rasterisation via
+        ``resvg``).  Returns raw PNG bytes that can be written to a file or
+        displayed in a Jupyter notebook via ``IPython.display.Image``.
+
+        Returns
+        -------
+        bytes
+            PNG-encoded image data.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> png = fm.Chart(df).mark_point().encode(x="x", y="y").show_png()
+        >>> png[:4] == b'\\x89PNG'
+        True
+        """
         from ferrum._core import render_png
         spec = self.to_spec()
         data = to_arrow_table(self._data)
@@ -2139,12 +4161,55 @@ class Chart:
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
     def save(self, path, *, format=None, **render_kwargs) -> None:
-        """Save chart to disk (svg or png). Format inferred from extension."""
+        """Save the chart to a file on disk.
+
+        Delegates to ``ferrum.display.save_chart``.  The file format is
+        inferred from the file extension when ``format`` is not given.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Destination file path.  Extension determines the default format:
+            ``.svg`` → SVG, ``.png`` → PNG.
+        format : {"svg", "png"} or None, optional
+            Explicit format override.  ``None`` (default) infers from ``path``.
+        **render_kwargs
+            Additional keyword arguments forwarded to the underlying renderer
+            (e.g. ``width``, ``height`` viewport overrides).
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").save("/tmp/chart.svg")
+        """
         from ferrum.display import save_chart
         save_chart(self, path, format=format, **render_kwargs)
 
     def show(self) -> None:
-        """Display chart: Jupyter inline SVG or browser fallback."""
+        """Display the chart inline or in a browser.
+
+        In a Jupyter notebook the SVG is rendered inline via
+        ``_repr_svg_``.  Outside of a notebook, the SVG is written to a
+        temporary file and opened in the system browser via
+        ``ferrum.display.show_chart``.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").show()  # doctest: +SKIP
+        """
         from ferrum.display import show_chart
         show_chart(self)
 
@@ -2164,12 +4229,49 @@ class Chart:
 
     # Stubs for Phase 11
     def add_selection(self, *selections):
+        """Add interactive selection(s) to this chart.
+
+        .. note::
+            Not yet implemented.  Interactive selections require the Phase 11
+            renderer.  Calling this method raises ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to Phase 11.
+        """
         raise NotImplementedError("selections require .interactive() — Phase 11")
 
     def interactive(self):
+        """Enable interactive rendering for this chart.
+
+        .. note::
+            Not yet implemented.  Calling this method raises
+            ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — deferred to Phase 11.
+        """
         raise NotImplementedError("interactive renderer — Phase 11")
 
     def __repr__(self) -> str:
+        """Return a concise string representation of the chart.
+
+        Returns
+        -------
+        str
+            A string of the form ``Chart(mark='point', encoding=['x', 'y'])``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> repr(fm.Chart(df).mark_point().encode(x="x", y="y"))
+        "Chart(mark='point', encoding=['x', 'y'])"
+        """
         return f"Chart(mark={self._mark!r}, encoding={list(self._encoding.keys())})"
 
 

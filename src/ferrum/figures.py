@@ -719,9 +719,9 @@ def shap_chart(
     sample_idx : int or None, default None
         Row index (0-based) of the sample to explain. Required when
         ``kind="waterfall"``; ignored for other kinds.
-    order : {"abs_mean", "abs_max"}, default "abs_mean"
+    order : {"abs_mean", "max"}, default "abs_mean"
         Feature ranking criterion across all three kinds. ``"abs_mean"``
-        ranks by mean absolute SHAP value; ``"abs_max"`` by max absolute
+        ranks by mean absolute SHAP value; ``"max"`` by max absolute
         SHAP value. Drives both the top-``max_display`` selection and
         the bar/waterfall layout order so all three chart types agree
         on "most important".
@@ -1485,9 +1485,11 @@ def intercluster_distance_chart(
         Number of clusters. When ``None``, inferred from
         ``model.n_clusters`` or ``len(model.cluster_centers_)``; raises
         ``ValueError`` if neither attribute is present.
-    method : {"mds"}, default "mds"
+    method : {"mds", "tsne"}, default "mds"
         Dimensionality-reduction method for embedding cluster centers.
-        Only ``"mds"`` is supported currently.
+        ``"mds"`` (default) uses sklearn MDS to preserve pairwise
+        distances; ``"tsne"`` uses t-SNE (perplexity clamped to
+        ``min(5, k-1)`` for small cluster counts).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None

@@ -37,12 +37,39 @@ from __future__ import annotations
 
 
 def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
-    """Validate user-supplied mark_kwargs; raise ``TypeError`` on unknown.
+    """Validate user-supplied ``mark_kwargs``; raise ``TypeError`` on unknown keys.
 
-    Returns the dict unchanged so callers can do
+    Returns the dict unchanged so callers can write
     ``user_kw = validate_user_mark_kwargs("foo", mark_kwargs)`` in one
-    line. Passes through an empty dict immediately to keep the common
-    ``mark_foo()`` no-kwarg path free of imports.
+    line.  Passes through an empty dict immediately to keep the common
+    no-kwarg path free of the ``MarkBase`` import.
+
+    Parameters
+    ----------
+    mark_name : str
+        Name of the composite mark (e.g. ``"boxplot"``). Used in the
+        error message only.
+    kwargs : dict
+        Caller-supplied keyword arguments to validate.
+
+    Returns
+    -------
+    dict
+        A copy of ``kwargs`` (unchanged) if all keys are valid.
+
+    Raises
+    ------
+    TypeError
+        If any key is not in ``ferrum.marks.base._VALID_MARK_KWARGS``.
+
+    Examples
+    --------
+    >>> validate_user_mark_kwargs("boxplot", {"opacity": 0.5})
+    {'opacity': 0.5}
+    >>> validate_user_mark_kwargs("boxplot", {"typo": 1})  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    TypeError: mark_boxplot: unknown keyword argument(s) ['typo']. ...
     """
     if not kwargs:
         return {}
@@ -58,14 +85,33 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
 
 
 def apply_user_mark_kwargs(layers: list[dict], user_kwargs: dict) -> list[dict]:
-    """Merge ``user_kwargs`` into each layer's ``mark_kwargs`` dict.
+    """Merge ``user_kwargs`` into every layer's ``mark_kwargs`` dict.
 
-    User-supplied kwargs win on conflict with the desugar's hard-coded
-    defaults so explicit user intent is honored. The renderer ignores
-    kwargs that don't apply to a given mark type, making the spread
-    across all layers safe even when only one layer can render the
-    kwarg (e.g. ``stroke_width`` on a ribbon: ignored; on the line
-    below it: applied).
+    User-supplied values win over the desugar's hard-coded defaults so
+    explicit user intent is honored (e.g. ``opacity=0.8`` overrides a
+    ribbon's built-in ``opacity=0.3``).  The renderer silently ignores
+    kwargs that don't apply to a given mark type, so spreading across all
+    layers is safe even when only one layer can use the kwarg.
+
+    Parameters
+    ----------
+    layers : list[dict]
+        Layer descriptors as returned by a desugar function.  Each dict
+        may have an optional ``"mark_kwargs"`` key.
+    user_kwargs : dict
+        Validated user-supplied kwargs (from ``validate_user_mark_kwargs``).
+
+    Returns
+    -------
+    list[dict]
+        New list of layer dicts with ``mark_kwargs`` updated.  The input
+        list and its dicts are not mutated.
+
+    Examples
+    --------
+    >>> layers = [{"mark": "ribbon", "encoding": {}, "mark_kwargs": {"opacity": 0.3}}]
+    >>> apply_user_mark_kwargs(layers, {"opacity": 0.8})
+    [{'mark': 'ribbon', 'encoding': {}, 'mark_kwargs': {'opacity': 0.8}}]
     """
     if not user_kwargs:
         return layers

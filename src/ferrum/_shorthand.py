@@ -31,10 +31,42 @@ _PATTERN = re.compile(
 
 
 def parse_shorthand(s: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Parse a shorthand encoding string into (field, type, aggregate).
+    """Parse an encoding shorthand string into ``(field, type, aggregate)``.
 
-    Returns (None, type, agg) for "count()".
-    Raises ValueError for malformed input or unknown type letters.
+    Supported forms (per spec §3.2):
+
+    * ``"fieldname"``        → ``("fieldname", None, None)``
+    * ``"fieldname:Q"``      → ``("fieldname", "Q", None)``
+    * ``"agg(fieldname)"``   → ``("fieldname", None, "agg")``
+    * ``"agg()"``            → ``(None, None, "agg")`` — e.g. ``"count()"``
+    * ``"agg(fieldname):Q"`` → ``("fieldname", "Q", "agg")``
+
+    Parameters
+    ----------
+    s : str
+        Shorthand encoding string.
+
+    Returns
+    -------
+    tuple[str or None, str or None, str or None]
+        ``(field, type_code, aggregate)``.  Any component may be ``None``
+        when absent.
+
+    Raises
+    ------
+    ValueError
+        If parentheses are unbalanced, the string does not match the
+        grammar, or the type letter is not one of ``Q``, ``N``, ``O``,
+        ``T``.
+
+    Examples
+    --------
+    >>> parse_shorthand("price:Q")
+    ('price', 'Q', None)
+    >>> parse_shorthand("mean(tip):Q")
+    ('tip', 'Q', 'mean')
+    >>> parse_shorthand("count()")
+    (None, None, 'count')
     """
     if "(" in s and ")" not in s:
         raise ValueError(f"unbalanced parens in shorthand: {s!r}")
