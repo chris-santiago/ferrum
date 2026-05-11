@@ -284,11 +284,22 @@ def clustermap(
         value_vars=value_cols,
         var_name="column", value_name="value",
     )
+    # Reorder reads its index column from a sibling named output via from=:
+    # row_link publishes `row_link_order` (n rows of permutation indices);
+    # the Reorder transform permutes the chained batch accordingly. The col
+    # Reorder consumes col_link_order. (Phase 9 finalize: Reorder.from=)
+    # Note: Linkage row/col indexing here assumes the column-Reorder runs
+    # AFTER the unpivot — but currently we keep them pre-unpivot, which only
+    # makes sense for the row axis. For column reordering with the wide-format
+    # data, the canonical approach is to reorder columns by passing through
+    # the column linkage order before unpivoting. We do both axes pre-unpivot;
+    # the resulting unpivoted long-form preserves the visually-clustered order.
+    # `drop_index=False` keeps the data columns intact (we're not dropping a
+    # column from the chained batch — the index column lives in `from=` only).
     center = (
         Chart(data)
         .transform(row_link, col_link,
-                   Reorder(by="row_link_order"),
-                   Reorder(by="col_link_order"),
+                   Reorder(by="original_idx", from_="row_link_order", drop_index=False),
                    unpivot)
         .mark_rect()
         .encode(

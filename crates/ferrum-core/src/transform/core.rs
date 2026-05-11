@@ -108,9 +108,13 @@ impl TransformSpec {
     ) -> PyResult<RecordBatch> {
         // Default: ignore context and forward to existing apply().
         // Phase 8b transforms that NEED context (Raster, Swarm) override here.
+        // Phase 9 finalize: Reorder optionally reads its index column from a
+        // sibling named output via ctx.named_outputs.
         match self {
             Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
             Self::Swarm(s) => crate::transform::swarm::apply_with_context(s, batch, ctx),
+            Self::Reorder(s) =>
+                crate::transform::reorder::apply_with_outputs(s, batch, Some(&ctx.named_outputs)),
             _ => self.apply(batch),
         }
     }
@@ -185,10 +189,14 @@ pub(crate) fn apply_transforms_named(
     let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
     let mut current = batch.clone();
     for spec in specs {
+        // Each transform sees the named outputs accumulated so far via the
+        // context (Phase 9 finalize: enables Reorder(from='<named_output>')).
+        let mut step_ctx = ctx.clone();
+        step_ctx.named_outputs = outputs.clone();
         if let Some(name) = spec_name(spec) {
             // Named: run on the CURRENT chained batch (prior unnamed tail).
             // Does not advance the chained pipeline pointer.
-            let result = spec.apply_with_context(&current, ctx)?;
+            let result = spec.apply_with_context(&current, &step_ctx)?;
             // Secondary outputs first — explicit `name` (registered below)
             // wins on key collision.
             for (key, b) in spec.secondary_outputs(&current, &result)? {
@@ -198,7 +206,7 @@ pub(crate) fn apply_transforms_named(
         } else {
             // Unnamed: chained.
             let input = current.clone();
-            current = spec.apply_with_context(&current, ctx)?;
+            current = spec.apply_with_context(&current, &step_ctx)?;
             for (key, b) in spec.secondary_outputs(&input, &current)? {
                 outputs.insert(key, b);
             }
@@ -399,7 +407,7 @@ mod tests {
     fn test_transform_spec_reorder_round_trip() {
         use crate::transform::reorder::ReorderSpec;
         let original = TransformSpec::Reorder(ReorderSpec {
-            by: "new_idx".into(), drop_index: true, name: None,
+            by: "new_idx".into(), drop_index: true, from: None, name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"reorder""#));

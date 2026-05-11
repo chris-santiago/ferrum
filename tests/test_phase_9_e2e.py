@@ -186,18 +186,6 @@ def test_heatmap_annot_golden(df_heat):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="clustermap needs Reorder to consume a secondary named output "
-           "(row_link_order / col_link_order) from a prior Linkage. Reorder's "
-           "current contract requires its index column to be in the input "
-           "batch — but Linkage's order output has a different cardinality "
-           "(n rows for n observations) than its primary linkage matrix "
-           "(n-1 rows), so the order column can't simply be merged into the "
-           "primary chained output. Needs a `from='<named_output>'` parameter "
-           "on Reorder + a mechanism to look up named outputs from the "
-           "transform context. Tracked for Phase 10 design.",
-    strict=True,
-)
 def test_clustermap_basic_golden(df_cluster):
     cm = fe.clustermap(df_cluster)
     _check_or_update("clustermap_basic.svg", cm.show_svg())
@@ -232,14 +220,6 @@ def test_pairplot_3x3_hue_golden(df_iris_like):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="same root cause as clustermap_basic — Reorder needs to consume a "
-           "Linkage secondary output (the order index) but Reorder's current "
-           "API requires its index column to be in the primary input batch, "
-           "and Linkage's primary (n-1) and secondary (n) outputs differ in "
-           "cardinality. Needs Reorder(from=<named_output>) extension.",
-    strict=True,
-)
 def test_clustermap_row_col_dendrograms_golden(df_cluster):
     cm = fe.clustermap(
         df_cluster,

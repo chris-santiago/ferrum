@@ -404,7 +404,10 @@ class Linkage:
 
 
 class Reorder:
-    def __init__(self, by: str, *, drop_index: bool = True, name: str | None = None) -> None: ...
+    def __init__(self, by: str, *,
+                 drop_index: bool = True,
+                 from_: Optional[str] = None,
+                 name: Optional[str] = None) -> None: ...
 
 
 class Unpivot:

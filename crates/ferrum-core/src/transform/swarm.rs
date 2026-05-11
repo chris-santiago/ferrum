@@ -385,6 +385,7 @@ mod tests {
     fn ctx_with_panel(w: u32, h: u32) -> TransformContext {
         TransformContext {
             panel_pixel_size: Some((w, h)),
+            ..Default::default()
         }
     }
 
