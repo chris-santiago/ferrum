@@ -101,6 +101,24 @@ def test_golden_roc_chart_multiclass_annotate_auc():
     _check_golden(chart.show_svg(), "roc_chart_multiclass_annotate_auc")
 
 
+def test_golden_pr_chart_binary_annotate_ap():
+    model, X, y = _binary_xy()
+    chart = ferrum.pr_chart(model, X, y, annotate_ap=True)
+    _check_golden(chart.show_svg(), "pr_chart_binary_annotate_ap")
+
+
+def test_golden_pr_chart_binary_iso_lines():
+    model, X, y = _binary_xy()
+    chart = ferrum.pr_chart(model, X, y, iso_lines=True)
+    _check_golden(chart.show_svg(), "pr_chart_binary_iso_lines")
+
+
+def test_golden_pr_chart_multiclass_annotate_ap_iso():
+    model, X, y = _multi_xy()
+    chart = ferrum.pr_chart(model, X, y, annotate_ap=True, iso_lines=True)
+    _check_golden(chart.show_svg(), "pr_chart_multiclass_annotate_ap_iso")
+
+
 def test_golden_pr_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.pr_chart(model, X, y)

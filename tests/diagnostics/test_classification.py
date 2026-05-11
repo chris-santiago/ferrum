@@ -63,16 +63,33 @@ def test_mark_pr_renders(binary_source):
     assert "<svg" in svg
 
 
-def test_mark_pr_iso_lines_raises(binary_source):
-    pr = binary_source.pr_curve()
-    with pytest.raises(NotImplementedError, match="iso_lines"):
-        ferrum.Chart(pr).mark_pr(iso_lines=True).show_svg()
+def test_mark_pr_iso_lines_renders_4_iso_curves(binary_source):
+    """iso_lines=True appends F-score iso curves for F = 0.2, 0.4, 0.6, 0.8
+    plus a text-label layer with the F-value at each curve's rightmost
+    point. The chart builder owns the iso-row injection; the desugar
+    emits one extra dashed line layer + one text layer."""
+    svg = ferrum.pr_chart(binary_source, iso_lines=True).show_svg()
+    assert "<svg" in svg
+    for f in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
+        assert f in svg, f"iso label {f!r} missing from SVG"
 
 
-def test_mark_pr_annotate_ap_raises(binary_source):
-    pr = binary_source.pr_curve()
-    with pytest.raises(NotImplementedError, match="annotate_ap"):
-        ferrum.Chart(pr).mark_pr(annotate_ap=True).show_svg()
+def test_mark_pr_annotate_ap_renders_text_label(binary_source):
+    """annotate_ap=True emits a per-class text layer at fixed (x, y)
+    with the formatted AP value, color-coded to match each curve."""
+    svg = ferrum.pr_chart(binary_source, annotate_ap=True).show_svg()
+    assert "<svg" in svg
+    assert "AP = 0." in svg
+
+
+def test_mark_pr_annotate_ap_and_iso_lines_compose(binary_source):
+    """The two annotation features compose: AP labels + iso curves
+    render in the same chart without collision."""
+    svg = ferrum.pr_chart(
+        binary_source, annotate_ap=True, iso_lines=True,
+    ).show_svg()
+    assert "AP = 0." in svg
+    assert "F=0.6" in svg
 
 
 def test_mark_calibration_renders(binary_source):

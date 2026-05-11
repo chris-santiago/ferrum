@@ -189,6 +189,8 @@ def _inject_curve_annotation(
     metric_values = df[metric_field].to_list()
     groups: list[str] = []
     for g in group_values:
+        if g is None:
+            continue
         if g not in groups:
             groups.append(str(g))
     label_x: list[float | None] = [None] * n_rows
@@ -216,18 +218,130 @@ def _pr_chart_from_source(
     iso_lines: bool = False,
     theme: Any = None,
 ):
-    """Build a precision-recall chart from a ModelSource."""
+    """Build a precision-recall chart from a ModelSource.
+
+    Pins both axes to ``[0, 1.05]`` (canonical sklearn / yellowbrick
+    convention for PR diagrams) so curves render against the full
+    precision-recall space, AP-annotation labels in the bottom-right
+    corner stay in-bounds, and visual comparisons across models with
+    very different baseline precisions remain calibrated.
+    """
     import ferrum
+    from ferrum.encoding import X, Y
+
     del per_class  # ModelSource.pr_curve() always returns per-class for now
     df = source.pr_curve()
-    chart = ferrum.Chart(df).mark_pr(
-        annotate_ap=annotate_ap,
-        iso_lines=iso_lines,
-        color_field=_color_field_for(df, "class"),
+    # Order matters: annotate first (so the per-class label rows live in
+    # the original schema), then append iso-curve rows. `_inject_pr_iso_lines`
+    # fills the new rows with nulls for every original column including the
+    # annotation columns, which is exactly what mark_text wants.
+    if annotate_ap:
+        df = _inject_curve_annotation(
+            df,
+            group_field="class",
+            metric_field="ap",
+            metric_label="AP",
+            prefix="_ap",
+        )
+    if iso_lines:
+        df = _inject_pr_iso_lines(df)
+    color_field = _color_field_for(df, "class")
+    chart = (
+        ferrum.Chart(df)
+        .mark_pr(
+            annotate_ap=annotate_ap,
+            iso_lines=iso_lines,
+            color_field=color_field,
+        )
+        .encode(
+            x=X("recall", scale={"type": "linear", "domain": [0.0, 1.05]}),
+            y=Y("precision", scale={"type": "linear", "domain": [0.0, 1.05]}),
+        )
     )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+def _inject_pr_iso_lines(
+    df: pl.DataFrame,
+    *,
+    f_scores: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
+    n_points: int = 50,
+) -> pl.DataFrame:
+    """Append F-score iso-curve rows to a PR-curve DataFrame.
+
+    For each F in ``f_scores``, parameterizes the iso curve
+    ``precision = F * recall / (2 * recall - F)`` (the locus of points
+    with the chosen F1) over the recall range ``(F/2, 1]`` where
+    precision stays in ``(0, 1]``. Each iso curve gets ``n_points``
+    rows with synthetic ``_iso_recall`` / ``_iso_precision`` /
+    ``_iso_f`` columns plus one ``_iso_label_x`` / ``_iso_label_y`` /
+    ``_iso_label`` row near the curve's right end for the F-value
+    annotation. The original PR columns are extended with nulls on the
+    new rows so ``mark_line`` skips them on the PR-curve layer (and
+    vice-versa on the iso layer).
+    """
+    import numpy as np
+
+    # Build the iso-curve rows.
+    iso_rows: list[dict] = []
+    for f in f_scores:
+        recalls = np.linspace(f / 2 + 1e-3, 1.0, n_points)
+        # precision = F * recall / (2 * recall - F)
+        precisions = f * recalls / (2 * recalls - f)
+        valid = (precisions > 0.0) & (precisions <= 1.0)
+        for r, p in zip(recalls[valid], precisions[valid]):
+            iso_rows.append({
+                "_iso_recall": float(r),
+                "_iso_precision": float(p),
+                "_iso_f": f"F={f:.1f}",
+                "_iso_label_x": None,
+                "_iso_label_y": None,
+                "_iso_label": None,
+            })
+        # Label anchor at the rightmost (recall ≈ 1) point of the iso curve.
+        if iso_rows:
+            iso_rows[-1]["_iso_label_x"] = float(recalls[valid][-1]) - 0.02
+            iso_rows[-1]["_iso_label_y"] = float(precisions[valid][-1]) + 0.02
+            iso_rows[-1]["_iso_label"] = f"F={f:.1f}"
+
+    iso_df = pl.DataFrame(iso_rows)
+    # Extend the original PR DataFrame with null iso columns.
+    null_iso = pl.DataFrame({
+        "_iso_recall": [None] * df.height,
+        "_iso_precision": [None] * df.height,
+        "_iso_f": [None] * df.height,
+        "_iso_label_x": [None] * df.height,
+        "_iso_label_y": [None] * df.height,
+        "_iso_label": [None] * df.height,
+    }, schema={
+        "_iso_recall": pl.Float64,
+        "_iso_precision": pl.Float64,
+        "_iso_f": pl.Utf8,
+        "_iso_label_x": pl.Float64,
+        "_iso_label_y": pl.Float64,
+        "_iso_label": pl.Utf8,
+    })
+    df = pl.concat([df, null_iso], how="horizontal")
+
+    # Extend iso_df with null PR columns so the schemas align for vertical concat.
+    pr_columns = [c for c in df.columns if c not in iso_df.columns]
+    null_pr_for_iso: dict[str, list] = {}
+    schema_for_iso: dict[str, pl.DataType] = {}
+    for col in pr_columns:
+        null_pr_for_iso[col] = [None] * iso_df.height
+        schema_for_iso[col] = df.schema[col]
+    iso_df = pl.concat(
+        [iso_df, pl.DataFrame(null_pr_for_iso, schema=schema_for_iso)],
+        how="horizontal",
+    )
+
+    # Vertical concat: original PR rows first, then iso rows.
+    return pl.concat(
+        [df.select(df.columns), iso_df.select(df.columns)],
+        how="vertical_relaxed",
+    )
 
 
 def _calibration_chart_from_source(

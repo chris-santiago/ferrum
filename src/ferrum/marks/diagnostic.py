@@ -174,25 +174,57 @@ def desugar_pr(
     """Precision-recall curve mark.
 
     Data contract: ``recall``, ``precision``, ``class``, ``ap`` as emitted
-    by ``ModelSource.pr_curve()``. ``annotate_ap`` and ``iso_lines`` are
-    reserved for Phase 10h; passing non-default values raises
-    ``NotImplementedError``.
+    by ``ModelSource.pr_curve()``.
+
+    When ``annotate_ap=True`` the chart builder
+    (``_pr_chart_from_source``) injects ``_ap_label_x`` / ``_ap_label_y`` /
+    ``_ap_label`` columns — one non-null row per class — and this
+    desugar emits a ``mark_text`` layer that references them.
+
+    When ``iso_lines=True`` the chart builder appends F-score iso-curve
+    rows for F in {0.2, 0.4, 0.6, 0.8} with synthetic ``_iso_recall``,
+    ``_iso_precision``, ``_iso_label`` columns; the desugar emits a
+    grey dashed line layer plus a text layer for the iso labels.
     """
     del average  # informational at the mark layer
-    if annotate_ap:
-        raise NotImplementedError(
-            "mark_pr(annotate_ap=True) lands in Phase 10h."
-        )
-    if iso_lines:
-        raise NotImplementedError(
-            "mark_pr(iso_lines=True) lands in Phase 10h."
-        )
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
         line_enc["color"] = color_field
-    return ("__layered__", [], None, None, [
-        {"mark": "line", "encoding": line_enc},
-    ])
+    layers: list[dict] = [{"mark": "line", "encoding": line_enc}]
+    if iso_lines:
+        # Iso-F lines are rendered as a separate line layer grouped by
+        # `_iso_f` (Utf8 string of the F-score). The chart builder appends
+        # one row per (F, recall_step) point along each iso curve.
+        layers.append({
+            "mark": "line",
+            "encoding": {
+                "x": "_iso_recall",
+                "y": "_iso_precision",
+                "color": "_iso_f",
+            },
+            "mark_kwargs": {"stroke_dash": [2, 4], "opacity": 0.6},
+        })
+        layers.append({
+            "mark": "text",
+            "encoding": {
+                "x": "_iso_label_x",
+                "y": "_iso_label_y",
+                "text": "_iso_label",
+            },
+            "mark_kwargs": {"align": "left", "font_size": 9.0},
+        })
+    if annotate_ap:
+        text_enc: dict[str, Any] = {
+            "x": "_ap_label_x", "y": "_ap_label_y", "text": "_ap_label",
+        }
+        if color_field is not None:
+            text_enc["color"] = color_field
+        layers.append({
+            "mark": "text",
+            "encoding": text_enc,
+            "mark_kwargs": {"align": "left"},
+        })
+    return ("__layered__", [], None, None, layers)
 
 
 def desugar_calibration(
