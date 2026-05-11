@@ -57,12 +57,16 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
 
     if let Some(t) = &axis.title {
         let title_style = TextStyle {
-            fill: theme.font_color,
+            fill: theme.title_color,
             font_size: theme.title_font_size,
             anchor: TextAnchor::Middle,
             angle: t.angle,
-            font_family: &theme.font_family,
-            font_weight: None,
+            font_family: &theme.title_font_family,
+            font_weight: if theme.title_font_weight == "normal" {
+                None
+            } else {
+                Some(&theme.title_font_weight)
+            },
         };
         out.text(t.anchor_x, t.anchor_y, &t.text, &title_style);
     }

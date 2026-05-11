@@ -206,7 +206,7 @@ impl Default for ThemeInputs {
             font_family: "Inter".into(),       // resvg default; T4 → "DejaVu Sans"
             font_weight: "normal".into(),
             title_font_family: "Inter".into(),
-            title_font_weight: "bold".into(),         // T4 → "600"
+            title_font_weight: "normal".into(),       // T4 → "600"; "normal" suppresses attr emission to preserve current SVG
             title_color: text_222,
             title_anchor: TextAnchor::Middle,         // T4 → Start
             title_offset: 4.0,                        // T4 → 6.0
