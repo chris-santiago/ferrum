@@ -20,6 +20,13 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 3 — figure-level functions
     "displot", "catplot", "lmplot", "residplot",
     "pairplot", "heatmap", "clustermap", "jointplot",
+    # Task 4 — encoding channels (31)
+    "X", "Y", "X2", "Y2", "XError", "YError", "XError2", "YError2",
+    "Theta", "Radius",
+    "Color", "Fill", "Stroke", "Opacity", "FillOpacity", "StrokeOpacity",
+    "StrokeWidth", "StrokeDash", "Size", "Shape", "Angle",
+    "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
+    "Facet", "FacetRow", "FacetCol",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

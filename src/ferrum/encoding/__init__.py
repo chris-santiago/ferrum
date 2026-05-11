@@ -1,4 +1,4 @@
-"""Encoding channels for Phase 8a."""
+"""Encoding channels — declarative mappings from data fields to visual variables."""
 from ferrum.encoding.positional import (
     X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
 )
