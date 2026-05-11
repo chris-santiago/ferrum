@@ -69,5 +69,6 @@ The boundary is "what does the chart need to show?" — and the answer to that q
 ## Where to go next
 
 - [One chart model](one-chart-model.md) for the broader context that makes pipeline-statistics possible.
+- [Dataframe pluralism](dataframe-pluralism.md) for how the same Arrow-based transforms run against pandas, Polars, modin, cuDF, dask, and ibis inputs.
 - [Performance & scale](performance-scale.md) for how the Rust-backed pipeline keeps the same chart spec usable at very different data sizes.
 - [Model outputs are data](model-outputs-as-data.md) for the related principle that ROC curves, calibration plots, and SHAP summaries are also data — and therefore also chart transforms.

@@ -26,13 +26,15 @@ Every existing library makes you precompute: call SciPy, build the KDE yourself,
 
 Ferrum declares intent and computes in Rust before rendering. KDE, LOESS, bootstrap CIs, binning, calibration curves, smoothing, and similar transforms are declarative chart operations. The library is statistically literate, not just a renderer.
 
-## Five features worth leading with
+## Six features worth leading with
 
 **Grammar of Graphics, without the ceiling.** Declarative, composable, layered — like Altair or plotnine — but no row limits and no API switch when data grows.
 
 **Stat transforms in the pipeline.** Declared in the chart spec, computed in Rust before rendering. You stop preprocessing data before plotting.
 
 **Model diagnostics that compose.** ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. `fr.hconcat(roc_chart, confusion_chart)` just works.
+
+**Handles every dataframe API.** Polars, pandas, modin, cuDF, dask, and ibis all flow through the same `Chart(data)` constructor — internally normalized to Arrow once, then routed through the Rust core unchanged. No per-framework adapters in user code; no special-case ingestion paths in ferrum.
 
 **Zero system dependencies.** Ships in a wheel. No Cairo, no X11, no display server. Renders in Kubernetes, CI, SSH sessions, containers.
 

@@ -53,6 +53,7 @@ These compositions are not special-cased. They fall out of the model because the
 ## Where to go next
 
 - [Stats in the rendering pipeline](stats-pipeline.md) explains why transforms like KDE, binning, and bootstrap CIs are part of the chart spec rather than user-side preprocessing.
+- [Dataframe pluralism](dataframe-pluralism.md) covers how the same chart sits on top of pandas, Polars, modin, cuDF, dask, ibis, and Arrow inputs.
 - [Interactivity is a renderer, not a rewrite](interactivity.md) covers how static and interactive output share one chart object.
 - [Model outputs are data](model-outputs-as-data.md) explains why ROC, calibration, confusion, and SHAP plots are charts in the same sense as scatter plots.
 - [Performance & scale](performance-scale.md) covers the Python/Rust/Arrow architecture that lets the same chart spec work at very different data sizes.

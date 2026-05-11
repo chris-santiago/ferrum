@@ -40,6 +40,7 @@ Guide
   ├─ Concepts
   │   ├─ One chart model
   │   ├─ Stats in the rendering pipeline
+  │   ├─ Dataframe pluralism
   │   ├─ Interactivity is a renderer, not a rewrite
   │   ├─ Model outputs are data
   │   └─ Performance & scale
@@ -72,7 +73,7 @@ The quality bar memory makes higher-level convenience functions (`displot`, `lmp
 
 Total authored pages: **~25 prose pages + 5 gallery pages + 1 API index + auto-generated API pages per module + 1 changelog ≈ 35 files**.
 
-- Prose pages: Home (1), Get Started (3), Concepts (5), Guide (6), Comparison (3), Changelog (1), API index (1), Gallery index (1) = **21 hand-written**.
+- Prose pages: Home (1), Get Started (3), Concepts (6), Guide (6), Comparison (3), Changelog (1), API index (1), Gallery index (1) = **22 hand-written**.
 - Gallery example pages: **5**.
 - API reference module pages: 4 (auto-rendered via mkdocstrings).
 

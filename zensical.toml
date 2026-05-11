@@ -27,6 +27,7 @@ nav = [
     { Concepts = [
       { "One chart model" = "guide/concepts/one-chart-model.md" },
       { "Stats in the pipeline" = "guide/concepts/stats-pipeline.md" },
+      { "Dataframe pluralism" = "guide/concepts/dataframe-pluralism.md" },
       { "Interactivity is a renderer" = "guide/concepts/interactivity.md" },
       { "Model outputs are data" = "guide/concepts/model-outputs-as-data.md" },
       { "Performance & scale" = "guide/concepts/performance-scale.md" },

@@ -22,11 +22,11 @@ This split is deliberate. Python is excellent for the expressive grammar that th
 
 ## Arrow CDI is the boundary
 
-The single point where Python and Rust meet is the Arrow C Data Interface. Ferrum accepts your data — pandas, Polars, Arrow tables, NumPy arrays, or anything Narwhals can interpret — and passes columnar buffers across the boundary by pointer rather than by copy.
+The single point where Python and Rust meet is the Arrow C Data Interface. Ferrum accepts your data — Polars, pandas, modin, cuDF, dask, ibis, Arrow tables, NumPy arrays, or anything Narwhals can interpret — and passes columnar buffers across the boundary by pointer rather than by copy.
 
 For Polars specifically, that handoff is zero-copy: the Rust engine reads the same columnar buffers Polars already owns. For other dataframe sources, Narwhals normalizes the interface and the engine reads through the Arrow representation that results.
 
-This is a structural performance choice, not a tuning knob. The library is built around the assumption that data already lives in a columnar layout, and the boundary is designed to preserve that layout end-to-end.
+This is a structural choice, not a tuning knob. The library is built around the assumption that data already lives in a columnar layout, and the boundary is designed to preserve that layout end-to-end. The same `Chart(data)` constructor accepts every supported dataframe API; the multi-framework story is explored in detail in [Dataframe pluralism](dataframe-pluralism.md).
 
 ## Rendering: SVG, raster, and GPU/WASM
 
@@ -69,5 +69,6 @@ Inside the scope, the bet is that one chart system, with the Python/Rust/Arrow a
 ## Where to go next
 
 - [Stats in the rendering pipeline](stats-pipeline.md) explains why statistical computation lives in the engine alongside layout and rendering.
+- [Dataframe pluralism](dataframe-pluralism.md) explains how the Arrow boundary supports pandas, Polars, modin, cuDF, dask, and ibis through one ingestion path.
 - [One chart model](one-chart-model.md) covers the grammar that the performance architecture is built to preserve.
 - [Why Ferrum](../../getting-started/why-ferrum.md) frames the same architecture as a comparison to existing Python plotting libraries.

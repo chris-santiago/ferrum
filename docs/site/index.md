@@ -54,11 +54,11 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     The plots that matter most for understanding models at scale — the ones existing tools sample or crash on — render in full because the rasterization is in Rust and the interactivity is GPU-backed.
 
--   __Built for plural dataframes__
+-   __Handles every dataframe API__
 
     ---
 
-    Pandas, Polars, Arrow tables, NumPy arrays. Narwhals broadens compatibility further. The chart model stays stable across whichever table type your data already lives in.
+    Polars, pandas, modin, cuDF, dask, and ibis all flow through the same `Chart(data)` constructor. Narwhals normalizes the input to Arrow once; the Rust core sees one shape. No per-framework adapters in your code, no special-case ingestion paths in ferrum.
 
 </div>
 
