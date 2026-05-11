@@ -1,6 +1,9 @@
 //! Per-panel draw context + mark dispatch. Spec §4.5 / §4.6.
 
-use arrow::array::{Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt64Array};
+use arrow::array::{
+    Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
+    TimestampMillisecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{PanelLayout, ThemeInputs};
@@ -210,16 +213,34 @@ pub fn resolve_mark_style(
     style
 }
 
-/// Try to read a column as `f64`, regardless of whether the underlying type
-/// is Float64 / Int64 / Timestamp(ms). Returns None for null rows.
+/// Try to read a column as `f64`, regardless of the underlying numeric type.
+///
+/// Polars emits `UInt32` from `.len()` (group_by counts), `Int32`/`Int16`/`Int8`
+/// from many builders, and `Float32` from some compute paths — all of these
+/// must coerce cleanly so renderers see a uniform `f64` view rather than
+/// silently aborting via `Err -> early return`. Returns `None` for null rows.
 pub fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<f64>>, super::RenderError> {
     let col = batch.column_by_name(field)
         .ok_or_else(|| super::RenderError::UnknownColumn { name: field.to_string() })?;
     if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
         Ok(a.iter().collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<Int8Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
     } else if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<UInt8Array>() {
         Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
     } else if let Some(a) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
         Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
