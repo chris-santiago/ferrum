@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use pyo3_arrow::PyRecordBatchReader;
 
-use crate::layout::{ThemeInputs, Viewport};
+use crate::layout::{LegendDirection, LegendOrient, TextAnchor, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 
 use super::config::RenderConfig;
@@ -190,6 +190,173 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
     if let Some(v) = d.get_item("padding")? {
         t.padding = v.extract()?;
     }
+
+    // -------- Themes-T1 additions --------
+
+    // Spec uses `background`; binding originally read `background_color`. Accept both.
+    if let Some(v) = d.get_item("background")? {
+        let s: String = v.extract()?;
+        t.background_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+
+    // Typography
+    if let Some(v) = d.get_item("font_family")? {
+        t.font_family = v.extract::<String>()?;
+    }
+    if let Some(v) = d.get_item("font_weight")? {
+        t.font_weight = v.extract::<String>()?;
+    }
+    if let Some(v) = d.get_item("font_color")? {
+        let s: String = v.extract()?;
+        t.font_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    if let Some(v) = d.get_item("font_size")? {
+        t.label_font_size = v.extract()?;
+    }
+    if let Some(v) = d.get_item("title_font_family")? {
+        t.title_font_family = v.extract::<String>()?;
+    }
+    if let Some(v) = d.get_item("title_font_size")? {
+        t.title_font_size = v.extract()?;
+    }
+    if let Some(v) = d.get_item("title_font_weight")? {
+        t.title_font_weight = v.extract::<String>()?;
+    }
+    if let Some(v) = d.get_item("title_color")? {
+        let s: String = v.extract()?;
+        t.title_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    if let Some(v) = d.get_item("title_anchor")? {
+        let s: String = v.extract()?;
+        t.title_anchor = match s.as_str() {
+            "start" => TextAnchor::Start,
+            "middle" => TextAnchor::Middle,
+            "end" => TextAnchor::End,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "title_anchor must be one of 'start'|'middle'|'end', got '{other}'"
+                )))
+            }
+        };
+    }
+    if let Some(v) = d.get_item("title_offset")? {
+        t.title_offset = v.extract()?;
+    }
+    if let Some(v) = d.get_item("label_font_family")? {
+        t.label_font_family = v.extract::<String>()?;
+    }
+    if let Some(v) = d.get_item("label_color")? {
+        let s: String = v.extract()?;
+        t.label_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+
+    // Axes
+    if let Some(v) = d.get_item("axis_line")? {
+        t.axis_line = v.extract()?;
+    }
+    if let Some(v) = d.get_item("axis_line_color")? {
+        let s: String = v.extract()?;
+        t.axis_line_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    if let Some(v) = d.get_item("axis_line_width")? {
+        t.axis_line_width = v.extract()?;
+    }
+    if let Some(v) = d.get_item("tick_color")? {
+        let s: String = v.extract()?;
+        t.tick_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    if let Some(v) = d.get_item("tick_size")? {
+        t.tick_size = v.extract()?;
+    }
+    if let Some(v) = d.get_item("tick_width")? {
+        t.tick_width = v.extract()?;
+    }
+
+    // Grid
+    if let Some(v) = d.get_item("grid_color")? {
+        let s: String = v.extract()?;
+        t.grid_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    if let Some(v) = d.get_item("grid_width")? {
+        t.grid_width = v.extract()?;
+    }
+    if let Some(v) = d.get_item("grid_dash")? {
+        let dashes: Vec<f64> = v.extract()?;
+        t.grid_dash = Some(dashes);
+    }
+    if let Some(v) = d.get_item("grid_opacity")? {
+        t.grid_opacity = v.extract()?;
+    }
+
+    // Marks
+    if let Some(v) = d.get_item("point_opacity")? {
+        t.point_opacity = v.extract()?;
+    }
+    if let Some(v) = d.get_item("opacity")? {
+        t.default_opacity = v.extract()?;
+    }
+
+    // Palette
+    if let Some(v) = d.get_item("color_scheme")? {
+        t.color_scheme = v.extract::<String>()?;
+    }
+
+    // Strip
+    if let Some(v) = d.get_item("strip_background_color")? {
+        let s: String = v.extract()?;
+        t.strip_background_color =
+            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+
+    // Legend
+    if let Some(v) = d.get_item("legend_orient")? {
+        let s: String = v.extract()?;
+        t.legend_orient = match s.as_str() {
+            "left" => LegendOrient::Left,
+            "right" => LegendOrient::Right,
+            "top" => LegendOrient::Top,
+            "bottom" => LegendOrient::Bottom,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "legend_orient must be one of 'left'|'right'|'top'|'bottom', got '{other}'"
+                )))
+            }
+        };
+    }
+    if let Some(v) = d.get_item("legend_direction")? {
+        let s: String = v.extract()?;
+        t.legend_direction = match s.as_str() {
+            "horizontal" => LegendDirection::Horizontal,
+            "vertical" => LegendDirection::Vertical,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "legend_direction must be one of 'horizontal'|'vertical', got '{other}'"
+                )))
+            }
+        };
+    }
+    if let Some(v) = d.get_item("legend_title_font_size")? {
+        t.legend_title_font_size = v.extract()?;
+    }
+
+    // Spacing
+    if let Some(v) = d.get_item("axis_title_padding")? {
+        t.axis_title_padding = v.extract()?;
+    }
+    if let Some(v) = d.get_item("column_padding")? {
+        t.column_padding = v.extract()?;
+    }
+    if let Some(v) = d.get_item("row_padding")? {
+        t.row_padding = v.extract()?;
+    }
+
     Ok(t)
 }
 
