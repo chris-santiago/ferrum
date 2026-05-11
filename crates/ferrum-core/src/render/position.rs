@@ -212,7 +212,7 @@ fn apply_jitter(
     axis: &crate::spec::position::JitterAxis,
     width: f64,
     seed: Option<u64>,
-    _scales: &ResolvedScales,
+    scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::JitterAxis;
@@ -232,12 +232,25 @@ fn apply_jitter(
     let do_x = matches!(axis, JitterAxis::X | JitterAxis::Both);
     let do_y = matches!(axis, JitterAxis::Y | JitterAxis::Both);
 
+    // Per-axis ordinality check — for ordinal axes we must NOT overwrite the
+    // string column with float noise. Instead we emit a pixel-offset column
+    // (`__pos_x_offset__` / `__pos_y_offset__`) that the mark renderers add
+    // post-scale. The pixel offset is `(u - 0.5) * width * bandwidth_px`, so
+    // `width=1.0` spans the full band; `width=0.4` (default) keeps points
+    // well within their band.
+    let x_is_ordinal = matches!(scales.x, ScaleKind::Ordinal(_));
+    let y_is_ordinal = matches!(scales.y, ScaleKind::Ordinal(_));
+    let x_bandwidth = if let ScaleKind::Ordinal(s) = &scales.x { s.bandwidth() } else { 1.0 };
+    let y_bandwidth = if let ScaleKind::Ordinal(s) = &scales.y { s.bandwidth() } else { 1.0 };
+
     let x_arr = x_idx.and_then(|j| batch.column(j).as_any().downcast_ref::<Float64Array>());
     let y_arr = y_idx.and_then(|j| batch.column(j).as_any().downcast_ref::<Float64Array>());
 
     let n = batch.num_rows();
     let mut new_x: Vec<f64> = Vec::with_capacity(n);
     let mut new_y: Vec<f64> = Vec::with_capacity(n);
+    let mut x_pixel_offsets: Vec<f64> = Vec::with_capacity(n);
+    let mut y_pixel_offsets: Vec<f64> = Vec::with_capacity(n);
 
     for i in 0..n {
         let xv = x_arr.map(|a| if a.is_null(i) { f64::NAN } else { a.value(i) }).unwrap_or(f64::NAN);
@@ -252,28 +265,39 @@ fn apply_jitter(
         };
         let mut rng = ChaCha8Rng::seed_from_u64(row_seed);
         let u = (rng.next_u64() as f64) / (u64::MAX as f64);
-        let noise_x = (u - 0.5) * width;
+        let noise_x_data = (u - 0.5) * width;
         let u2 = (rng.next_u64() as f64) / (u64::MAX as f64);
-        let noise_y = (u2 - 0.5) * width;
+        let noise_y_data = (u2 - 0.5) * width;
 
-        new_x.push(if do_x { xv + noise_x } else { xv });
-        new_y.push(if do_y { yv + noise_y } else { yv });
+        new_x.push(if do_x && !x_is_ordinal { xv + noise_x_data } else { xv });
+        new_y.push(if do_y && !y_is_ordinal { yv + noise_y_data } else { yv });
+        x_pixel_offsets.push(if do_x && x_is_ordinal { (u - 0.5) * width * x_bandwidth } else { 0.0 });
+        y_pixel_offsets.push(if do_y && y_is_ordinal { (u2 - 0.5) * width * y_bandwidth } else { 0.0 });
     }
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    if let Some(j) = x_idx {
-        if do_x {
-            cols[j] = Arc::new(Float64Array::from(new_x));
-        }
+    if let (Some(j), true) = (x_idx, do_x && !x_is_ordinal) {
+        cols[j] = Arc::new(Float64Array::from(new_x));
     }
-    if let Some(j) = y_idx {
-        if do_y {
-            cols[j] = Arc::new(Float64Array::from(new_y));
-        }
+    if let (Some(j), true) = (y_idx, do_y && !y_is_ordinal) {
+        cols[j] = Arc::new(Float64Array::from(new_y));
     }
-    let schema = batch.schema();
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| crate::render::RenderError::Other(format!("Jitter: {e}")))
+
+    let need_offsets = (do_x && x_is_ordinal) || (do_y && y_is_ordinal);
+    if !need_offsets {
+        let schema = batch.schema();
+        return RecordBatch::try_new(schema, cols)
+            .map_err(|e| crate::render::RenderError::Other(format!("Jitter: {e}")));
+    }
+
+    cols.push(Arc::new(Float64Array::from(x_pixel_offsets)));
+    cols.push(Arc::new(Float64Array::from(y_pixel_offsets)));
+    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+    fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
+    let new_schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(new_schema, cols)
+        .map_err(|e| crate::render::RenderError::Other(format!("Jitter ordinal: {e}")))
 }
 
 // ---------------------------------------------------------------------------

@@ -58,13 +58,40 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return };
 
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    if xs.len() != ys.len() { return; }
+    // Read per-axis as f64 OR as string depending on column dtype. Ordinal
+    // axes (Utf8 columns) route through `to_pixel_str`; quantitative axes
+    // through `to_pixel_f64`. Reading both and dispatching at the loop level
+    // lets `mark_point` participate in categorical scatters (e.g. Phase 10d
+    // SHAP beeswarm with feature on y-axis).
+    let xs_f64 = col_as_f64(ctx.batch, xf).ok();
+    let xs_str = col_as_str(ctx.batch, xf).ok();
+    let ys_f64 = col_as_f64(ctx.batch, yf).ok();
+    let ys_str = col_as_str(ctx.batch, yf).ok();
+    let n = xs_f64
+        .as_ref().map(|v| v.len())
+        .or_else(|| xs_str.as_ref().map(|v| v.len()))
+        .unwrap_or(0);
+    let n_y = ys_f64
+        .as_ref().map(|v| v.len())
+        .or_else(|| ys_str.as_ref().map(|v| v.len()))
+        .unwrap_or(0);
+    if n == 0 || n != n_y { return; }
 
-    // Color encoding (Phase 7 feature, preserved).
-    let color_values: Option<Vec<Option<String>>> = color_field(ctx, spec)
-        .and_then(|f| col_as_str(ctx.batch, f).ok());
+    // Color encoding. Phase 7 read color as Utf8 only (categorical lookups);
+    // Phase 10d adds a Continuous path that reads color as f64 and resolves
+    // via `lookup_f64` (mirrors the Phase 10c-pre rect.rs pattern).
+    let cfield = color_field(ctx, spec);
+    let color_values_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        // No color scale resolved yet → fall back to Utf8 read so legacy
+        // single-color charts behave as before.
+        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_values_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
 
     // Phase 8a: optional per-row size / shape / opacity vectors.
     let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
@@ -86,27 +113,62 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // an ordinal-x band). Zero-valued when no adjustment was applied.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    for i in 0..xs.len() {
-        let (xv, yv) = match (xs[i], ys[i]) {
-            (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
-            _ => continue,
+    for i in 0..n {
+        // Resolve x-pixel: prefer Utf8 lookup when the scale is ordinal AND a
+        // string column is available, falling back to f64.
+        let cx = match &ctx.scales.x {
+            ScaleKind::Ordinal(_) => match &xs_str {
+                Some(v) => match &v[i] {
+                    Some(s) => match ctx.scales.x.to_pixel_str(s.as_str()) {
+                        Some(p) => p, None => continue,
+                    },
+                    None => continue,
+                },
+                None => continue,
+            },
+            _ => match xs_f64.as_ref().and_then(|v| v[i]) {
+                Some(a) if a.is_finite() => match ctx.scales.x.to_pixel_f64(a) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            },
         };
-        let cx = match scale_value(&ctx.scales.x, xv, None) { Some(p) => p, None => continue };
-        let cy = match scale_value(&ctx.scales.y, yv, None) { Some(p) => p, None => continue };
+        let cy = match &ctx.scales.y {
+            ScaleKind::Ordinal(_) => match &ys_str {
+                Some(v) => match &v[i] {
+                    Some(s) => match ctx.scales.y.to_pixel_str(s.as_str()) {
+                        Some(p) => p, None => continue,
+                    },
+                    None => continue,
+                },
+                None => continue,
+            },
+            _ => match ys_f64.as_ref().and_then(|v| v[i]) {
+                Some(a) if a.is_finite() => match ctx.scales.y.to_pixel_f64(a) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            },
+        };
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        // Resolve color (same logic as Phase 7).
-        let fill_base = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
-            match values[i].as_deref() {
-                Some(v) => match scale {
-                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                },
-                None => ctx.mark_style.fill,
+        // Resolve color: Continuous → lookup_f64 over the numeric column;
+        // Categorical → string lookup; otherwise use the mark style default.
+        let fill_base = match (&ctx.scales.color, &color_values_f64, &color_values_str) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
+                match values[i] {
+                    Some(v) if v.is_finite() => scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill),
+                    _ => ctx.mark_style.fill,
+                }
             }
-        } else {
-            ctx.mark_style.fill
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
+                match values[i].as_deref() {
+                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    None => ctx.mark_style.fill,
+                }
+            }
+            _ => ctx.mark_style.fill,
         };
 
         // Resolve per-row opacity (Phase 8a), falling back to mark_style.opacity.

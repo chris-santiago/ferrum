@@ -101,12 +101,15 @@ fn draw_ordinal(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
-/// Ordinal-y bar path: horizontal categorical bar chart. Mirrors
-/// `draw_ordinal` with x/y swapped — bars grow rightward from the left
-/// panel edge to `to_pixel_f64(value)`. Used by Phase 10d
-/// `mark_importance(orient="horizontal")` and any later mark that wants
-/// row-indexed horizontal bars. Stacking (`__stack_x_base__`) is not
-/// mirrored — no horizontal-stacked-bar consumer yet.
+/// Ordinal-y bar path: horizontal categorical bar chart. Two modes —
+///   `x` only: bars grow rightward from the left panel edge to
+///     `to_pixel_f64(value)`. Used by `mark_importance(orient="horizontal")`.
+///   `x` + `x2`: ranged horizontal bar from `to_pixel_f64(x)` to
+///     `to_pixel_f64(x2)`. Used by Phase 10d `mark_shap_waterfall` to draw
+///     each per-feature contribution as a segment from the cumulative
+///     baseline to the new cumulative value.
+/// Stacking (`__stack_x_base__`) is not mirrored from the vertical path —
+/// no horizontal-stacked-bar consumer yet.
 fn draw_ordinal_y(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
@@ -114,6 +117,10 @@ fn draw_ordinal_y(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let y_strs = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
     if y_strs.len() != xs.len() { return; }
+
+    let x2f_opt = spec.encoding.x2.as_ref().map(|e| e.field.as_str());
+    let x2s_opt: Option<Vec<Option<f64>>> = x2f_opt
+        .and_then(|f| col_as_f64(ctx.batch, f).ok());
 
     let panel = ctx.panel.plot_area;
     let baseline_x = panel.x;
@@ -134,13 +141,22 @@ fn draw_ordinal_y(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let ys = match &y_strs[i] { Some(s) => s.as_str(), None => continue };
         let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
         let cy = match ctx.scales.y.to_pixel_str(ys) { Some(p) => p, None => continue };
-        let right_x = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+        let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
 
         let cy = cy + y_offsets[i];
-        let right_x = right_x + x_offsets[i];
-        let width = (right_x - baseline_x).max(0.0);
+        let px = px + x_offsets[i];
+
+        let (left_x, width) = if let Some(x2s) = &x2s_opt {
+            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+            let px2 = px2 + x_offsets[i];
+            (px.min(px2), (px - px2).abs())
+        } else {
+            (baseline_x, (px - baseline_x).max(0.0))
+        };
+
         let r = Rect {
-            x: baseline_x,
+            x: left_x,
             y: cy - bar_height / 2.0,
             w: width,
             h: bar_height,
@@ -338,6 +354,43 @@ mod tests {
         super::draw(&ctx, &mut out);
         let s = out.finish();
         assert_eq!(s.matches("<rect ").count(), 3, "expected 3 horizontal bars, got: {s}");
+    }
+
+    #[test]
+    fn bar_ordinal_y_with_x2_emits_ranged_horizontal_rects() {
+        // Phase 10d (Task 22-pre): quantitative x + x2 + ordinal y →
+        // ranged horizontal bars (each row spans from x to x2 horizontally).
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x0", DataType::Float64, false),
+            Field::new("x1", DataType::Float64, false),
+            Field::new("g",  DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let mut out = SvgBuffer::new(panel.plot_area, None, false);
+        super::draw(&ctx, &mut out);
+        let s = out.finish();
+        assert_eq!(s.matches("<rect ").count(), 3, "expected 3 ranged-horizontal bars, got: {s}");
     }
 
     #[test]
