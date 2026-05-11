@@ -29,4 +29,40 @@ strip = true
 pythonpath = ["src"]
 
 [dependency-groups]
-dev = ["maturin>=1.7,<2.0", "pytest>=8", "zensical>=0.0.40"]
+dev = ["maturin>=1.7,<2.0", "pytest>=8", "zensical>=0.0.40", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["D"]
+ignore = [
+    "D203",  # one-blank-line-before-class (conflicts with D211)
+    "D213",  # multi-line-summary-second-line (conflicts with D212)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# Permanent exemptions:
+"src/ferrum/_*.py" = ["D"]
+"src/ferrum/marks/**" = ["D"]  # internal-only subpackage; not in __all__
+"tests/**" = ["D"]
+"src/ferrum/_core.pyi" = ["D"]
+
+# Ratcheting exemptions — each row is removed by the commit that completes that scope.
+"src/ferrum/chart.py" = ["D"]
+"src/ferrum/figure/**" = ["D"]
+"src/ferrum/encoding/**" = ["D"]
+"src/ferrum/composition.py" = ["D"]
+"src/ferrum/layer.py" = ["D"]
+"src/ferrum/repeat.py" = ["D"]
+"src/ferrum/themes/**" = ["D"]
+"src/ferrum/position.py" = ["D"]
+"src/ferrum/coord.py" = ["D"]
+"src/ferrum/annotations.py" = ["D"]
+"src/ferrum/schemes.py" = ["D"]
+"src/ferrum/__init__.py" = ["D"]
