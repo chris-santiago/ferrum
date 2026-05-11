@@ -158,6 +158,27 @@ fn is_numeric(d: &DataType) -> bool {
 
 use crate::transform::core::TransformSpec;
 
+/// Melt / wide-to-long reshaping transform.
+///
+/// Converts a wide-format batch to long format by stacking one or more
+/// value columns into ``var_name`` / ``value_name`` column pairs, while
+/// preserving ``id_vars`` columns as repeated identifiers. Numeric and
+/// string value columns are both supported; all selected value columns
+/// must share a compatible Arrow data type.
+///
+/// Parameters
+/// ----------
+/// id_vars : list of str, default []
+///     Columns to keep as identifier variables (repeated per unpivoted row).
+/// value_vars : list of str, optional
+///     Columns to unpivot. When omitted, all columns not in ``id_vars``
+///     are unpivoted.
+/// var_name : str, default "variable"
+///     Name of the new column that holds the original column names.
+/// value_name : str, default "value"
+///     Name of the new column that holds the original values.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Unpivot")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyUnpivot(pub(crate) TransformSpec);

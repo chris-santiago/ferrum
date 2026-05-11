@@ -298,6 +298,27 @@ impl WhiskerExtentArg {
     }
 }
 
+/// Box-plot five-number summary with Tukey or min-max whiskers.
+///
+/// Computes Q1, median, Q3 and whisker endpoints per group using Type-7
+/// quantile interpolation (same as NumPy/SciPy default). Output has one row
+/// per unique group-key combination.
+///
+/// Output columns: groupby columns (if any), then ``q1``, ``median``,
+/// ``q3``, ``lower_whisker``, ``upper_whisker`` (all Float64, nullable).
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to summarize (must be Float64).
+/// groupby : list of str, default []
+///     Columns to group by before computing statistics.
+/// whisker_extent : float or "min-max", default 1.5
+///     When a float, whiskers extend to the most extreme data point within
+///     ``whisker_extent * IQR`` of Q1/Q3. Use ``"min-max"`` to extend
+///     whiskers to the data minimum and maximum.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "BoxStats")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBoxStats(pub(crate) crate::transform::core::TransformSpec);

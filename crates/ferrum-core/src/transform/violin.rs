@@ -314,6 +314,33 @@ pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBa
 
 use pyo3::prelude::*;
 
+/// Per-group KDE density curves for violin plots.
+///
+/// Computes a 1D Gaussian KDE for each group defined by ``groupby`` and
+/// maps the density values to a half-width in [0, ``width``] for mirrored
+/// ribbon rendering. The output feeds the ribbon mark in composite violin
+/// charts.
+///
+/// Output columns: ``group_id`` (UInt32 sequential group identifier),
+/// groupby columns (if any), ``violin_x`` (Float64, mirrored normalized
+/// density), and ``violin_y`` (Float64, value grid points). Vertices form
+/// a closed polygon: right side bottom→top then left side top→bottom.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to estimate (must be Float64).
+/// groupby : list of str, default []
+///     Columns to group by; a separate density curve is produced per group.
+/// bandwidth : float or {"scott", "silverman"}, optional
+///     Kernel bandwidth. Default is ``"scott"``.
+/// n : int, default 256
+///     Number of evaluation grid points per group. Must be > 0.
+/// width : float, default 0.4
+///     Maximum half-width of the violin in category-axis data units.
+///     Must be > 0.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Violin")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);

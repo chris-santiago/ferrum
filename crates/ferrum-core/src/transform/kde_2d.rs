@@ -221,6 +221,32 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Two-dimensional kernel density estimate (KDE2D).
+///
+/// Fits a bivariate Gaussian kernel to the (``x``, ``y``) point cloud and
+/// evaluates the density on a square grid of ``n × n`` points. The result
+/// is the primary input for the ``Contour`` transform.
+///
+/// Output is a single-row batch with columns ``grid_x`` (List<Float64>,
+/// length ``n``), ``grid_y`` (List<Float64>, length ``n``), ``density``
+/// (List<Float64>, length ``n*n``, row-major), ``nx`` (UInt32), ``ny``
+/// (UInt32), and ``extent`` (List<Float64>, ``[xmin, xmax, ymin, ymax]``).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Numeric column for the horizontal axis (must be Float64).
+/// y : str
+///     Numeric column for the vertical axis (must be Float64).
+/// bandwidth : float or {"scott", "silverman"}, optional
+///     Kernel bandwidth applied to both axes. Default is ``"scott"``.
+/// n : int, default 128
+///     Grid resolution (``n × n`` cells). Must be > 0.
+/// extent : (float, float, float, float), optional
+///     ``(xmin, xmax, ymin, ymax)`` clipping box; all values must be finite
+///     and satisfy ``xmin < xmax``, ``ymin < ymax``.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Kde2D")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde2D(pub(crate) TransformSpec);

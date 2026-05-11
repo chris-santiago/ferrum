@@ -320,6 +320,35 @@ fn build_bin2d_batch(
 
 use crate::transform::core::TransformSpec;
 
+/// Two-dimensional binning over a pair of numeric columns.
+///
+/// Partitions ``x`` and ``y`` into a rectangular grid of cells and counts
+/// (or aggregates) observations per cell. Used for 2D histograms and heat
+/// maps where hex-binning is not desired.
+///
+/// Output columns: ``x_lo``, ``x_hi``, ``y_lo``, ``y_hi`` (Float64 bin
+/// edges) and ``count`` (Int64). When ``cumulative=True`` an additional
+/// ``cumulative`` column is appended.
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Column for the horizontal axis (must be numeric).
+/// y : str
+///     Column for the vertical axis (must be numeric).
+/// bins_x : int, float, or {"sturges", "fd"}, optional
+///     Bin count (int), bin width (float), or rule name for the x-axis.
+///     Default is ``"sturges"``.
+/// bins_y : int, float, or {"sturges", "fd"}, optional
+///     Same as ``bins_x`` but for the y-axis. Default is ``"sturges"``.
+/// extent_x : (float, float), optional
+///     ``(lo, hi)`` clipping range for the x-axis.
+/// extent_y : (float, float), optional
+///     ``(lo, hi)`` clipping range for the y-axis.
+/// cumulative : bool, default False
+///     Append a running total column.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Bin2D")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBin2D(pub(crate) TransformSpec);

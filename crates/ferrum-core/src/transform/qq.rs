@@ -362,6 +362,34 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Quantile-quantile (Q-Q) plot point computation.
+///
+/// Maps the empirical quantiles of ``field`` against the theoretical
+/// quantiles of a reference distribution. Optionally emits the reference
+/// line (slope 1 through the first and third quartiles). When
+/// ``dequantize=True``, adds a small random jitter to break ties in
+/// discrete data (seeded by ``seed`` for reproducibility).
+///
+/// Output columns: ``sample`` (Float64 empirical quantiles), ``theoretical``
+/// (Float64 reference quantiles). When ``emit_line=True``, also emits two
+/// rows with the reference-line endpoints in additional columns
+/// ``line_x`` and ``line_y``.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to plot (must be Float64).
+/// distribution : {"normal", "uniform", "exponential"}, default "normal"
+///     Reference distribution for theoretical quantiles.
+/// dequantize : bool, default False
+///     When True, add small seeded random jitter to break discrete ties.
+/// emit_line : bool, default True
+///     When True, append the two reference-line endpoints.
+/// seed : int, default 0
+///     RNG seed for dequantization jitter. Seeds ``ChaCha8Rng`` for
+///     byte-deterministic output across platforms.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "QQ")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyQQ(pub(crate) TransformSpec);

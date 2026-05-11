@@ -327,6 +327,32 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Hexagonal binning over a pair of numeric columns.
+///
+/// Partitions the (x, y) plane into a hex grid and counts — or aggregates
+/// — the observations that fall into each cell. Produces compact, visually
+/// uniform density representations suitable for large scatter data.
+///
+/// Output columns: ``hex_x``, ``hex_y`` (Float64 cell centers), ``count``
+/// (Int64 observation count), and ``value`` (Float64, only when
+/// ``aggregate`` is ``"mean"`` or ``"sum"``).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Column for the horizontal axis (must be numeric).
+/// y : str
+///     Column for the vertical axis (must be numeric).
+/// bin_size : float, optional
+///     Hex cell radius in data units. When omitted, a reasonable default
+///     is chosen automatically from the data range.
+/// aggregate : {"count", "mean", "sum"}, default "count"
+///     Aggregation to apply per cell. ``"mean"`` and ``"sum"`` require
+///     ``field``.
+/// field : str, optional
+///     Column to aggregate when ``aggregate`` is ``"mean"`` or ``"sum"``.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Hex")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyHex(pub(crate) TransformSpec);

@@ -38,6 +38,11 @@ _DOC_ALLOWLIST: set[str] = {
     "continuous_palette",
     # Task 7 — spec types (Rust)
     "ChartSpec", "EncodingSpec",
+    # Task 8 — transforms (Rust)
+    "Aggregate", "AggregateOp", "Bin", "Bin2D", "BoxStats", "Contour",
+    "ErrorExtent", "Hex", "Kde", "Kde2D", "Glm", "LetterValue", "Linkage",
+    "Logistic", "Outliers", "QQ", "Raster", "Reorder", "Robust", "Smooth",
+    "Summary", "Swarm", "Unpivot", "Violin",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

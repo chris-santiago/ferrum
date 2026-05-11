@@ -475,6 +475,51 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Smoothing line (LOESS or linear model) with optional confidence band.
+///
+/// Fits a smoothing curve to ``(x, y)`` data and evaluates it on ``n``
+/// grid points spanning the x-range. When ``ci`` is set, a bootstrap
+/// confidence band is computed using ``seed`` for reproducibility. An
+/// optional x-binning step (``x_bins``) and per-bin aggregator
+/// (``x_estimator``) are applied before fitting, as in seaborn's
+/// ``lineplot``.
+///
+/// Output columns: ``x`` (Float64 grid), ``y`` (Float64 fitted or
+/// residuals), ``ci_lower`` and ``ci_upper`` (Float64; ``NaN`` when ``ci``
+/// is not set).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Predictor column (must be Float64).
+/// y : str
+///     Response column (must be Float64).
+/// method : {"loess", "lm"}, default "loess"
+///     Smoothing method. ``"loess"`` fits locally-weighted polynomial
+///     regression; ``"lm"`` fits a global linear model.
+/// ci : float or None, default 0.95
+///     Confidence level in (0, 1) for bootstrap confidence bands. Set to
+///     ``None`` to suppress the band.
+/// bandwidth : float, default 0.75
+///     LOESS span in (0, 1]; fraction of data used in each local fit.
+///     Ignored when ``method="lm"``.
+/// degree : {1, 2}, default 2
+///     Polynomial degree for LOESS. Ignored when ``method="lm"``.
+/// n : int, default 200
+///     Number of grid points to evaluate. Must be > 0.
+/// seed : int, default 0
+///     RNG seed for the bootstrap confidence band. Seeds ``ChaCha8Rng``
+///     for byte-deterministic output across platforms.
+/// x_bins : int, optional
+///     When set, the x-axis is divided into this many equal-width bins and
+///     ``x_estimator`` is applied within each bin before fitting.
+/// x_estimator : {"mean", "median", "sum", "min", "max"}, optional
+///     Aggregation function applied per x-bin when ``x_bins`` is set.
+///     Default is ``None`` (no aggregation).
+/// output : {"fitted", "residuals"}, default "fitted"
+///     When ``"residuals"``, the ``y`` column contains ``y_obs - y_hat``.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Smooth")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySmooth(pub(crate) TransformSpec);

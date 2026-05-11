@@ -290,6 +290,34 @@ fn quartile(values: &[f64], p: f64) -> f64 {
 
 use pyo3::prelude::*;
 
+/// Per-group error-bar extent transform.
+///
+/// Computes the center (mean) and a symmetric error half-width for each
+/// group using one of four methods. The result is used to draw error bars
+/// in ``mark_errorbar`` and ``mark_errorband`` composite marks.
+///
+/// Output columns: groupby columns (if any), then ``mean`` (Float64),
+/// ``lower`` (Float64), ``upper`` (Float64).
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to summarize (must be Float64).
+/// method : {"ci", "stderr", "stdev", "iqr"}, default "ci"
+///     Error-bar extent method:
+///     ``"ci"`` — bootstrap confidence interval (uses ``seed`` and
+///     ``n_boot``); ``"stderr"`` — standard error of the mean;
+///     ``"stdev"`` — one standard deviation; ``"iqr"`` — inter-quartile
+///     range.
+/// groupby : list of str, default []
+///     Columns to group by before computing statistics.
+/// seed : int, default 0
+///     RNG seed for the bootstrap (``method="ci"``). Seeds ``ChaCha8Rng``
+///     for byte-deterministic output across platforms.
+/// n_boot : int, default 1000
+///     Bootstrap resamples when ``method="ci"``. Ignored for other methods.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "ErrorExtent")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyErrorExtent(pub(crate) crate::transform::core::TransformSpec);

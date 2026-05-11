@@ -360,6 +360,41 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Robust regression fit (Huber M-estimator via IRLS).
+///
+/// Fits a linear model using an iteratively reweighted least squares
+/// procedure with Huber weights, making the fit resistant to outliers.
+/// Evaluates the fitted line on a grid of ``n_grid`` evenly-spaced x-values.
+/// When ``ci`` is set, also emits Wald-style confidence bands.
+///
+/// Output columns: ``x`` (Float64 grid points), ``y`` (Float64 fitted
+/// values), ``ci_lower`` and ``ci_upper`` (Float64; ``NaN`` when ``ci`` is
+/// not set).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Predictor column (must be Float64).
+/// y : str
+///     Response column (must be Float64).
+/// n_grid : int, default 100
+///     Number of evenly-spaced grid points for the fitted line. Must be > 0.
+/// ci : float, optional
+///     Confidence level in (0, 1) for confidence bands (e.g. 0.95). When
+///     omitted, ``ci_lower`` and ``ci_upper`` are ``NaN``.
+/// huber_c : float, default 1.345
+///     Huber loss transition parameter (``c`` in ``ρ(r) = r²/2`` for
+///     ``|r| ≤ c``, else ``c|r| - c²/2``). Must be finite and > 0.
+/// max_iter : int, default 25
+///     Maximum IRLS iterations. Must be > 0.
+/// tol : float, default 1e-8
+///     Convergence tolerance (relative change in coefficients). Must be
+///     finite and > 0.
+/// output : {"fitted", "residuals"}, default "fitted"
+///     When ``"residuals"``, the ``y`` column contains ``y_obs - y_fitted``
+///     instead of the fitted values.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Robust")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRobust(pub(crate) TransformSpec);

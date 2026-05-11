@@ -293,6 +293,33 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Equal-width or quantile binning of a numeric column.
+///
+/// Discretizes a continuous field into intervals and counts values per bin.
+/// Output columns: ``bin_start``, ``bin_end`` (Float64 bin edges), ``count``
+/// (UInt64), and ``density`` (Float64, integrates to 1 over the range).
+/// When ``cumulative=True``, ``count`` and ``density`` become running totals.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Column to bin (must be Float64).
+/// bin_count : int, optional
+///     Number of equal-width bins. Mutually exclusive with ``bin_width``.
+///     When both are omitted, Sturges' rule determines bin count.
+/// bin_width : float, optional
+///     Fixed bin width. Mutually exclusive with ``bin_count``.
+/// extent : (float, float), optional
+///     ``(lo, hi)`` range to cover; data outside is clipped. Both must be
+///     finite and ``lo < hi``.
+/// nice : bool, default True
+///     Round bin edges to visually clean numbers.
+/// cumulative : bool, default False
+///     When True, append a ``cumulative`` count column.
+/// groupby : str, optional
+///     Single group-key column; bins computed independently per group.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Bin")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBin(pub(crate) TransformSpec);
