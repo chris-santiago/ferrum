@@ -36,6 +36,8 @@ _DOC_ALLOWLIST: set[str] = {
     "CoordFlip", "CoordCartesian", "CoordPolar", "CoordGeo", "CoordFixed",
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
     "continuous_palette",
+    # Task 7 — spec types (Rust)
+    "ChartSpec", "EncodingSpec",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

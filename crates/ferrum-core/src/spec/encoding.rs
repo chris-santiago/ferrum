@@ -144,6 +144,53 @@ pub struct LegendSpec {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Encoding channel specification — maps a data field to a visual variable.
+///
+/// Created implicitly by Python's encoding channel classes (``X``, ``Y``,
+/// ``Color``, ...). Carries the field name, optional inferred data type,
+/// and optional scale/title overrides.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Column name in the input DataFrame.
+/// type_ : {"Q", "N", "O", "T", "quantitative", "nominal", "ordinal", \
+///          "temporal"}, optional
+///     Data type. Inferred from the column dtype when omitted.
+/// scale : dict, optional
+///     Scale override (e.g. ``{"type": "log"}``). Honored by the renderer.
+/// title : str, optional
+///     Axis or legend title. Overrides the auto-generated field name.
+/// axis : dict, optional
+///     Axis style overrides. **Reserved** — round-trips JSON but not yet
+///     honored by the renderer in Phase 8a.
+/// legend : dict, optional
+///     Legend style overrides. **Reserved** — round-trips JSON but not yet
+///     honored by the renderer in Phase 8a.
+/// sort : dict or str, optional
+///     Sort order. **Reserved** — round-trips JSON but not yet honored by
+///     the renderer in Phase 8a.
+/// stack : str, optional
+///     Stack method. **Reserved** — round-trips JSON but not yet honored by
+///     the renderer in Phase 8a.
+/// impute : dict, optional
+///     Imputation strategy. **Reserved** — round-trips JSON but not yet
+///     honored by the renderer in Phase 8a.
+/// scheme : str, optional
+///     Color scheme name for quantitative color encodings (e.g. ``"viridis"``).
+///     Honored by the renderer via ``scale_resolve``.
+/// format : str, optional
+///     Tick/label format string. **Reserved** — round-trips JSON but not yet
+///     honored by the renderer.
+/// format_type : str, optional
+///     Format type (e.g. ``"time"``). **Reserved** — round-trips JSON but
+///     not yet honored by the renderer.
+///
+/// Notes
+/// -----
+/// Users typically work with the higher-level encoding channel classes
+/// from ``ferrum.encoding`` (``X``, ``Y``, ``Color``, ...);
+/// ``EncodingSpec`` is the internal IR that ``Chart.encode(...)`` builds.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EncodingSpec {
@@ -250,16 +297,20 @@ impl EncodingSpec {
         })
     }
 
+    /// Column name in the input DataFrame.
     #[getter]
     fn field(&self) -> &str {
         &self.field
     }
 
+    /// Data type string (``"quantitative"``, ``"nominal"``, ``"ordinal"``,
+    /// ``"temporal"``), or ``None`` when inferred.
     #[getter]
     fn type_(&self) -> Option<&'static str> {
         self.type_.as_ref().map(|t| t.as_str())
     }
 
+    /// Scale override dict, or ``None``.
     #[getter]
     fn scale(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.scale {
@@ -273,11 +324,13 @@ impl EncodingSpec {
         }
     }
 
+    /// Axis or legend title override, or ``None``.
     #[getter]
     fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
 
+    /// Axis style overrides (reserved — not yet honored by renderer).
     #[getter]
     fn axis(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.axis {
@@ -291,6 +344,7 @@ impl EncodingSpec {
         }
     }
 
+    /// Legend style overrides (reserved — not yet honored by renderer).
     #[getter]
     fn legend(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.legend {
@@ -304,6 +358,7 @@ impl EncodingSpec {
         }
     }
 
+    /// Sort order (reserved — not yet honored by renderer).
     #[getter]
     fn sort(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.sort {
@@ -317,11 +372,13 @@ impl EncodingSpec {
         }
     }
 
+    /// Stack method (reserved — not yet honored by renderer).
     #[getter]
     fn stack(&self) -> Option<&str> {
         self.stack.as_deref()
     }
 
+    /// Imputation strategy (reserved — not yet honored by renderer).
     #[getter]
     fn impute(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.impute {
@@ -335,21 +392,25 @@ impl EncodingSpec {
         }
     }
 
+    /// Color scheme name for quantitative encodings (e.g. ``"viridis"``).
     #[getter]
     fn scheme(&self) -> Option<&str> {
         self.scheme.as_deref()
     }
 
+    /// Tick/label format string (reserved — not yet honored by renderer).
     #[getter]
     fn format(&self) -> Option<&str> {
         self.format.as_deref()
     }
 
+    /// Format type string (reserved — not yet honored by renderer).
     #[getter]
     fn format_type(&self) -> Option<&str> {
         self.format_type.as_deref()
     }
 
+    /// Return a string representation of this encoding spec.
     fn __repr__(&self) -> String {
         self.repr_string()
     }

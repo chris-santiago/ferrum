@@ -13,6 +13,41 @@ use std::str::FromStr;
 
 use crate::spec::encoding::EncodingSpec;
 
+/// Intermediate Representation for a chart.
+///
+/// A tree-structured configuration: top-level mark, encoding channels,
+/// optional transforms, optional layers, coordinate system, theme styling.
+/// Serializes to JSON via ``to_json`` and round-trips via ``from_json``.
+///
+/// Parameters
+/// ----------
+/// mark : {"point", "line", "bar", "area", "rule", "text", "tick", \
+///         "rect", "polygon", "image", "ribbon", "segment"}
+///     Mark kind.
+/// x, y, color, size, shape, opacity, x2, y2 : EncodingSpec or str, optional
+///     Encoding channels. Strings auto-wrap as ``EncodingSpec(field)``.
+/// data : str, optional
+///     Dataset name (referenced by ``Layer.data_source`` for multi-batch
+///     specs). Defaults to the primary dataset when omitted.
+/// transforms : list of transform objects, optional
+///     Stat transforms applied before rendering.
+/// facet : dict, optional
+///     Faceting configuration.
+/// layers : list of Layer, optional
+///     When set, top-level ``mark`` + encodings are ignored; renderer
+///     iterates the layers.
+/// coord : {"cartesian", "flip"}, optional
+///     Coordinate system name.
+/// mark_style : dict, optional
+///     Theme/style overrides applied to the mark.
+/// position : dict, optional
+///     Position adjustment (e.g. ``Jitter``, ``Dodge``, ``Stack``).
+///
+/// Notes
+/// -----
+/// ``ChartSpec`` is the contract between Python and Rust. Python's
+/// ``Chart`` class builds a ``ChartSpec`` lazily and renders via
+/// ``ferrum._core.render_svg``.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChartSpec {
@@ -152,51 +187,61 @@ impl ChartSpec {
         })
     }
 
+    /// Mark kind string (e.g. ``"point"``, ``"bar"``).
     #[getter]
     fn mark(&self) -> &'static str {
         self.mark.as_str()
     }
 
+    /// X encoding channel, or ``None`` if unset.
     #[getter]
     fn x(&self) -> Option<EncodingSpec> {
         self.encoding.x.clone()
     }
 
+    /// Y encoding channel, or ``None`` if unset.
     #[getter]
     fn y(&self) -> Option<EncodingSpec> {
         self.encoding.y.clone()
     }
 
+    /// Color encoding channel, or ``None`` if unset.
     #[getter]
     fn color(&self) -> Option<EncodingSpec> {
         self.encoding.color.clone()
     }
 
+    /// Size encoding channel, or ``None`` if unset.
     #[getter]
     fn size(&self) -> Option<EncodingSpec> {
         self.encoding.size.clone()
     }
 
+    /// Shape encoding channel, or ``None`` if unset.
     #[getter]
     fn shape(&self) -> Option<EncodingSpec> {
         self.encoding.shape.clone()
     }
 
+    /// Opacity encoding channel, or ``None`` if unset.
     #[getter]
     fn opacity(&self) -> Option<EncodingSpec> {
         self.encoding.opacity.clone()
     }
 
+    /// Secondary X endpoint channel (ribbon/errorbar), or ``None`` if unset.
     #[getter]
     fn x2(&self) -> Option<EncodingSpec> {
         self.encoding.x2.clone()
     }
 
+    /// Secondary Y endpoint channel (ribbon/errorbar), or ``None`` if unset.
     #[getter]
     fn y2(&self) -> Option<EncodingSpec> {
         self.encoding.y2.clone()
     }
 
+    /// Dataset name; ``"default"`` when the primary dataset is used.
     #[getter]
     fn data(&self) -> &str {
         match &self.data {
@@ -204,6 +249,7 @@ impl ChartSpec {
         }
     }
 
+    /// Stat transforms applied before rendering, as a list of transform objects.
     #[getter]
     fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let mut out: Vec<Py<PyAny>> = Vec::with_capacity(self.transforms.len());
@@ -261,6 +307,7 @@ impl ChartSpec {
         Ok(out)
     }
 
+    /// Layers as a list of dicts, or ``None`` for single-layer specs.
     #[getter]
     fn layers(&self, py: Python) -> PyResult<Option<Vec<Py<PyAny>>>> {
         let Some(ref vec) = self.layers else { return Ok(None) };
@@ -274,6 +321,7 @@ impl ChartSpec {
         Ok(Some(out))
     }
 
+    /// Coordinate system name (``"cartesian"``, ``"flip"``), or ``None``.
     #[getter]
     fn coord(&self) -> Option<&'static str> {
         match self.coord {
@@ -283,6 +331,7 @@ impl ChartSpec {
         }
     }
 
+    /// Position adjustment dict (Jitter, Dodge, Stack, ...), or ``None``.
     #[getter]
     fn position(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.position {
@@ -296,15 +345,33 @@ impl ChartSpec {
         }
     }
 
+    /// Serialize this spec to its canonical JSON form.
+    ///
+    /// Returns
+    /// -------
+    /// str
+    ///     JSON-encoded ``ChartSpec``.
     fn to_json(&self) -> PyResult<String> {
         serde_json::to_string(self).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Reconstruct a ``ChartSpec`` from JSON.
+    ///
+    /// Parameters
+    /// ----------
+    /// s : str
+    ///     JSON string produced by ``to_json``.
+    ///
+    /// Returns
+    /// -------
+    /// ChartSpec
+    ///     Reconstructed spec; ``s == ChartSpec.from_json(s.to_json())``.
     #[classmethod]
     fn from_json<'py>(_cls: &Bound<'py, PyType>, s: &str) -> PyResult<Self> {
         serde_json::from_str(s).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Return a string representation of this spec.
     fn __repr__(&self) -> String {
         let mark = self.mark.as_str();
         let data = match &self.data {
