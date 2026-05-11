@@ -693,6 +693,98 @@ class Chart:
         new._position = position
         return new
 
+    # ---- Marks (diagnostic — Phase 10) ----
+
+    def mark_residuals(
+        self,
+        *,
+        kind: str = "studentized",
+        reference_line: bool = True,
+        cook_threshold: float | None = None,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Residuals diagnostic mark — see ferrum-spec.md §3.3.
+
+        Expects the chart's data to carry the schema emitted by
+        ``ModelSource.predictions()``: ``y_true``, ``y_pred``, ``residual``,
+        ``studentized_residual``. When ``reference_line`` is true, a sentinel
+        ``_ref_zero`` column (one row at 0.0, rest null) is injected so the
+        downstream ``mark_rule`` renders exactly one horizontal line at y=0.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("residuals", position)
+        from ferrum.marks.diagnostic import desugar_residuals
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "point"  # placeholder; layered mode overrides
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _inject_constant(new._data, "_ref_zero", 0.0)
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "residuals",
+            {
+                "kind": kind,
+                "reference_line": reference_line,
+                "cook_threshold": cook_threshold,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_residuals,
+        )
+        new._position = position
+        return new
+
+    def mark_prediction_error(
+        self,
+        *,
+        identity_line: bool = True,
+        ci: float | None = None,
+        reference_band: bool = False,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Actual-vs-predicted mark — see ferrum-spec.md §3.3.
+
+        Expects ``y_true`` and ``y_pred`` columns. When ``identity_line`` is
+        true, the data is pre-sorted ascending by ``y_true`` so the downstream
+        ``mark_line`` renders a monotonic y=x diagonal.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("prediction_error", position)
+        from ferrum.marks.diagnostic import desugar_prediction_error
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if identity_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "y_true")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "prediction_error",
+            {
+                "identity_line": identity_line,
+                "ci": ci,
+                "reference_band": reference_band,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_prediction_error,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
