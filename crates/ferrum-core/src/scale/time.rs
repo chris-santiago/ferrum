@@ -3,6 +3,31 @@ use pyo3::prelude::*;
 use super::core::{validate_continuous_pair, Scale};
 use super::ticks::nice_time_interval_ms;
 
+/// Continuous temporal scale backed by Unix epoch milliseconds.
+///
+/// Maps an epoch-millisecond domain to a numeric range. Tick generation
+/// uses time-aware "nice" intervals (seconds, minutes, hours, days, months,
+/// years) rather than purely numeric rounding. Domain values are
+/// floating-point epoch milliseconds (UTC).
+///
+/// Parameters
+/// ----------
+/// domain : tuple[float, float]
+///     Input domain as ``[t_min, t_max]`` in epoch milliseconds (UTC).
+/// range : tuple[float, float]
+///     Output range as ``[lo, hi]`` pixel coordinates.
+/// clamp : bool, default False
+///     Clamp out-of-domain inputs to the range endpoints.
+/// nice : bool, default False
+///     Extend domain endpoints to the nearest calendar interval boundary.
+///
+/// Examples
+/// --------
+/// Ferrum converts datetime columns automatically; a ``TimeScale`` is
+/// constructed implicitly when the channel data type is temporal::
+///
+///     import ferrum as fr
+///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeScale(Scale);
@@ -115,14 +140,22 @@ impl TimeScale {
         }
     }
 
+    /// Map an epoch-millisecond value ``x`` to its output range coordinate.
     fn scale(&self, x: f64) -> f64 { self.0.scale_f64(x) }
+    /// Invert a range coordinate ``y`` back to an epoch-millisecond value.
     fn invert(&self, y: f64) -> f64 { self.0.invert_f64(y) }
 
+    /// Return approximately ``count`` time-aligned tick values within the domain.
+    ///
+    /// Tick granularity snaps to calendar intervals (seconds, minutes, hours,
+    /// days, months, or years) based on the domain span.
     #[pyo3(signature = (count = 10))]
     fn ticks(&self, count: usize) -> Vec<f64> { self.time_ticks(count) }
 
+    /// Return a copy of this scale with domain endpoints rounded to the nearest calendar interval.
     fn nice(&self) -> Self { self.time_nice() }
 
+    /// Input domain as ``[t_min, t_max]`` in epoch milliseconds.
     #[getter]
     fn domain(&self) -> Vec<f64> {
         match &self.0 {
@@ -132,6 +165,7 @@ impl TimeScale {
         }
     }
 
+    /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
     fn range(&self) -> Vec<f64> {
         match &self.0 {
@@ -141,6 +175,7 @@ impl TimeScale {
         }
     }
 
+    /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool {
         match &self.0 {

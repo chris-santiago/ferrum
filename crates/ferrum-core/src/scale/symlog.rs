@@ -3,6 +3,35 @@ use pyo3::prelude::*;
 
 use super::core::{validate_continuous_pair, Scale};
 
+/// Symmetric logarithmic scale.
+///
+/// Maps a numeric domain — including zero and negative values — to a range
+/// using a bi-symmetric log transform. The transformation is linear in
+/// ``[-constant, +constant]`` and logarithmic outside that band, so zero and
+/// sign changes are handled without special-casing.
+///
+/// Parameters
+/// ----------
+/// domain : tuple[float, float]
+///     Input domain as ``[min, max]``. May span zero or be entirely negative.
+/// range : tuple[float, float]
+///     Output range as ``[lo, hi]`` pixel coordinates.
+/// constant : float, default 1.0
+///     Half-width of the linear region around zero. Must be finite and
+///     positive.
+/// clamp : bool, default False
+///     Clamp out-of-domain inputs to the range endpoints.
+/// nice : bool, default False
+///     Round domain endpoints to "nice" values for tick generation.
+///
+/// Examples
+/// --------
+/// ::
+///
+///     import ferrum as fr
+///     chart = fr.Chart(df).encode(
+///         y=fr.Y("delta", scale=fr.SymlogScale(domain=[-1000, 1000], range=[400, 0]))
+///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymlogScale(Scale);
@@ -71,14 +100,19 @@ impl SymlogScale {
         Ok(SymlogScale(s))
     }
 
+    /// Map a single input value ``x`` to its output range coordinate.
     fn scale(&self, x: f64) -> f64 { self.0.scale_f64(x) }
+    /// Invert a range coordinate ``y`` back to the domain.
     fn invert(&self, y: f64) -> f64 { self.0.invert_f64(y) }
 
+    /// Return approximately ``count`` tick values within the domain.
     #[pyo3(signature = (count = 10))]
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(Some(count)) }
 
+    /// Return a copy of this scale with domain endpoints rounded to "nice" values.
     fn nice(&self) -> Self { SymlogScale(self.0.clone().nice()) }
 
+    /// Input domain as ``[min, max]``.
     #[getter]
     fn domain(&self) -> Vec<f64> {
         match &self.0 {
@@ -88,6 +122,7 @@ impl SymlogScale {
         }
     }
 
+    /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
     fn range(&self) -> Vec<f64> {
         match &self.0 {
@@ -97,6 +132,7 @@ impl SymlogScale {
         }
     }
 
+    /// Half-width of the linear region around zero (default 1.0).
     #[getter]
     fn constant(&self) -> f64 {
         match &self.0 {
@@ -106,6 +142,7 @@ impl SymlogScale {
         }
     }
 
+    /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool {
         match &self.0 {

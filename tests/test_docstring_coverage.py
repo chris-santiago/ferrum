@@ -43,6 +43,10 @@ _DOC_ALLOWLIST: set[str] = {
     "ErrorExtent", "Hex", "Kde", "Kde2D", "Glm", "LetterValue", "Linkage",
     "Logistic", "Outliers", "QQ", "Raster", "Reorder", "Robust", "Smooth",
     "Summary", "Swarm", "Unpivot", "Violin",
+    # Task 9 — scales + schemes (Rust)
+    "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
+    "QuantileScale", "ThresholdScale",
+    "ContinuousScheme", "Gradient",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

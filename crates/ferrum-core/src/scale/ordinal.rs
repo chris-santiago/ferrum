@@ -2,6 +2,32 @@ use pyo3::prelude::*;
 
 use super::core::{validate_ordinal, Scale};
 
+/// Discrete ordinal scale.
+///
+/// Maps a categorical (string) domain to an evenly-divided numeric range.
+/// Each category is assigned a band center within the range, with optional
+/// inner padding between bands. Tick generation returns the category list.
+///
+/// Parameters
+/// ----------
+/// domain : list[str]
+///     Ordered list of category labels.
+/// range : list[float]
+///     Pixel positions for the scale endpoints. The scale divides the
+///     interval between ``range[0]`` and ``range[-1]`` evenly across the
+///     domain categories.
+/// padding : float, default 0.0
+///     Fractional inner padding between bands, in ``[0.0, 1.0)``.
+///
+/// Examples
+/// --------
+/// Ordinal scales are normally constructed implicitly when ``Chart.encode``
+/// detects a categorical column. Pass an instance to fix the category order::
+///
+///     import ferrum as fr
+///     chart = fr.Chart(df).encode(
+///         x=fr.X("group", scale=fr.OrdinalScale(domain=["A", "B", "C"], range=[0, 300]))
+///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrdinalScale(Scale);
@@ -77,14 +103,20 @@ impl OrdinalScale {
         Ok(OrdinalScale(Scale::Ordinal { domain, range, padding }))
     }
 
+    /// Map a category label to its band-center pixel coordinate.
+    ///
+    /// Returns ``f64::NAN`` for labels not in the domain.
     fn scale(&self, value: &str) -> f64 {
         self.0.scale_str(value)
     }
 
+    /// Return the category label whose band contains pixel coordinate ``y``,
+    /// or ``None`` if ``y`` is out of range.
     fn invert(&self, y: f64) -> Option<String> {
         self.0.invert_band(y)
     }
 
+    /// Return the domain categories in order.
     fn ticks(&self) -> Vec<String> {
         match &self.0 {
             Scale::Ordinal { domain, .. } => domain.clone(),
@@ -93,10 +125,12 @@ impl OrdinalScale {
         }
     }
 
+    /// Return this scale unchanged (ordinal scales have no numeric "nice" rounding).
     fn nice(&self) -> Self {
         self.clone()
     }
 
+    /// Ordered list of category labels.
     #[getter]
     fn domain(&self) -> Vec<String> {
         match &self.0 {
@@ -106,6 +140,7 @@ impl OrdinalScale {
         }
     }
 
+    /// Pixel extent of the scale as the full range list.
     #[getter]
     fn range(&self) -> Vec<f64> {
         match &self.0 {
@@ -115,6 +150,7 @@ impl OrdinalScale {
         }
     }
 
+    /// Fractional inner padding between bands.
     #[getter]
     fn padding(&self) -> f64 {
         match &self.0 {

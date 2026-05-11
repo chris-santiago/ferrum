@@ -3,6 +3,34 @@ use pyo3::prelude::*;
 
 use super::core::{validate_continuous_pair, Scale};
 
+/// Continuous logarithmic scale.
+///
+/// Maps a numeric domain to a numeric range via a logarithmic transformation.
+/// Useful for data spanning several orders of magnitude. Domain must not
+/// contain zero and both endpoints must share the same sign.
+///
+/// Parameters
+/// ----------
+/// domain : tuple[float, float]
+///     Input domain as ``[min, max]``. Neither endpoint may be 0 and both
+///     must have the same sign.
+/// range : tuple[float, float]
+///     Output range as ``[lo, hi]`` pixel coordinates.
+/// base : float, default 10.0
+///     Logarithm base. Must be finite, positive, and not equal to 1.
+/// clamp : bool, default False
+///     Clamp out-of-domain inputs to the range endpoints.
+/// nice : bool, default False
+///     Round domain endpoints to the nearest power of ``base``.
+///
+/// Examples
+/// --------
+/// ::
+///
+///     import ferrum as fr
+///     chart = fr.Chart(df).encode(
+///         x=fr.X("value", scale=fr.LogScale(domain=[1, 10_000], range=[0, 400]))
+///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogScale(Scale);
@@ -81,14 +109,19 @@ impl LogScale {
         Ok(LogScale(s))
     }
 
+    /// Map a single input value ``x`` to its output range coordinate.
     fn scale(&self, x: f64) -> f64 { self.0.scale_f64(x) }
+    /// Invert a range coordinate ``y`` back to the domain.
     fn invert(&self, y: f64) -> f64 { self.0.invert_f64(y) }
 
+    /// Return approximately ``count`` tick values spaced logarithmically within the domain.
     #[pyo3(signature = (count = 10))]
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(Some(count)) }
 
+    /// Return a copy of this scale with domain endpoints rounded to the nearest power of ``base``.
     fn nice(&self) -> Self { LogScale(self.0.clone().nice()) }
 
+    /// Input domain as ``[min, max]``.
     #[getter]
     fn domain(&self) -> Vec<f64> {
         match &self.0 {
@@ -98,6 +131,7 @@ impl LogScale {
         }
     }
 
+    /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
     fn range(&self) -> Vec<f64> {
         match &self.0 {
@@ -107,6 +141,7 @@ impl LogScale {
         }
     }
 
+    /// Logarithm base (default 10.0).
     #[getter]
     fn base(&self) -> f64 {
         match &self.0 {
@@ -116,6 +151,7 @@ impl LogScale {
         }
     }
 
+    /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool {
         match &self.0 {
