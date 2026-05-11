@@ -224,6 +224,11 @@ pub fn prepare_render_inputs(
                     let tmp = lp.encoding.x.take();
                     lp.encoding.x = lp.encoding.y.take();
                     lp.encoding.y = tmp;
+                    // Phase 10c-pre: x2/y2 must swap together with x/y so paired
+                    // endpoints (segment, ribbon) remain self-consistent under flip.
+                    let tmp2 = lp.encoding.x2.take();
+                    lp.encoding.x2 = lp.encoding.y2.take();
+                    lp.encoding.y2 = tmp2;
                     lp
                 })
                 .collect()

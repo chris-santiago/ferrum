@@ -179,7 +179,9 @@ class JointChart:
                 "wire-up lands in Phase 9a Task 12"
             ) from e
         center_svg = self.center.show_svg()
-        cells = [None, self.top.show_svg() if self.top is not None else None,
+        # Layout per docstring: top-left = top marginal (shares x with center),
+        # top-right = empty, bottom-left = center, bottom-right = right marginal.
+        cells = [self.top.show_svg() if self.top is not None else None, None,
                  center_svg, self.right.show_svg() if self.right is not None else None]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
