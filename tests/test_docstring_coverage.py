@@ -27,6 +27,9 @@ _DOC_ALLOWLIST: set[str] = {
     "StrokeWidth", "StrokeDash", "Size", "Shape", "Angle",
     "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
     "Facet", "FacetRow", "FacetCol",
+    # Task 5 — composition / layer / repeat
+    "HConcatChart", "VConcatChart", "JointChart", "RepeatChart", "ClusterMapChart",
+    "Layer", "Repeat",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

@@ -54,9 +54,6 @@ convention = "numpy"
 "src/ferrum/_core.pyi" = ["D"]
 
 # Ratcheting exemptions — each row is removed by the commit that completes that scope.
-"src/ferrum/composition.py" = ["D"]
-"src/ferrum/layer.py" = ["D"]
-"src/ferrum/repeat.py" = ["D"]
 "src/ferrum/themes/**" = ["D"]
 "src/ferrum/position.py" = ["D"]
 "src/ferrum/coord.py" = ["D"]
