@@ -182,6 +182,63 @@ any future mark whose plan defers behavior to a later sub-batch.
 
 ---
 
+## Correction §7: `mark_errorband` does not work for pre-aggregated CI columns
+
+**Plan claim:** Task 28 desugars (`mark_learning_curve`, `mark_validation_curve`)
+were drafted to layer `mark_errorband` on top of the source DataFrame to
+draw the per-split confidence band.
+
+**Actual codebase state:** `desugar_errorband` (composite.py:88-108)
+unconditionally injects an `ErrorExtent(field=y_field,
+groupby=[x_field], method=extent)` transform, which **recomputes** the CI
+from a single column on the input batch. When the source frame already
+carries pre-computed `lower` / `upper` columns (which is true for every
+10e source method — `learning_curve`, `validation_curve`, `alpha_selection`
+all aggregate per-fold scores into 95% CI in `ModelSource`), routing
+through `mark_errorband` would re-aggregate against `lower` alone and
+emit a nonsensical band.
+
+**Correction (applied in Task 28):** the 10e desugars emit a direct
+`{"mark": "ribbon", "encoding": {"x": ..., "y": "lower", "y2": "upper",
+"color": "split"}}` layer with `opacity=0.3` and no transform. The chart
+builder dedupes per (x, split) so the ribbon is one row per (x, split).
+
+The same pattern applies to any future diagnostic whose source method
+emits pre-computed band columns. Use `mark_errorband` only when the
+caller has raw per-observation rows and wants ErrorExtent to compute
+the CI on the fly.
+
+---
+
+## Correction §8: Axis-title only honored `encoding.field`, never `encoding.title`
+
+**Plan claim:** Layer-level encoding `title` would propagate to the
+chart's x/y axis labels (so a desugar can override the displayed label
+without renaming a data column).
+
+**Actual codebase state (before Task 28):** `render/prepare.rs:280-281`
+computed `x_field`/`y_field` from `rendering_encoding.x.field` /
+`.y.field` and passed those as axis titles, ignoring `encoding.title`
+entirely. The `EncodingSpec.title: Option<String>` field existed
+(spec/encoding.rs:158) but had no consumer for axis labels. This made
+diagnostic-mark axis labels unfixable without renaming the underlying
+data columns — a problem for layered charts where layer-0's y column
+(e.g. `lower`, `lower_whisker`, `param_value`) is a structural artifact
+of the data shape rather than a user-meaningful label.
+
+**Correction (applied in Task 28):** `render/prepare.rs:280-292` now
+reads `e.title.clone().unwrap_or_else(|| e.field.clone())` for both x
+and y axes. Existing charts (which set no `title`) remain byte-identical
+because the fallback to field name is unchanged. The 10e desugars use
+this to render proper labels (`score`, `training samples`, `alpha`)
+without renaming data columns.
+
+This generalizes to every Phase 10+ layered mark — a desugar that needs
+a non-trivial axis label can wrap an encoding in `X(field, title="...")`
+or `Y(field, title="...")` and trust the Rust side to honor it.
+
+---
+
 ## What works as-of `fa26114`
 
 - `feat/phase-10` branch created from `main` at `2d6f994`.

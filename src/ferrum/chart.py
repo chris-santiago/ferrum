@@ -1239,6 +1239,158 @@ class Chart:
         new._position = position
         return new
 
+    def mark_learning_curve(
+        self,
+        *,
+        ci_style: str = "band",
+        color_field: str | None = "split",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Learning-curve mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.learning_curve()``,
+        pre-deduped per (train_size, split) by the chart builder.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("learning_curve", position)
+        from ferrum.marks.diagnostic import desugar_learning_curve
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "learning_curve",
+            {"ci_style": ci_style, "color_field": color_field, **mark_kwargs},
+            desugar_learning_curve,
+        )
+        new._position = position
+        return new
+
+    def mark_validation_curve(
+        self,
+        *,
+        log_scale: bool = False,
+        ci_style: str = "band",
+        color_field: str | None = "split",
+        param_label: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Validation-curve mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.validation_curve()``,
+        pre-deduped per (param_value, split) by the chart builder.
+
+        ``param_label`` names the swept hyperparameter for the x-axis
+        title; the chart builder forwards the user's ``param`` argument.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("validation_curve", position)
+        from ferrum.marks.diagnostic import desugar_validation_curve
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "validation_curve",
+            {
+                "log_scale": log_scale,
+                "ci_style": ci_style,
+                "color_field": color_field,
+                "param_label": param_label,
+                **mark_kwargs,
+            },
+            desugar_validation_curve,
+        )
+        new._position = position
+        return new
+
+    def mark_cv_scores(
+        self,
+        *,
+        kind: str = "box",
+        split: str = "both",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Per-fold CV-score mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.cv_scores()``. The
+        chart builder pre-aggregates per split when ``kind="bar"`` and
+        leaves raw per-fold rows for ``"box"``/``"strip"``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("cv_scores", position)
+        from ferrum.marks.diagnostic import desugar_cv_scores
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "cv_scores",
+            {"kind": kind, "split": split, **mark_kwargs},
+            desugar_cv_scores,
+        )
+        new._position = position
+        return new
+
+    def mark_alpha_selection(
+        self,
+        *,
+        log_scale: bool = True,
+        highlight_best: bool = True,
+        ci_style: str = "band",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Regularization-strength selection mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.alpha_selection()``.
+        When ``highlight_best=True`` and the data carries ``alpha`` plus
+        ``mean_score`` columns, the chart's data is augmented with a
+        ``_best_alpha`` sentinel column (one non-null row at the alpha
+        maximizing ``mean_score``) so the downstream ``mark_rule`` draws
+        exactly one vertical reference line.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("alpha_selection", position)
+        from ferrum.marks.diagnostic import desugar_alpha_selection
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "point"
+        if highlight_best and new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "alpha" in new._data.columns
+                    and "mean_score" in new._data.columns
+                ):
+                    agg = (
+                        new._data
+                        .group_by("alpha")
+                        .agg(pl.col("mean_score").first())
+                        .sort("mean_score", descending=True)
+                    )
+                    if agg.height > 0:
+                        best_alpha = float(agg["alpha"][0])
+                        new._data = _inject_constant(
+                            new._data, "_best_alpha", best_alpha,
+                        )
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "alpha_selection",
+            {
+                "log_scale": log_scale,
+                "highlight_best": highlight_best,
+                "ci_style": ci_style,
+                **mark_kwargs,
+            },
+            desugar_alpha_selection,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

@@ -397,3 +397,110 @@ def discrimination_threshold_chart(
         threshold_line=threshold_line,
         theme=theme,
     )
+
+
+def learning_curve_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    train_sizes: Any = None,
+    ci_style: str = "band",
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Learning curve — see ferrum-spec.md §3.14."""
+    from ferrum._diagnostics.charts import _learning_curve_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _learning_curve_chart_from_source(
+        source,
+        cv=cv,
+        scoring=scoring,
+        train_sizes=train_sizes,
+        ci_style=ci_style,
+        theme=theme,
+    )
+
+
+def validation_curve_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    param: str = "alpha",
+    values: Any = None,
+    cv: int = 5,
+    scoring: Any = None,
+    log_scale: Any = "auto",
+    ci_style: str = "band",
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Validation curve — see ferrum-spec.md §3.14.
+
+    ``param`` and ``values`` are required; the defaults exist only to
+    keep the signature ergonomic for ``param="alpha"`` Ridge sweeps.
+    """
+    if values is None:
+        raise ValueError(
+            "validation_curve_chart(values=...) is required — pass an explicit "
+            "list of values to sweep for the given param."
+        )
+    from ferrum._diagnostics.charts import _validation_curve_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _validation_curve_chart_from_source(
+        source, param, values,
+        cv=cv, scoring=scoring,
+        log_scale=log_scale, ci_style=ci_style, theme=theme,
+    )
+
+
+def cv_scores_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    kind: str = "box",
+    split: str = "both",
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Per-fold CV-score chart — see ferrum-spec.md §3.14."""
+    from ferrum._diagnostics.charts import _cv_scores_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _cv_scores_chart_from_source(
+        source, cv=cv, scoring=scoring,
+        kind=kind, split=split, theme=theme,
+    )
+
+
+def alpha_selection_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    alphas: Any = None,
+    cv: int = 5,
+    scoring: Any = None,
+    log_scale: bool = True,
+    highlight_best: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Regularization-strength selection chart — see ferrum-spec.md §3.14."""
+    if alphas is None:
+        raise ValueError(
+            "alpha_selection_chart(alphas=...) is required — pass an explicit "
+            "list of regularization-strength values to sweep."
+        )
+    from ferrum._diagnostics.charts import _alpha_selection_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _alpha_selection_chart_from_source(
+        source, alphas,
+        cv=cv, scoring=scoring,
+        log_scale=log_scale, highlight_best=highlight_best, theme=theme,
+    )

@@ -562,3 +562,129 @@ def _discrimination_threshold_chart_from_source(
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+# ---------------------------------------------------------------------------
+# 10e builders — model selection / CV curves
+# ---------------------------------------------------------------------------
+
+
+def _dedupe_aggregated(df: pl.DataFrame, *group_keys: str) -> pl.DataFrame:
+    """Drop per-fold duplicate rows when only the aggregated (mean/lower/upper)
+    columns are needed. Sorts ascending by the primary group key so a
+    downstream line layer renders a monotonic polyline.
+    """
+    keep = df.unique(subset=list(group_keys), keep="first", maintain_order=True)
+    return keep.sort(list(group_keys), nulls_last=True)
+
+
+def _learning_curve_chart_from_source(
+    source: Any,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    train_sizes: Any = None,
+    ci_style: str = "band",
+    theme: Any = None,
+):
+    """Learning-curve chart: dedupe per (train_size, split), then ribbon+line."""
+    import ferrum
+
+    df = source.learning_curve(cv=cv, scoring=scoring, train_sizes=train_sizes)
+    df = _dedupe_aggregated(df, "train_size", "split")
+    chart = ferrum.Chart(df).mark_learning_curve(ci_style=ci_style)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _validation_curve_chart_from_source(
+    source: Any,
+    param: str,
+    values: Any,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    log_scale: Any = "auto",
+    ci_style: str = "band",
+    theme: Any = None,
+):
+    """Validation-curve chart: dedupe per (param_value, split), then ribbon+line.
+
+    ``log_scale="auto"`` enables log when the parameter range spans more
+    than two orders of magnitude (max / max(min, 1e-12) > 100).
+    """
+    import ferrum
+
+    df = source.validation_curve(param, values, cv=cv, scoring=scoring)
+    df = _dedupe_aggregated(df, "param_value", "split")
+    vals = [float(v) for v in values]
+    if log_scale == "auto":
+        non_zero = [v for v in vals if v > 0]
+        if len(non_zero) >= 2 and max(non_zero) / min(non_zero) > 100:
+            is_log = True
+        else:
+            is_log = False
+    else:
+        is_log = bool(log_scale)
+    chart = ferrum.Chart(df).mark_validation_curve(
+        log_scale=is_log, ci_style=ci_style, param_label=param,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _cv_scores_chart_from_source(
+    source: Any,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    kind: str = "box",
+    split: str = "both",
+    theme: Any = None,
+):
+    """Per-fold CV-score chart. ``kind="bar"`` pre-aggregates per split;
+    ``"box"``/``"strip"`` leave raw per-fold rows for the mark layer.
+    """
+    import ferrum
+
+    df = source.cv_scores(cv=cv, scoring=scoring)
+    if split != "both":
+        df = df.filter(pl.col("split") == split)
+    if kind == "bar":
+        df = (
+            df.group_by("split")
+            .agg(pl.col("score").mean())
+            .sort("split")
+        )
+    chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _alpha_selection_chart_from_source(
+    source: Any,
+    alphas: Any,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    log_scale: bool = True,
+    highlight_best: bool = True,
+    theme: Any = None,
+):
+    """Alpha-selection chart: dedupe per alpha (one row per alpha holds the
+    aggregated mean_score). The Chart method injects ``_best_alpha`` when
+    ``highlight_best=True``.
+    """
+    import ferrum
+
+    df = source.alpha_selection(alphas, cv=cv, scoring=scoring)
+    df = _dedupe_aggregated(df, "alpha")
+    chart = ferrum.Chart(df).mark_alpha_selection(
+        log_scale=log_scale, highlight_best=highlight_best,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart

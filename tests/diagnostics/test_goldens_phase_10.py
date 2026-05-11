@@ -206,3 +206,42 @@ def test_golden_pdp_chart_three_features():
         model, X, y, features=["f0", "f1", "f2"], grid_resolution=20,
     )
     _check_golden(chart.show_svg(), "pdp_chart_three_features")
+
+
+# --- 10e goldens (model selection / CV curves) ---
+
+
+def _ridge_for_selection():
+    """Fresh Ridge — deterministic across runs given fixed random_state."""
+    from sklearn.linear_model import Ridge
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    return Ridge(random_state=0), X, df["y"]
+
+
+def test_golden_learning_curve_ridge():
+    model, X, y = _ridge_for_selection()
+    chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
+    _check_golden(chart.show_svg(), "learning_curve_ridge")
+
+
+def test_golden_validation_curve_ridge_alpha():
+    model, X, y = _ridge_for_selection()
+    chart = ferrum.validation_curve_chart(
+        model, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3,
+    )
+    _check_golden(chart.show_svg(), "validation_curve_ridge_alpha")
+
+
+def test_golden_cv_scores_ridge_box():
+    model, X, y = _ridge_for_selection()
+    chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="box")
+    _check_golden(chart.show_svg(), "cv_scores_ridge_box")
+
+
+def test_golden_alpha_selection_ridge():
+    model, X, y = _ridge_for_selection()
+    chart = ferrum.alpha_selection_chart(
+        model, X, y, alphas=[0.01, 0.1, 1.0, 10.0], cv=3,
+    )
+    _check_golden(chart.show_svg(), "alpha_selection_ridge")

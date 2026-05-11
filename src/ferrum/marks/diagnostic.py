@@ -580,6 +580,235 @@ def desugar_pdp(
     ])
 
 
+# --- 10e: model selection / CV curves --------------------------------
+
+
+def _log_x_channel(field: str, log_scale: bool) -> Any:
+    """Wrap ``field`` in an ``X`` channel with a log scale when requested,
+    otherwise return the bare string field. Used by validation-curve and
+    alpha-selection desugars whose x-axis is conventionally log-scaled.
+    """
+    if not log_scale:
+        return field
+    from ferrum.encoding import X
+
+    return X(field, scale={"type": "log"})
+
+
+def desugar_learning_curve(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    ci_style: str = "band",
+    color_field: str | None = "split",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Learning-curve mark: per-split CI band/errorbar + mean line.
+
+    Data contract: ``train_size`` (Int64), ``split`` (Utf8: "train"|"test"),
+    ``mean_score``, ``lower``, ``upper`` (Float64) as emitted by
+    ``ModelSource.learning_curve()`` and deduped per (train_size, split)
+    by the chart builder. The CI columns are pre-computed in
+    ``ModelSource.learning_curve``; mark_errorband would re-aggregate
+    via ErrorExtent against a single column and is the wrong tool here
+    (see plan-CORRECTIONS §7).
+
+    ``ci_style="band"`` (default) renders a translucent ribbon between
+    ``lower`` and ``upper``; ``ci_style="errorbar"`` renders a vertical
+    rule per train_size from ``lower`` to ``upper``.
+
+    The ribbon layer is layer-0 so the line draws on top; layer-0's y
+    title therefore drives the chart's y-axis label — set to "score" so
+    the axis does not read "lower" (the bottom-edge column name).
+    """
+    del x_field, y_field
+    from ferrum.encoding import X, Y
+
+    y_axis = Y("lower", title="score")
+    x_axis = X("train_size", title="training samples")
+    if ci_style == "band":
+        ci_layer = {
+            "mark": "ribbon",
+            "encoding": {
+                "x": x_axis, "y": y_axis, "y2": "upper", "color": color_field,
+            },
+            "mark_kwargs": {"opacity": 0.3},
+        }
+    elif ci_style == "errorbar":
+        ci_layer = {
+            "mark": "rule",
+            "encoding": {
+                "x": x_axis, "y": y_axis, "y2": "upper", "color": color_field,
+            },
+        }
+    else:
+        raise ValueError(
+            f"mark_learning_curve(ci_style={ci_style!r}) — expected "
+            "'band' or 'errorbar'."
+        )
+    line_enc: dict[str, Any] = {
+        "x": "train_size", "y": "mean_score", "color": color_field,
+    }
+    return ("__layered__", [], None, None, [
+        ci_layer,
+        {"mark": "line", "encoding": line_enc},
+    ])
+
+
+def desugar_validation_curve(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    log_scale: bool = False,
+    ci_style: str = "band",
+    color_field: str | None = "split",
+    param_label: str | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Validation-curve mark: same shape as learning_curve over a
+    hyperparameter sweep.
+
+    Data contract: ``param_value`` (Float64), ``split``, ``mean_score``,
+    ``lower``, ``upper`` — deduped per (param_value, split) by the
+    builder. When ``log_scale=True`` the x channel uses a log scale,
+    appropriate when ``values`` span more than two orders of magnitude.
+
+    ``param_label`` (passed by the chart builder) names the swept
+    hyperparameter so the x-axis reads e.g. "alpha" rather than the
+    generic ``param_value`` column name.
+    """
+    del x_field, y_field
+    from ferrum.encoding import X, Y
+
+    scale = {"type": "log"} if log_scale else None
+    x_kwargs: dict[str, Any] = {}
+    if param_label is not None:
+        x_kwargs["title"] = param_label
+    if scale is not None:
+        x_kwargs["scale"] = scale
+    x_ch = X("param_value", **x_kwargs) if x_kwargs else "param_value"
+    y_axis = Y("lower", title="score")
+    if ci_style == "band":
+        ci_layer = {
+            "mark": "ribbon",
+            "encoding": {
+                "x": x_ch, "y": y_axis, "y2": "upper", "color": color_field,
+            },
+            "mark_kwargs": {"opacity": 0.3},
+        }
+    elif ci_style == "errorbar":
+        ci_layer = {
+            "mark": "rule",
+            "encoding": {
+                "x": x_ch, "y": y_axis, "y2": "upper", "color": color_field,
+            },
+        }
+    else:
+        raise ValueError(
+            f"mark_validation_curve(ci_style={ci_style!r}) — expected "
+            "'band' or 'errorbar'."
+        )
+    return ("__layered__", [], None, None, [
+        ci_layer,
+        {"mark": "line",
+         "encoding": {"x": "param_value", "y": "mean_score", "color": color_field}},
+    ])
+
+
+def desugar_cv_scores(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    kind: str = "box",
+    split: str = "both",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Per-fold CV score distribution.
+
+    Data contract: ``fold`` (Int64), ``split`` (Utf8), ``score`` (Float64)
+    as emitted by ``ModelSource.cv_scores()``. For ``kind="box"`` the
+    builder leaves raw per-fold rows (BoxStats groups by split); for
+    ``kind="bar"`` the builder pre-aggregates to mean score per split;
+    for ``kind="strip"`` the builder leaves raw rows and Jitter spreads
+    them along the categorical axis.
+    """
+    del x_field, y_field, split
+    from ferrum.encoding import Y
+
+    if kind == "box":
+        from ferrum.marks.composite import desugar_boxplot
+
+        prefix, transforms, _ig1, _ig2, layers = desugar_boxplot("split", "score")
+        # Override layer-0's y field-name (BoxStats output column) with a
+        # titled channel so the chart's y-axis reads "score" rather than
+        # the internal column name "lower_whisker".
+        if layers:
+            first = dict(layers[0])
+            enc = dict(first.get("encoding", {}))
+            y_val = enc.get("y")
+            if isinstance(y_val, str):
+                enc["y"] = Y(y_val, title="score")
+                first["encoding"] = enc
+                layers = [first, *layers[1:]]
+        return (prefix, transforms, _ig1, _ig2, layers)
+    if kind == "bar":
+        return ("__layered__", [], None, None, [
+            {"mark": "bar",
+             "encoding": {"x": "split", "y": Y("score", title="score"),
+                          "color": "split"}},
+        ])
+    if kind == "strip":
+        from ferrum.position import Jitter
+
+        return ("__layered__", [], None, None, [
+            {"mark": "point",
+             "encoding": {"x": "split", "y": Y("score", title="score"),
+                          "color": "split"},
+             "position": Jitter(axis="x", width=0.3, seed=42)},
+        ])
+    raise ValueError(
+        f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'."
+    )
+
+
+def desugar_alpha_selection(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    log_scale: bool = True,
+    highlight_best: bool = True,
+    ci_style: str = "band",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Regularization-strength selection mark: mean-score line + best-alpha rule.
+
+    Data contract: ``alpha`` (Float64), ``mean_score`` (Float64) — the
+    builder dedupes per alpha and (when ``highlight_best=True``) the
+    ``Chart.mark_alpha_selection`` method injects a ``_best_alpha``
+    sentinel column with one non-null row at ``argmax(mean_score)`` for
+    a single vertical rule.
+
+    ``ci_style`` is informational at the mark layer — alpha_selection
+    renders a single curve without CI bands; the multi-fold spread
+    surfaces in the companion ``cv_scores_chart``.
+    """
+    del x_field, y_field, ci_style
+    from ferrum.encoding import Y
+
+    x_ch = _log_x_channel("alpha", log_scale)
+    layers: list[dict] = [
+        {"mark": "line",
+         "encoding": {"x": x_ch, "y": Y("mean_score", title="score")}},
+    ]
+    if highlight_best:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"x": "_best_alpha"},
+            "mark_kwargs": {"stroke_dash": [4, 4]},
+        })
+    return ("__layered__", [], None, None, layers)
+
+
 def desugar_class_prediction_error(
     x_field: str | None,
     y_field: str | None,
