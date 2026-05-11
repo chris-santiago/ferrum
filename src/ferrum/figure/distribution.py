@@ -154,10 +154,18 @@ def displot(
             hist_kwargs["groupby"] = hue
         chart = chart.mark_histogram(**hist_kwargs)
     elif kind == "kde":
-        chart = chart.mark_density(
+        # When hue is bound, thread `groupby=hue` so the Kde transform emits
+        # per-(grid, group) rows preserving the hue column for color encoding.
+        # Position adjustment is informational for KDE (continuous curves
+        # overlay regardless of `multiple`), but groupby is required whenever
+        # hue is set so each level gets its own curve.
+        kde_kwargs: dict = dict(
             bandwidth=bandwidth, bw_adjust=bw_adjust, fill=fill,
             position=position,
         )
+        if hue is not None:
+            kde_kwargs["groupby"] = hue
+        chart = chart.mark_density(**kde_kwargs)
     elif kind == "ecdf":
         # ECDF: cumulative bin → step line.
         if x is None:

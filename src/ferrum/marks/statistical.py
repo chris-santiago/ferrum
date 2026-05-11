@@ -19,6 +19,8 @@ def desugar_density(
     cumulative: bool = False,
     multiple: str = "layer",
     fill: bool = True,
+    groupby: Any = None,
+    orientation: str = "vertical",
     # Bivariate-only kwargs (forwarded to desugar_contour when both x and y
     # encoded). Ignored on the 1D path.
     thresholds: int = 6,
@@ -77,6 +79,17 @@ def desugar_density(
         other values raise ``NotImplementedError``).
     fill : bool, default True
         If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
+    groupby : str, optional
+        Optional grouping column forwarded to the ``Kde`` transform.  When
+        set, the density is computed per group and the output retains the
+        group column so a downstream ``color=`` encoding can map to it.
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Axis along which the density curve is drawn.  ``"vertical"`` (the
+        default) puts the kernel value on the x-axis and the density on the
+        y-axis.  ``"horizontal"`` swaps them — used for JointChart's right
+        marginal where the data dimension shares the y-axis with the centre
+        scatter.  Output column ordering does not change; only the
+        ``encoding_remap`` flips ``x`` ↔ ``y``.
     thresholds : int, default 6
         Passed through to ``desugar_contour`` on the bivariate path.
     smooth : bool, default True
@@ -131,9 +144,23 @@ def desugar_density(
                 "it), or land bw_adjust support inside the Rust Kde."
             )
 
-    transforms = [Kde(field, bandwidth=bandwidth, n=n, extent=extent, cumulative=cumulative)]
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError(
+            f"desugar_density: orientation must be 'vertical' or "
+            f"'horizontal'; got {orientation!r}"
+        )
+    kde_kwargs: dict = dict(
+        bandwidth=bandwidth, n=n, extent=extent, cumulative=cumulative,
+    )
+    if groupby is not None:
+        kde_kwargs["groupby"] = groupby
+    transforms = [Kde(field, **kde_kwargs)]
     # Phase 5 Kde produces columns ("value", "density") — remap both x and y.
-    encoding_remap = {"x": "value", "y": "density"}
+    # With groupby, output also contains the group column for color encoding.
+    if orientation == "horizontal":
+        encoding_remap = {"y": "value", "x": "density"}
+    else:
+        encoding_remap = {"x": "value", "y": "density"}
     mark = "area" if fill else "line"
     return (mark, transforms, encoding_remap)
 
@@ -150,6 +177,7 @@ def desugar_histogram(
     right: bool = False,
     multiple: str = "layer",
     groupby: Any = None,
+    orientation: str = "vertical",
 ) -> tuple[str, list, dict]:
     """Histogram mark desugar.
 
@@ -194,6 +222,15 @@ def desugar_histogram(
         is supported; stacking deferred).
     groupby : list or None, default None
         Optional grouping columns forwarded to the ``Bin`` transform.
+    orientation : {"vertical", "horizontal"}, default "vertical"
+        Axis along which bars are drawn.  ``"vertical"`` (the default) puts
+        bin edges on the x-axis and count/density on the y-axis.
+        ``"horizontal"`` swaps them — used for JointChart's right marginal
+        where the binned dimension shares the y-axis with the centre
+        scatter.  Output column ordering does not change; only the
+        ``encoding_remap`` keys flip ``x`` ↔ ``y`` (so the chart needs to
+        bind the binned field via ``encode(y=...)`` rather than
+        ``encode(x=...)``).
 
     Returns
     -------
@@ -209,14 +246,23 @@ def desugar_histogram(
     {'x': 'bin_start', 'x2': 'bin_end', 'y': 'count'}
     """
     del right, multiple  # forwarded to renderer in a later phase
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError(
+            f"desugar_histogram: orientation must be 'vertical' or "
+            f"'horizontal'; got {orientation!r}"
+        )
     bin_kwargs: dict = dict(bin_count=bin_count, bin_width=bin_width, extent=extent,
                             nice=nice, cumulative=cumulative)
     if groupby is not None:
         bin_kwargs["groupby"] = groupby
     transforms = [Bin(field, **bin_kwargs)]
-    # Phase 5 Bin produces columns (bin_start, bin_end, count, density)
-    y_column = "density" if density else "count"
-    encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": y_column}
+    # Phase 5 Bin produces columns (bin_start, bin_end, count, density).
+    count_column = "density" if density else "count"
+    if orientation == "horizontal":
+        # Horizontal bars: bin extents on y-axis, count on x-axis.
+        encoding_remap = {"y": "bin_start", "y2": "bin_end", "x": count_column}
+    else:
+        encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": count_column}
     return ("bar", transforms, encoding_remap)
 
 

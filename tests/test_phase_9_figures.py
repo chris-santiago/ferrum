@@ -96,6 +96,45 @@ class TestDisplot:
         d = json.loads(chart.to_spec().to_json())
         assert d.get("facet") is not None
 
+    def test_kde_with_hue_threads_groupby(self, iris_like):
+        # Regression: displot(kind="kde", hue=...) must forward the hue
+        # column as Kde.groupby so the output retains it for color encoding.
+        chart = fe.displot(iris_like, x="sepal_length", hue="species", kind="kde")
+        d = json.loads(chart.to_spec().to_json())
+        kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
+        assert kde_t.get("groupby") == "species"
+        # End-to-end render must not raise and must produce SVG.
+        assert "<svg" in chart.show_svg()
+
+    def test_mark_density_groupby_passthrough(self, iris_like):
+        # Direct API path mirrors the displot wiring.
+        chart = fe.Chart(iris_like).mark_density(groupby="species").encode(
+            x="sepal_length", color="species",
+        )
+        d = json.loads(chart.to_spec().to_json())
+        kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
+        assert kde_t.get("groupby") == "species"
+
+    def test_mark_histogram_horizontal_orientation(self, iris_like):
+        # JointChart's right-marginal pattern: bind the data column to y and
+        # request horizontal orientation; encoding remap flips x ↔ y.
+        chart = fe.Chart(iris_like).mark_histogram(
+            orientation="horizontal"
+        ).encode(y="sepal_length")
+        resolved = chart._resolve_pending()
+        # Bin is on the y field (the data dimension), output goes on y/y2/x.
+        assert resolved._encoding["y"].field == "bin_start"
+        assert resolved._encoding["y2"].field == "bin_end"
+        assert resolved._encoding["x"].field == "count"
+
+    def test_mark_density_horizontal_orientation(self, iris_like):
+        chart = fe.Chart(iris_like).mark_density(
+            orientation="horizontal"
+        ).encode(y="sepal_length")
+        resolved = chart._resolve_pending()
+        assert resolved._encoding["y"].field == "value"
+        assert resolved._encoding["x"].field == "density"
+
 
 # ---------------------------------------------------------------------------
 # Task 29 — catplot

@@ -206,10 +206,15 @@ class Chart:
         new = self._clone()
         new._pending_stat_mark = None
         if kind == "density":
-            x_enc = new._encoding.get("x")
-            if x_enc is None:
-                raise ValueError("mark_density() requires .encode(x=...) to specify the density field")
-            field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            orientation = kwargs.get("orientation", "vertical")
+            field_channel = "y" if orientation == "horizontal" else "x"
+            enc = new._encoding.get(field_channel)
+            if enc is None:
+                raise ValueError(
+                    f"mark_density() requires .encode({field_channel}=...) "
+                    f"to specify the density field"
+                )
+            field = enc.field if isinstance(enc, ChannelBase) else enc
             result = desugar_density(field, chart_encoding=new._encoding, **kwargs)
             if (
                 isinstance(result, tuple)
@@ -229,17 +234,27 @@ class Chart:
                 new._encoding["x"] = X(remap["x"], type="Q")
                 new._encoding["y"] = Y(remap["y"], type="Q")
         elif kind == "histogram":
-            x_enc = new._encoding.get("x")
-            if x_enc is None:
-                raise ValueError("mark_histogram() requires .encode(x=...) to specify the histogram field")
-            field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+            orientation = kwargs.get("orientation", "vertical")
+            field_channel = "y" if orientation == "horizontal" else "x"
+            enc = new._encoding.get(field_channel)
+            if enc is None:
+                raise ValueError(
+                    f"mark_histogram() requires .encode({field_channel}=...) "
+                    f"to specify the histogram field"
+                )
+            field = enc.field if isinstance(enc, ChannelBase) else enc
             mark, transforms, remap = desugar_histogram(field, **kwargs)
             new._mark = mark
             new._transforms = list(new._transforms) + transforms
-            from ferrum.encoding import X, X2, Y
-            new._encoding["x"] = X(remap["x"], type="Q")
-            new._encoding["x2"] = X2(remap["x2"], type="Q")
-            new._encoding["y"] = Y(remap["y"], type="Q")
+            from ferrum.encoding import X, X2, Y, Y2
+            if orientation == "horizontal":
+                new._encoding["y"] = Y(remap["y"], type="Q")
+                new._encoding["y2"] = Y2(remap["y2"], type="Q")
+                new._encoding["x"] = X(remap["x"], type="Q")
+            else:
+                new._encoding["x"] = X(remap["x"], type="Q")
+                new._encoding["x2"] = X2(remap["x2"], type="Q")
+                new._encoding["y"] = Y(remap["y"], type="Q")
         elif kind == "smooth":
             x_enc = new._encoding.get("x")
             y_enc = new._encoding.get("y")
@@ -630,15 +645,19 @@ class Chart:
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("density", position)
-        x_enc = self._encoding.get("x")
-        if x_enc is None:
+        orientation = kwargs.get("orientation", "vertical")
+        # For horizontal orientation, the data field is bound to y rather
+        # than x (JointChart's right-marginal pattern).
+        field_channel = "y" if orientation == "horizontal" else "x"
+        enc = self._encoding.get(field_channel)
+        if enc is None:
             # Encoding not yet set — defer resolution to render time.
             new = self._clone()
             new._mark = "area"  # placeholder so _mark is not None
             new._pending_stat_mark = ("density", dict(kwargs))
             new._position = position
             return new
-        field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+        field = enc.field if isinstance(enc, ChannelBase) else enc
         result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
         new = self._clone()
         if (
@@ -703,22 +722,31 @@ class Chart:
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("histogram", position)
-        x_enc = self._encoding.get("x")
-        if x_enc is None:
+        orientation = kwargs.get("orientation", "vertical")
+        # For horizontal orientation, the binned column is bound to y rather
+        # than x (JointChart's right-marginal pattern).
+        field_channel = "y" if orientation == "horizontal" else "x"
+        enc = self._encoding.get(field_channel)
+        if enc is None:
             new = self._clone()
             new._mark = "bar"  # placeholder
             new._pending_stat_mark = ("histogram", dict(kwargs))
             new._position = position
             return new
-        field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+        field = enc.field if isinstance(enc, ChannelBase) else enc
         mark, transforms, remap = desugar_histogram(field, **kwargs)
         new = self._clone()
         new._mark = mark
         new._transforms = list(self._transforms) + transforms
-        from ferrum.encoding import X, X2, Y
-        new._encoding["x"] = X(remap["x"], type="Q")
-        new._encoding["x2"] = X2(remap["x2"], type="Q")
-        new._encoding["y"] = Y(remap["y"], type="Q")
+        from ferrum.encoding import X, X2, Y, Y2
+        if orientation == "horizontal":
+            new._encoding["y"] = Y(remap["y"], type="Q")
+            new._encoding["y2"] = Y2(remap["y2"], type="Q")
+            new._encoding["x"] = X(remap["x"], type="Q")
+        else:
+            new._encoding["x"] = X(remap["x"], type="Q")
+            new._encoding["x2"] = X2(remap["x2"], type="Q")
+            new._encoding["y"] = Y(remap["y"], type="Q")
         new._position = position
         return new
 

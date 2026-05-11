@@ -145,19 +145,24 @@ def jointplot(
     elif marginal_kind == "box":
         top = Chart(data).mark_boxplot(**mk).encode(**enc_top)
 
-    # Build right marginal (over y, oriented vertically).
-    enc_right: dict = {"x": y}  # marginal sample is the y-field, but plotted
-                                 # on its own coordinate system in the right cell
+    # Build right marginal — oriented horizontally so bars/density grow along
+    # the marginal's x-axis while the binned data dimension stays on the
+    # marginal's y-axis (shared with the centre cell via share_y).
+    enc_right: dict = {"y": y}
     if hue is not None:
         enc_right["color"] = hue
     if marginal_kind == "hist":
-        right = Chart(data).mark_histogram(**mk).encode(**enc_right)
+        right = Chart(data).mark_histogram(orientation="horizontal", **mk).encode(**enc_right)
     elif marginal_kind == "kde":
-        right = Chart(data).mark_density(**mk).encode(**enc_right)
+        right = Chart(data).mark_density(orientation="horizontal", **mk).encode(**enc_right)
     elif marginal_kind == "rug":
+        # Tick mark has no bin/density direction — the y-binding is enough.
         right = Chart(data).mark_tick(**mk).encode(**enc_right)
     elif marginal_kind == "box":
-        right = Chart(data).mark_boxplot(**mk).encode(**enc_right)
+        # Boxplot is intrinsically asymmetric across the categorical axis;
+        # JointChart uses the default vertical orientation with the data on x
+        # (composite-mark orientation work tracked separately).
+        right = Chart(data).mark_boxplot(**mk).encode(x=y)
 
     if height is not None:
         center = center.properties(width=height, height=height)

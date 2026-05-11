@@ -222,6 +222,7 @@ pub(crate) fn apply_with_context(
             n: spec.n,
             extent: Some((lo, hi)),
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let kde_out = kde::apply(&kde_spec, &synth_batch)?;

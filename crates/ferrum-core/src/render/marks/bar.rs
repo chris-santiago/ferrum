@@ -12,9 +12,17 @@ use crate::render::scale_resolve::{ColorScale, ScaleKind};
 use crate::render::svg::{FillStroke, SvgBuffer};
 
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+    // Encoding-presence check picks between the four quantitative paths:
+    // - x + x2 + y       → vertical histogram (draw_quantitative)
+    // - y + y2 + x       → horizontal histogram (draw_quantitative_horizontal),
+    //                       used by JointChart's right marginal with
+    //                       mark_histogram(orientation="horizontal").
+    let has_x2 = ctx.spec.encoding.x2.is_some();
+    let has_y2 = ctx.spec.encoding.y2.is_some();
     match (&ctx.scales.x, &ctx.scales.y) {
         (ScaleKind::Ordinal(_), _) => draw_ordinal(ctx, out),
         (_, ScaleKind::Ordinal(_)) => draw_ordinal_y(ctx, out),
+        (_, _) if has_y2 && !has_x2 => draw_quantitative_horizontal(ctx, out),
         (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_), _) => {
             draw_quantitative(ctx, out)
         }
@@ -218,6 +226,73 @@ fn draw_quantitative(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let width = (px_right - px_left).abs().max(1.0);
         let height = (baseline_y - top_y).max(0.0);
         let r = Rect { x: px_left.min(px_right), y: top_y, w: width, h: height };
+
+        let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
+            match values[i].as_deref() {
+                Some(v) => match scale {
+                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                },
+                None => ctx.mark_style.fill,
+            }
+        } else {
+            ctx.mark_style.fill
+        };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        out.rect(r, &FillStroke {
+            fill: Some(fill),
+            stroke: ctx.mark_style.stroke,
+            stroke_width: ctx.mark_style.stroke_width,
+        }, Some(ctx.mark_style.corner_radius));
+    }
+}
+
+/// Quantitative-y horizontal histogram path: y is `bin_start`, y2 is `bin_end`,
+/// x is the count/density value. Mirror of `draw_quantitative` with axes
+/// swapped — bars grow rightward from the left panel edge, one stacked
+/// vertically per bin. Used by JointChart's right marginal so the binned
+/// data dimension stays on the marginal's y-axis (shared with the centre
+/// panel's y-scale).
+fn draw_quantitative_horizontal(ctx: &DrawCtx, out: &mut SvgBuffer) {
+    let spec = ctx.spec;
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return };
+    let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
+        Some(f) => f, None => return,
+    };
+
+    let xs  = match col_as_f64(ctx.batch, xf)  { Ok(v) => v, Err(_) => return };
+    let ys  = match col_as_f64(ctx.batch, yf)  { Ok(v) => v, Err(_) => return };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
+    if xs.len() != ys.len() || y2s.len() != ys.len() { return; }
+
+    let panel = ctx.panel.plot_area;
+    let baseline_x = panel.x;
+
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+
+    for i in 0..xs.len() {
+        let xv  = match xs[i]  { Some(v) if v.is_finite() => v, _ => continue };
+        let yv  = match ys[i]  { Some(v) if v.is_finite() => v, _ => continue };
+        let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let px_right  = match ctx.scales.x.to_pixel_f64(xv)  { Some(p) => p, None => continue };
+        let py_top    = match ctx.scales.y.to_pixel_f64(yv)  { Some(p) => p, None => continue };
+        let py_bottom = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+
+        let px_right = px_right + x_offsets[i];
+        let py_top   = py_top   + y_offsets[i];
+        let py_bottom = py_bottom + y_offsets[i];
+        let width  = (px_right - baseline_x).max(0.0);
+        let height = (py_top - py_bottom).abs().max(1.0);
+        let r = Rect {
+            x: baseline_x,
+            y: py_top.min(py_bottom),
+            w: width,
+            h: height,
+        };
 
         let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {

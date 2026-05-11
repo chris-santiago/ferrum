@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -22,11 +22,26 @@ pub(crate) struct KdeSpec {
     pub extent: Option<(f64, f64)>,
     #[serde(default)]
     pub cumulative: bool,
+    /// When set, partition input by this Utf8 column and emit per-(grid, group)
+    /// rows. Output schema gains the groupby column as the 3rd field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub groupby: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    if let Some(g) = &spec.groupby {
+        return apply_grouped(spec, batch, g);
+    }
+    apply_one_group(spec, batch, None)
+}
+
+fn apply_one_group(
+    spec: &KdeSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_kde: column '{}' not found", spec.field))
@@ -42,14 +57,15 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    let mut clean: Vec<f64> = Vec::with_capacity(arr.len());
-    for i in 0..arr.len() {
-        if !arr.is_null(i) {
-            let v = arr.value(i);
-            if !v.is_nan() {
-                clean.push(v);
-            }
-        }
+    let mut clean: Vec<f64> = Vec::new();
+    let push = |i: usize, clean: &mut Vec<f64>| {
+        if arr.is_null(i) { return; }
+        let v = arr.value(i);
+        if !v.is_nan() { clean.push(v); }
+    };
+    match only_indices {
+        Some(ixs) => for &i in ixs { push(i, &mut clean); },
+        None => for i in 0..arr.len() { push(i, &mut clean); },
     }
 
     let (lo, hi) = match spec.extent {
@@ -99,6 +115,69 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(grid)),
         Arc::new(Float64Array::from(density)),
+    ];
+    RecordBatch::try_new(out_schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
+}
+
+/// Partition input batch by `group_col` (Utf8), call apply_one_group per
+/// partition, then stack the results into a single batch with the group
+/// column preserved as the 3rd field.
+fn apply_grouped(
+    spec: &KdeSpec,
+    batch: &RecordBatch,
+    group_col: &str,
+) -> PyResult<RecordBatch> {
+    use std::collections::BTreeMap;
+    let schema = batch.schema();
+    let gi = schema.index_of(group_col).map_err(|_|
+        PyValueError::new_err(format!(
+            "stat_kde: groupby column '{}' not found", group_col)))?;
+    let gtype = schema.field(gi).data_type();
+    if gtype != &DataType::Utf8 {
+        return Err(PyValueError::new_err(format!(
+            "stat_kde: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
+    }
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+
+    // Group row indices by first-appearance order of the group value.
+    let mut group_order: Vec<String> = Vec::new();
+    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..garr.len() {
+        if garr.is_null(i) { continue; }
+        let gv = garr.value(i).to_string();
+        if seen.insert(gv.clone()) {
+            group_order.push(gv.clone());
+        }
+        group_idx_map.entry(gv).or_default().push(i);
+    }
+
+    let mut all_values: Vec<f64> = Vec::new();
+    let mut all_density: Vec<f64> = Vec::new();
+    let mut all_groups: Vec<String> = Vec::new();
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).unwrap();
+        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let n = out.num_rows();
+        let values = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let density = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..n {
+            all_values.push(values.value(i));
+            all_density.push(if density.is_null(i) { f64::NAN } else { density.value(i) });
+            all_groups.push(g.clone());
+        }
+    }
+
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Float64, false),
+        Field::new("density", DataType::Float64, true),
+        Field::new(group_col, DataType::Utf8, false),
+    ]));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(all_values)),
+        Arc::new(Float64Array::from(all_density)),
+        Arc::new(StringArray::from(all_groups.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
@@ -194,6 +273,9 @@ use crate::transform::core::TransformSpec;
 /// cumulative : bool, default False
 ///     When True, output is the cumulative distribution function (CDF)
 ///     rather than the PDF.
+/// groupby : str, optional
+///     Single group-key column (Utf8); KDE computed independently per
+///     group. Output schema gains the group column as the 3rd field.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Kde")]
@@ -203,13 +285,14 @@ pub(crate) struct PyKde(pub(crate) TransformSpec);
 #[pymethods]
 impl PyKde {
     #[new]
-    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false, name = None))]
+    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false, groupby = None, name = None))]
     fn new(
         field: &str,
         bandwidth: Option<&Bound<'_, PyAny>>,
         n: usize,
         extent: Option<(f64, f64)>,
         cumulative: bool,
+        groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -256,6 +339,7 @@ impl PyKde {
             n,
             extent,
             cumulative,
+            groupby,
             name,
         })))
     }
@@ -339,6 +423,7 @@ mod tests {
                 n: case.n,
                 extent: Some((case.extent[0], case.extent[1])),
                 cumulative: case.cumulative,
+                groupby: None,
                 name: None,
             };
             let batch = batch_with("x", case.input.clone());
@@ -376,6 +461,7 @@ mod tests {
             n: 16,
             extent: Some((0.0, 6.0)),
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -392,11 +478,94 @@ mod tests {
             n: 8,
             extent: Some((0.0, 2.0)),
             cumulative: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let density = col(&out, "density");
         assert!(density.iter().all(|d| d.is_nan()));
+    }
+
+    #[test]
+    fn test_kde_grouped_preserves_group_column_and_per_group_density() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        // Two groups, well-separated means so per-group bandwidth differs from
+        // global bandwidth.
+        let xs = Float64Array::from(vec![
+            0.0, 0.5, 1.0, 1.5, 2.0,        // group A
+            10.0, 10.5, 11.0, 11.5, 12.0,    // group B
+        ]);
+        let gs = StringArray::from(vec!["A", "A", "A", "A", "A",
+                                          "B", "B", "B", "B", "B"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 8,
+            extent: None,
+            cumulative: false,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // 2 groups × 8 grid points = 16 rows
+        assert_eq!(out.num_rows(), 16);
+        // Schema must include the group column as the 3rd field.
+        let out_schema = out.schema();
+        assert_eq!(out_schema.field(0).name(), "value");
+        assert_eq!(out_schema.field(1).name(), "density");
+        assert_eq!(out_schema.field(2).name(), "g");
+        // Per-group grids span per-group extents.
+        let values = col(&out, "value");
+        let groups = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        // Rows 0..8 are group A (values 0.0..2.0); rows 8..16 are group B (10.0..12.0).
+        for i in 0..8 { assert_eq!(groups.value(i), "A"); }
+        for i in 8..16 { assert_eq!(groups.value(i), "B"); }
+        assert!((values[0] - 0.0).abs() < 1e-9, "group A grid starts at min");
+        assert!((values[7] - 2.0).abs() < 1e-9, "group A grid ends at max");
+        assert!((values[8] - 10.0).abs() < 1e-9, "group B grid starts at min");
+        assert!((values[15] - 12.0).abs() < 1e-9, "group B grid ends at max");
+    }
+
+    #[test]
+    fn test_kde_ungrouped_output_schema_unchanged() {
+        // Sentinel: ungrouped output schema MUST stay [value, density] (2 cols)
+        // so existing goldens stay byte-identical.
+        let batch = batch_with("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 4,
+            extent: Some((0.0, 6.0)),
+            cumulative: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_columns(), 2);
+        assert_eq!(out.schema().field(0).name(), "value");
+        assert_eq!(out.schema().field(1).name(), "density");
+    }
+
+    #[test]
+    fn test_kde_grouped_missing_column_errors() {
+        pyo3::Python::initialize();
+        let batch = batch_with("x", vec![1.0, 2.0, 3.0]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 4,
+            extent: None,
+            cumulative: false,
+            groupby: Some("ghost".into()),
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("ghost"), "err: {err}");
     }
 
     #[test]
@@ -407,6 +576,7 @@ mod tests {
             n: 32,
             extent: Some((-1.0, 5.0)),
             cumulative: true,
+            groupby: None,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
