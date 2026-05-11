@@ -2,7 +2,11 @@
 
 **Surfaced:** 2026-05-11 during themes-T4 golden regen.
 **Verified:** 2026-05-11 (post feat/themes merge to main).
-**Severity:** Maintenance smell on the failure path. Steady-state is fine.
+**Resolved:** 2026-05-11 in commit `c8f0894` —
+`tests._snapshots.assert_svg_eq` helper replaces the two `assert svg ==
+expected` call sites. Mid-string-mutation failure path measured at
+**4.35 s** (was ~100 s). Steady-state unchanged.
+**Severity:** ~~Maintenance smell on the failure path.~~ Closed.
 
 ## TL;DR
 
