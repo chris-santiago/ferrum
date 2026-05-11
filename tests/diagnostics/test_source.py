@@ -197,3 +197,43 @@ def test_lift_curve_baseline_at_one():
     baseline = lift.filter(pl.col("class") == "baseline")
     assert baseline.height == 2
     assert (baseline["lift"] == 1.0).all()
+
+
+def test_discrimination_threshold_schema_and_grid():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    dt = source.discrimination_threshold(n_thresholds=20)
+    assert set(dt.columns) == {
+        "threshold", "precision", "recall", "f1", "queue_rate",
+    }
+    assert dt.height == 20
+    near_zero = dt.filter(pl.col("threshold") < 0.05)["queue_rate"].to_list()
+    assert all(qr > 0.95 for qr in near_zero)
+    # queue_rate at threshold=1.0 is small.
+    near_one = dt.filter(pl.col("threshold") >= 0.99)["queue_rate"].to_list()
+    assert all(qr < 0.05 for qr in near_one)
+
+
+def test_discrimination_threshold_multiclass_rejects():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    with pytest.raises(ValueError, match="binary-classifier only"):
+        source.discrimination_threshold()
+
+
+def test_discrimination_threshold_cv_averaging():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    dt = source.discrimination_threshold(n_thresholds=10, cv=3)
+    assert dt.height == 10
+    assert (dt["precision"] >= 0).all() and (dt["precision"] <= 1).all()
+    assert (dt["recall"] >= 0).all() and (dt["recall"] <= 1).all()
+    # Sort order is ascending by threshold.
+    thresholds = dt["threshold"].to_list()
+    assert thresholds == sorted(thresholds)

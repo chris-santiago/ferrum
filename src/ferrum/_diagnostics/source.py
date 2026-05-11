@@ -477,6 +477,122 @@ class ModelSource:
         self._cache[key] = df
         return df
 
+    def discrimination_threshold(
+        self,
+        *,
+        n_thresholds: int = 50,
+        cv: Any = None,
+    ) -> pl.DataFrame:
+        """Discrimination threshold sweep — binary classifiers only.
+
+        Sweeps ``n_thresholds`` evenly-spaced thresholds in [0, 1] and
+        reports precision, recall, F1, and queue_rate at each. ``queue_rate``
+        is the hand-computed fraction ``(y_score >= t).mean()``.
+
+        When ``cv`` is an int, runs the same sweep on each fold's held-out
+        scores from a freshly-cloned + re-fit estimator and averages
+        per-threshold metrics across folds. Pass a splitter object with a
+        ``.split()`` method to override.
+        """
+        key = self._cache_key(
+            "discrimination_threshold", n_thresholds=n_thresholds, cv=cv,
+        )
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("discrimination_threshold")
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.discrimination_threshold() requires y to be provided."
+            )
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        if len(proba_cols) != 2:
+            raise ValueError(
+                "discrimination_threshold() is binary-classifier only; "
+                f"got {len(proba_cols)} classes."
+            )
+        y_true = np.asarray(self._y.to_numpy())
+        positive_class = _coerce_class_label(
+            proba_cols[1][len("proba_"):], y_true.dtype,
+        )
+        thresholds = np.linspace(0.0, 1.0, n_thresholds)
+
+        if cv is None:
+            y_score = proba_df[proba_cols[1]].to_numpy()
+            df = self._sweep_thresholds(
+                y_true, y_score, thresholds, positive_class,
+            )
+        else:
+            from sklearn.base import clone
+            from sklearn.model_selection import KFold
+            X_np = self._X.to_numpy()
+            splitter = (
+                cv if hasattr(cv, "split")
+                else KFold(
+                    n_splits=int(cv), shuffle=True,
+                    random_state=self._random_state or 0,
+                )
+            )
+            fold_dfs: list[pl.DataFrame] = []
+            for tr, te in splitter.split(X_np):
+                m = clone(self._model).fit(X_np[tr], y_true[tr])
+                if hasattr(m, "predict_proba"):
+                    s = np.asarray(m.predict_proba(X_np[te]), dtype=np.float64)[:, 1]
+                elif hasattr(m, "decision_function"):
+                    raw = np.asarray(
+                        m.decision_function(X_np[te]), dtype=np.float64,
+                    )
+                    s = 1.0 / (1.0 + np.exp(-raw))
+                else:
+                    raise AttributeError(
+                        "discrimination_threshold(cv=...) requires the wrapped "
+                        "model to implement 'predict_proba' or 'decision_function'."
+                    )
+                fold_dfs.append(self._sweep_thresholds(
+                    y_true[te], s, thresholds, positive_class,
+                ))
+            df = (
+                pl.concat(fold_dfs, how="vertical")
+                .group_by("threshold")
+                .agg([
+                    pl.col("precision").mean(),
+                    pl.col("recall").mean(),
+                    pl.col("f1").mean(),
+                    pl.col("queue_rate").mean(),
+                ])
+                .sort("threshold")
+            )
+
+        self._cache[key] = df
+        return df
+
+    def _sweep_thresholds(
+        self,
+        y_true: np.ndarray,
+        y_score: np.ndarray,
+        thresholds: np.ndarray,
+        positive_class: object,
+    ) -> pl.DataFrame:
+        from sklearn.metrics import precision_recall_fscore_support
+
+        y_true_bin = (y_true == positive_class).astype(int)
+        rows: list[dict] = []
+        for t in thresholds:
+            y_pred = (y_score >= t).astype(int)
+            p, r, f1, _ = precision_recall_fscore_support(
+                y_true_bin, y_pred, average="binary", zero_division=0,
+            )
+            queue_rate = float((y_score >= t).mean()) if y_score.size else 0.0
+            rows.append({
+                "threshold": float(t),
+                "precision": float(p),
+                "recall": float(r),
+                "f1": float(f1),
+                "queue_rate": queue_rate,
+            })
+        return pl.DataFrame(rows)
+
 
 def _coerce_class_label(label_str: str, target_dtype) -> object:
     """Coerce a stringified class label back to y's dtype for equality
