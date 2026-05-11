@@ -514,7 +514,15 @@ def _pdp_chart_from_source(
     center: bool = False,
     theme: Any = None,
 ):
-    """Partial-dependence chart: one polyline per feature."""
+    """Partial-dependence chart: faceted, one polyline per feature panel.
+
+    Each feature occupies its own facet panel because PDP curves for
+    different features span unrelated x-axis ranges and units — sharing
+    a single x axis (the pre-Phase-10f behavior) collapsed every curve
+    onto the union range and obscured the per-feature shape. The
+    column-wrap facet gives each feature its own x scale via
+    ferrum.Chart.facet.
+    """
     import ferrum
 
     df = source.partial_dependence(
@@ -524,8 +532,13 @@ def _pdp_chart_from_source(
     # layer renders monotonically (line.rs groups rows by color in batch
     # order, so the sort order matters).
     df = df.sort(["feature", "feature_value"])
-    chart = ferrum.Chart(df).mark_pdp(
-        kind=kind, ice_alpha=ice_alpha, center=center,
+    chart = (
+        ferrum.Chart(df)
+        .mark_pdp(
+            kind=kind, ice_alpha=ice_alpha, center=center,
+            color_field=None,  # one feature per facet — color is redundant
+        )
+        .facet(col="feature")
     )
     if theme is not None:
         chart = chart.theme(theme)
