@@ -200,3 +200,78 @@ def test_visualizer_show_before_fit_raises():
     viz = ferrum.LearningCurveVisualizer(model=None)
     with pytest.raises(RuntimeError, match="must be fit"):
         viz.show()
+
+
+# --- mark_kwargs forwarding + validation ---------------------------------
+
+
+def _line_layer_mark_kwargs(chart, mark_name: str) -> dict:
+    """Resolve a pending composite mark and return the line layer's
+    ``mark_kwargs`` dict (the conventional 'primary visual' layer for
+    multi-layer curve marks).
+    """
+    resolved = chart._resolve_pending()
+    for layer in resolved._layers or []:
+        if layer.get("mark") == "line":
+            return dict(layer.get("mark_kwargs") or {})
+    raise AssertionError(f"no line layer found in resolved {mark_name} chart")
+
+
+def test_learning_curve_forwards_mark_kwargs_to_line_layer():
+    model, X, y = _ridge_xy()
+    chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
+    chart = chart._clone()
+    chart = chart.mark_learning_curve(stroke="#ff0000", stroke_width=3)
+    kw = _line_layer_mark_kwargs(chart, "learning_curve")
+    assert kw["stroke"] == "#ff0000"
+    assert kw["stroke_width"] == 3
+
+
+def test_validation_curve_forwards_mark_kwargs():
+    model, X, y = _ridge_xy()
+    chart = ferrum.validation_curve_chart(
+        model, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3,
+    )
+    chart = chart._clone().mark_validation_curve(
+        log_scale=True, stroke_width=2,
+    )
+    kw = _line_layer_mark_kwargs(chart, "validation_curve")
+    assert kw["stroke_width"] == 2
+
+
+def test_alpha_selection_forwards_mark_kwargs():
+    model, X, y = _ridge_xy()
+    chart = ferrum.alpha_selection_chart(
+        model, X, y, alphas=[0.1, 1.0, 10.0], cv=3,
+    )
+    chart = chart._clone().mark_alpha_selection(stroke="#00aa00")
+    kw = _line_layer_mark_kwargs(chart, "alpha_selection")
+    assert kw["stroke"] == "#00aa00"
+
+
+def test_cv_scores_bar_forwards_mark_kwargs():
+    model, X, y = _ridge_xy()
+    chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="bar")
+    chart = chart._clone().mark_cv_scores(kind="bar", opacity=0.5)
+    resolved = chart._resolve_pending()
+    bar = next(L for L in (resolved._layers or []) if L.get("mark") == "bar")
+    assert (bar.get("mark_kwargs") or {}).get("opacity") == 0.5
+
+
+def test_mark_kwargs_unknown_kwarg_raises():
+    model, X, y = _ridge_xy()
+    bad = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
+    bad = bad._clone().mark_learning_curve(not_a_real_kwarg=42)
+    with pytest.raises(TypeError, match="not_a_real_kwarg"):
+        bad.show_svg()
+
+
+def test_user_mark_kwargs_override_desugar_defaults():
+    """User-supplied kwargs should win on conflict with desugar defaults
+    (e.g. ribbon's hard-coded opacity=0.3)."""
+    model, X, y = _ridge_xy()
+    chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
+    chart = chart._clone().mark_learning_curve(opacity=0.7)
+    resolved = chart._resolve_pending()
+    ribbon = next(L for L in (resolved._layers or []) if L.get("mark") == "ribbon")
+    assert (ribbon.get("mark_kwargs") or {}).get("opacity") == 0.7

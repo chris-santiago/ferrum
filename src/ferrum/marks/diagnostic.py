@@ -583,6 +583,53 @@ def desugar_pdp(
 # --- 10e: model selection / CV curves --------------------------------
 
 
+def _validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
+    """Validate user-supplied ``**mark_kwargs`` against the renderer-level
+    allowlist before merging them into composite-mark layers.
+
+    Diagnostic marks accept ``**mark_kwargs`` and conventionally dropped
+    them silently — that violates the Phase 9+ no-defer principle and
+    leaves users guessing why ``mark_<name>(stroke="red")`` has no
+    effect. This helper raises ``TypeError`` on unknown kwargs (mirroring
+    primitive-mark validation in ``MarkBase`` / ``_set_mark``) and
+    returns the validated dict for merging into each layer's
+    ``mark_kwargs``.
+    """
+    if not kwargs:
+        return {}
+    from ferrum.marks.base import _VALID_MARK_KWARGS  # type: ignore[attr-defined]
+
+    unknown = [k for k in kwargs if k not in _VALID_MARK_KWARGS]
+    if unknown:
+        raise TypeError(
+            f"mark_{mark_name}: unknown keyword argument(s) {unknown!r}. "
+            f"Valid: {sorted(_VALID_MARK_KWARGS)}"
+        )
+    return dict(kwargs)
+
+
+def _apply_user_mark_kwargs(layers: list[dict], user_kwargs: dict) -> list[dict]:
+    """Merge ``user_kwargs`` into every layer's ``mark_kwargs`` dict.
+
+    User-supplied kwargs win on conflict with the desugar's hard-coded
+    defaults (e.g. ``opacity=0.3`` on ribbon, ``stroke_dash=[4,4]`` on
+    a sentinel rule) so explicit user intent is honored. The renderer
+    ignores kwargs that don't apply to a given mark type, so spreading
+    across all layers is safe even when only one layer can render the
+    kwarg.
+    """
+    if not user_kwargs:
+        return layers
+    merged = []
+    for layer in layers:
+        existing = dict(layer.get("mark_kwargs") or {})
+        existing.update(user_kwargs)  # user wins
+        new_layer = dict(layer)
+        new_layer["mark_kwargs"] = existing
+        merged.append(new_layer)
+    return merged
+
+
 def _log_x_channel(field: str, log_scale: bool) -> Any:
     """Wrap ``field`` in an ``X`` channel with a log scale when requested,
     otherwise return the bare string field. Used by validation-curve and
@@ -624,6 +671,7 @@ def desugar_learning_curve(
     del x_field, y_field
     from ferrum.encoding import X, Y
 
+    user_kw = _validate_user_mark_kwargs("learning_curve", mark_kwargs)
     y_axis = Y("lower", title="score")
     x_axis = X("train_size", title="training samples")
     if ci_style == "band":
@@ -649,10 +697,9 @@ def desugar_learning_curve(
     line_enc: dict[str, Any] = {
         "x": "train_size", "y": "mean_score", "color": color_field,
     }
-    return ("__layered__", [], None, None, [
-        ci_layer,
-        {"mark": "line", "encoding": line_enc},
-    ])
+    layers = [ci_layer, {"mark": "line", "encoding": line_enc}]
+    return ("__layered__", [], None, None,
+            _apply_user_mark_kwargs(layers, user_kw))
 
 
 def desugar_validation_curve(
@@ -680,6 +727,7 @@ def desugar_validation_curve(
     del x_field, y_field
     from ferrum.encoding import X, Y
 
+    user_kw = _validate_user_mark_kwargs("validation_curve", mark_kwargs)
     scale = {"type": "log"} if log_scale else None
     x_kwargs: dict[str, Any] = {}
     if param_label is not None:
@@ -708,11 +756,13 @@ def desugar_validation_curve(
             f"mark_validation_curve(ci_style={ci_style!r}) — expected "
             "'band' or 'errorbar'."
         )
-    return ("__layered__", [], None, None, [
+    layers = [
         ci_layer,
         {"mark": "line",
          "encoding": {"x": "param_value", "y": "mean_score", "color": color_field}},
-    ])
+    ]
+    return ("__layered__", [], None, None,
+            _apply_user_mark_kwargs(layers, user_kw))
 
 
 def desugar_cv_scores(
@@ -735,6 +785,7 @@ def desugar_cv_scores(
     del x_field, y_field, split
     from ferrum.encoding import Y
 
+    user_kw = _validate_user_mark_kwargs("cv_scores", mark_kwargs)
     if kind == "box":
         from ferrum.marks.composite import desugar_boxplot
 
@@ -750,22 +801,27 @@ def desugar_cv_scores(
                 enc["y"] = Y(y_val, title="score")
                 first["encoding"] = enc
                 layers = [first, *layers[1:]]
-        return (prefix, transforms, _ig1, _ig2, layers)
+        return (prefix, transforms, _ig1, _ig2,
+                _apply_user_mark_kwargs(layers, user_kw))
     if kind == "bar":
-        return ("__layered__", [], None, None, [
+        layers = [
             {"mark": "bar",
              "encoding": {"x": "split", "y": Y("score", title="score"),
                           "color": "split"}},
-        ])
+        ]
+        return ("__layered__", [], None, None,
+                _apply_user_mark_kwargs(layers, user_kw))
     if kind == "strip":
         from ferrum.position import Jitter
 
-        return ("__layered__", [], None, None, [
+        layers = [
             {"mark": "point",
              "encoding": {"x": "split", "y": Y("score", title="score"),
                           "color": "split"},
              "position": Jitter(axis="x", width=0.3, seed=42)},
-        ])
+        ]
+        return ("__layered__", [], None, None,
+                _apply_user_mark_kwargs(layers, user_kw))
     raise ValueError(
         f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'."
     )
@@ -795,6 +851,7 @@ def desugar_alpha_selection(
     del x_field, y_field, ci_style
     from ferrum.encoding import Y
 
+    user_kw = _validate_user_mark_kwargs("alpha_selection", mark_kwargs)
     x_ch = _log_x_channel("alpha", log_scale)
     layers: list[dict] = [
         {"mark": "line",
@@ -806,7 +863,8 @@ def desugar_alpha_selection(
             "encoding": {"x": "_best_alpha"},
             "mark_kwargs": {"stroke_dash": [4, 4]},
         })
-    return ("__layered__", [], None, None, layers)
+    return ("__layered__", [], None, None,
+            _apply_user_mark_kwargs(layers, user_kw))
 
 
 def desugar_class_prediction_error(
