@@ -12,6 +12,46 @@ use super::config::RenderConfig;
 use super::RenderError;
 use super::{render_png as render_png_internal, render_svg as render_svg_internal};
 
+/// Render a ``ChartSpec`` and Arrow batch to an SVG string.
+///
+/// Parameters
+/// ----------
+/// spec : ChartSpec
+///     Compiled chart specification produced by ``Chart.to_spec()``.
+/// data : pyarrow.RecordBatchReader or compatible
+///     Input data stream. Columns must satisfy the encoding fields declared
+///     in *spec*. Polars ``DataFrame`` and pyarrow objects are accepted
+///     directly via the Arrow C Data Interface (zero copy).
+/// viewport : tuple[float, float]
+///     ``(width, height)`` of the output SVG canvas in pixels.
+/// theme : dict, optional
+///     Sparse theme override dict. Accepted keys: ``mark_color``,
+///     ``background_color``, ``point_size``, ``line_stroke_width``,
+///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Unset keys fall back to ``ThemeInputs`` defaults.
+/// config : dict, optional
+///     Render-config dict. Accepted keys: ``scale``, ``embed_fonts``,
+///     ``background``, ``width``, ``height``.
+///
+/// Returns
+/// -------
+/// str
+///     Complete SVG document as a UTF-8 string.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the data stream is empty, a batch cannot be read, or the spec
+///     references a column absent from the data.
+///
+/// Notes
+/// -----
+/// Output is byte-deterministic given the same *spec*, *data*, and *theme*
+/// inputs. Any stochastic transforms (e.g. ``Jitter``, bootstrap CI) use a
+/// seeded ``ChaCha8Rng`` keyed from the transform's ``seed`` field
+/// (CLAUDE.md "byte-deterministic randomness"). Render warnings (e.g.
+/// unsupported encoding combinations) are forwarded to Python's
+/// ``warnings.warn``.
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
 pub fn render_svg(
@@ -34,6 +74,46 @@ pub fn render_svg(
     Ok(result.bytes)
 }
 
+/// Render a ``ChartSpec`` and Arrow batch to PNG bytes.
+///
+/// Parameters
+/// ----------
+/// spec : ChartSpec
+///     Compiled chart specification produced by ``Chart.to_spec()``.
+/// data : pyarrow.RecordBatchReader or compatible
+///     Input data stream. Columns must satisfy the encoding fields declared
+///     in *spec*. Polars ``DataFrame`` and pyarrow objects are accepted
+///     directly via the Arrow C Data Interface (zero copy).
+/// viewport : tuple[float, float]
+///     ``(width, height)`` of the output image in pixels (before the
+///     ``config["scale"]`` multiplier is applied).
+/// theme : dict, optional
+///     Sparse theme override dict. Accepted keys: ``mark_color``,
+///     ``background_color``, ``point_size``, ``line_stroke_width``,
+///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Unset keys fall back to ``ThemeInputs`` defaults.
+/// config : dict, optional
+///     Render-config dict. Accepted keys: ``scale`` (pixel ratio, default
+///     1.0), ``embed_fonts``, ``background``, ``width``, ``height``.
+///
+/// Returns
+/// -------
+/// bytes
+///     PNG image as raw bytes suitable for ``IPython.display.Image`` or
+///     writing directly to disk.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the data stream is empty, a batch cannot be read, or the spec
+///     references a column absent from the data.
+///
+/// Notes
+/// -----
+/// PNG output is produced by rasterising the SVG pipeline result. Output
+/// is byte-deterministic for the same inputs (seeded ``ChaCha8Rng`` for
+/// stochastic transforms). Render warnings are forwarded to Python's
+/// ``warnings.warn``.
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
 pub fn render_png<'py>(
@@ -148,6 +228,36 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 // SVG compositor bindings (Task 11)
 // ---------------------------------------------------------------------------
 
+/// Compose SVG panels side-by-side into a single horizontal strip.
+///
+/// Parameters
+/// ----------
+/// svgs : list[str]
+///     SVG document strings to lay out left-to-right. Each must be a valid
+///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
+/// spacing : float, default 10.0
+///     Gap in pixels between adjacent panels.
+/// align : str, default "top"
+///     Vertical alignment of panels with different heights. One of
+///     ``"top"``, ``"center"``, or ``"bottom"``.
+///
+/// Returns
+/// -------
+/// str
+///     A single SVG document whose width equals the sum of panel widths
+///     plus total spacing and whose height equals the tallest panel.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If *align* is not one of the accepted values, or if any SVG string
+///     cannot be parsed.
+///
+/// Notes
+/// -----
+/// Used internally by ``HConcatChart`` to combine column-concatenated
+/// charts. The returned SVG preserves each panel's coordinate system via
+/// nested ``<g transform="translate(...)">`` elements.
 #[pyfunction]
 #[pyo3(name = "compose_svg_horizontal")]
 #[pyo3(signature = (svgs, *, spacing = 10.0, align = "top"))]
@@ -170,6 +280,36 @@ pub fn compose_svg_horizontal_py(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+/// Compose SVG panels stacked top-to-bottom into a single vertical strip.
+///
+/// Parameters
+/// ----------
+/// svgs : list[str]
+///     SVG document strings to lay out top-to-bottom. Each must be a valid
+///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
+/// spacing : float, default 10.0
+///     Gap in pixels between adjacent panels.
+/// align : str, default "left"
+///     Horizontal alignment of panels with different widths. One of
+///     ``"left"``, ``"center"``, or ``"right"``.
+///
+/// Returns
+/// -------
+/// str
+///     A single SVG document whose height equals the sum of panel heights
+///     plus total spacing and whose width equals the widest panel.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If *align* is not one of the accepted values, or if any SVG string
+///     cannot be parsed.
+///
+/// Notes
+/// -----
+/// Used internally by ``VConcatChart`` to combine row-concatenated charts.
+/// The returned SVG preserves each panel's coordinate system via nested
+/// ``<g transform="translate(...)">`` elements.
 #[pyfunction]
 #[pyo3(name = "compose_svg_vertical")]
 #[pyo3(signature = (svgs, *, spacing = 10.0, align = "left"))]
@@ -192,6 +332,52 @@ pub fn compose_svg_vertical_py(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+/// Compose SVG panels into a rectangular grid.
+///
+/// Parameters
+/// ----------
+/// cells : list[str | None]
+///     Flat list of SVG document strings in row-major order (length must
+///     equal *rows* × *cols*). Pass ``None`` for empty cells.
+/// rows : int
+///     Number of grid rows.
+/// cols : int
+///     Number of grid columns.
+/// row_ratios : list[float]
+///     Relative height weight for each row (length must equal *rows*).
+///     E.g. ``[2.0, 1.0]`` makes the first row twice as tall as the second.
+/// col_ratios : list[float]
+///     Relative width weight for each column (length must equal *cols*).
+/// spacing : float, default 10.0
+///     Gap in pixels between adjacent cells (applied both horizontally and
+///     vertically).
+/// share_x : list[list[int]], default []
+///     Groups of cell indices whose x-axes should share the same scale
+///     range. Reserved for future alignment; currently accepted but not
+///     applied.
+/// share_y : list[list[int]], default []
+///     Groups of cell indices whose y-axes should share the same scale
+///     range. Reserved for future alignment; currently accepted but not
+///     applied.
+///
+/// Returns
+/// -------
+/// str
+///     A single SVG document containing all cells positioned according to
+///     the ratio-weighted grid layout.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If ``len(cells) != rows * cols``, ratios lists have wrong lengths,
+///     or any non-``None`` cell SVG cannot be parsed.
+///
+/// Notes
+/// -----
+/// Used internally by ``RepeatChart`` and the figure-level ``pairplot`` /
+/// ``clustermap`` combinators. Each cell is embedded via a nested
+/// ``<g transform="translate(...)">`` preserving its internal coordinate
+/// system.
 #[pyfunction]
 #[pyo3(name = "compose_svg_grid")]
 #[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0,

@@ -47,6 +47,9 @@ _DOC_ALLOWLIST: set[str] = {
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
     "QuantileScale", "ThresholdScale",
     "ContinuousScheme", "Gradient",
+    # Task 10 — free functions (Rust)
+    "process_batch", "compute_layout", "render_svg", "render_png",
+    "compose_svg_horizontal", "compose_svg_vertical", "compose_svg_grid",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

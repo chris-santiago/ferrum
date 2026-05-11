@@ -14,6 +14,53 @@ use super::panel::FacetKey;
 use super::text_metrics::HeuristicMetrics;
 use super::{compute_layout as compute_layout_internal, ThemeInputs, Viewport};
 
+/// Compute a chart's layout geometry and return it as a dict.
+///
+/// Parameters
+/// ----------
+/// spec : ChartSpec
+///     Compiled chart specification used to determine axis types, facet
+///     structure, and legend presence.
+/// viewport : tuple[float, float]
+///     ``(width, height)`` of the total drawing area in pixels.
+/// x_tick_labels : list[str]
+///     Formatted tick labels for the x-axis, used to estimate label width.
+/// y_tick_labels : list[str]
+///     Formatted tick labels for the y-axis, used to estimate label height.
+/// x_title : str, optional
+///     Axis title for the x-axis.
+/// y_title : str, optional
+///     Axis title for the y-axis.
+/// facet_groups : list[tuple[str, str, int]], optional
+///     Sequence of ``(field, value, n_rows)`` triples describing each facet
+///     panel. Pass ``None`` for non-faceted charts.
+/// legend_entries : list[tuple[str, str]], optional
+///     Sequence of ``(label, kind)`` pairs for the legend. ``kind`` is one
+///     of ``"circle"``, ``"square"``, or ``"line"``.
+/// legend_orient : str, default "right"
+///     Legend placement. One of ``"right"``, ``"left"``, ``"top"``,
+///     ``"bottom"``.
+/// label_angle : float, optional
+///     Override the x-axis tick label rotation angle in degrees.
+///
+/// Returns
+/// -------
+/// dict
+///     Layout geometry serialised as a JSON-derived dict with keys such as
+///     ``plot_area``, ``margins``, ``facet_panels``, and ``legend_box``.
+///     The exact schema follows the internal ``LayoutResult`` type.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If ``legend_orient`` is not one of the accepted values, or if the
+///     layout engine cannot satisfy the viewport constraints.
+///
+/// Notes
+/// -----
+/// Phase 6 always uses ``HeuristicMetrics`` for text measurement. Phase 8
+/// will map ``ferrum.Theme`` into ``ThemeInputs`` and pass it here; until
+/// then, theme inputs use safe defaults.
 #[pyfunction]
 #[pyo3(signature = (
     spec,
