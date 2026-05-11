@@ -62,6 +62,13 @@ from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, an
 
 # Phase 10 — model diagnostics
 from ferrum._diagnostics import ModelSource
+from ferrum._diagnostics.visualizers import (
+    CooksDistanceVisualizer,
+    FerrumVisualizer,
+    PredictionErrorVisualizer,
+    ResidualsVisualizer,
+)
+from ferrum.figures import residuals_chart
 
 # Phase 9e — figure-level convenience functions
 from ferrum.figure import (
@@ -112,4 +119,7 @@ __all__ = [
     "pairplot", "heatmap", "clustermap", "jointplot",
     # Phase 10 — model diagnostics
     "ModelSource",
+    "FerrumVisualizer",
+    "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
+    "residuals_chart",
 ]

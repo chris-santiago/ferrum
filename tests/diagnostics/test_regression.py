@@ -103,3 +103,66 @@ def test_prediction_error_chart_from_source_builder():
     chart = _prediction_error_chart_from_source(source)
     svg = chart.show_svg()
     assert "<svg" in svg
+
+
+# --- Task 10: residuals_chart figure function + visualizers ----------------
+
+
+def test_residuals_chart_figure_function():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.residuals_chart(model, X, df["y"])
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_residuals_chart_accepts_existing_source():
+    source, _ = _ridge_source()
+    chart = ferrum.residuals_chart(source)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_residuals_visualizer_full_cycle():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    viz = ferrum.ResidualsVisualizer(model)
+    assert "unfit" in repr(viz)
+
+    viz.fit(X, df["y"])
+    assert "rmse=" in repr(viz)
+    assert "mae=" in repr(viz)
+    chart = viz.show()
+    assert "<svg" in chart.show_svg()
+
+
+def test_prediction_error_visualizer():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    viz = ferrum.PredictionErrorVisualizer(model).fit(X, df["y"])
+    chart = viz.show()
+    assert "<svg" in chart.show_svg()
+    assert "rmse=" in repr(viz)
+
+
+def test_cooks_distance_visualizer():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    viz = ferrum.CooksDistanceVisualizer(model).fit(X, df["y"])
+    chart = viz.show()
+    assert "<svg" in chart.show_svg()
+    assert "max_studentized=" in repr(viz)
+
+
+def test_visualizer_show_before_fit_errors():
+    import pytest
+    viz = ferrum.ResidualsVisualizer(model=None)
+    with pytest.raises(RuntimeError, match="must be fit"):
+        viz.show()
