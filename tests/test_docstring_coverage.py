@@ -14,7 +14,10 @@ import ferrum
 
 # Symbols required to have a non-empty __doc__. Grows commit-by-commit.
 # DO NOT add symbols here unless their docstrings have actually landed.
-_DOC_ALLOWLIST: set[str] = set()
+_DOC_ALLOWLIST: set[str] = {
+    # Task 2 — top-level Chart class
+    "Chart",
+}
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
 _NAMESPACE_EXEMPT: set[str] = {"themes", "encoding", "figure"}
