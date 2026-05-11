@@ -215,6 +215,7 @@ def pr_chart(
     y: Any = None,
     *,
     per_class: bool = True,
+    average: str | None = "macro",
     annotate_ap: bool = False,
     iso_lines: bool = False,
     compare: dict[str, Any] | None = None,
@@ -223,10 +224,11 @@ def pr_chart(
 ):
     """Precision-recall curve chart for a classifier.
 
-    Plots precision vs. recall, one curve per class. Both axes are
-    pinned to ``[0, 1.05]`` so curves render against the full
-    precision-recall space (same convention as sklearn and yellowbrick).
-    Supports multi-model comparison via ``compare=``.
+    Plots precision vs. recall, one curve per class (default) or a single
+    averaged curve. Both axes are pinned to ``[0, 1.05]`` so curves
+    render against the full precision-recall space (same convention as
+    sklearn and yellowbrick). Supports multi-model comparison via
+    ``compare=``.
 
     Parameters
     ----------
@@ -241,9 +243,15 @@ def pr_chart(
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
     per_class : bool, default True
-        Reserved for future use (no-op today). ``ModelSource.pr_curve()``
-        always returns per-class curves regardless of this flag; a
-        single-curve averaged path will be wired in Phase 10h.
+        When ``True``, one PR curve per class is drawn using the
+        one-vs-rest scheme. When ``False``, a single curve averaged per
+        ``average`` is drawn. Binary classifiers always render a single
+        curve regardless.
+    average : {"macro", "micro", "weighted"} or None, default "macro"
+        Averaging method used when ``per_class=False``. Ignored when
+        ``per_class=True``. Macro and weighted variants interpolate
+        per-class precision over a shared recall grid; micro ravels the
+        binarized labels into a single curve.
     annotate_ap : bool, default False
         When ``True``, injects one text label per class near the lower-
         right corner of the plot showing average precision (AP) to 3
@@ -264,7 +272,8 @@ def pr_chart(
     Returns
     -------
     Chart
-        Precision-recall curve chart with one line per class.
+        Precision-recall curve chart with one line per class (or an
+        averaged summary curve).
 
     Examples
     --------
@@ -279,6 +288,7 @@ def pr_chart(
     return _pr_chart_from_source(
         source,
         per_class=per_class,
+        average=average,
         annotate_ap=annotate_ap,
         iso_lines=iso_lines,
         theme=theme,

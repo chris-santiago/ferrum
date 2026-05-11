@@ -147,6 +147,15 @@ def test_golden_pr_chart_multiclass_annotate_ap_iso():
     _check_golden(chart.show_svg(), "pr_chart_multiclass_annotate_ap_iso")
 
 
+def test_golden_pr_chart_multiclass_macro_average():
+    """Multiclass PR chart with ``per_class=False`` — renders a single
+    macro-averaged summary curve instead of per-class one-vs-rest curves.
+    """
+    model, X, y = _multi_xy()
+    chart = ferrum.pr_chart(model, X, y, per_class=False)
+    _check_golden(chart.show_svg(), "pr_chart_multiclass_macro_average")
+
+
 def test_golden_pr_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.pr_chart(model, X, y)

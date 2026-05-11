@@ -305,11 +305,19 @@ def _pr_chart_from_source(
     source: Any,
     *,
     per_class: bool = True,
+    average: str | None = "macro",
     annotate_ap: bool = False,
     iso_lines: bool = False,
     theme: Any = None,
 ):
     """Build a precision-recall chart from a ModelSource.
+
+    When ``per_class=True`` (default) the chart shows one curve per class
+    via ``ModelSource.pr_curve(average=None)``. When ``per_class=False``
+    the chart shows a single summary curve averaged across classes
+    (``"macro"`` by default, configurable to ``"micro"`` or
+    ``"weighted"``). Binary classifiers ignore ``per_class`` because
+    ``pr_curve`` returns a single curve in either case.
 
     Pins both axes to ``[0, 1.05]`` (canonical sklearn / yellowbrick
     convention for PR diagrams) so curves render against the full
@@ -320,8 +328,7 @@ def _pr_chart_from_source(
     import ferrum
     from ferrum.encoding import X, Y
 
-    del per_class  # ModelSource.pr_curve() always returns per-class for now
-    df = source.pr_curve()
+    df = source.pr_curve(average=None if per_class else average)
     # Order matters: annotate first (so the per-class label rows live in
     # the original schema), then append iso-curve rows. `_inject_pr_iso_lines`
     # fills the new rows with nulls for every original column including the

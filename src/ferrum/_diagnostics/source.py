@@ -346,16 +346,28 @@ class ModelSource:
         """Precision-recall curve(s). One row per (class, threshold).
 
         For binary classifiers, returns a single curve on the positive
-        (second) class. For multiclass, returns one-vs-rest curves per
-        class. ``threshold`` is NaN at the final (recall=0) point per
-        sklearn's convention.
+        (second) class — ``average`` is accepted for API symmetry with
+        the multiclass path but has no effect because binary classifiers
+        have only one curve to draw. For multiclass:
+
+        - ``average=None`` (default) — returns one-vs-rest curves per
+          class.
+        - ``average in {"micro", "macro", "weighted"}`` — returns a
+          single summary curve with ``class="<average>"`` and no
+          per-class rows. Macro / weighted variants interpolate per-
+          class precision over a shared recall grid (100 points); micro
+          ravels the binarized labels into one curve. ``threshold`` is
+          NaN on every row of macro / weighted summaries (recall-grid
+          interpolation discards thresholds) and follows sklearn's
+          padding convention for micro.
+
+        ``threshold`` is NaN at the final (recall=0) point of every
+        per-class curve per sklearn's convention.
         """
-        if average is not None:
-            # The spec exposes `average` for API symmetry with roc_curve but
-            # multiclass averaged PR variants aren't part of Phase 10b.
-            raise NotImplementedError(
-                "ModelSource.pr_curve(average=...) lands in a later phase; "
-                "use average=None for per-class curves."
+        if average is not None and average not in ("micro", "macro", "weighted"):
+            raise ValueError(
+                f"pr_curve(average={average!r}) — expected one of "
+                "'micro', 'macro', 'weighted', or None."
             )
         key = self._cache_key("pr_curve", average=average)
         if key in self._cache:
@@ -382,6 +394,15 @@ class ModelSource:
                     "precision": float(pi), "recall": float(ri),
                     "threshold": float(ti), "class": classes[1], "ap": ap,
                 })
+        elif average in ("micro", "macro", "weighted"):
+            # Multiclass + average requested: return ONLY the summary curve.
+            # The user has explicitly opted into a single-curve view, so the
+            # per-class one-vs-rest rows would just be visual noise.
+            rows.extend(_compute_avg_pr(
+                y_true,
+                proba_df[proba_cols].to_numpy(),
+                classes, average,
+            ))
         else:
             for i, cls in enumerate(classes):
                 y_bin = (
@@ -1471,6 +1492,56 @@ def _coerce_class_label(label_str: str, target_dtype) -> object:
         except ValueError:
             return label_str
     return label_str
+
+
+def _compute_avg_pr(y_true, y_score_matrix, classes, average):
+    """Return micro/macro/weighted-averaged PR-curve rows.
+
+    Mirrors ``_compute_avg_roc`` for the precision-recall axes. ``micro``
+    ravels the binarized labels + score matrix and computes a single PR
+    curve via ``precision_recall_curve``. ``macro`` and ``weighted``
+    interpolate each per-class precision at a shared recall grid (100
+    points on ``[0, 1]``) and reduce with equal-weight (macro) or
+    support-weighted (weighted) means. ``threshold`` is reported as NaN
+    on every row of these summary curves — recall-grid interpolation
+    doesn't preserve thresholds.
+    """
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    from sklearn.preprocessing import label_binarize
+
+    coerced_classes = [_coerce_class_label(c, y_true.dtype) for c in classes]
+    y_bin = label_binarize(y_true, classes=coerced_classes)
+    if average == "micro":
+        p, r, thr = precision_recall_curve(y_bin.ravel(), y_score_matrix.ravel())
+        ap = float(average_precision_score(y_bin, y_score_matrix, average="micro"))
+        thresholds_padded = np.concatenate([thr, [float("nan")]])
+        return [
+            {"precision": float(pi), "recall": float(ri),
+             "threshold": float(ti), "class": "micro", "ap": ap}
+            for pi, ri, ti in zip(p, r, thresholds_padded)
+        ]
+    # macro / weighted: interpolate precision at a shared recall grid.
+    # sklearn's precision_recall_curve returns recall descending from 1
+    # to 0, so reverse before passing to np.interp (which requires
+    # monotonically increasing xp).
+    grid = np.linspace(0.0, 1.0, 100)
+    precisions = []
+    for i in range(y_bin.shape[1]):
+        p_i, r_i, _ = precision_recall_curve(y_bin[:, i], y_score_matrix[:, i])
+        order = np.argsort(r_i)
+        precisions.append(np.interp(grid, r_i[order], p_i[order]))
+    if average == "macro":
+        weights = np.ones(len(classes)) / len(classes)
+    else:  # weighted
+        total = max(int(y_bin.sum()), 1)
+        weights = y_bin.sum(axis=0) / total
+    precision_avg = (np.array(precisions).T * weights).sum(axis=1)
+    ap = float(average_precision_score(y_bin, y_score_matrix, average=average))
+    return [
+        {"precision": float(p), "recall": float(r),
+         "threshold": float("nan"), "class": average, "ap": ap}
+        for p, r in zip(precision_avg, grid)
+    ]
 
 
 def _compute_avg_roc(y_true, y_score_matrix, classes, average, drop_intermediate):

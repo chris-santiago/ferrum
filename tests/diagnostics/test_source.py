@@ -141,13 +141,37 @@ def test_pr_curve_multiclass():
     assert len(classes_seen) >= 3
 
 
-def test_pr_curve_average_raises():
+def test_pr_curve_multiclass_macro_average():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pr = source.pr_curve(average="macro")
+    # average=<single-curve mode>: ONLY the summary class appears.
+    classes_seen = set(pr["class"].unique().to_list())
+    assert classes_seen == {"macro"}
+    ap_values = pr["ap"].unique().to_list()
+    assert len(ap_values) == 1
+    assert 0.0 <= ap_values[0] <= 1.0
+
+
+def test_pr_curve_multiclass_micro_average():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pr = source.pr_curve(average="micro")
+    classes_seen = set(pr["class"].unique().to_list())
+    assert classes_seen == {"micro"}
+
+
+def test_pr_curve_bad_average_raises():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     source = ferrum.ModelSource(model, X, df["y"])
-    with pytest.raises(NotImplementedError):
-        source.pr_curve(average="macro")
+    with pytest.raises(ValueError, match="expected one of"):
+        source.pr_curve(average="not-a-real-mode")
 
 
 def test_roc_curve_caching():

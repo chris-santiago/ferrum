@@ -159,6 +159,28 @@ def test_pr_chart_figure_function(binary_source):
     assert "<svg" in svg
 
 
+def test_pr_chart_per_class_false_routes_to_macro(multi_source):
+    """``per_class=False`` should render a single averaged curve. The
+    routed DataFrame from ``ModelSource.pr_curve(average='macro')``
+    carries a single ``class='macro'`` value (no per-class rows), so the
+    chart contains exactly one line. Regression test for the silent-
+    discard bug fixed in the post-merge cleanup sweep.
+    """
+    chart = ferrum.pr_chart(multi_source, per_class=False)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # Verify the underlying DataFrame holds one summary class (the macro
+    # summary) rather than several per-class curves.
+    classes = set(chart._data["class"].unique().to_list())
+    assert classes == {"macro"}
+
+
+def test_pr_chart_per_class_false_micro(multi_source):
+    chart = ferrum.pr_chart(multi_source, per_class=False, average="micro")
+    classes = set(chart._data["class"].unique().to_list())
+    assert classes == {"micro"}
+
+
 def test_calibration_chart_figure_function(binary_source):
     svg = ferrum.calibration_chart(binary_source, n_bins=5).show_svg()
     assert "<svg" in svg
