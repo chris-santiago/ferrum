@@ -1115,6 +1115,92 @@ class Chart:
         new._position = position
         return new
 
+    def mark_shap_beeswarm(
+        self,
+        *,
+        max_display: int = 20,
+        color_bar: bool = True,
+        order: str = "abs_mean",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP beeswarm mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data from ``ModelSource.shap_values()`` pre-filtered
+        to the top ``max_display`` features by the chart builder.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_beeswarm", position)
+        from ferrum.marks.diagnostic import desugar_shap_beeswarm
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_beeswarm",
+            {
+                "max_display": max_display,
+                "color_bar": color_bar,
+                "order": order,
+                **mark_kwargs,
+            },
+            desugar_shap_beeswarm,
+        )
+        new._position = position
+        return new
+
+    def mark_shap_bar(
+        self,
+        *,
+        max_display: int = 20,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP aggregated-bar mark — see ferrum-spec.md §3.3."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_bar", position)
+        from ferrum.marks.diagnostic import desugar_shap_bar
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_bar",
+            {"max_display": max_display, **mark_kwargs},
+            desugar_shap_bar,
+        )
+        new._position = position
+        return new
+
+    def mark_shap_waterfall(
+        self,
+        *,
+        sample_idx: int = -1,
+        max_display: int = 20,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP waterfall mark — see ferrum-spec.md §3.3.
+
+        ``sample_idx`` is required; passing the default ``-1`` raises
+        ``TypeError`` at desugar time.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_waterfall", position)
+        from ferrum.marks.diagnostic import desugar_shap_waterfall
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_waterfall",
+            {
+                "sample_idx": sample_idx,
+                "max_display": max_display,
+                **mark_kwargs,
+            },
+            desugar_shap_waterfall,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

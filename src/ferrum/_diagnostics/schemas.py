@@ -85,3 +85,11 @@ SCHEMA_IMPORTANCES = pl.Schema({
     "rank": pl.Int64,
     # "model": pl.Utf8 (optional)
 })
+
+SCHEMA_SHAP_VALUES = pl.Schema({
+    "sample_id": pl.Int64,
+    "feature": pl.Utf8,
+    "shap_value": pl.Float64,
+    "feature_value": pl.Float64,
+    "feature_value_normalized": pl.Float64,
+})

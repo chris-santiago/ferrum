@@ -158,3 +158,117 @@ def test_feature_importances_visualizer_permutation():
     ).fit(X, df["y"])
     chart = viz.show()
     assert "<svg" in chart.show_svg()
+
+
+# --- ModelSource.shap_values() -----------------------------------------
+
+
+def _ridge_source():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    return ferrum.ModelSource(model, X, df["y"], random_state=0), X, df["y"]
+
+
+def test_shap_values_schema():
+    source, _X, _y = _ridge_source()
+    sv = source.shap_values()
+    assert set(sv.columns) == {
+        "sample_id", "feature", "shap_value",
+        "feature_value", "feature_value_normalized",
+    }
+    assert sv["feature"].n_unique() == 5
+    assert sv.height == sv["sample_id"].n_unique() * sv["feature"].n_unique()
+
+
+def test_shap_values_caches():
+    source, _, _ = _ridge_source()
+    a = source.shap_values()
+    b = source.shap_values()
+    # Cache returns the same DataFrame object (identity) — the second call
+    # must not recompute.
+    assert a is b
+
+
+# --- shap_chart figure dispatcher --------------------------------------
+
+
+def test_shap_chart_beeswarm():
+    source, _, _ = _ridge_source()
+    chart = ferrum.shap_chart(source, kind="beeswarm")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # 200 samples × 5 features = 1000 points.
+    assert svg.count("<circle ") == 1000
+
+
+def test_shap_chart_bar():
+    source, _, _ = _ridge_source()
+    chart = ferrum.shap_chart(source, kind="bar")
+    assert "<svg" in chart.show_svg()
+
+
+def test_shap_chart_waterfall():
+    source, _, _ = _ridge_source()
+    chart = ferrum.shap_chart(source, kind="waterfall", sample_idx=3)
+    assert "<svg" in chart.show_svg()
+
+
+def test_shap_chart_waterfall_requires_sample_idx():
+    source, _, _ = _ridge_source()
+    with pytest.raises(ValueError, match="sample_idx"):
+        ferrum.shap_chart(source, kind="waterfall")
+
+
+def test_shap_chart_waterfall_bad_sample_idx():
+    source, _, _ = _ridge_source()
+    with pytest.raises(ValueError, match="not found"):
+        ferrum.shap_chart(source, kind="waterfall", sample_idx=999_999)
+
+
+def test_shap_chart_invalid_kind():
+    source, _, _ = _ridge_source()
+    with pytest.raises(ValueError, match="kind="):
+        ferrum.shap_chart(source, kind="violinplot")
+
+
+def test_mark_shap_waterfall_requires_sample_idx():
+    """The desugar guards against the -1 sentinel — calling
+    mark_shap_waterfall without sample_idx raises TypeError."""
+    df = pl.DataFrame({
+        "feature": ["a"], "x0": [0.0], "x1": [1.0], "shap_sign": ["positive"],
+    })
+    with pytest.raises(TypeError, match="sample_idx"):
+        ferrum.Chart(df).mark_shap_waterfall().show_svg()
+
+
+# --- SHAPVisualizer -----------------------------------------------------
+
+
+def test_shap_visualizer_beeswarm_default():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    viz = ferrum.SHAPVisualizer(model).fit(X, df["y"])
+    assert "top_abs_shap" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_shap_visualizer_waterfall_requires_sample_idx():
+    """fit() raises immediately when kind='waterfall' but sample_idx wasn't
+    provided — chart building happens inside fit()."""
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    viz = ferrum.SHAPVisualizer(model, kind="waterfall")
+    with pytest.raises(ValueError, match="sample_idx"):
+        viz.fit(X, df["y"])
+
+
+def test_shap_visualizer_invalid_kind():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    viz = ferrum.SHAPVisualizer(model, kind="not_a_kind")
+    with pytest.raises(ValueError, match="kind="):
+        viz.fit(X, df["y"])

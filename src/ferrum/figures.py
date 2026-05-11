@@ -271,6 +271,66 @@ def importance_chart(
     )
 
 
+def shap_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    kind: str = "beeswarm",
+    max_display: int = 20,
+    sample_idx: int | None = None,
+    order: str = "abs_mean",
+    background: Any = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """SHAP value chart dispatcher — see ferrum-spec.md §3.14.
+
+    ``kind="beeswarm"`` (default) renders one point per (sample, feature)
+    with shap_value on x and feature on ordinal y, colored by z-scored
+    feature value. ``kind="bar"`` aggregates mean(|shap|) per feature.
+    ``kind="waterfall"`` requires ``sample_idx`` and renders cumulative
+    per-feature contributions for that one sample.
+    """
+    from ferrum._diagnostics.charts import (
+        _shap_bar_chart_from_source,
+        _shap_beeswarm_chart_from_source,
+        _shap_waterfall_chart_from_source,
+    )
+
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    if kind == "beeswarm":
+        return _shap_beeswarm_chart_from_source(
+            source,
+            max_display=max_display,
+            order=order,
+            background=background,
+            theme=theme,
+        )
+    if kind == "bar":
+        return _shap_bar_chart_from_source(
+            source,
+            max_display=max_display,
+            background=background,
+            theme=theme,
+        )
+    if kind == "waterfall":
+        if sample_idx is None:
+            raise ValueError(
+                "shap_chart(kind='waterfall') requires sample_idx=<int>."
+            )
+        return _shap_waterfall_chart_from_source(
+            source,
+            sample_idx=sample_idx,
+            max_display=max_display,
+            background=background,
+            theme=theme,
+        )
+    raise ValueError(
+        f"shap_chart(kind={kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'."
+    )
+
+
 def discrimination_threshold_chart(
     model_or_source: Any,
     X: Any = None,

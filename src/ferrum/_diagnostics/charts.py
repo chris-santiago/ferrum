@@ -379,6 +379,126 @@ def _importance_chart_from_source(
     return chart
 
 
+# ---------------------------------------------------------------------------
+# 10d builders — SHAP family
+# ---------------------------------------------------------------------------
+
+
+def _shap_order_features(
+    sv: pl.DataFrame, *, order: str, max_display: int,
+) -> list[str]:
+    """Return the top-`max_display` feature names ordered by `order`."""
+    expr = pl.col("shap_value").abs()
+    agg = expr.mean() if order == "abs_mean" else expr.max()
+    ranked = (
+        sv.group_by("feature")
+        .agg(agg.alias("score"))
+        .sort("score", descending=True)
+        .head(max_display)
+    )
+    return ranked["feature"].to_list()
+
+
+def _shap_beeswarm_chart_from_source(
+    source: Any,
+    *,
+    max_display: int = 20,
+    order: str = "abs_mean",
+    background: Any = None,
+    theme: Any = None,
+):
+    """Beeswarm chart: per-sample shap values colored by feature value."""
+    import ferrum
+
+    sv = source.shap_values(background=background)
+    keep = _shap_order_features(sv, order=order, max_display=max_display)
+    plot_df = sv.filter(pl.col("feature").is_in(keep))
+
+    x_min = float(plot_df["shap_value"].min())
+    x_max = float(plot_df["shap_value"].max())
+    pad = max(abs(x_min), abs(x_max)) * 0.05 if (x_min < x_max) else 1.0
+    domain = (x_min - pad, x_max + pad)
+
+    chart = ferrum.Chart(plot_df).mark_shap_beeswarm(
+        max_display=max_display, order=order, x_scale_domain=domain,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _shap_bar_chart_from_source(
+    source: Any,
+    *,
+    max_display: int = 20,
+    background: Any = None,
+    theme: Any = None,
+):
+    """SHAP aggregated bar chart: mean(|shap_value|) per feature."""
+    import ferrum
+
+    sv = source.shap_values(background=background)
+    agg = (
+        sv.group_by("feature")
+        .agg(pl.col("shap_value").abs().mean().alias("abs_mean_shap"))
+        .sort("abs_mean_shap", descending=True)
+        .head(max_display)
+    )
+    x_max = float(agg["abs_mean_shap"].max())
+    domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
+    chart = ferrum.Chart(agg).mark_shap_bar(
+        max_display=max_display, x_scale_domain=domain,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _shap_waterfall_chart_from_source(
+    source: Any,
+    *,
+    sample_idx: int,
+    max_display: int = 20,
+    background: Any = None,
+    theme: Any = None,
+):
+    """Waterfall chart for a single sample's SHAP contributions."""
+    import ferrum
+    import numpy as np
+
+    sv = source.shap_values(background=background)
+    one = sv.filter(pl.col("sample_id") == sample_idx)
+    if one.height == 0:
+        raise ValueError(
+            f"shap_waterfall: sample_idx={sample_idx} not found in shap output "
+            f"(have {sv['sample_id'].n_unique()} samples)."
+        )
+    # Order by descending |shap| and trim.
+    ordered = one.sort(pl.col("shap_value").abs(), descending=True).head(max_display)
+    sv_arr = ordered["shap_value"].to_numpy()
+    cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
+    plot_df = ordered.with_columns([
+        pl.Series("x0", cum[:-1]),
+        pl.Series("x1", cum[1:]),
+        pl.when(pl.col("shap_value") >= 0)
+        .then(pl.lit("positive"))
+        .otherwise(pl.lit("negative"))
+        .alias("shap_sign"),
+    ])
+
+    x_lo = float(min(cum.min(), 0.0))
+    x_hi = float(max(cum.max(), 0.0))
+    pad = max(abs(x_lo), abs(x_hi)) * 0.05 if (x_lo < x_hi) else 1.0
+    domain = (x_lo - pad, x_hi + pad)
+
+    chart = ferrum.Chart(plot_df).mark_shap_waterfall(
+        sample_idx=sample_idx, max_display=max_display, x_scale_domain=domain,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,

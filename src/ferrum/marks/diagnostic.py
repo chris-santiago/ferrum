@@ -410,6 +410,133 @@ def desugar_importance(
     return ("__layered__", [], None, None, layers)
 
 
+def desugar_shap_beeswarm(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    max_display: int = 20,
+    color_bar: bool = True,
+    order: str = "abs_mean",
+    x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """SHAP beeswarm mark: categorical scatter of per-sample shap values.
+
+    Data contract: ``feature`` (Utf8), ``shap_value`` (Float64),
+    ``feature_value_normalized`` (Float64) as emitted by
+    ``ModelSource.shap_values()`` and pre-filtered by the chart builder
+    to the top ``max_display`` features.
+
+    Renders one point per (sample, feature) cell with feature on the
+    ordinal y-axis, shap_value on the quantitative x-axis, and the
+    z-scored feature value on the continuous color scale. Vertical
+    spread within each feature band uses the Phase 10d-pre Jitter
+    ordinal-axis path; ``width=0.6`` keeps the band well-contained.
+
+    ``color_bar`` and ``order`` are informational at the mark layer —
+    the chart builder is responsible for any reordering / aggregation
+    before constructing the chart.
+    """
+    del x_field, y_field, max_display, color_bar, order
+
+    def _x_channel(field: str) -> Any:
+        if x_scale_domain is None:
+            return field
+        from ferrum.encoding import X
+
+        return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+
+    from ferrum.position import Jitter
+
+    layers: list[dict] = [
+        {
+            "mark": "point",
+            "encoding": {
+                "x": _x_channel("shap_value"),
+                "y": "feature",
+                "color": "feature_value_normalized",
+            },
+            "position": Jitter(axis="y", width=0.6, seed=42),
+        },
+    ]
+    return ("__layered__", [], None, None, layers)
+
+
+def desugar_shap_bar(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    max_display: int = 20,
+    x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Aggregated-SHAP bar mark: mean(|shap_value|) per feature.
+
+    Data contract: ``feature`` (Utf8), ``abs_mean_shap`` (Float64) — the
+    chart builder aggregates ``ModelSource.shap_values()`` and selects
+    the top ``max_display`` features.
+    """
+    del x_field, y_field, max_display
+
+    def _x_channel(field: str) -> Any:
+        if x_scale_domain is None:
+            return field
+        from ferrum.encoding import X
+
+        return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+
+    return ("__layered__", [], None, None, [
+        {
+            "mark": "bar",
+            "encoding": {"x": _x_channel("abs_mean_shap"), "y": "feature"},
+        },
+    ])
+
+
+def desugar_shap_waterfall(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    sample_idx: int = -1,
+    max_display: int = 20,
+    x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """SHAP waterfall mark: per-feature contribution segments for one sample.
+
+    Data contract: ``feature`` (Utf8), ``x0`` (cumulative start),
+    ``x1`` (cumulative end), ``shap_sign`` (Utf8: 'positive'|'negative')
+    pre-computed by the chart builder. Renders a horizontal-ranged bar
+    per feature via the Phase 10d-pre quantitative-x + x2 + ordinal-y
+    bar path.
+    """
+    del x_field, y_field, max_display
+    if sample_idx < 0:
+        raise TypeError(
+            "mark_shap_waterfall(sample_idx=...) is required. Pass an "
+            "explicit non-negative sample index."
+        )
+
+    def _x_channel(field: str) -> Any:
+        if x_scale_domain is None:
+            return field
+        from ferrum.encoding import X
+
+        return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+
+    return ("__layered__", [], None, None, [
+        {
+            "mark": "bar",
+            "encoding": {
+                "x": _x_channel("x0"),
+                "x2": "x1",
+                "y": "feature",
+                "color": "shap_sign",
+            },
+        },
+    ])
+
+
 def desugar_class_prediction_error(
     x_field: str | None,
     y_field: str | None,

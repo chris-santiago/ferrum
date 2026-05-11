@@ -11,7 +11,7 @@ from typing import Any, Sequence
 import numpy as np
 import polars as pl
 
-from .deps import require_sklearn
+from .deps import require_shap, require_sklearn
 from .stats import studentized_residual
 
 
@@ -702,6 +702,82 @@ class ModelSource:
                 "rank": int(r),
             }
             for r, i in enumerate(order, start=1)
+        ]
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
+    def shap_values(
+        self,
+        *,
+        background: Any = None,
+        max_evals: int = 500,
+    ) -> pl.DataFrame:
+        """Long-form SHAP values per (sample, feature).
+
+        Returns a DataFrame with ``sample_id``, ``feature``, ``shap_value``,
+        ``feature_value``, ``feature_value_normalized``. The explainer is
+        auto-picked by model capability:
+
+        - ``coef_``: ``shap.LinearExplainer`` (deterministic, fast).
+        - ``feature_importances_``: ``shap.TreeExplainer`` (deterministic
+          for tree ensembles).
+        - otherwise: ``shap.KernelExplainer`` (model-agnostic; uses the
+          first ``min(50, N)`` rows of X as the background unless an
+          explicit ``background`` array is passed).
+
+        For multi-class classifiers the underlying ``shap_values`` returns
+        a list of arrays — Phase 10d uses class 1 for binary and class 0
+        otherwise. Multi-class SHAP overlay is a Phase 10h follow-up.
+        """
+        key = self._cache_key(
+            "shap_values",
+            background=str(background)[:64],
+            max_evals=max_evals,
+        )
+        if key in self._cache:
+            return self._cache[key]
+        shap = require_shap("shap_values")
+
+        X_np = self._X.to_numpy()
+        if "coef_" in self._capabilities:
+            explainer = shap.LinearExplainer(self._model, X_np)
+        elif "feature_importances_" in self._capabilities:
+            explainer = shap.TreeExplainer(self._model)
+        else:
+            bg = (
+                background
+                if background is not None
+                else X_np[: min(50, len(X_np))]
+            )
+            explainer = shap.KernelExplainer(self._model.predict, bg)
+
+        sv = explainer.shap_values(X_np)
+        if isinstance(sv, list):
+            sv = sv[1] if len(sv) == 2 else sv[0]
+        sv = np.asarray(sv, dtype=np.float64)
+        # Some shap versions return a 3D array (n_samples, n_features, n_classes)
+        # for multi-class TreeExplainer; collapse to the positive-class slice.
+        if sv.ndim == 3:
+            sv = sv[..., 1] if sv.shape[2] == 2 else sv[..., 0]
+
+        f_mean = X_np.mean(axis=0)
+        f_std_raw = X_np.std(axis=0)
+        f_std = np.where(f_std_raw > 0, f_std_raw, 1.0)
+        f_norm = (X_np - f_mean) / f_std
+
+        n_samples = X_np.shape[0]
+        n_features = len(self._feature_names)
+        rows: list[dict] = [
+            {
+                "sample_id": int(s),
+                "feature": str(self._feature_names[f]),
+                "shap_value": float(sv[s, f]),
+                "feature_value": float(X_np[s, f]),
+                "feature_value_normalized": float(f_norm[s, f]),
+            }
+            for s in range(n_samples)
+            for f in range(n_features)
         ]
         df = pl.DataFrame(rows)
         self._cache[key] = df

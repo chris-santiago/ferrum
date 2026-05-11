@@ -76,6 +76,7 @@ from ferrum._diagnostics.visualizers import (
     PredictionErrorVisualizer,
     ResidualsVisualizer,
     ROCVisualizer,
+    SHAPVisualizer,
 )
 from ferrum.figures import (
     residuals_chart,
@@ -88,6 +89,7 @@ from ferrum.figures import (
     confusion_matrix_chart,
     class_prediction_error_chart,
     importance_chart,
+    shap_chart,
 )
 
 # Phase 9e — figure-level convenience functions
@@ -145,10 +147,10 @@ __all__ = [
     "DiscriminationThresholdVisualizer",
     "ConfusionMatrixVisualizer", "ClassificationReportVisualizer",
     "ClassPredictionErrorVisualizer", "ClassBalanceVisualizer",
-    "FeatureImportancesVisualizer",
+    "FeatureImportancesVisualizer", "SHAPVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
     "confusion_matrix_chart", "class_prediction_error_chart",
-    "importance_chart",
+    "importance_chart", "shap_chart",
 ]

@@ -171,3 +171,30 @@ def test_golden_importance_chart_permutation():
         model, X, y, method="permutation", random_state=0,
     )
     _check_golden(chart.show_svg(), "importance_chart_permutation")
+
+
+def _ridge_xy():
+    """Ridge regressor for SHAP goldens — LinearExplainer is deterministic
+    across runs and platforms."""
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    return model, X, df["y"]
+
+
+def test_golden_shap_chart_beeswarm():
+    model, X, _y = _ridge_xy()
+    chart = ferrum.shap_chart(model, X, kind="beeswarm")
+    _check_golden(chart.show_svg(), "shap_chart_beeswarm")
+
+
+def test_golden_shap_chart_bar():
+    model, X, _y = _ridge_xy()
+    chart = ferrum.shap_chart(model, X, kind="bar")
+    _check_golden(chart.show_svg(), "shap_chart_bar")
+
+
+def test_golden_shap_chart_waterfall():
+    model, X, _y = _ridge_xy()
+    chart = ferrum.shap_chart(model, X, kind="waterfall", sample_idx=3)
+    _check_golden(chart.show_svg(), "shap_chart_waterfall_sample3")
