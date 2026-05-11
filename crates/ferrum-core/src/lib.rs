@@ -6,6 +6,7 @@ mod scale;
 pub(crate) mod transform;
 pub(crate) mod layout;
 pub(crate) mod render;
+pub(crate) mod diagnostics;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -52,5 +53,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
+    // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
+    m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     Ok(())
 }
