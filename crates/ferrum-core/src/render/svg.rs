@@ -105,6 +105,39 @@ impl SvgBuffer {
         self.buf.push_str("/>");
     }
 
+    /// Emit a `<line>` for gridline use — accepts dash + opacity inline so
+    /// theme-driven grid styling can flow without extending the shared
+    /// `Stroke` struct (which would touch every mark call site).
+    /// Attribute order matches `line` (x1, y1, x2, y2, stroke, stroke-width,
+    /// stroke-dasharray, stroke-opacity) for SVG-diff stability.
+    pub fn gridline(
+        &mut self,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        color: Color,
+        width: f64,
+        dash: Option<&[f64]>,
+        opacity: f64,
+    ) {
+        self.buf.push_str("<line");
+        push_attr(&mut self.buf, "x1", &fmt_f(x1));
+        push_attr(&mut self.buf, "y1", &fmt_f(y1));
+        push_attr(&mut self.buf, "x2", &fmt_f(x2));
+        push_attr(&mut self.buf, "y2", &fmt_f(y2));
+        push_attr(&mut self.buf, "stroke", &fmt_svg(color));
+        push_attr(&mut self.buf, "stroke-width", &fmt_f(width));
+        if let Some(d) = dash {
+            let v: Vec<String> = d.iter().map(|x| fmt_f(*x)).collect();
+            push_attr(&mut self.buf, "stroke-dasharray", &v.join(","));
+        }
+        if opacity < 1.0 {
+            push_attr(&mut self.buf, "stroke-opacity", &fmt_f(opacity));
+        }
+        self.buf.push_str("/>");
+    }
+
     pub fn path(&mut self, d: &str, style: &FillStroke) {
         self.buf.push_str("<path");
         push_attr(&mut self.buf, "d", &escape_attr(d));

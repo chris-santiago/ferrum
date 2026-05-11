@@ -1,6 +1,6 @@
 //! Internal: draw axis line, ticks, tick labels, and axis title from an AxisLayout.
 
-use crate::layout::{AxisLayout, AxisOrient, TextAnchor, ThemeInputs};
+use crate::layout::{AxisLayout, AxisOrient, Rect, TextAnchor, ThemeInputs};
 use crate::render::svg::{Stroke, SvgBuffer, TextStyle};
 
 pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
@@ -71,6 +71,73 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
             },
         };
         out.text(t.anchor_x, t.anchor_y, &t.text, &title_style);
+    }
+}
+
+/// Draw the gridlines for a panel — vertical lines from x-axis tick positions
+/// spanning the plot height, horizontal lines from y-axis tick positions
+/// spanning the plot width. Called once per panel from the renderer's panel
+/// loop *before* `axis::draw` so the axis line + ticks render on top.
+///
+/// Skips any gridline whose position coincides with an axis baseline (within
+/// 0.5 px) to avoid a double-strokes at the plot edge. Returns early when
+/// `theme.grid` is false.
+pub fn draw_grid(
+    plot: Rect,
+    x_axis: Option<&AxisLayout>,
+    y_axis: Option<&AxisLayout>,
+    theme: &ThemeInputs,
+    out: &mut SvgBuffer,
+) {
+    if !theme.grid {
+        return;
+    }
+    let color = theme.grid_color;
+    let width = theme.grid_width;
+    let dash: Option<&[f64]> = theme.grid_dash.as_deref();
+    let opacity = theme.grid_opacity;
+
+    // y-axis baseline x-coord — vertical gridlines coinciding with it are skipped.
+    let y_baseline_x = y_axis.map(|a| a.axis_line.x).unwrap_or(plot.x);
+    // x-axis baseline y-coord — horizontal gridlines coinciding with it are skipped.
+    let x_baseline_y = x_axis
+        .map(|a| a.axis_line.y)
+        .unwrap_or(plot.y + plot.h);
+
+    if let Some(ax) = x_axis {
+        for tick in &ax.ticks {
+            if (tick.position - y_baseline_x).abs() < 0.5 {
+                continue;
+            }
+            out.gridline(
+                tick.position,
+                plot.y,
+                tick.position,
+                plot.y + plot.h,
+                color,
+                width,
+                dash,
+                opacity,
+            );
+        }
+    }
+
+    if let Some(ay) = y_axis {
+        for tick in &ay.ticks {
+            if (tick.position - x_baseline_y).abs() < 0.5 {
+                continue;
+            }
+            out.gridline(
+                plot.x,
+                tick.position,
+                plot.x + plot.w,
+                tick.position,
+                color,
+                width,
+                dash,
+                opacity,
+            );
+        }
     }
 }
 

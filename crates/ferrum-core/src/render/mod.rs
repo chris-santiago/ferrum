@@ -219,7 +219,28 @@ pub fn render_svg(
             continue;
         }
 
-        for axis in layout.axes.iter().filter(|a| a.panel_index == panel_idx) {
+        // Per-panel axes: collect first so we can hand both x and y to
+        // draw_grid before the axis lines themselves render.
+        let panel_axes: Vec<&crate::layout::AxisLayout> = layout
+            .axes
+            .iter()
+            .filter(|a| a.panel_index == panel_idx)
+            .collect();
+        let panel_x_axis = panel_axes
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
+        let panel_y_axis = panel_axes
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
+
+        // Gridlines render below axis lines + marks so they sit behind both.
+        marks::axis::draw_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, &mut out);
+
+        for axis in &panel_axes {
             marks::axis::draw(axis, theme, &mut out);
         }
 
