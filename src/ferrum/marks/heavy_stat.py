@@ -22,7 +22,6 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = False,
     cmap: str = "viridis",
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
@@ -48,7 +47,6 @@ def desugar_violin(
     *,
     bandwidth: str | float = "scott",
     inner: Optional[str] = "box",
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_violin() requires .encode(x=..., y=...)")
@@ -89,7 +87,6 @@ def desugar_qq(
     distribution: str = "normal",
     dequantize: bool = False,
     line: bool = True,
-    **mark_kwargs: Any,
 ) -> tuple:
     if distribution not in ("normal", "uniform", "exponential"):
         raise ValueError(
@@ -118,7 +115,6 @@ def desugar_raster(
     blend: str = "alpha",
     min_count: Optional[int] = None,
     log_scale: bool = False,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
@@ -151,7 +147,6 @@ def desugar_hex(
     cmap: str = "viridis",
     stroke: Optional[str] = None,
     stroke_width: float = 0,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
@@ -182,7 +177,6 @@ def desugar_swarm(
     spacing: float = 1.0,
     side: str = "both",
     dodge: Optional[str] = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
@@ -194,11 +188,28 @@ def desugar_swarm(
     val = y_field if orient == "vertical" else x_field
     transforms = [Swarm(category=cat, value=val, point_size=float(size), spacing=spacing, side=side,
                         name="swarm")]
-    layers = [{
-        "mark": "point",
-        "encoding": {"x": "swarm_x", "y": "swarm_y"},
-        "data_source": "swarm",
-    }]
+    if orient == "vertical":
+        # Encode the chart's original category & value fields so the ordinal x
+        # axis renders properly with the category labels. The Swarm transform
+        # also emits a `__pos_x_offset__` column (pixel offset on the cross axis)
+        # which the renderer's standard position-offset path applies on top of
+        # the category band center — same mechanism Dodge uses (Phase 9c).
+        layers = [{
+            "mark": "point",
+            "encoding": {"x": cat, "y": val},
+            "data_source": "swarm",
+        }]
+    else:
+        # TODO(phase-10g+): horizontal-orient swarm still uses the legacy
+        # value-axis-data-unit encoding. Fixing it requires either threading
+        # orient through the Rust transform so it emits __pos_y_offset__ instead,
+        # or adding a column-rename step in the Python pipeline. Lightly tested
+        # path; smoke render still produces an SVG.
+        layers = [{
+            "mark": "point",
+            "encoding": {"x": "swarm_x", "y": "swarm_y"},
+            "data_source": "swarm",
+        }]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -209,7 +220,6 @@ def desugar_function(
     domain: Optional[tuple] = None,
     n: int = 200,
     clip: bool = True,
-    **mark_kwargs: Any,
 ) -> tuple:
     """The only desugar that materializes a synthetic Arrow table."""
     import numpy as np

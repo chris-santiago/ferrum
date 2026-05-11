@@ -58,20 +58,47 @@ impl LayerPrepared {
         spec: &crate::spec::chart::ChartSpec,
         layer: &crate::spec::layer::Layer,
     ) -> Self {
+        // Phase 10f: when a layer encoding references the same field as the
+        // chart-level encoding but has no scale of its own, merge the
+        // chart-level scale spec into the layer. Keeps the per-layer field
+        // (the drawer reads from there) while letting the chart-level
+        // scale-resolution receive the user's explicit domain / range
+        // override (intercluster_distance padding, future bubble-chart
+        // size ranges, etc). Layer-supplied scales win on conflict so
+        // explicit per-layer overrides still apply.
+        fn merge_scale(
+            layer_enc: &mut Option<crate::spec::encoding::EncodingSpec>,
+            chart_enc: &Option<crate::spec::encoding::EncodingSpec>,
+        ) {
+            let (Some(le), Some(ce)) = (layer_enc.as_mut(), chart_enc.as_ref())
+            else { return };
+            if le.field == ce.field && le.scale.is_none() && ce.scale.is_some() {
+                le.scale = ce.scale.clone();
+            }
+        }
+
         let mut encoding = layer.encoding.clone();
         // Inherit chart-level encoding when layer encoding fields are unset.
         if encoding.x.is_none() {
             encoding.x = spec.encoding.x.clone();
+        } else {
+            merge_scale(&mut encoding.x, &spec.encoding.x);
         }
         if encoding.y.is_none() {
             encoding.y = spec.encoding.y.clone();
+        } else {
+            merge_scale(&mut encoding.y, &spec.encoding.y);
         }
         if encoding.color.is_none() {
             encoding.color = spec.encoding.color.clone();
+        } else {
+            merge_scale(&mut encoding.color, &spec.encoding.color);
         }
         // Also inherit size/shape/opacity (Phase 8a channels) if present
         if encoding.size.is_none() {
             encoding.size = spec.encoding.size.clone();
+        } else {
+            merge_scale(&mut encoding.size, &spec.encoding.size);
         }
         if encoding.shape.is_none() {
             encoding.shape = spec.encoding.shape.clone();
@@ -224,6 +251,11 @@ pub fn prepare_render_inputs(
                     let tmp = lp.encoding.x.take();
                     lp.encoding.x = lp.encoding.y.take();
                     lp.encoding.y = tmp;
+                    // Phase 10c-pre: x2/y2 must swap together with x/y so paired
+                    // endpoints (segment, ribbon) remain self-consistent under flip.
+                    let tmp2 = lp.encoding.x2.take();
+                    lp.encoding.x2 = lp.encoding.y2.take();
+                    lp.encoding.y2 = tmp2;
                     lp
                 })
                 .collect()
@@ -272,10 +304,33 @@ pub fn prepare_render_inputs(
         &crate::layout::ThemeInputs::default(),
     )?;
 
-    let x_field = rendering_encoding.x.as_ref().map(|e| e.field.clone());
-    let y_field = rendering_encoding.y.as_ref().map(|e| e.field.clone());
+    // Axis title: prefer an explicit `encoding.title` over the field name when
+    // set, so layered diagnostic charts whose layer-0 encoding references a
+    // column with a non-semantic name (e.g. "lower" / "lower_whisker" /
+    // "param_value") can override the displayed axis label without renaming
+    // the underlying data column. Falls back to the field name when no
+    // explicit title is set — preserves byte-equality of all existing
+    // single-layer goldens (none of which set encoding.title).
+    let x_field = rendering_encoding
+        .x
+        .as_ref()
+        .map(|e| e.title.clone().unwrap_or_else(|| e.field.clone()));
+    let y_field = rendering_encoding
+        .y
+        .as_ref()
+        .map(|e| e.title.clone().unwrap_or_else(|| e.field.clone()));
     let x_tick_labels = provisional_scales.x.tick_labels(10);
-    let y_tick_labels = provisional_scales.y.tick_labels(10);
+    // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
+    // places the first label at the TOP of the panel, which is the correct
+    // top-down convention for ordinal y (heatmaps, confusion matrices) but
+    // INVERTS quantitative/temporal labels relative to the data placement
+    // (scale_resolve.rs inverts the pixel range for non-ordinal y so high
+    // data → top pixel). Reverse the tick labels here for non-ordinal y so
+    // the axis labels and data points share the same orientation.
+    let mut y_tick_labels = provisional_scales.y.tick_labels(10);
+    if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
+        y_tick_labels.reverse();
+    }
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,

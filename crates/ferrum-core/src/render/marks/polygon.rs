@@ -26,9 +26,21 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         (Some(a), Some(b)) => (a, b),
         _ => return,
     };
-    let xs = match col_as_f64(ctx.batch, xf) {
-        Ok(v) => v,
-        Err(_) => return,
+    // Pre-resolve per-row x pixel positions so the ring loop is dtype-agnostic.
+    // Handles both numeric x (continuous scales) and ordinal-category x (the
+    // mark_violin path: polygon vertices live at category band centers, with
+    // `__pos_x_offset__` providing the per-vertex horizontal spread emitted by
+    // the violin transform).
+    let xpx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, xf) {
+        v.into_iter()
+            .map(|opt| opt.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
+            .collect()
+    } else if let Ok(v) = col_as_str(ctx.batch, xf) {
+        v.into_iter()
+            .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+            .collect()
+    } else {
+        return;
     };
     let ys = match col_as_f64(ctx.batch, yf) {
         Ok(v) => v,
@@ -59,13 +71,13 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 }
             } else {
                 // Unknown dtype: fall back to a single group containing all rows.
-                g.insert(0, (0..xs.len()).collect());
+                g.insert(0, (0..xpx.len()).collect());
             }
             g
         }
         None => {
             let mut g = BTreeMap::new();
-            g.insert(0, (0..xs.len()).collect());
+            g.insert(0, (0..xpx.len()).collect());
             g
         }
     };
@@ -127,12 +139,11 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let ring: Vec<(f64, f64)> = indices
             .iter()
             .filter_map(|&i| {
-                let xv = xs[i]?;
+                let cx = xpx.get(i).copied().flatten()?;
                 let yv = ys[i]?;
-                if !xv.is_finite() || !yv.is_finite() {
+                if !yv.is_finite() {
                     return None;
                 }
-                let cx = ctx.scales.x.to_pixel_f64(xv)?;
                 let cy = ctx.scales.y.to_pixel_f64(yv)?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);

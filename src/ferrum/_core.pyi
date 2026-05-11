@@ -1,4 +1,4 @@
-from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union
 
 DataTypeStr = Literal[
     "Q", "N", "O", "T",
@@ -554,3 +554,17 @@ class ContinuousScheme:
     def __repr__(self) -> str: ...
 
 def Gradient(stops: list[tuple[float, str]]) -> ContinuousScheme: ...
+
+
+# ---------- Diagnostics (Phase 10g Task 35) ----------
+
+class _KendallResult(TypedDict):
+    tau: float
+    n_concordant: int
+    n_discordant: int
+    n_tied_x: int
+    n_tied_y: int
+    n_tied_both: int
+
+
+def kendall_tau_b(x: Sequence[float], y: Sequence[float]) -> _KendallResult: ...

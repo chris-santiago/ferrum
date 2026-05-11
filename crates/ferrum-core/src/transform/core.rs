@@ -113,6 +113,7 @@ impl TransformSpec {
         match self {
             Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
             Self::Swarm(s) => crate::transform::swarm::apply_with_context(s, batch, ctx),
+            Self::Violin(s) => crate::transform::violin::apply_with_context(s, batch, ctx),
             Self::Reorder(s) =>
                 crate::transform::reorder::apply_with_outputs(s, batch, Some(&ctx.named_outputs)),
             _ => self.apply(batch),

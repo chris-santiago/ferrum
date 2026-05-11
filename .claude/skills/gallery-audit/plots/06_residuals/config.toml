@@ -1,0 +1,7 @@
+plot_type = "Residuals vs fitted"
+dataset = "load_diabetes (regression), LinearRegression, 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "sklearn", "seaborn", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.residuals_chart available; also seaborn.residplot for EDA-style reference"

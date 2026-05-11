@@ -1,0 +1,7 @@
+plot_type = "ROC curve"
+dataset = "sklearn.datasets.load_breast_cancer (binary), LogisticRegression(C=1.0), 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "sklearn", "yellowbrick", "skp"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.roc_chart implemented as of Phase 10b; annotate_auc reserved for 10h"

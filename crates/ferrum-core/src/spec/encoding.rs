@@ -437,6 +437,11 @@ pub struct Encoding {
     pub x2: Option<EncodingSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y2: Option<EncodingSpec>,
+    // Phase 10c: text channel for mark_text label content. When set, mark_text
+    // reads this column for the rendered label; otherwise it falls back to
+    // formatting the y value (legacy Phase 7 behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<EncodingSpec>,
 }
 
 #[cfg(test)]

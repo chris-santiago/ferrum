@@ -241,11 +241,25 @@ pub fn render_svg(
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
 
-        // Build a rendering spec for scale resolution that uses the first layer's
-        // encoding (which accounts for CoordFlip and chart-level inheritance).
-        // For single-layer non-flipped specs this is structurally identical to spec.
+        // Build a rendering spec for scale resolution. Start from the
+        // chart-level encoding (so chart-level scale/title/etc. flow into
+        // every layer) and overlay the first layer's encoding per-channel
+        // (so CoordFlip and any layer-specific encoding wins for axes the
+        // layer overrides). For single-layer non-flipped specs this is
+        // structurally identical to `spec`, since layer-0.encoding == spec.encoding.
+        let mut merged_encoding = spec.encoding.clone();
+        let layer0_enc = &prep.layers[0].encoding;
+        if layer0_enc.x.is_some()       { merged_encoding.x       = layer0_enc.x.clone(); }
+        if layer0_enc.y.is_some()       { merged_encoding.y       = layer0_enc.y.clone(); }
+        if layer0_enc.color.is_some()   { merged_encoding.color   = layer0_enc.color.clone(); }
+        if layer0_enc.size.is_some()    { merged_encoding.size    = layer0_enc.size.clone(); }
+        if layer0_enc.shape.is_some()   { merged_encoding.shape   = layer0_enc.shape.clone(); }
+        if layer0_enc.opacity.is_some() { merged_encoding.opacity = layer0_enc.opacity.clone(); }
+        if layer0_enc.x2.is_some()      { merged_encoding.x2      = layer0_enc.x2.clone(); }
+        if layer0_enc.y2.is_some()      { merged_encoding.y2      = layer0_enc.y2.clone(); }
+        if layer0_enc.text.is_some()    { merged_encoding.text    = layer0_enc.text.clone(); }
         let rendering_spec_for_panel = ChartSpec {
-            encoding: prep.layers[0].encoding.clone(),
+            encoding: merged_encoding,
             ..spec.clone()
         };
 

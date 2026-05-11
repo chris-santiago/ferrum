@@ -1,0 +1,7 @@
+plot_type = "Bar chart with error bars"
+dataset = "seaborn.load_dataset('tips'), x='day', y='total_bill', aggregate=mean, error=95% CI"
+width = 640
+height = 480
+panels = ["ferrum", "seaborn"]
+ferrum_status = "PARTIAL"
+ferrum_notes = "ferrum.catplot(kind='bar') supports aggregates; check whether default includes 95% CI error bars"

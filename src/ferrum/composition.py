@@ -1,7 +1,25 @@
 """Multi-chart composition primitives (HConcat, VConcat, Joint, Repeat, ClusterMap)."""
 from __future__ import annotations
 
+import re
 from typing import List, Optional
+
+
+# Matches axis decoration emitted by the renderer:
+#   <line ... stroke="#888888" .../>  axis lines + tick marks
+#   <text .../>                       tick labels + axis titles
+# Stripping these leaves only data marks (bars/lines/paths). Used by JointChart
+# and ClusterMapChart to clean up shrunken marginals/dendrograms where the
+# original axis labels would otherwise be tiny and overlap unreadably.
+_AXIS_LINE_RE = re.compile(r'<line\s[^/]*stroke="#888888"[^/]*/>')
+_TEXT_RE = re.compile(r'<text\s[^>]*>.*?</text>', re.DOTALL)
+
+
+def _strip_axis_decoration(svg: str) -> str:
+    """Remove axis lines, tick marks, and text from a chart SVG."""
+    svg = _AXIS_LINE_RE.sub('', svg)
+    svg = _TEXT_RE.sub('', svg)
+    return svg
 
 
 class _CompositeBase:
@@ -359,9 +377,23 @@ class JointChart:
                 "JointChart.show_svg() requires compose_svg_grid; "
                 "wire-up lands in Phase 9a Task 12"
             ) from e
-        center_svg = self.center.show_svg()
-        cells = [None, self.top.show_svg() if self.top is not None else None,
-                 center_svg, self.right.show_svg() if self.right is not None else None]
+        # The grid compositor uses each cell's actual rendered size, ignoring
+        # row_ratios/col_ratios — so we must resize the marginals here. Without
+        # this, all charts render at 600x400 and the top-right corner becomes
+        # a huge empty rectangle the size of a full chart.
+        center_w = self.center._width or 600.0
+        center_h = self.center._height or 400.0
+        marg_h = center_h / self.ratio
+        marg_w = center_w / self.ratio
+        top_chart = self.top.properties(width=center_w, height=marg_h) if self.top is not None else None
+        right_chart = self.right.properties(width=marg_w, height=center_h) if self.right is not None else None
+        # Layout per docstring: top-left = top marginal (shares x with center),
+        # top-right = empty, bottom-left = center, bottom-right = right marginal.
+        # Strip marginals' axis decoration — shared axes with center, redundant
+        # at this size.
+        top_svg = _strip_axis_decoration(top_chart.show_svg()) if top_chart is not None else None
+        right_svg = _strip_axis_decoration(right_chart.show_svg()) if right_chart is not None else None
+        cells = [top_svg, None, self.center.show_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         return compose_svg_grid(
@@ -846,12 +878,22 @@ class ClusterMapChart:
             ) from e
         d = self.dendrogram_ratio
         h = 1.0 - d
-        cells = [
-            None,
-            self.col_dendrogram.show_svg() if self.col_dendrogram is not None else None,
-            self.row_dendrogram.show_svg() if self.row_dendrogram is not None else None,
-            self.heatmap.show_svg(),
-        ]
+        # Compositor ignores row_ratios/col_ratios; resize each component so
+        # the heatmap fills (h × h) of the grid and dendrograms occupy the
+        # remaining (d) on the row/col axis they sit beside.
+        hm_w = self.heatmap._width or 600.0
+        hm_h = self.heatmap._height or 400.0
+        dendro_w = hm_w * d / h
+        dendro_h = hm_h * d / h
+        col_dendro = (self.col_dendrogram.properties(width=hm_w, height=dendro_h)
+                      if self.col_dendrogram is not None else None)
+        row_dendro = (self.row_dendrogram.properties(width=dendro_w, height=hm_h)
+                      if self.row_dendrogram is not None else None)
+        # Strip dendrogram axis decoration — dendrograms have no meaningful
+        # axes (only the tree structure matters).
+        col_svg = _strip_axis_decoration(col_dendro.show_svg()) if col_dendro is not None else None
+        row_svg = _strip_axis_decoration(row_dendro.show_svg()) if row_dendro is not None else None
+        cells = [None, col_svg, row_svg, self.heatmap.show_svg()]
         return compose_svg_grid(
             cells, rows=2, cols=2,
             row_ratios=[d, h],

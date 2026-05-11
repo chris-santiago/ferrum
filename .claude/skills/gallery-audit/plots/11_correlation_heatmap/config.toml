@@ -1,0 +1,7 @@
+plot_type = "Correlation heatmap"
+dataset = "load_breast_cancer dataframe, first 10 features, .corr()"
+width = 600
+height = 600
+panels = ["ferrum", "seaborn", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.heatmap — Phase 9e"

@@ -46,34 +46,7 @@ def _channel_class_for(name: str):
 
 
 class Chart:
-    """Top-level chart value class.
-
-    Immutable — every method returns a new ``Chart``. Pass data once at
-    construction; declare encodings, marks, and transforms with chained
-    methods; render with ``show_svg`` / ``show_png`` or display in a
-    Jupyter cell.
-
-    Parameters
-    ----------
-    data : polars.DataFrame, pyarrow.Table, pandas.DataFrame, or any object \
-            implementing ``__arrow_c_stream__``, optional
-        Input data. Polars and pyarrow flow through Arrow C Data Interface
-        with zero copies; other DataFrame types use ``narwhals``.
-    width : int or str, optional
-        Chart width in pixels (or CSS string). Defaults to 600 at render time.
-    height : int or str, optional
-        Chart height in pixels (or CSS string). Defaults to 400 at render time.
-    title : str, optional
-        Chart title rendered above the axes.
-    description : str, optional
-        Accessible description for screen readers; not rendered visually.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> chart = fm.Chart(df).encode(x="hp", y="mpg").mark_point()
-    >>> svg = chart.show_svg()
-    """
+    """Top-level chart value class. Immutable — every method returns a new Chart."""
 
     __slots__ = (
         "_data", "_mark", "_mark_kwargs", "_encoding", "_transforms",
@@ -283,200 +256,21 @@ class Chart:
         new._position = position
         return new
 
-    def mark_point(self, **kwargs) -> "Chart":
-        """Render data as a scatter plot with point marks.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``size``, ``opacity``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the point mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point()
-        """
-        return self._set_mark("point", **kwargs)
-
-    def mark_line(self, **kwargs) -> "Chart":
-        """Render data as connected line segments.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``stroke_width``, ``interpolate``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the line mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="year", y="value").mark_line()
-        """
-        return self._set_mark("line", **kwargs)
-
-    def mark_bar(self, **kwargs) -> "Chart":
-        """Render data as rectangular bars.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``opacity``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the bar mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="category", y="count").mark_bar()
-        """
-        return self._set_mark("bar", **kwargs)
-
-    def mark_area(self, **kwargs) -> "Chart":
-        """Render data as a filled area between y and the baseline.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``opacity``, ``interpolate``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the area mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="year", y="value").mark_area()
-        """
-        return self._set_mark("area", **kwargs)
-
-    def mark_rule(self, **kwargs) -> "Chart":
-        """Render data as axis-aligned horizontal or vertical rule lines.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``stroke_width``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the rule mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(y="threshold").mark_rule()
-        """
-        return self._set_mark("rule", **kwargs)
-
-    def mark_text(self, **kwargs) -> "Chart":
-        """Render data as text labels at each data point.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``size``, ``align``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the text mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="y", text="label").mark_text()
-        """
-        return self._set_mark("text", **kwargs)
-
-    def mark_tick(self, **kwargs) -> "Chart":
-        """Render data as short tick marks along an axis.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``size``, ``thickness``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the tick mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="value", y="category").mark_tick()
-        """
-        return self._set_mark("tick", **kwargs)
-
-    def mark_rect(self, **kwargs) -> "Chart":
-        """Render data as filled rectangles; requires x, x2, y, y2 encodings.
-
-        Parameters
-        ----------
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``opacity``, ``position``).
-
-        Returns
-        -------
-        Chart
-            New chart with the rect mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x1", x2="x2", y="y1", y2="y2").mark_rect()
-        """
-        return self._set_mark("rect", **kwargs)
+    def mark_point(self, **kwargs):  return self._set_mark("point", **kwargs)
+    def mark_line(self, **kwargs):   return self._set_mark("line", **kwargs)
+    def mark_bar(self, **kwargs):    return self._set_mark("bar", **kwargs)
+    def mark_area(self, **kwargs):   return self._set_mark("area", **kwargs)
+    def mark_rule(self, **kwargs):   return self._set_mark("rule", **kwargs)
+    def mark_text(self, **kwargs):   return self._set_mark("text", **kwargs)
+    def mark_tick(self, **kwargs):   return self._set_mark("tick", **kwargs)
+    def mark_rect(self, **kwargs):   return self._set_mark("rect", **kwargs)
 
     # ---- Marks (statistical) ----
 
     def mark_density(self, *, position=None, **kwargs) -> "Chart":
-        """Render a kernel density estimate (KDE) as a smoothed area curve.
-
-        1D KDE when only ``x`` is encoded; bivariate filled-contour over a 2D
-        KDE when both ``x`` and ``y`` are encoded. May be called before or
-        after ``.encode()``.
-
-        Parameters
-        ----------
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each mark.
-        **kwargs
-            Additional options forwarded to the underlying KDE transform
-            (e.g. ``bandwidth``, ``n``).
-
-        Returns
-        -------
-        Chart
-            New chart with the density mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp").mark_density()
+        """Density plot. 1D KDE when only x is encoded; bivariate (filled
+        contour over 2D KDE — Phase 8b) when both x and y are encoded.
+        Can be called before or after ``.encode()``.
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -513,28 +307,7 @@ class Chart:
         return new
 
     def mark_histogram(self, *, position=None, **kwargs) -> "Chart":
-        """Render data as a histogram of binned counts or densities.
-
-        May be called before or after ``.encode(x=...)``.
-
-        Parameters
-        ----------
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each bar.
-        **kwargs
-            Additional options forwarded to the underlying ``Bin`` transform
-            (e.g. ``bin_count``, ``bin_width``, ``density``, ``cumulative``).
-
-        Returns
-        -------
-        Chart
-            New chart with the histogram mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp").mark_histogram(bin_count=20)
-        """
+        """Histogram. Can be called before or after .encode(x=...)."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("histogram", position)
@@ -558,30 +331,9 @@ class Chart:
         return new
 
     def mark_smooth(self, *, position=None, **kwargs) -> "Chart":
-        """Render a smoothed regression line over x/y data.
+        """Smooth/regression line. Can be called before or after .encode(x=..., y=...).
 
-        May be called before or after ``.encode(x=..., y=...)``. When ``ci``
-        is set, emits a layered ribbon (confidence-interval band) plus line.
-
-        Parameters
-        ----------
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each mark.
-        **kwargs
-            Options forwarded to the ``Smooth`` transform. Key options:
-            ``method`` (``"loess"`` or ``"lm"``), ``ci`` (float or ``None``),
-            ``bandwidth`` (float, LOESS only), ``seed`` (int).
-
-        Returns
-        -------
-        Chart
-            New chart with the smooth mark set; may be layered when ``ci`` is
-            enabled.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_smooth(method="lm")
+        With ``ci=`` set, emits a layered ribbon (CI band) + line (Phase 8b).
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -635,40 +387,7 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render a composite boxplot (box + whiskers + median + optional outliers).
-
-        Desugars to a multi-layer chart using the ``BoxStats`` transform.
-        Requires ``x`` (categorical group) and ``y`` (numeric value) encodings.
-
-        Parameters
-        ----------
-        extent : float, default 1.5
-            IQR multiplier for whisker length. Points beyond the whiskers are
-            drawn as outliers when ``outliers=True``.
-        size : float, optional
-            Box width in pixels. Defaults to an automatic value.
-        outliers : bool, default True
-            Whether to render outlier points beyond the whiskers.
-        color_field : str, optional
-            Column to map to box fill color.
-        horizontal : bool, default False
-            Rotate the plot so boxes are horizontal (requires ``y`` as the
-            group field and ``x`` as the numeric field).
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the box layers.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to each layer.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the boxplot composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="species", y="petal_length").mark_boxplot()
-        """
+        """Composite boxplot. Desugars to box+whisker+median (+optional outlier) layers."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("boxplot", position)
@@ -702,41 +421,9 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render a letter-value (boxen) plot.
-
-        Composite mark that desugars to nested rect bands per letter-value
-        depth, a median rule, and an outlier-point layer via the
-        ``LetterValue`` transform.
-
-        Parameters
-        ----------
-        k_depth : {"proportion", "tukey", "trustworthy", "full"}, default "proportion"
-            Method for determining the number of letter-value levels to show.
-        k_proportion : float, default 0.007
-            Proportion of the sample used when ``k_depth="proportion"``.
-        outlier_threshold : float, default 1.5
-            IQR-based threshold beyond which points are treated as outliers.
-        palette : list of str, optional
-            Custom color palette for the nested rect bands (outermost to
-            innermost).
-        horizontal : bool, default False
-            Rotate so the distribution spreads horizontally.
-        color_field : str, optional
-            Column to map to box fill color.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the box layers.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to each layer.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the letter-value composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="species", y="petal_length").mark_boxen()
+        """Letter-value (boxen) plot. Composite mark — desugars to nested rect
+        bands per letter-value depth, plus a median rule and an outlier-point
+        layer, via the ``LetterValue`` transform.
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -761,34 +448,7 @@ class Chart:
         return new
 
     def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
-        """Render error bars showing a spread or confidence interval.
-
-        Uses the ``ErrorExtent`` transform to compute interval bounds from the
-        encoded ``y`` field.
-
-        Parameters
-        ----------
-        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
-            Interval type. ``"ci"`` uses a 95 % bootstrap confidence interval;
-            ``"stderr"`` ± one standard error; ``"stdev"`` ± one standard
-            deviation; ``"iqr"`` inter-quartile range.
-        ticks : bool, default True
-            Whether to draw horizontal caps (ticks) at the interval endpoints.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each errorbar.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the rule/tick layers.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the errorbar composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="species", y="value").mark_errorbar()
-        """
+        """Errorbar mark via ErrorExtent transform."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("errorbar", position)
@@ -804,35 +464,7 @@ class Chart:
         return new
 
     def mark_errorband(self, *, extent="ci", borders=False, position=None, **mark_kwargs) -> "Chart":
-        """Render a filled ribbon representing a confidence or spread interval.
-
-        Uses the ``ErrorExtent`` transform to compute interval bounds, then
-        renders the band as a ribbon mark.
-
-        Parameters
-        ----------
-        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
-            Interval type. ``"ci"`` uses a 95 % bootstrap confidence interval;
-            ``"stderr"`` ± one standard error; ``"stdev"`` ± one standard
-            deviation; ``"iqr"`` inter-quartile range.
-        borders : bool, default False
-            Whether to draw boundary lines at the top and bottom edges of the
-            band.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the band.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the ribbon layer.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the errorband composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="value").mark_errorband(extent="stdev")
-        """
+        """Errorband mark (ribbon) via ErrorExtent transform."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("errorband", position)
@@ -848,34 +480,7 @@ class Chart:
         return new
 
     def mark_ribbon(self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs) -> "Chart":
-        """Render a filled ribbon between ``y`` and ``y2`` along ``x``.
-
-        Requires both ``y`` and ``y2`` in the encoding. Useful for showing
-        a pre-computed interval band (e.g. min/max or CI bounds stored as
-        separate columns).
-
-        Parameters
-        ----------
-        opacity : float, default 0.3
-            Fill opacity of the ribbon area.
-        interpolate : str, default "linear"
-            Line interpolation method between data points (e.g.
-            ``"linear"``, ``"monotone"``, ``"step"``).
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the ribbon.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the ribbon layer.
-
-        Returns
-        -------
-        Chart
-            New chart with the ribbon composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="lower", y2="upper").mark_ribbon()
-        """
+        """Ribbon mark — fills closed area between y and y2 along x. Requires y2 in encoding."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("ribbon", position)
@@ -901,39 +506,7 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render a contour plot of the bivariate density.
-
-        Uses the ``Kde2D`` and ``Contour`` transforms. Requires both ``x`` and
-        ``y`` encodings.
-
-        Parameters
-        ----------
-        bandwidth : str or float, default "scott"
-            KDE bandwidth selector. ``"scott"`` and ``"silverman"`` invoke
-            automatic rules; a float sets the bandwidth directly.
-        thresholds : int or list of float, default 6
-            Number of contour levels, or explicit threshold values.
-        smooth : bool, default True
-            Whether to apply smoothing to the iso-lines.
-        fill : bool, default False
-            If ``True``, render filled contour bands instead of iso-lines.
-        cmap : str, default "viridis"
-            Color map name for coloring contour levels.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each contour layer.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the polygon layers.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the contour composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="y").mark_contour(thresholds=8)
-        """
+        """Contour plot via Kde2D + Contour transforms."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("contour", position)
@@ -952,33 +525,7 @@ class Chart:
         return new
 
     def mark_violin(self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs) -> "Chart":
-        """Render a violin plot of the distribution per group.
-
-        Uses the ``Violin`` transform to compute density shapes. Requires
-        ``x`` (categorical group) and ``y`` (numeric value) encodings.
-
-        Parameters
-        ----------
-        bandwidth : str or float, default "scott"
-            KDE bandwidth selector. ``"scott"`` and ``"silverman"`` invoke
-            automatic rules; a float sets the bandwidth directly.
-        inner : {"box", "quartile", "point", None}, default "box"
-            Inner overlay drawn inside the violin shape.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the violin layers.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the polygon layers.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the violin composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="species", y="sepal_length").mark_violin()
-        """
+        """Violin plot via Violin transform; optional inner box/quartile/point overlay."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("violin", position)
@@ -994,35 +541,7 @@ class Chart:
         return new
 
     def mark_qq(self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs) -> "Chart":
-        """Render a quantile-quantile (QQ) plot against a reference distribution.
-
-        Reads the sample field from the ``x`` encoding. The ``y`` encoding is
-        ignored — theoretical quantiles become the y axis.
-
-        Parameters
-        ----------
-        distribution : {"normal", "uniform", "exponential"}, default "normal"
-            Reference distribution to plot against.
-        dequantize : bool, default False
-            Whether to dequantize tied values with small random jitter before
-            computing quantiles.
-        line : bool, default True
-            Whether to overlay the 45-degree reference line.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the point marks.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the point layers.
-
-        Returns
-        -------
-        Chart
-            New layered chart with the QQ composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="residual").mark_qq()
-        """
+        """QQ plot. Reads `field` from x encoding (single-column input)."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("qq", position)
@@ -1057,45 +576,7 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render a 2D density raster image over x/y data.
-
-        Uses the ``Raster`` transform to bin data onto a pixel grid and
-        aggregate within each cell. Suitable for large-N scatter data.
-
-        Parameters
-        ----------
-        aggregate : str, default "count"
-            Aggregation function applied to each pixel cell (e.g. ``"count"``,
-            ``"mean"``, ``"sum"``).
-        field : str, optional
-            Column used for aggregation. Required when ``aggregate`` is not
-            ``"count"``.
-        cmap : str, default "viridis"
-            Color map name for mapping aggregated values to colors.
-        resolution : str or int, default "screen"
-            Pixel grid resolution. ``"screen"`` infers from the chart viewport.
-        blend : str, default "alpha"
-            Blending mode used when compositing the raster.
-        min_count : int, optional
-            Minimum cell count below which cells are rendered as transparent.
-        log_scale : bool, default False
-            Whether to apply a log scale to aggregated values before color
-            mapping.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the image mark.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the image layer.
-
-        Returns
-        -------
-        Chart
-            New chart with the raster composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="y").mark_raster()
-        """
+        """2D raster (heatmap) via Raster transform."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("raster", position)
@@ -1125,43 +606,7 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render data as hexagonally binned aggregates.
-
-        Uses the ``Hex`` transform to bin x/y data onto a hexagonal grid and
-        aggregate within each bin. Requires ``x`` and ``y`` encodings.
-
-        Parameters
-        ----------
-        bin_size : int or float, optional
-            Diameter of each hexagon in pixels. Inferred from data density
-            when omitted.
-        aggregate : str, default "count"
-            Aggregation function for each hex bin (e.g. ``"count"``,
-            ``"mean"``, ``"sum"``).
-        field : str, optional
-            Column used for aggregation. Required when ``aggregate`` is not
-            ``"count"``.
-        cmap : str, default "viridis"
-            Color map name for mapping aggregated values to fill color.
-        stroke : str, optional
-            Hex border color. ``None`` disables the border.
-        stroke_width : float, default 0
-            Border stroke width in pixels.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the polygon marks.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the polygon layer.
-
-        Returns
-        -------
-        Chart
-            New chart with the hexagonal binning composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x", y="y").mark_hex()
-        """
+        """Hexagonal binning via Hex transform."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("hex", position)
@@ -1190,40 +635,7 @@ class Chart:
         position=None,
         **mark_kwargs,
     ) -> "Chart":
-        """Render a beeswarm (jittered scatter) plot for categorical data.
-
-        Uses the ``Swarm`` transform to compute non-overlapping point positions
-        along the categorical axis. Requires ``x`` (categorical) and ``y``
-        (numeric) encodings (or the reverse for horizontal orientation).
-
-        Parameters
-        ----------
-        size : float, default 4
-            Radius of each point in pixels; also controls the layout padding.
-        orient : {"vertical", "horizontal"}, default "vertical"
-            Direction of the swarm layout. ``"vertical"`` spreads points
-            horizontally within each category.
-        spacing : float, default 1.0
-            Extra gap between adjacent points as a fraction of point diameter.
-        side : {"both", "left", "right"}, default "both"
-            Which side of the category axis to allow points to spread onto.
-        dodge : str, optional
-            Column used to sub-group points within each category level.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied after swarm layout.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the point layer.
-
-        Returns
-        -------
-        Chart
-            New chart with the beeswarm composite mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="species", y="petal_length").mark_swarm()
-        """
+        """Beeswarm plot via Swarm transform."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("swarm", position)
@@ -1242,40 +654,7 @@ class Chart:
         return new
 
     def mark_function(self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs) -> "Chart":
-        """Render a mathematical function as a line over a numeric domain.
-
-        Materializes a synthetic dataset by evaluating ``fn`` over ``n``
-        evenly-spaced x values within ``domain``. The function data replaces
-        any data passed to ``Chart()``.
-
-        Parameters
-        ----------
-        fn : callable
-            A function ``fn(x: numpy.ndarray) -> numpy.ndarray`` that maps x
-            values to y values.
-        domain : tuple of (float, float), optional
-            The x range over which to evaluate ``fn``. Inferred from the
-            parent chart's x data when omitted.
-        n : int, default 200
-            Number of sample points used to draw the function curve.
-        clip : bool, default True
-            Whether to clip the rendered line to the chart viewport.
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to the line mark.
-        **mark_kwargs
-            Additional mark-style overrides forwarded to the line layer.
-
-        Returns
-        -------
-        Chart
-            New chart backed by synthetic data with the function line mark.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import numpy as np
-        >>> fm.Chart(df).encode(x="x").mark_function(np.sin)
-        """
+        """Function plot. Materializes synthetic data via fn(xs)."""
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("function", position)
@@ -1314,74 +693,1054 @@ class Chart:
         new._position = position
         return new
 
-    def mark_arc(self, **kwargs) -> "Chart":
-        """Arc mark — deferred to a future phase.
+    # ---- Marks (diagnostic — Phase 10) ----
 
-        Parameters
-        ----------
-        **kwargs
-            Accepted for API compatibility; raises ``NotImplementedError``.
+    def mark_residuals(
+        self,
+        *,
+        kind: str = "studentized",
+        reference_line: bool = True,
+        cook_threshold: float | None = None,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Residuals diagnostic mark — see ferrum-spec.md §3.3.
 
-        Raises
-        ------
-        NotImplementedError
-            Always; arc marks are not yet implemented.
+        Expects the chart's data to carry the schema emitted by
+        ``ModelSource.predictions()``: ``y_true``, ``y_pred``, ``residual``,
+        ``studentized_residual``. When ``reference_line`` is true, a sentinel
+        ``_ref_zero`` column (one row at 0.0, rest null) is injected so the
+        downstream ``mark_rule`` renders exactly one horizontal line at y=0.
         """
-        raise deferred_mark_error("arc")
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("residuals", position)
+        from ferrum.marks.diagnostic import desugar_residuals
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "point"  # placeholder; layered mode overrides
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _inject_constant(new._data, "_ref_zero", 0.0)
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "residuals",
+            {
+                "kind": kind,
+                "reference_line": reference_line,
+                "cook_threshold": cook_threshold,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_residuals,
+        )
+        new._position = position
+        return new
 
-    def mark_image(self, **kwargs) -> "Chart":
-        """Image mark — deferred to a future phase.
+    def mark_prediction_error(
+        self,
+        *,
+        identity_line: bool = True,
+        ci: float | None = None,
+        reference_band: bool = False,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Actual-vs-predicted mark — see ferrum-spec.md §3.3.
 
-        Parameters
-        ----------
-        **kwargs
-            Accepted for API compatibility; raises ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            Always; image marks are not yet implemented.
+        Expects ``y_true`` and ``y_pred`` columns. When ``identity_line`` is
+        true, the data is pre-sorted ascending by ``y_true`` so the downstream
+        ``mark_line`` renders a monotonic y=x diagonal.
         """
-        raise deferred_mark_error("image")
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("prediction_error", position)
+        from ferrum.marks.diagnostic import desugar_prediction_error
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if identity_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "y_true")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "prediction_error",
+            {
+                "identity_line": identity_line,
+                "ci": ci,
+                "reference_band": reference_band,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_prediction_error,
+        )
+        new._position = position
+        return new
 
-    def mark_geoshape(self, **kwargs) -> "Chart":
-        """Geographic shape mark — deferred to a future phase.
+    def mark_roc(
+        self,
+        *,
+        average: str | None = None,
+        reference_line: bool = True,
+        annotate_auc: bool = False,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """ROC curve mark — see ferrum-spec.md §3.3.
 
-        Parameters
-        ----------
-        **kwargs
-            Accepted for API compatibility; raises ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            Always; geoshape marks are not yet implemented.
+        Expects the data shape emitted by ``ModelSource.roc_curve()``:
+        ``fpr``, ``tpr``, ``threshold``, ``class``, ``auc``. When
+        ``reference_line=True`` the data is pre-sorted ascending by ``fpr``
+        so the downstream ``mark_line`` renders a monotonic y=x diagonal.
         """
-        raise deferred_mark_error("geoshape")
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("roc", position)
+        from ferrum.marks.diagnostic import desugar_roc
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "fpr")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "roc",
+            {
+                "average": average,
+                "reference_line": reference_line,
+                "annotate_auc": annotate_auc,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_roc,
+        )
+        new._position = position
+        return new
+
+    def mark_pr(
+        self,
+        *,
+        average: str | None = None,
+        annotate_ap: bool = False,
+        iso_lines: bool = False,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Precision-recall curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.pr_curve()``:
+        ``precision``, ``recall``, ``threshold``, ``class``, ``ap``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pr", position)
+        from ferrum.marks.diagnostic import desugar_pr
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "pr",
+            {
+                "average": average,
+                "annotate_ap": annotate_ap,
+                "iso_lines": iso_lines,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_pr,
+        )
+        new._position = position
+        return new
+
+    def mark_calibration(
+        self,
+        *,
+        n_bins: int = 10,
+        strategy: str = "uniform",
+        reference_line: bool = True,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Calibration (reliability) curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.calibration_curve()``:
+        ``mean_predicted``, ``fraction_positive``, ``count``. When
+        ``reference_line=True`` the data is pre-sorted ascending by
+        ``mean_predicted``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("calibration", position)
+        from ferrum.marks.diagnostic import desugar_calibration
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "mean_predicted")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "calibration",
+            {
+                "n_bins": n_bins,
+                "strategy": strategy,
+                "reference_line": reference_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_calibration,
+        )
+        new._position = position
+        return new
+
+    def mark_gain(
+        self,
+        *,
+        reference_lines: bool = True,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Cumulative-gain mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.cumulative_gain()``:
+        ``percent_population``, ``gain``, ``class``. The baseline diagonal
+        is encoded in the data via ``class='baseline'`` rows.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("gain", position)
+        from ferrum.marks.diagnostic import desugar_gain
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "gain",
+            {
+                "reference_lines": reference_lines,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_gain,
+        )
+        new._position = position
+        return new
+
+    def mark_lift(
+        self,
+        *,
+        reference_line: bool = True,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Lift curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.lift_curve()``:
+        ``percent_population``, ``lift``, ``class``. The lift=1 baseline
+        is encoded via ``class='baseline'`` rows.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("lift", position)
+        from ferrum.marks.diagnostic import desugar_lift
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "lift",
+            {
+                "reference_line": reference_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_lift,
+        )
+        new._position = position
+        return new
+
+    def mark_discrimination_threshold(
+        self,
+        *,
+        metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
+        n_thresholds: int = 50,
+        threshold_line: bool = False,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Discrimination-threshold sweep mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data ``threshold``, ``metric``, ``value`` —
+        callers are responsible for unpivoting
+        ``ModelSource.discrimination_threshold()`` output (the figure
+        builder handles this).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("discrimination_threshold", position)
+        from ferrum.marks.diagnostic import desugar_discrimination_threshold
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "discrimination_threshold",
+            {
+                "metrics": metrics,
+                "n_thresholds": n_thresholds,
+                "threshold_line": threshold_line,
+                **mark_kwargs,
+            },
+            desugar_discrimination_threshold,
+        )
+        new._position = position
+        return new
+
+    def mark_confusion(
+        self,
+        *,
+        normalize: str | None = None,
+        annotate: bool = True,
+        color_field: str = "value",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Confusion-matrix mark — see ferrum-spec.md §3.3.
+
+        Expects the long-form data shape from ``ModelSource.confusion_matrix()``:
+        ``actual``, ``predicted``, ``value``, ``value_fmt``. Renders an
+        ordinal heatmap of cell values with optional per-cell text labels
+        (controlled by ``annotate``; reads ``value_fmt`` via the Phase 10c
+        text channel).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("confusion", position)
+        from ferrum.marks.diagnostic import desugar_confusion
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "confusion",
+            {
+                "normalize": normalize,
+                "annotate": annotate,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_confusion,
+        )
+        new._position = position
+        return new
+
+    def mark_class_prediction_error(
+        self,
+        *,
+        normalize: bool = False,
+        color_field: str = "actual",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Class prediction error mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data ``(actual, predicted, value)`` (same shape
+        as ``ModelSource.confusion_matrix(normalize=None)``). Renders one
+        bar per ``predicted`` value with segments stacked by ``actual``.
+        Per-bar 100% stack via ``normalize=True``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("class_prediction_error", position)
+        from ferrum.marks.diagnostic import desugar_class_prediction_error
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "class_prediction_error",
+            {
+                "normalize": normalize,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_class_prediction_error,
+        )
+        new._position = position
+        return new
+
+    def mark_importance(
+        self,
+        *,
+        orient: str = "horizontal",
+        error_bars: bool = True,
+        top_k: int | None = None,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Feature-importance mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.importances()``:
+        ``feature``, ``importance``, ``std``. The chart builder is
+        responsible for computing ``imp_lower``/``imp_upper`` columns and
+        truncating to ``top_k`` rows before invoking this method.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("importance", position)
+        from ferrum.marks.diagnostic import desugar_importance
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "importance",
+            {
+                "orient": orient,
+                "error_bars": error_bars,
+                "top_k": top_k,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_importance,
+        )
+        new._position = position
+        return new
+
+    def mark_shap_beeswarm(
+        self,
+        *,
+        max_display: int = 20,
+        color_bar: bool = True,
+        order: str = "abs_mean",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP beeswarm mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data from ``ModelSource.shap_values()`` pre-filtered
+        to the top ``max_display`` features by the chart builder.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_beeswarm", position)
+        from ferrum.marks.diagnostic import desugar_shap_beeswarm
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_beeswarm",
+            {
+                "max_display": max_display,
+                "color_bar": color_bar,
+                "order": order,
+                **mark_kwargs,
+            },
+            desugar_shap_beeswarm,
+        )
+        new._position = position
+        return new
+
+    def mark_shap_bar(
+        self,
+        *,
+        max_display: int = 20,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP aggregated-bar mark — see ferrum-spec.md §3.3."""
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_bar", position)
+        from ferrum.marks.diagnostic import desugar_shap_bar
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_bar",
+            {"max_display": max_display, **mark_kwargs},
+            desugar_shap_bar,
+        )
+        new._position = position
+        return new
+
+    def mark_pdp(
+        self,
+        *,
+        kind: str = "average",
+        ice_alpha: float = 0.2,
+        center: bool = False,
+        color_field: str | None = "feature",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Partial-dependence mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data from ``ModelSource.partial_dependence()``:
+        ``feature``, ``feature_value``, ``pd_value`` (one polyline per
+        feature, colored by feature). The chart builder is responsible
+        for sorting ascending by ``feature_value`` so the line renders
+        monotonically.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pdp", position)
+        from ferrum.marks.diagnostic import desugar_pdp
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "pdp",
+            {
+                "kind": kind,
+                "ice_alpha": ice_alpha,
+                "center": center,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_pdp,
+        )
+        new._position = position
+        return new
+
+    def mark_shap_waterfall(
+        self,
+        *,
+        sample_idx: int = -1,
+        max_display: int = 20,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """SHAP waterfall mark — see ferrum-spec.md §3.3.
+
+        ``sample_idx`` is required; passing the default ``-1`` raises
+        ``TypeError`` at desugar time.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("shap_waterfall", position)
+        from ferrum.marks.diagnostic import desugar_shap_waterfall
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "shap_waterfall",
+            {
+                "sample_idx": sample_idx,
+                "max_display": max_display,
+                **mark_kwargs,
+            },
+            desugar_shap_waterfall,
+        )
+        new._position = position
+        return new
+
+    def mark_learning_curve(
+        self,
+        *,
+        ci_style: str = "band",
+        color_field: str | None = "split",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Learning-curve mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.learning_curve()``,
+        pre-deduped per (train_size, split) by the chart builder.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("learning_curve", position)
+        from ferrum.marks.diagnostic import desugar_learning_curve
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "learning_curve",
+            {"ci_style": ci_style, "color_field": color_field, **mark_kwargs},
+            desugar_learning_curve,
+        )
+        new._position = position
+        return new
+
+    def mark_validation_curve(
+        self,
+        *,
+        log_scale: bool = False,
+        ci_style: str = "band",
+        color_field: str | None = "split",
+        param_label: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Validation-curve mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.validation_curve()``,
+        pre-deduped per (param_value, split) by the chart builder.
+
+        ``param_label`` names the swept hyperparameter for the x-axis
+        title; the chart builder forwards the user's ``param`` argument.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("validation_curve", position)
+        from ferrum.marks.diagnostic import desugar_validation_curve
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "validation_curve",
+            {
+                "log_scale": log_scale,
+                "ci_style": ci_style,
+                "color_field": color_field,
+                "param_label": param_label,
+                **mark_kwargs,
+            },
+            desugar_validation_curve,
+        )
+        new._position = position
+        return new
+
+    def mark_cv_scores(
+        self,
+        *,
+        kind: str = "box",
+        split: str = "both",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Per-fold CV-score mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.cv_scores()``. The
+        chart builder pre-aggregates per split when ``kind="bar"`` and
+        leaves raw per-fold rows for ``"box"``/``"strip"``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("cv_scores", position)
+        from ferrum.marks.diagnostic import desugar_cv_scores
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "cv_scores",
+            {"kind": kind, "split": split, **mark_kwargs},
+            desugar_cv_scores,
+        )
+        new._position = position
+        return new
+
+    def mark_alpha_selection(
+        self,
+        *,
+        log_scale: bool = True,
+        highlight_best: bool = True,
+        ci_style: str = "band",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Regularization-strength selection mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.alpha_selection()``.
+        When ``highlight_best=True`` and the data carries ``alpha`` plus
+        ``mean_score`` columns, the chart's data is augmented with a
+        ``_best_alpha`` sentinel column (one non-null row at the alpha
+        maximizing ``mean_score``) so the downstream ``mark_rule`` draws
+        exactly one vertical reference line.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("alpha_selection", position)
+        from ferrum.marks.diagnostic import desugar_alpha_selection
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "point"
+        if highlight_best and new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "alpha" in new._data.columns
+                    and "mean_score" in new._data.columns
+                ):
+                    agg = (
+                        new._data
+                        .group_by("alpha")
+                        .agg(pl.col("mean_score").first())
+                        .sort("mean_score", descending=True)
+                    )
+                    if agg.height > 0:
+                        best_alpha = float(agg["alpha"][0])
+                        new._data = _inject_constant(
+                            new._data, "_best_alpha", best_alpha,
+                        )
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "alpha_selection",
+            {
+                "log_scale": log_scale,
+                "highlight_best": highlight_best,
+                "ci_style": ci_style,
+                **mark_kwargs,
+            },
+            desugar_alpha_selection,
+        )
+        new._position = position
+        return new
+
+    # ---- Marks (clustering / manifold — Phase 10f) ----
+
+    def mark_silhouette(
+        self,
+        *,
+        zero_line: bool = True,
+        color_field: str | None = "cluster",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Rousseeuw silhouette plot mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.silhouette()``:
+        ``sample_id``, ``y_position``, ``cluster``, ``silhouette_value``.
+        When ``zero_line=True`` a sentinel ``_ref_zero`` column (one row
+        at 0.0, rest null) is injected so the downstream ``mark_rule``
+        renders exactly one vertical line at x=0.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("silhouette", position)
+        from ferrum.marks.diagnostic import desugar_silhouette
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "rect"
+        if new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "y_position" in new._data.columns
+                    and "silhouette_value" in new._data.columns
+                ):
+                    new._data = new._data.with_columns([
+                        pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                        .alias("_silhouette_x_lo"),
+                        pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                        .alias("_silhouette_x_hi"),
+                        (pl.col("y_position").cast(pl.Float64) - 0.5)
+                        .alias("_silhouette_y_lo"),
+                        (pl.col("y_position").cast(pl.Float64) + 0.5)
+                        .alias("_silhouette_y_hi"),
+                    ])
+                    if zero_line:
+                        new._data = _inject_constant(new._data, "_ref_zero", 0.0)
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "silhouette",
+            {
+                "zero_line": zero_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_silhouette,
+        )
+        new._position = position
+        return new
+
+    def mark_pca_scree(
+        self,
+        *,
+        cumulative_line: bool = True,
+        threshold_line: float | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """PCA scree plot mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.pca_variance()``:
+        ``component``, ``explained_variance_ratio``,
+        ``cumulative_variance_ratio``. When ``threshold_line`` is
+        non-None, a sentinel ``_threshold_line`` column (one row at the
+        threshold value, rest null) is injected so the downstream
+        ``mark_rule`` renders exactly one horizontal reference line.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pca_scree", position)
+        from ferrum.marks.diagnostic import (
+            desugar_pca_scree,
+            desugar_pca_scree_with_threshold,
+        )
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "rect"
+        if new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "component" in new._data.columns
+                    and "explained_variance_ratio" in new._data.columns
+                ):
+                    new._data = new._data.with_columns([
+                        (pl.col("component").cast(pl.Float64) - 0.4)
+                        .alias("_pca_bar_x_lo"),
+                        (pl.col("component").cast(pl.Float64) + 0.4)
+                        .alias("_pca_bar_x_hi"),
+                        pl.lit(0.0).alias("_pca_bar_y_lo"),
+                        pl.col("explained_variance_ratio")
+                        .alias("_pca_bar_y_hi"),
+                    ])
+                    # X-axis anchor: same scale-extension trick as
+                    # _y_axis_anchor — the bar rects sit at
+                    # component ± 0.4 but the line layer's x is the
+                    # bare component column. Without this, bars at
+                    # the first/last component get clipped by the
+                    # narrower x domain.
+                    n_anchor = new._data.height
+                    x_lo = float(new._data["_pca_bar_x_lo"].min() or 0.0)
+                    x_hi = float(new._data["_pca_bar_x_hi"].max() or 0.0)
+                    x_anchor_vals = [x_lo, x_hi] + [None] * max(
+                        0, n_anchor - 2,
+                    )
+                    new._data = new._data.with_columns(
+                        pl.Series(
+                            "_x_axis_anchor", x_anchor_vals[:n_anchor],
+                            dtype=pl.Float64,
+                        ),
+                    )
+                    # Scale-resolution anchor: render/prepare.rs:265
+                    # feeds layer-0's y+y2 into the y-axis domain
+                    # computation. Layer-0 here is the cumulative
+                    # line (y range ≈ [evr[0], sum(evr)]); the bar
+                    # baseline at 0 and any threshold rule (0.95
+                    # default) sit outside that range. Stash both
+                    # anchor values into a y2 column on layer-0 so
+                    # the scale union covers [0, threshold].
+                    anchor_hi = (
+                        max(
+                            float(threshold_line)
+                            if threshold_line is not None
+                            else 0.0,
+                            float(
+                                new._data["cumulative_variance_ratio"]
+                                .max() or 0.0
+                            ),
+                        )
+                    )
+                    n = new._data.height
+                    anchor_vals = [0.0, float(anchor_hi)] + [None] * max(
+                        0, n - 2,
+                    )
+                    new._data = new._data.with_columns(
+                        pl.Series(
+                            "_y_axis_anchor", anchor_vals[:n],
+                            dtype=pl.Float64,
+                        ),
+                    )
+                    if threshold_line is not None:
+                        new._data = _inject_constant(
+                            new._data, "_threshold_line",
+                            float(threshold_line),
+                        )
+            except ImportError:
+                pass
+        fn = (
+            desugar_pca_scree_with_threshold
+            if threshold_line is not None
+            else desugar_pca_scree
+        )
+        new._pending_stat_mark = (
+            "pca_scree",
+            {"cumulative_line": cumulative_line, **mark_kwargs},
+            fn,
+        )
+        new._position = position
+        return new
+
+    def mark_intercluster_distance(
+        self,
+        *,
+        label_clusters: bool = True,
+        color_field: str | None = "cluster",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Cluster-center 2D embedding mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by
+        ``ModelSource.intercluster_distance()``: ``cluster``, ``x``,
+        ``y``, ``size``. The ``size`` channel maps to point area; with
+        ``label_clusters=True`` a text overlay labels each point by
+        cluster id.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("intercluster_distance", position)
+        from ferrum.marks.diagnostic import desugar_intercluster_distance
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "intercluster_distance",
+            {
+                "label_clusters": label_clusters,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_intercluster_distance,
+        )
+        new._position = position
+        return new
+
+    def mark_decision_boundary(
+        self,
+        *,
+        proba: bool = False,
+        color_field: str = "z",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Decision-boundary heatmap mark — see ferrum-spec.md §3.3.
+
+        Expects pre-computed grid columns ``x``, ``x2``, ``y``, ``y2``
+        (cell bounds) and ``z`` (the prediction value — class index for
+        ``proba=False`` or probability for ``proba=True``). The chart
+        builder ``_decision_boundary_chart_from_source`` produces these
+        columns.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("decision_boundary", position)
+        from ferrum.marks.diagnostic import desugar_decision_boundary
+        new = self._clone()
+        new._mark = "rect"
+        new._pending_stat_mark = (
+            "decision_boundary",
+            {
+                "proba": proba,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_decision_boundary,
+        )
+        new._position = position
+        return new
+
+    def mark_rank1d(
+        self,
+        *,
+        orient: str = "horizontal",
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Univariate feature-ranking bar chart — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.rank1d()``:
+        ``feature``, ``score``, ``rank``. ``orient='horizontal'``
+        (default) places features on the y axis with score on x; pass
+        ``orient='vertical'`` to swap.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("rank1d", position)
+        from ferrum.marks.diagnostic import desugar_rank1d
+        new = self._clone()
+        new._mark = "bar"
+        new._pending_stat_mark = (
+            "rank1d",
+            {
+                "orient": orient,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_rank1d,
+        )
+        new._position = position
+        return new
+
+    def mark_rank2d(
+        self,
+        *,
+        annot: bool = True,
+        color_field: str = "correlation",
+        text_field: str = "correlation_fmt",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Pairwise feature-ranking heatmap — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.rank2d()``:
+        ``feature_x``, ``feature_y``, ``correlation``. The chart builder
+        appends a ``correlation_fmt`` (Utf8) column when ``annot=True``
+        so the text layer can render each cell's value at 2 dp.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("rank2d", position)
+        from ferrum.marks.diagnostic import desugar_rank2d
+        new = self._clone()
+        new._mark = "rect"
+        new._pending_stat_mark = (
+            "rank2d",
+            {
+                "annot": annot,
+                "color_field": color_field,
+                "text_field": text_field,
+                **mark_kwargs,
+            },
+            desugar_rank2d,
+        )
+        new._position = position
+        return new
+
+    def mark_parallel_coordinates(
+        self,
+        *,
+        alpha: float = 0.5,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Parallel coordinates — one polyline per sample.
+
+        Expects the long-form schema produced by
+        ``_parallel_coords_chart_from_dataframe``: ``feature`` (Utf8),
+        ``value`` (Float64), ``sample_id`` (Utf8), and optionally the
+        hue column passed via ``color_field``. The line layer routes
+        ``sample_id`` through ``mark_style.detail`` so each sample
+        renders as its own polyline (see ``crates/ferrum-core/src/render/
+        marks/line.rs``).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("parallel_coordinates", position)
+        from ferrum.marks.diagnostic import desugar_parallel_coordinates
+        new = self._clone()
+        new._mark = "line"
+        new._pending_stat_mark = (
+            "parallel_coordinates",
+            {
+                "alpha": alpha,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_parallel_coordinates,
+        )
+        new._position = position
+        return new
+
+    def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
+    def mark_image(self, **kwargs):         raise deferred_mark_error("image")
+    def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
     def mark_segment(self, *, position=None, **kwargs) -> "Chart":
-        """Render a diagonal line segment from (x, y) to (x2, y2).
+        """Diagonal line segment from (x, y) to (x2, y2).
 
-        Distinct from ``mark_rule``, which is axis-aligned only; segments may
-        take any direction. Requires ``x``, ``y``, ``x2``, and ``y2``
-        encodings.
-
-        Parameters
-        ----------
-        position : Identity, Dodge, Jitter, or Stack, optional
-            Position adjustment applied to each segment.
-        **kwargs
-            Mark-style overrides forwarded to the renderer (e.g. ``color``,
-            ``stroke_width``).
-
-        Returns
-        -------
-        Chart
-            New chart with the segment mark set.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="x1", y="y1", x2="x2", y2="y2").mark_segment()
+        Distinct from ``mark_rule`` (axis-aligned only); segments may take any
+        direction. Requires ``x``, ``y``, ``x2``, ``y2`` on the encoding.
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1389,58 +1748,11 @@ class Chart:
         new = self._set_mark("segment", **kwargs)
         new._position = position
         return new
-    def mark_label(self, **kwargs) -> "Chart":
-        """Label mark — deferred to a future phase.
-
-        Parameters
-        ----------
-        **kwargs
-            Accepted for API compatibility; raises ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            Always; label marks are not yet implemented.
-        """
-        raise deferred_mark_error("label")
+    def mark_label(self, **kwargs):         raise deferred_mark_error("label")
 
     # ---- Encoding ----
 
     def encode(self, **channels: Any) -> "Chart":
-        """Declare data-to-visual encoding channels.
-
-        Each keyword argument maps a channel name to a column name (string
-        shorthand) or a typed channel object (e.g. ``X``, ``Color``).
-        Shorthand strings accept ``"field"``, ``"field:Q"``, or
-        ``"agg(field):Q"`` syntax.
-
-        Parameters
-        ----------
-        **channels : str or ChannelBase
-            Keyword arguments where each key is a channel name (``x``, ``y``,
-            ``color``, ``size``, ``shape``, ``opacity``, ``x2``, ``y2``,
-            ``text``, ``tooltip``, ``facet``, ``facet_row``, ``facet_col``,
-            etc.) and each value is a column-name string or a typed channel
-            instance.
-
-        Returns
-        -------
-        Chart
-            New chart with the declared encodings applied.
-
-        Raises
-        ------
-        ValueError
-            When an unknown channel name is passed.
-        TypeError
-            When a value is not a string, channel instance, or Repeat
-            placeholder.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg", color="cyl:N").mark_point()
-        """
         new = self._clone()
         for name, value in channels.items():
             cls = _channel_class_for(name)
@@ -1471,27 +1783,6 @@ class Chart:
         return new
 
     def transform(self, *transforms) -> "Chart":
-        """Append one or more data transforms to the chart's pipeline.
-
-        Transforms are applied in order before rendering. Multiple calls
-        accumulate; earlier transforms feed into later ones.
-
-        Parameters
-        ----------
-        *transforms : transform objects
-            One or more Rust-backed transform instances (e.g. ``Aggregate``,
-            ``Bin``, ``Smooth``, ``Kde``) to append to the pipeline.
-
-        Returns
-        -------
-        Chart
-            New chart with the additional transforms appended.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").transform(fm.Aggregate("mean", "mpg")).mark_bar()
-        """
         new = self._clone()
         new._transforms = list(self._transforms) + list(transforms)
         return new
@@ -1499,28 +1790,12 @@ class Chart:
     # ---- Composition operators ----
 
     def __add__(self, other: "Chart") -> "Chart":
-        """Overlay two charts into a multi-layer chart (``chart1 + chart2``).
+        """Overlay two charts.
 
-        When both charts share the same data (identity or Arrow value
-        equality), produces a layered ``Chart``. When the data differs,
-        falls through to horizontal concatenation and emits a
+        If both charts share the same data object (identity check) or equivalent
+        data (value equality via Arrow), produces a multi-layer ``Chart``.
+        If the data differs, falls through to an ``HConcatChart`` with a
         ``UserWarning``.
-
-        Parameters
-        ----------
-        other : Chart
-            The chart to overlay on top of this one.
-
-        Returns
-        -------
-        Chart
-            Layered chart when data matches; ``HConcatChart`` otherwise.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> base = fm.Chart(df).encode(x="hp", y="mpg")
-        >>> base.mark_point() + base.mark_smooth()
         """
         if not isinstance(other, Chart):
             return NotImplemented
@@ -1549,22 +1824,36 @@ class Chart:
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-        new._layers = [
-            {
-                "mark": lhs._mark,
-                "encoding": dict(lhs._encoding),
-                "transforms": list(lhs._transforms),
-                "mark_style": dict(lhs._mark_kwargs),
-                "position": lhs._position,
-            },
-            {
-                "mark": rhs._mark,
-                "encoding": dict(rhs._encoding),
-                "transforms": list(rhs._transforms),
-                "mark_style": dict(rhs._mark_kwargs),
-                "position": rhs._position,
-            },
-        ]
+
+        def _expand(c):
+            """Return (layer_dicts, top_level_transforms) for one side of `+`.
+
+            Composite-mark charts arrive pre-layered (c._layers is not None,
+            c._mark is None) — splat their layers as-is and carry their
+            top-level transforms across. Plain single-mark charts wrap into a
+            one-element list with the chart's own mark/encoding/etc.
+            """
+            if c._layers is not None:
+                return list(c._layers), list(c._transforms or [])
+            return [{
+                "mark": c._mark,
+                "encoding": dict(c._encoding),
+                "transforms": list(c._transforms),
+                "mark_style": dict(c._mark_kwargs),
+                "position": c._position,
+            }], []
+
+        lhs_layers, _ = _expand(lhs)  # lhs top-level xforms already in `new` via _clone()
+        rhs_layers, rhs_top_xforms = _expand(rhs)
+        new._layers = lhs_layers + rhs_layers
+        # Merge RHS top-level transforms (e.g. composite-mark expansion produced
+        # them) into the combined chart's top-level pipeline, deduping by
+        # identity to avoid re-running a transform shared across layers.
+        existing_ids = {id(t) for t in (new._transforms or [])}
+        for t in rhs_top_xforms:
+            if id(t) not in existing_ids:
+                new._transforms = list(new._transforms or []) + [t]
+                existing_ids.add(id(t))
         # Warn if secondary layer has conflicting theme/facet/coord
         if (
             (rhs._theme is not None and rhs._theme != lhs._theme)
@@ -1581,44 +1870,12 @@ class Chart:
         return new
 
     def __or__(self, other: "Chart") -> "HConcatChart":
-        """Concatenate two charts side-by-side (``chart1 | chart2``).
-
-        Parameters
-        ----------
-        other : Chart
-            Chart to place to the right of this one.
-
-        Returns
-        -------
-        HConcatChart
-            Horizontally concatenated chart pair.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).mark_point() | fm.Chart(df).mark_bar()
-        """
+        """Horizontal concatenation: ``chart1 | chart2``."""
         from ferrum.composition import HConcatChart
         return HConcatChart([self, other])
 
     def __and__(self, other: "Chart") -> "VConcatChart":
-        """Stack two charts vertically (``chart1 & chart2``).
-
-        Parameters
-        ----------
-        other : Chart
-            Chart to place below this one.
-
-        Returns
-        -------
-        VConcatChart
-            Vertically concatenated chart pair.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).mark_point() & fm.Chart(df).mark_histogram()
-        """
+        """Vertical concatenation: ``chart1 & chart2``."""
         from ferrum.composition import VConcatChart
         return VConcatChart([self, other])
 
@@ -1633,40 +1890,10 @@ class Chart:
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
     ) -> "Chart":
-        """Split the chart into a small-multiples grid by a categorical column.
+        """Set faceting on this chart.
 
-        Two layouts are supported. Wrap mode places panels left-to-right then
-        wraps onto new rows. Grid mode places panels at explicit
-        ``row`` × ``col`` positions.
-
-        Parameters
-        ----------
-        field : str, optional
-            Column used for wrap-mode faceting. Equivalent to passing
-            ``col=field`` with no ``row``.
-        row : str, optional
-            Column for the row dimension in grid mode.
-        col : str, optional
-            Column for the column dimension in grid (or wrap) mode.
-        ncols : int, optional
-            Maximum number of columns per row in wrap mode.
-        nrows : int, optional
-            Maximum number of rows per column in grid mode.
-
-        Returns
-        -------
-        Chart
-            New chart with faceting configured.
-
-        Raises
-        ------
-        ValueError
-            When neither ``field``, ``row``, nor ``col`` is supplied.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().facet("cyl", ncols=2)
+        Single-field wrap mode: ``facet(field="col")`` or ``facet(col="col")``.
+        Grid mode: ``facet(row="year", col="species")``.
         """
         new = self._clone()
         if field is not None:
@@ -1703,54 +1930,13 @@ class Chart:
         return new
 
     def theme(self, theme: Any) -> "Chart":
-        """Attach a ``Theme`` to this chart, overriding the process default.
-
-        Per-chart theme always wins over ``ferrum.set_default_theme()``.
-
-        Parameters
-        ----------
-        theme : Theme
-            Theme value to apply at render time.
-
-        Returns
-        -------
-        Chart
-            New chart with the theme attached.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().theme(fm.themes.dark)
-        """
+        """Attach a Theme to this chart instance (overrides the process default)."""
         new = self._clone()
         new._theme = theme
         return new
 
     def coord(self, coord: Any) -> "Chart":
-        """Set the coordinate system for this chart.
-
-        Currently only ``CoordFlip`` is supported.
-
-        Parameters
-        ----------
-        coord : CoordFlip
-            Coordinate system instance to apply.
-
-        Returns
-        -------
-        Chart
-            New chart with the coordinate system set.
-
-        Raises
-        ------
-        TypeError
-            When a coordinate type other than ``CoordFlip`` is passed.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="value", y="category").mark_bar().coord(fm.CoordFlip())
-        """
+        """Set the coordinate system. Only CoordFlip is supported in Phase 8a."""
         from ferrum.coord import CoordFlip
         new = self._clone()
         if isinstance(coord, CoordFlip):
@@ -1787,7 +1973,7 @@ class Chart:
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
-            for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity"):
+            for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
                 ch = layer.get("encoding", {}).get(axis)
                 if ch is None:
                     continue
@@ -1801,7 +1987,7 @@ class Chart:
                     enc_json_dict: dict = {"field": field}
                     if d.get("type"):
                         enc_json_dict["type_"] = d["type"]
-                    for opt_key in ("title", "aggregate", "scheme"):
+                    for opt_key in ("title", "aggregate", "scheme", "format", "formatType", "scale"):
                         if d.get(opt_key):
                             enc_json_dict[opt_key] = d[opt_key]
                     encoding_dict[axis] = enc_json_dict
@@ -1855,31 +2041,6 @@ class Chart:
     # ---- Properties ----
 
     def properties(self, *, width=None, height=None, title=None, description=None) -> "Chart":
-        """Set chart-level display properties.
-
-        Parameters
-        ----------
-        width : int or str, optional
-            Chart width in pixels or as a CSS string. Overrides the value set
-            at construction.
-        height : int or str, optional
-            Chart height in pixels or as a CSS string. Overrides the value set
-            at construction.
-        title : str, optional
-            Chart title rendered above the axes.
-        description : str, optional
-            Accessible description for screen readers; not rendered visually.
-
-        Returns
-        -------
-        Chart
-            New chart with the specified properties updated.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().properties(width=500, title="MPG vs HP")
-        """
         new = self._clone()
         if width is not None: new._width = width
         if height is not None: new._height = height
@@ -1889,23 +2050,7 @@ class Chart:
 
     # ---- Spec output ----
 
-    def to_spec(self) -> "ChartSpec":
-        """Build and return the ``ChartSpec`` intermediate representation.
-
-        Resolves any pending statistical mark desugar (when a mark method was
-        called before ``.encode()``), then constructs the ``ChartSpec`` that
-        the Rust renderer consumes.
-
-        Returns
-        -------
-        ChartSpec
-            Fully resolved chart specification ready for rendering.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> spec = fm.Chart(df).encode(x="hp", y="mpg").mark_point().to_spec()
-        """
+    def to_spec(self):
         # Resolve any pending statistical mark desugar (mark called before encode).
         resolved = self._resolve_pending()
         from ferrum import ChartSpec, EncodingSpec
@@ -1914,7 +2059,7 @@ class Chart:
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": resolved._mark or "point", "data": "default"}
         from ferrum.repeat import _RepeatPlaceholder
-        for axis in ("x", "y", "color", "size", "shape", "opacity"):
+        for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
             if axis in resolved._encoding:
                 ch = resolved._encoding[axis]
                 if ch.field is None:
@@ -1945,7 +2090,8 @@ class Chart:
         return ChartSpec(**kw)
 
     def _build_spec(self):
-        """Build the chart spec with typed Python access to layers.
+        """Build the chart spec for callers that want typed Python access to
+        layers (composite-mark tests, future internal renderer wiring).
 
         For single-layer charts this is a thin alias for ``to_spec``. For
         layered charts it returns a Python-side ``_SpecView`` that wraps the
@@ -1963,34 +2109,10 @@ class Chart:
         return _SpecView(spec, resolved._layers)
 
     def to_json(self, *, indent=None) -> str:
-        """Serialize the chart specification to a JSON string.
-
-        Returns
-        -------
-        str
-            JSON-encoded ``ChartSpec``.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> json_str = fm.Chart(df).encode(x="hp", y="mpg").mark_point().to_json()
-        """
         spec = self.to_spec()
         return spec.to_json()
 
     def show_svg(self) -> str:
-        """Render the chart to an SVG string.
-
-        Returns
-        -------
-        str
-            An SVG document string representing the chart.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> svg = fm.Chart(df).encode(x="hp", y="mpg").mark_point().show_svg()
-        """
         # Stub — full impl in Task 32
         from ferrum._core import render_svg
         spec = self.to_spec()
@@ -2000,18 +2122,6 @@ class Chart:
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
     def show_png(self) -> bytes:
-        """Render the chart to a PNG byte string.
-
-        Returns
-        -------
-        bytes
-            PNG-encoded image bytes.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> png = fm.Chart(df).encode(x="hp", y="mpg").mark_point().show_png()
-        """
         from ferrum._core import render_png
         spec = self.to_spec()
         data = to_arrow_table(self._data)
@@ -2020,37 +2130,12 @@ class Chart:
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
     def save(self, path, *, format=None, **render_kwargs) -> None:
-        """Save the chart to disk as SVG or PNG.
-
-        The output format is inferred from the file extension when ``format``
-        is not provided.
-
-        Parameters
-        ----------
-        path : str or pathlib.Path
-            Destination file path. Extension determines format when ``format``
-            is ``None``.
-        format : {"svg", "png"}, optional
-            Explicit output format. Overrides extension-based inference.
-        **render_kwargs
-            Additional keyword arguments forwarded to the renderer.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().save("chart.svg")
-        """
+        """Save chart to disk (svg or png). Format inferred from extension."""
         from ferrum.display import save_chart
         save_chart(self, path, format=format, **render_kwargs)
 
     def show(self) -> None:
-        """Display the chart inline in Jupyter or open in a browser fallback.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().show()
-        """
+        """Display chart: Jupyter inline SVG or browser fallback."""
         from ferrum.display import show_chart
         show_chart(self)
 
@@ -2069,39 +2154,13 @@ class Chart:
             return None
 
     # Stubs for Phase 11
-    def add_selection(self, *selections) -> "Chart":
-        """Add interactive selection brushes — deferred to Phase 11.
-
-        Parameters
-        ----------
-        *selections
-            Accepted for API compatibility; raises ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            Always; selections require the interactive renderer (Phase 11).
-        """
+    def add_selection(self, *selections):
         raise NotImplementedError("selections require .interactive() — Phase 11")
 
-    def interactive(self) -> "Chart":
-        """Enable the interactive renderer — deferred to Phase 11.
-
-        Raises
-        ------
-        NotImplementedError
-            Always; the interactive renderer is not yet implemented.
-        """
+    def interactive(self):
         raise NotImplementedError("interactive renderer — Phase 11")
 
     def __repr__(self) -> str:
-        """Return a concise string representation of the chart.
-
-        Returns
-        -------
-        str
-            String showing the active mark and declared encoding channels.
-        """
         return f"Chart(mark={self._mark!r}, encoding={list(self._encoding.keys())})"
 
 

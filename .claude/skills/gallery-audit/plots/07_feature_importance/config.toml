@@ -1,0 +1,7 @@
+plot_type = "Feature importance (horizontal bar)"
+dataset = "load_breast_cancer, RandomForestClassifier(n_estimators=100, random_state=0)"
+width = 600
+height = 600
+panels = ["ferrum", "yellowbrick", "skp"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.importance_chart available (Task 21 / commit bcaeb65). Defaults: method='builtin', top_k=20, orient='horizontal', error_bars=True"

@@ -1,6 +1,6 @@
 # Ferrum — Implementation Phases (Meta-Roadmap)
 
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-11
 **Concept spec:** `ferrum-spec.md` (at repo root — philosophy, API surface, design constraints)
 **This document:** implementation order, phase dependencies, done criteria, and session-orientation guide
 
@@ -67,7 +67,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **8a** | Grammar API surface (Python) — primitives + simple stats | `Chart`, `Layer`, all 31 encoding channels, themes-as-values, `+`/`\|`/`&` composition, `Facet`, `CoordFlip`, annotations, `mark_density/histogram/smooth` | 7 | [`2026-05-10-grammar-api-design.md`](specs/2026-05-10-grammar-api-design.md) | **done** |
 | **8b** | Composite + heavy statistical marks | `mark_boxplot/errorbar/errorband/ribbon`, `mark_contour/violin/qq/raster/swarm/hex/function` + 10 new Phase 5 transforms (Outliers, ErrorExtent, BoxStats, Violin, Kde2D, Contour, QQ, Raster, Hex, Swarm) + new SVG primitives (image, polygon, beeswarm) | 8a | [`2026-05-10-composite-stat-marks-design.md`](specs/2026-05-10-composite-stat-marks-design.md) | **done** |
 | **9** | Convenience / figure-level API | 8 Group A figure functions (`displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`, `clustermap`, `jointplot`); 8 new transforms (Unpivot, Linkage, Reorder, Bin2D, Logistic, Glm, Robust, LetterValue); 4 position adjustments (Identity, Dodge, Jitter, Stack); 2 new marks (segment, boxen); 3 new compound views (JointChart, RepeatChart, ClusterMapChart). Group B (model-diagnostic figure-level) deferred to Phase 10. | 8 | [`2026-05-10-convenience-api-design.md`](specs/2026-05-10-convenience-api-design.md) | **done** |
-| **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter), model-diagnostic marks (`ConfusionMark`, `ROCMark`, `CalibrationMark`, etc.), `Visualizer` convenience wrappers | 8 | *(not yet written)* | pending |
+| **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter, 22 derived-data methods, plus `ComparedModelSource` for multi-model overlay), 26 model-diagnostic marks, 21 Group B figure functions, 25 sklearn-protocol Visualizers. One new Rust function (`kendall_tau_b`, Knight's O(n log n)). | 8 | [`2026-05-10-model-diagnostics-design.md`](specs/2026-05-10-model-diagnostics-design.md) | **done** |
 | **11** | Interactive renderer (WASM) | `ferrum-wasm` crate + `ferrum._wasm` module; `.interactive()` switches render target; selections, zoom, pan, linked views declared in chart spec | 8 | *(not yet written)* | pending |
 | **12** | Extension points | Public APIs for custom marks, custom stat transforms, custom themes, renderer plugins; stable enough to document and not break | 8 | *(not yet written)* | pending |
 
@@ -144,9 +144,9 @@ A phase is `done` when all of the following are true:
 - [x] All 6 spec drift notes applied to `ferrum-spec.md`
 
 ### Phase 10 — Model diagnostics
-- [ ] `ModelSource` wraps any object with `predict`/`predict_proba`/`transform`
-- [ ] All model-diagnostic marks from `ferrum-spec.md §3.3` render correctly
-- [ ] Sklearn is not imported unless the user's model is from sklearn
+- [x] `ModelSource` wraps any object with `predict`/`predict_proba`/`transform`
+- [x] All model-diagnostic marks from `ferrum-spec.md §3.3` render correctly
+- [x] Sklearn is not imported unless the user's model is from sklearn
 
 ### Phase 11 — Interactive renderer
 - [ ] `chart.interactive()` produces an HTML bundle with a WASM renderer

@@ -50,6 +50,14 @@ enum KeyValue {
 }
 
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &crate::transform::context::TransformContext::default())
+}
+
+pub(crate) fn apply_with_context(
+    spec: &ViolinSpec,
+    batch: &RecordBatch,
+    ctx: &crate::transform::context::TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
 
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
@@ -90,10 +98,14 @@ pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBa
     }
     fields.push(Field::new("violin_x", DataType::Float64, false));
     fields.push(Field::new("violin_y", DataType::Float64, false));
+    // __pos_x_offset__ = per-vertex pixel offset on the category axis, so the
+    // polygon mark's ordinal-x dispatch path can position each vertex relative
+    // to its category band center. Computed below from panel width / n_groups.
+    fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(fields));
 
     if n_rows == 0 {
-        let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 3);
+        let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 4);
         cols.push(Arc::new(UInt32Array::from(Vec::<u32>::new())));
         for gi in 0..spec.groupby.len() {
             match group_dtypes[gi] {
@@ -106,6 +118,7 @@ pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBa
                 _ => unreachable!(),
             }
         }
+        cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
         cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
         cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
         return RecordBatch::try_new(out_schema, cols)
@@ -305,8 +318,23 @@ pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBa
             _ => unreachable!(),
         }
     }
+    // Convert violin_x (in normalized polygon-width units; |violin_x| ≤ spec.width)
+    // to per-vertex pixel offsets on the category axis. With n_groups categories
+    // sharing panel_w pixels, each band is roughly panel_w / n_groups wide, and
+    // we use that as the conversion factor — a violin of `width=0.4` (default)
+    // then spans 80% of its band, which matches the standard violin convention.
+    // Without panel context (e.g. tests calling `apply` directly) we fall back
+    // to a sensible per-band default so the column is still populated.
+    let n_groups = groups.len().max(1);
+    let band_pixels: f64 = match ctx.panel_pixel_size {
+        Some((w, _)) if w > 0 => (w as f64) / (n_groups as f64),
+        _ => 100.0,
+    };
+    let pos_x_offset: Vec<f64> = violin_x.iter().map(|x| x * band_pixels).collect();
+
     cols.push(Arc::new(Float64Array::from(violin_x)));
     cols.push(Arc::new(Float64Array::from(violin_y)));
+    cols.push(Arc::new(Float64Array::from(pos_x_offset)));
 
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_violin: {e}")))

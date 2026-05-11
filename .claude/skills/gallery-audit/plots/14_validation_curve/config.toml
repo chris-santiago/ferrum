@@ -1,0 +1,7 @@
+plot_type = "Validation curve (param sweep)"
+dataset = "load_diabetes, Ridge regression, alpha sweep [1e-3 ... 1e2] (6 values log-spaced)"
+width = 720
+height = 480
+panels = ["ferrum", "sklearn", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.validation_curve_chart available (Task 28, commit cf6858a). `param` + `values` are required args — both panels pass the same sweep."

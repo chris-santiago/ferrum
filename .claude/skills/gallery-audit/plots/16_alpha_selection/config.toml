@@ -1,0 +1,7 @@
+plot_type = "Alpha selection (regularization sweep)"
+dataset = "load_diabetes, Ridge regression, alpha sweep [1e-3 ... 1e2] log-spaced"
+width = 720
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.alpha_selection_chart available (Task 28, commit cf6858a). `alphas=` required. Defaults: log_scale=True, highlight_best=True. No sklearn comparator (RidgeCV picks best but has no display class)."

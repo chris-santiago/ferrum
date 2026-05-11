@@ -18,6 +18,20 @@ A confusion matrix is a cross-tabulation. A ROC curve is a sorted transformation
 #### Statistics belong in the rendering pipeline, not in userspace
 Computing a KDE, bootstrapping a confidence interval, or fitting a LOESS curve should not require the user to call SciPy before plotting. These are stat transforms: first-class operations declared in the chart spec and executed in the Rust engine before rendering. The user declares intent; Ferrum computes.
 
+> **2026-05-11 (Phase 10 — Model Diagnostics):** Phase 10 places model-diagnostic
+> compute in the `ModelSource` adapter layer (Python, lazy-imported sklearn
+> delegation) rather than as Rust transforms in the rendering pipeline. From the
+> user's perspective the figure function (`ferrum.roc_chart`, etc.) *is* the
+> rendering pipeline — they are not computing ROC in userspace, which is what
+> this constraint actually proscribes. Whether the internal compute is a Rust
+> transform or a Python call to sklearn is invisible at the call site.
+> Model-diagnostic compute is also entangled with the model-specific protocol
+> (`predict_proba`, `classes_`, etc.), which a generic Rust transform cannot
+> access without reimplementing sklearn's estimator protocol. The one exception
+> is `ferrum._core.kendall_tau_b` (Knight's O(n log n) tau-b), which runs as a
+> Rust function called from `ModelSource.rank2d(algorithm="kendall")` — pure
+> numeric work over two f64 arrays, no estimator protocol involved.
+
 #### Interactivity is a renderer, not a rewrite
 You should not need to learn a different API to make a chart interactive. `.interactive()` switches the render target from SVG to a WASM canvas. Selections, zoom, pan, and linked views are declared in the chart spec and handled by the renderer. Plotly's fatal flaw is that interactive charts and static charts are different objects. Ferrum has one chart object.
 
@@ -164,8 +178,19 @@ Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` dir
 Wraps a fitted estimator and a dataset; exposes derived data sources as Arrow tables.
 
 ```
-ModelSource(model, X, y=None, *, feature_names=None, class_names=None, sample_weight=None)
+ModelSource(model, X, y=None, *, feature_names=None, class_names=None,
+            sample_weight=None, random_state=None)
 ```
+
+> **2026-05-11 (Phase 10 — Model Diagnostics):** `random_state: int | None = None`
+> was added as the sixth keyword-only constructor argument. It is propagated to
+> every derived-data method whose underlying sklearn / shap / umap call accepts
+> an RNG seed (importances permutation, SHAP background sampling, UMAP / t-SNE
+> embeddings, MDS / t-SNE cluster-center projection, learning_curve / validation_curve /
+> cv_scores / alpha_selection cross-validation, partial_dependence sampling).
+> Methods whose compute is deterministic by construction (predictions, residuals,
+> roc_curve, pr_curve, confusion_matrix, calibration_curve, cumulative_gain,
+> lift_curve, discrimination_threshold, pca_variance, rank1d/rank2d) ignore it.
 
 **Methods** (all return `polars.DataFrame` unless noted)
 - `.predictions()` — `y_true`, `y_pred`, `residual`, `studentized_residual`
@@ -411,6 +436,32 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_intercluster_distance(...)` | MDS or t-SNE projection of cluster centers, with each center sized proportionally to its membership count. Completes the clustering diagnostic suite alongside `mark_silhouette`. | `method` (`"mds"`\|`"tsne"`), `min_size`, `max_size`, `label_clusters` (bool) |
 | `mark_cv_scores(...)` | Box, bar, or strip plot of cross-validation score distributions per fold. | `kind` (`"box"`\|`"bar"`\|`"strip"`), `split` (`"test"`\|`"train"`\|`"both"`) |
 | `mark_alpha_selection(...)` | CV score vs regularization parameter curve with CI band. Intended for Ridge, Lasso, ElasticNet. Distinct from `mark_validation_curve` in that it assumes a log-spaced alpha domain by default. | `log_scale` (bool, default `True`), `ci_style` (`"band"`\|`"errorbar"`), `highlight_best` (bool) |
+
+> **2026-05-11 (Phase 10 — Model Diagnostics):** Per-mark clarifications surfaced during
+> the 10a–10g implementation:
+> - `mark_residuals(kind="studentized")` uses the leverage-aware hat-matrix definition
+>   when `X` is supplied to the underlying `studentized_residual` helper (linear
+>   estimators only). For non-linear estimators ferrum falls back to internally
+>   studentized residuals (divide by `std(r, ddof=1)`).
+> - `mark_confusion`: color scale on `value` uses Phase 8b's continuous color scale
+>   (`viridis` default). Per-cell `value_fmt` (Utf8) is pre-computed by
+>   `ModelSource.confusion_matrix` so the renderer's text layer lays out short labels
+>   without invoking number formatting per cell.
+> - `mark_decision_boundary`: requires exactly 2 features; the figure-level
+>   `decision_boundary_chart` fixes the unused features at their column means.
+> - `mark_shap_*`: require the `shap` library, installable via `ferrum[shap]`. The
+>   `shap_waterfall` mark requires an explicit `sample_idx: int` kwarg.
+> - `mark_rank2d(algorithm="kendall")` is the sole Phase 10 path that crosses into
+>   Rust at compute time — it calls `ferrum._core.kendall_tau_b` (Knight's
+>   O(n log n) merge-sort variant). All other rank2d algorithms run in NumPy.
+> - `mark_pca_scree(cumulative_line=True)` overlays a `mark_line` on the
+>   `cumulative_variance_ratio` column. Layer-0 is the cumulative line so its
+>   wider y range drives axis-scale resolution; the rect-bar layer follows.
+> - `mark_intercluster_distance` uses the `size` channel for cluster cardinality;
+>   the chart builder pads the x/y domain by 15% so large bubbles don't clip.
+> - `mark_parallel_coordinates`: routes `sample_id` through `mark_style.detail` so
+>   each sample renders as its own polyline. Requires the Phase 10g `mark_line`
+>   composite (color, detail) grouping path and ordinal-x support.
 
 ---
 
@@ -799,6 +850,22 @@ with ferrum.theme_context(my_theme):
 > `cv_scores_chart`) remains scheduled for Phase 10, alongside
 > `ModelSource` and the model-diagnostic marks they depend on.
 
+> **2026-05-11 (Phase 10 — Model Diagnostics):** All Group B figure
+> functions ship in Phase 10 with every spec parameter implemented.
+> Multi-model overlay is supported via three entry points:
+> (a) pass a dict positional argument
+> (`roc_chart({"a": model_a, "b": model_b}, X, y)`),
+> (b) pass `compare=` kwarg
+> (`roc_chart(model_a, X, y, compare={"alt": model_b})`), or
+> (c) construct a `ComparedModelSource` explicitly via
+> `ModelSource.compare(...)` and pass it positionally. In all three
+> cases each per-model DataFrame is concatenated with a `model: Utf8`
+> column that downstream chart builders route to `color="model"`.
+> `random_state` affects compute on figure functions backed by
+> ModelSource methods that consume randomness (see §3.1 note); it is a
+> no-op on the rest. `parallel_coordinates_chart` and `rank_chart` do
+> not need a model — both accept a raw DataFrame / 2D array directly.
+
 Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
 
 #### Distribution
@@ -998,6 +1065,21 @@ class FerrumVisualizer:
 | `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, theme=None)` | Regularization parameter selection curve |
 | `InterclusterDistanceVisualizer(model, *, method="mds", theme=None)` | Intercluster distance map |
 | `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", theme=None)` | Cross-validation score distribution |
+
+> **2026-05-11 (Phase 10 — Model Diagnostics):** Every visualizer constructor
+> documented above accepts `random_state: int | None = None` as an additional
+> keyword argument. The base `FerrumVisualizer.__init__` stores it on `self`
+> and forwards it to the underlying `ModelSource` (or to `_diagnostics/stats`
+> compute helpers for the no-model variants). Visualizers whose backing
+> compute is deterministic (`ROCVisualizer`, `PRVisualizer`,
+> `ConfusionMatrixVisualizer`, `CalibrationVisualizer`,
+> `ResidualsVisualizer`, `PredictionErrorVisualizer`,
+> `DiscriminationThresholdVisualizer`, `PCAVarianceVisualizer`,
+> `Rank2DVisualizer` — except `algorithm="kendall"` which is also
+> deterministic, `ClassBalanceVisualizer`, `ClassificationReportVisualizer`,
+> `ClassPredictionErrorVisualizer`) ignore the value; the rest propagate
+> it. The `ElbowVisualizer(model_class, *, ks, ...)` signature is unique —
+> it takes a model **class** and fits one instance per k inside `fit()`.
 
 ---
 

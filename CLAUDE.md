@@ -45,6 +45,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 - **No global mutable state.** No module-level config objects, no module-level theme rebinding. Themes are values passed to `Chart`; per-chart `.theme()` always wins. The single documented exception is `ferrum.set_default_theme()` (phase 8a+), which mutates a per-thread `contextvars.ContextVar` — scope-bounded, automatic-revert when used as a context manager, and overridden by per-chart `.theme()` at render time. Do not introduce other process-scoped mutators.
 - **`ferrum-spec.md` is the API contract.** If implementation diverges, update the spec with a dated note. Never silently drift.
 - **`cargo test` must pass** before any phase (2+) is marked done. Phase 1 is the only exception.
+- **Goldens are not blessed until visually inspected.** SVG byte-equality is necessary but not sufficient — historically goldens were committed that rendered with missing elements, blank panels, or mis-stacked bars, and the byte-diff tests still passed because the implementation matched the *broken* golden. Whenever you add or regenerate any `tests/goldens/**/*.svg` (or `tests/test_phase_9_e2e/goldens/*.svg`), you must rasterize it to PNG via `python scripts/snapshot-goldens.py <name>` (or `python scripts/snapshot-goldens.py` for all), `Read` each resulting PNG, and confirm the chart renders correctly **before committing**. The helpers live in `tests/_snapshots.py` (`snapshot_golden()`, `rasterize_svg()`, `find_goldens()`, and `regen_and_verify(golden_path, svg)` — the preferred entry point for regen scripts: writes the SVG, rasterizes the PNG, and prints both paths to stdout in a single call so the inspection PNG cannot be silently skipped). `resvg-py` (in the dev dependency group) is the rasterizer. **Caveat:** `resvg-py` silently drops paths when an SVG contains many thousands of polygon/path elements (observed at ~9.5k paths in dense KDE-contour fills). Before concluding a chart is broken from the PNG, sanity-check the SVG itself — `grep -oE 'd="M' tests/.../foo.svg | wc -l` — and look at the x-range of the first numeric coord on each path. A chart that looks like a tiny patch in the PNG but has thousands of paths spanning the plot extent in the SVG is a *renderer-side* truncation, not a real bug.
 - **Do not `git push`** unless the user explicitly asks.
 - **Confirm before committing to `main`** on non-trivial work. Phase 1 commits directly to main by user decision (greenfield); subsequent phases use feature branches unless the user says otherwise.
 
@@ -76,6 +77,22 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 | Python package source | `src/ferrum/` |
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
+| Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
+| Gallery audit skill | `.claude/skills/gallery-audit/` |
+| Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
+
+---
+
+## Gallery audit (default-output comparison)
+
+A reproducible side-by-side audit of ferrum's default plot output against canonical Python libraries (sklearn, seaborn, yellowbrick, scikit-plot). Use it to find where ferrum's defaults lack information or visual quality that competitors ship out of the box — missing AUC annotations, missing reference lines, wrong axis labels, missing per-cell counts on confusion matrices, etc.
+
+- **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 12-row scaffold; 10 wired today, 2 historically blocked rows tracked in `RESUME.md` (row 07 unblocks with Task 21 `importance_chart`; row 05 still needs a `learning_curve_chart`). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
+- **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
+- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see "Composite marks desugar Python-side" below).
+- **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
+- **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
+- **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
 
 ---
 
@@ -93,3 +110,27 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 - **Themes are values; one documented contextvar exception.** `Theme` is an immutable Python value class (phase 8a+). `Chart.theme(t)` per-chart override always wins. `ferrum.set_default_theme(t)` returns a context manager backed by a per-thread `contextvars.ContextVar` for notebook ergonomics — the only sanctioned process-scoped theme state. See the **Hard constraints** section above for the full statement. (Decision made 2026-05-10.)
 - **Composite marks desugar Python-side; no Rust `Composite` Mark variant.** Composite marks (`mark_boxplot`, `mark_errorbar`, `mark_errorband`, `mark_ribbon`, `mark_violin`, `mark_boxen`, …) build multi-layer `ChartSpec`s in Python via `chart.layer(...)` over primitive marks (rect, rule, point, line, ribbon). Rust has no awareness that a layered spec came from a composite — it just renders layers. Multi-output transforms (`BoxStats`, `Outliers`, `Violin`, `Hex`, …) feed individual layers via `Layer.data_source: Option<String>` matched against `TransformSpec.name: Option<String>`; when both are `None`, behavior is byte-identical to single-layer 8a. (Decision made 2026-05-10: alternative was a Rust `MarkSpec::Composite { layers: Vec<Mark> }` variant — rejected because it duplicates the multi-layer machinery already in `ChartSpec.layers`, and would force every composite-mark expansion to cross the PyO3 boundary as opaque payloads. Same pattern applies to Phase 9's `mark_boxen` and any future composite.)
 - **Byte-deterministic randomness via seeded `rand_chacha`.** Every transform that uses randomness — bootstrap CI (`Smooth`, `Aggregate`), beeswarm tiebreak, Phase 9 `Jitter` — seeds `ChaCha8Rng` from a `u64` (transform's `seed` field or `spec.seed`, default `0`). Never `rand::thread_rng()`, never `SystemRandom`, never platform RNG. This makes SVG goldens byte-identical across macOS / Linux / CI and across Rust toolchain versions. The same rule applies to any future transform or mark that introduces randomness — pick a seed field, document the default, plumb it through `ChaCha8Rng`. (Decision made 2026-05-10: existing 8b transforms ship this way; codified here so Phase 9+ doesn't accidentally reintroduce non-determinism.)
+
+
+## Docs site work in progress
+
+  - **Worktree**: `.claude/worktrees/docs-continue/`
+  - **Branch**: `docs/continue` (based on `main`, 2 commits ahead)
+  - **Spec**: `design-docs/DOCS_SITE_PLAN.md`
+
+  **Status (paused 2026-05-11):**
+  - Phase 1 scaffold landed: Zensical at repo root (`zensical.toml`), docs source at `docs/site/`, `docs_dir = "docs/site"` set so the legacy
+  `docs/superpowers/` tree stays out of scope. mkdocstrings + mkdocstrings-python wired with NumPy docstring style.
+  - 6 source-independent pages authored: Home, Get Started/{Install, Why Ferrum}, Concepts/{One chart model, Stats in the pipeline, Performance & scale}.
+  - Remaining stubs are blocked on either (a) source-backed code examples — First plot, the six Guide pages — or (b) unmerged Phase 10 surface (Model
+  diagnostics, Model outputs as data, Interactive rendering, two gallery examples, the yellowbrick + scikit-plot comparisons).
+  
+  **Resume path after Phase 10 merges to main:**
+  1. From the docs worktree: `git fetch && git rebase origin/main`.
+  2. Expect conflicts in `pyproject.toml` (dev deps list — usually auto-mergeable), `uv.lock` (resolve by `git checkout --theirs uv.lock && uv sync`), and
+  `.gitignore` (additive). No other overlap.
+  3. Run `uv run zensical build --clean` to verify (~5–9s) and check the new `griffe` warning count from Phase 10 visualizers.
+  4. Author the unblocked pages against the now-real surface.
+  
+  **Do not** delete the worktree or branch — both docs commits live in `.git/` and survive worktree removal, but the convention is to leave both in place
+  until the work merges.

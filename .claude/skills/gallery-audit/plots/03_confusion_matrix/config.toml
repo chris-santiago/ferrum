@@ -1,0 +1,7 @@
+plot_type = "Confusion matrix"
+dataset = "load_breast_cancer (binary), LogisticRegression, 30% test split, random_state=0"
+width = 500
+height = 500
+panels = ["ferrum", "sklearn", "yellowbrick", "skp"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.confusion_matrix_chart available"

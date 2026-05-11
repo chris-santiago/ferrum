@@ -1,0 +1,7 @@
+plot_type = "Boxplot by category"
+dataset = "seaborn.load_dataset('tips'), x='day', y='total_bill'"
+width = 640
+height = 480
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.catplot(kind='box') — Phase 9e"

@@ -48,6 +48,30 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 10 — free functions (Rust)
     "process_batch", "compute_layout", "render_svg", "render_png",
     "compose_svg_horizontal", "compose_svg_vertical", "compose_svg_grid",
+    # Phase 10 — model diagnostics layer (added 2026-05-11)
+    "ModelSource", "ComparedModelSource",
+    "FerrumVisualizer",
+    "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
+    "ROCVisualizer", "PRVisualizer", "CalibrationVisualizer",
+    "DiscriminationThresholdVisualizer",
+    "ConfusionMatrixVisualizer", "ClassificationReportVisualizer",
+    "ClassPredictionErrorVisualizer", "ClassBalanceVisualizer",
+    "FeatureImportancesVisualizer", "SHAPVisualizer",
+    "LearningCurveVisualizer", "ValidationCurveVisualizer",
+    "CVScoresVisualizer", "AlphaSelectionVisualizer",
+    "SilhouetteVisualizer", "ElbowVisualizer", "ManifoldVisualizer",
+    "InterclusterDistanceVisualizer", "PCAVarianceVisualizer",
+    "Rank1DVisualizer", "Rank2DVisualizer", "ParallelCoordinatesVisualizer",
+    "residuals_chart",
+    "roc_chart", "pr_chart", "calibration_chart",
+    "gain_chart", "lift_chart", "discrimination_threshold_chart",
+    "confusion_matrix_chart", "class_prediction_error_chart",
+    "importance_chart", "shap_chart", "pdp_chart",
+    "learning_curve_chart", "validation_curve_chart",
+    "cv_scores_chart", "alpha_selection_chart",
+    "pca_scree_chart", "cluster_diagnostics",
+    "intercluster_distance_chart", "decision_boundary_chart",
+    "rank_chart", "parallel_coordinates_chart",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
