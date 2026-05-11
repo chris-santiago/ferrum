@@ -104,3 +104,56 @@ def test_mark_discrimination_threshold_threshold_line_raises(binary_source):
         ferrum.Chart(long).mark_discrimination_threshold(
             threshold_line=True,
         ).show_svg()
+
+
+# --- Figure-function tests (Task 16) --------------------------------
+
+
+def test_roc_chart_figure_function(binary_source):
+    svg = ferrum.roc_chart(binary_source).show_svg()
+    assert "<svg" in svg
+
+
+def test_roc_chart_from_model():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    svg = ferrum.roc_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    ).show_svg()
+    assert "<svg" in svg
+
+
+def test_pr_chart_figure_function(binary_source):
+    svg = ferrum.pr_chart(binary_source).show_svg()
+    assert "<svg" in svg
+
+
+def test_calibration_chart_figure_function(binary_source):
+    svg = ferrum.calibration_chart(binary_source, n_bins=5).show_svg()
+    assert "<svg" in svg
+
+
+def test_calibration_chart_multi_model_rejected():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    src = ferrum.ModelSource(model, X, df["y"])
+    with pytest.raises(NotImplementedError, match="Multi-model calibration"):
+        ferrum.calibration_chart(src, src)
+
+
+def test_gain_chart_figure_function(binary_source):
+    svg = ferrum.gain_chart(binary_source).show_svg()
+    assert "<svg" in svg
+
+
+def test_lift_chart_figure_function(binary_source):
+    svg = ferrum.lift_chart(binary_source).show_svg()
+    assert "<svg" in svg
+
+
+def test_discrimination_threshold_chart_figure_function(binary_source):
+    svg = ferrum.discrimination_threshold_chart(
+        binary_source, n_thresholds=20,
+    ).show_svg()
+    assert "<svg" in svg

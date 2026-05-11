@@ -115,3 +115,143 @@ def _prediction_error_chart_from_source(
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+# ---------------------------------------------------------------------------
+# 10b builders — classification curves
+# ---------------------------------------------------------------------------
+
+
+def _color_field_for(df: pl.DataFrame, default: str) -> str:
+    """Return ``'model'`` if a ``model`` column is present (compare-source
+    path), otherwise the supplied default.
+    """
+    return "model" if "model" in df.columns else default
+
+
+def _roc_chart_from_source(
+    source: Any,
+    *,
+    per_class: bool = True,
+    average: str | None = "macro",
+    annotate_auc: bool = False,
+    theme: Any = None,
+):
+    """Build an ROC chart from a ModelSource."""
+    import ferrum
+    df = source.roc_curve(average=None if per_class else average)
+    chart = ferrum.Chart(df).mark_roc(
+        average=None if per_class else average,
+        annotate_auc=annotate_auc,
+        color_field=_color_field_for(df, "class"),
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _pr_chart_from_source(
+    source: Any,
+    *,
+    per_class: bool = True,
+    annotate_ap: bool = False,
+    iso_lines: bool = False,
+    theme: Any = None,
+):
+    """Build a precision-recall chart from a ModelSource."""
+    import ferrum
+    del per_class  # ModelSource.pr_curve() always returns per-class for now
+    df = source.pr_curve()
+    chart = ferrum.Chart(df).mark_pr(
+        annotate_ap=annotate_ap,
+        iso_lines=iso_lines,
+        color_field=_color_field_for(df, "class"),
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _calibration_chart_from_source(
+    source: Any,
+    *,
+    n_bins: int = 10,
+    strategy: str = "uniform",
+    theme: Any = None,
+):
+    """Build a calibration (reliability) chart from a ModelSource."""
+    import ferrum
+    df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
+    color = "model" if "model" in df.columns else None
+    chart = ferrum.Chart(df).mark_calibration(
+        n_bins=n_bins,
+        strategy=strategy,
+        color_field=color,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _gain_chart_from_source(
+    source: Any,
+    *,
+    theme: Any = None,
+):
+    """Build a cumulative-gain chart from a ModelSource."""
+    import ferrum
+    df = source.cumulative_gain()
+    chart = ferrum.Chart(df).mark_gain(
+        color_field=_color_field_for(df, "class"),
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _lift_chart_from_source(
+    source: Any,
+    *,
+    theme: Any = None,
+):
+    """Build a lift chart from a ModelSource."""
+    import ferrum
+    df = source.lift_curve()
+    chart = ferrum.Chart(df).mark_lift(
+        color_field=_color_field_for(df, "class"),
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _discrimination_threshold_chart_from_source(
+    source: Any,
+    *,
+    n_thresholds: int = 50,
+    metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
+    cv: Any = None,
+    threshold_line: bool = False,
+    theme: Any = None,
+):
+    """Build a discrimination-threshold chart from a ModelSource.
+
+    The underlying DataFrame is unpivoted to long form
+    ``(threshold, metric, value)`` for plotting.
+    """
+    import ferrum
+    df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
+    long_df = df.unpivot(
+        index="threshold",
+        on=list(metrics),
+        variable_name="metric",
+        value_name="value",
+    )
+    chart = ferrum.Chart(long_df).mark_discrimination_threshold(
+        metrics=metrics,
+        n_thresholds=n_thresholds,
+        threshold_line=threshold_line,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart

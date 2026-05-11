@@ -58,3 +58,62 @@ def test_golden_prediction_error_regression():
     chart = _prediction_error_chart_from_source(source)
     svg = chart.show_svg()
     _check_golden(svg, "prediction_error_regression")
+
+
+# --- 10b goldens (classification curves) ---
+
+
+def _binary_xy():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return model, X, df["y"]
+
+
+def _multi_xy():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return model, X, df["y"]
+
+
+def test_golden_roc_chart_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.roc_chart(model, X, y)
+    _check_golden(chart.show_svg(), "roc_chart_binary")
+
+
+def test_golden_roc_chart_multiclass():
+    model, X, y = _multi_xy()
+    chart = ferrum.roc_chart(model, X, y)
+    _check_golden(chart.show_svg(), "roc_chart_multiclass")
+
+
+def test_golden_pr_chart_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.pr_chart(model, X, y)
+    _check_golden(chart.show_svg(), "pr_chart_binary")
+
+
+def test_golden_calibration_chart_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.calibration_chart(model, X=X, y=y, n_bins=5)
+    _check_golden(chart.show_svg(), "calibration_chart_binary")
+
+
+def test_golden_gain_chart_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.gain_chart(model, X, y)
+    _check_golden(chart.show_svg(), "gain_chart_binary")
+
+
+def test_golden_lift_chart_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.lift_chart(model, X, y)
+    _check_golden(chart.show_svg(), "lift_chart_binary")
+
+
+def test_golden_discrimination_threshold_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.discrimination_threshold_chart(model, X, y, n_thresholds=20)
+    _check_golden(chart.show_svg(), "discrimination_threshold_binary")

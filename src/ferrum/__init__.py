@@ -68,7 +68,15 @@ from ferrum._diagnostics.visualizers import (
     PredictionErrorVisualizer,
     ResidualsVisualizer,
 )
-from ferrum.figures import residuals_chart
+from ferrum.figures import (
+    residuals_chart,
+    roc_chart,
+    pr_chart,
+    calibration_chart,
+    gain_chart,
+    lift_chart,
+    discrimination_threshold_chart,
+)
 
 # Phase 9e — figure-level convenience functions
 from ferrum.figure import (
@@ -122,4 +130,6 @@ __all__ = [
     "FerrumVisualizer",
     "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
     "residuals_chart",
+    "roc_chart", "pr_chart", "calibration_chart",
+    "gain_chart", "lift_chart", "discrimination_threshold_chart",
 ]
