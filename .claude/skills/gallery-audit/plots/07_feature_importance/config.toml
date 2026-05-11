@@ -1,0 +1,7 @@
+plot_type = "Feature importance (horizontal bar)"
+dataset = "load_breast_cancer, RandomForestClassifier(n_estimators=100, random_state=0)"
+width = 600
+height = 600
+panels = []
+ferrum_status = "BLOCKED"
+ferrum_notes = "No ferrum.feature_importance_chart yet — ferrum._diagnostics.source recognizes feature_importances_/coef_ but no chart wraps it"

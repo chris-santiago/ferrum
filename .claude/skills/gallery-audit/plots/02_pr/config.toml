@@ -1,0 +1,7 @@
+plot_type = "Precision-recall curve"
+dataset = "load_breast_cancer (binary), LogisticRegression, 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "sklearn", "yellowbrick", "skp"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.pr_chart available; annotate_ap and iso_lines reserved for 10h"

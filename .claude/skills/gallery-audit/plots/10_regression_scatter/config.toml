@@ -1,0 +1,7 @@
+plot_type = "Scatter with regression fit + CI band"
+dataset = "seaborn.load_dataset('tips'), x='total_bill', y='tip'"
+width = 640
+height = 480
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.lmplot or ferrum.jointplot(kind='reg')"

@@ -1,0 +1,7 @@
+plot_type = "Calibration curve / reliability diagram"
+dataset = "load_breast_cancer (binary), LogisticRegression, 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "sklearn", "skp"]
+ferrum_status = "PARTIAL"
+ferrum_notes = "ferrum.calibration_chart exists but raises NotImplementedError in single-model mode (reserved for Phase 10h). Confirmed by audit run."

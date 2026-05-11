@@ -1,0 +1,7 @@
+plot_type = "Histogram with KDE overlay"
+dataset = "seaborn.load_dataset('tips').total_bill"
+width = 640
+height = 480
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.displot — supports kde overlay per Phase 9e"
