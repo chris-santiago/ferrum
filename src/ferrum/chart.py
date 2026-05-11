@@ -1629,6 +1629,110 @@ class Chart:
         new._position = position
         return new
 
+    def mark_rank1d(
+        self,
+        *,
+        orient: str = "horizontal",
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Univariate feature-ranking bar chart — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.rank1d()``:
+        ``feature``, ``score``, ``rank``. ``orient='horizontal'``
+        (default) places features on the y axis with score on x; pass
+        ``orient='vertical'`` to swap.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("rank1d", position)
+        from ferrum.marks.diagnostic import desugar_rank1d
+        new = self._clone()
+        new._mark = "bar"
+        new._pending_stat_mark = (
+            "rank1d",
+            {
+                "orient": orient,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_rank1d,
+        )
+        new._position = position
+        return new
+
+    def mark_rank2d(
+        self,
+        *,
+        annot: bool = True,
+        color_field: str = "correlation",
+        text_field: str = "correlation_fmt",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Pairwise feature-ranking heatmap — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.rank2d()``:
+        ``feature_x``, ``feature_y``, ``correlation``. The chart builder
+        appends a ``correlation_fmt`` (Utf8) column when ``annot=True``
+        so the text layer can render each cell's value at 2 dp.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("rank2d", position)
+        from ferrum.marks.diagnostic import desugar_rank2d
+        new = self._clone()
+        new._mark = "rect"
+        new._pending_stat_mark = (
+            "rank2d",
+            {
+                "annot": annot,
+                "color_field": color_field,
+                "text_field": text_field,
+                **mark_kwargs,
+            },
+            desugar_rank2d,
+        )
+        new._position = position
+        return new
+
+    def mark_parallel_coordinates(
+        self,
+        *,
+        alpha: float = 0.5,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Parallel coordinates — one polyline per sample.
+
+        Expects the long-form schema produced by
+        ``_parallel_coords_chart_from_dataframe``: ``feature`` (Utf8),
+        ``value`` (Float64), ``sample_id`` (Utf8), and optionally the
+        hue column passed via ``color_field``. The line layer routes
+        ``sample_id`` through ``mark_style.detail`` so each sample
+        renders as its own polyline (see ``crates/ferrum-core/src/render/
+        marks/line.rs``).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("parallel_coordinates", position)
+        from ferrum.marks.diagnostic import desugar_parallel_coordinates
+        new = self._clone()
+        new._mark = "line"
+        new._pending_stat_mark = (
+            "parallel_coordinates",
+            {
+                "alpha": alpha,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_parallel_coordinates,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

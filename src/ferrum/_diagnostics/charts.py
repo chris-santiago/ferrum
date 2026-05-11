@@ -790,6 +790,207 @@ def _intercluster_distance_chart_from_source(
     return chart
 
 
+def _rank1d_chart_from_dataframe(
+    df: pl.DataFrame,
+    *,
+    algorithm: str = "shapiro",
+    orient: str = "horizontal",
+    top_k: int | None = None,
+    color_field: str | None = None,
+    theme: Any = None,
+):
+    """Univariate rank1d chart over a pre-computed rank1d DataFrame.
+
+    Truncates to ``top_k`` rows before rendering (the ModelSource has
+    already sorted rows by descending score). ``algorithm`` is accepted
+    for signature parity with ``rank_chart``; it doesn't affect the
+    render — the DataFrame already carries the scores.
+
+    Pins the score axis to ``[0, max_score * 1.05]`` (or ``[0, 1]`` for
+    shapiro — W is bounded above by 1). Without an explicit zero
+    baseline, ``mark_bar``'s ordinal-y path renders bars from the
+    panel's left edge to ``to_pixel_f64(score)`` — when scores are
+    tightly clustered above zero (typical for Shapiro W ∈ [0.98, 1.0]
+    on well-behaved features), the auto-derived x domain starts at
+    ``min(score)`` and the smallest-scored feature has a zero-width
+    bar. Anchoring the domain at zero matches yellowbrick's default
+    and makes relative magnitudes legible.
+    """
+    import ferrum
+    from ferrum.encoding import X, Y
+
+    if top_k is not None:
+        df = df.head(int(top_k))
+    max_score = float(df["score"].max() or 0.0)
+    min_score = float(df["score"].min() or 0.0)
+    if algorithm == "shapiro":
+        x_domain = [0.0, 1.0]
+    elif min_score < 0.0:
+        # Negative scores (rare — only seen for raw covariance without
+        # abs); anchor at ``min - pad`` instead.
+        pad = max(abs(min_score), abs(max_score)) * 0.05
+        x_domain = [min_score - pad, max_score + pad]
+    else:
+        x_domain = [0.0, max_score * 1.05 if max_score > 0.0 else 1.0]
+
+    chart = ferrum.Chart(df).mark_rank1d(
+        orient=orient, color_field=color_field,
+    )
+    if orient == "horizontal":
+        chart = chart.encode(
+            x=X("score", scale={"type": "linear", "domain": x_domain}),
+            y=Y("feature"),
+        )
+    else:
+        chart = chart.encode(
+            x=X("feature"),
+            y=Y("score", scale={"type": "linear", "domain": x_domain}),
+        )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _rank2d_chart_from_dataframe(
+    df: pl.DataFrame,
+    *,
+    algorithm: str = "pearson",
+    annot: bool = True,
+    theme: Any = None,
+):
+    """Pairwise rank2d heatmap chart over a pre-computed rank2d DataFrame.
+
+    When ``annot=True``, appends a ``correlation_fmt`` (Utf8) column
+    holding ``"{:.2f}".format(correlation)`` per row so the text-overlay
+    layer can render compact 2-dp labels without invoking Rust-side
+    number formatting per cell.
+    """
+    import ferrum
+
+    del algorithm
+    if annot and "correlation_fmt" not in df.columns:
+        df = df.with_columns(
+            pl.col("correlation").map_elements(
+                lambda v: f"{v:.2f}", return_dtype=pl.Utf8,
+            ).alias("correlation_fmt"),
+        )
+    chart = ferrum.Chart(df).mark_rank2d(annot=annot)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _parallel_coords_chart_from_dataframe(
+    data,
+    *,
+    features: list[str] | None = None,
+    hue: str | None = None,
+    rescale: str | None = "minmax",
+    alpha: float = 0.5,
+    theme: Any = None,
+):
+    """Parallel coordinates chart from a wide DataFrame.
+
+    Reshapes ``data`` (a polars DataFrame, pandas DataFrame, or 2D
+    numpy array) into long form (``sample_id``, ``feature``, ``value``)
+    plus an optional ``hue`` column when provided, then renders one
+    polyline per sample with ``mark_parallel_coordinates``.
+
+    ``rescale`` in ``{"minmax", "zscore", None}``: per-feature rescaling
+    applied before unpivot so all features share a common y axis.
+    """
+    import ferrum
+    import numpy as np
+
+    if isinstance(data, pl.DataFrame):
+        df = data
+    elif hasattr(data, "to_numpy") and hasattr(data, "columns"):
+        # pandas DataFrame.
+        df = pl.from_pandas(data)
+    else:
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.ndim != 2:
+            raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
+        df = pl.DataFrame({
+            f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])
+        })
+
+    if features is None:
+        features = [
+            c for c in df.columns if c != hue
+        ]
+    else:
+        features = [str(c) for c in features]
+    # Validate feature columns exist.
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"parallel_coordinates: features {missing!r} are not in the "
+            f"data (available columns: {df.columns!r})."
+        )
+
+    # Optional per-feature rescale.
+    if rescale == "minmax":
+        for c in features:
+            col = df[c]
+            vmin = col.min()
+            vmax = col.max()
+            if vmin is None or vmax is None or vmin == vmax:
+                continue
+            df = df.with_columns(
+                ((pl.col(c) - float(vmin)) / (float(vmax) - float(vmin))).alias(c),
+            )
+    elif rescale == "zscore":
+        for c in features:
+            col = df[c]
+            mu = col.mean()
+            sd = col.std()
+            if sd is None or sd == 0.0:
+                continue
+            df = df.with_columns(
+                ((pl.col(c) - float(mu)) / float(sd)).alias(c),
+            )
+    elif rescale is None:
+        pass
+    else:
+        raise ValueError(
+            f"parallel_coordinates(rescale={rescale!r}) — expected "
+            "'minmax', 'zscore', or None."
+        )
+
+    # Reshape to long form.
+    id_cols = ["sample_id"] + ([hue] if hue is not None else [])
+    df = df.with_row_index("sample_id").with_columns(
+        pl.col("sample_id").cast(pl.Utf8),
+    )
+    long = df.unpivot(
+        index=id_cols,
+        on=features,
+        variable_name="feature",
+        value_name="value",
+    )
+    # Preserve feature order so the ordinal x scale lays out features in
+    # the user-supplied (or default) sequence rather than alphabetical.
+    long = long.with_columns(
+        pl.col("feature").cast(pl.Enum(features)),
+    ).sort("sample_id", "feature").with_columns(
+        pl.col("feature").cast(pl.Utf8),
+    )
+
+    if hue is not None:
+        # Cast hue to Utf8 so the categorical color scale routes it
+        # correctly (same Int64→continuous gotcha as silhouette.cluster).
+        long = long.with_columns(pl.col(hue).cast(pl.Utf8))
+
+    chart = ferrum.Chart(long).mark_parallel_coordinates(
+        alpha=alpha,
+        color_field=hue,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _decision_boundary_chart_from_source(
     source: Any,
     *,

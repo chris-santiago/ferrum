@@ -167,3 +167,16 @@ SCHEMA_INTERCLUSTER_DISTANCE = pl.Schema({
     "y": pl.Float64,
     "size": pl.Int64,
 })
+
+# Phase 10g — feature ranking
+SCHEMA_RANK1D = pl.Schema({
+    "feature": pl.Utf8,
+    "score": pl.Float64,
+    "rank": pl.Int64,
+})
+
+SCHEMA_RANK2D = pl.Schema({
+    "feature_x": pl.Utf8,
+    "feature_y": pl.Utf8,
+    "correlation": pl.Float64,
+})

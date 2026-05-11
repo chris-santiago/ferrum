@@ -260,6 +260,10 @@ def rank2d_compute(X, *, algorithm: str = "pearson") -> pl.DataFrame:
         else:
             C = np.corrcoef(X_np, rowvar=False)
             C = np.nan_to_num(C, nan=0.0)
+            # np.corrcoef can return 1.0 ± O(eps) on the diagonal due to
+            # accumulated rounding in the variance ratio; pin to exact 1.0
+            # so the heatmap diagonal renders identically across platforms.
+            np.fill_diagonal(C, 1.0)
     elif algorithm == "spearman":
         if p == 1:
             C = np.array([[1.0]])
@@ -269,6 +273,7 @@ def rank2d_compute(X, *, algorithm: str = "pearson") -> pl.DataFrame:
             ])
             C = np.corrcoef(Xr, rowvar=False)
             C = np.nan_to_num(C, nan=0.0)
+            np.fill_diagonal(C, 1.0)
     elif algorithm == "kendall":
         from ferrum._core import kendall_tau_b as _rust_ktb
         C = np.eye(p, dtype=np.float64)

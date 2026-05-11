@@ -287,3 +287,27 @@ def test_golden_decision_boundary_binary():
         features=(0, 1), grid_resolution=50, proba=True,
     )
     _check_golden(chart.show_svg(), "decision_boundary_binary_logistic")
+
+
+# --- 10g goldens (feature ranking + parallel coordinates) ---
+
+
+def test_golden_rank1d_shapiro_regression():
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.rank_chart(df, rank="1d", algorithm="shapiro")
+    _check_golden(chart.show_svg(), "rank1d_shapiro_regression")
+
+
+def test_golden_rank2d_kendall_regression():
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.rank_chart(df, rank="2d", algorithm="kendall")
+    _check_golden(chart.show_svg(), "rank2d_kendall_regression")
+
+
+def test_golden_parallel_coordinates_multiclass():
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.parallel_coordinates_chart(
+        df, features=["f0", "f1", "f2", "f3"], hue="y",
+        rescale="minmax",
+    )
+    _check_golden(chart.show_svg(), "parallel_coordinates_multiclass")

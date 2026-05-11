@@ -615,6 +615,88 @@ def intercluster_distance_chart(
     )
 
 
+def rank_chart(
+    data_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    rank: str = "2d",
+    algorithm: str | None = None,
+    top_k: int | None = None,
+    annot: bool = True,
+    orient: str = "horizontal",
+    color_field: str | None = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Feature-ranking chart — see ferrum-spec.md §3.14.
+
+    Accepts either a ``ModelSource`` / fitted model + X (covariance
+    routes through ``ModelSource.rank1d(algorithm='covariance')``,
+    which requires ``y``) or a raw DataFrame / 2D array of features
+    (no model needed).
+
+    ``rank='1d'`` produces a univariate ranking bar chart; ``rank='2d'``
+    produces a pairwise heatmap. Algorithm defaults: ``shapiro`` for 1d,
+    ``pearson`` for 2d.
+    """
+    import ferrum
+
+    if rank == "1d":
+        algo = algorithm or "shapiro"
+        if isinstance(data_or_source, ferrum.ModelSource):
+            df = data_or_source.rank1d(algorithm=algo)
+        elif algo == "covariance":
+            source = _resolve_source(
+                data_or_source, X, y, random_state=random_state,
+            )
+            df = source.rank1d(algorithm=algo)
+        else:
+            from ferrum._diagnostics.stats import rank1d_compute
+            data = data_or_source if X is None else X
+            df = rank1d_compute(data, algorithm=algo)
+        from ferrum._diagnostics.charts import _rank1d_chart_from_dataframe
+        return _rank1d_chart_from_dataframe(
+            df, algorithm=algo, orient=orient, top_k=top_k,
+            color_field=color_field, theme=theme,
+        )
+    if rank == "2d":
+        algo = algorithm or "pearson"
+        if isinstance(data_or_source, ferrum.ModelSource):
+            df = data_or_source.rank2d(algorithm=algo)
+        else:
+            from ferrum._diagnostics.stats import rank2d_compute
+            data = data_or_source if X is None else X
+            df = rank2d_compute(data, algorithm=algo)
+        from ferrum._diagnostics.charts import _rank2d_chart_from_dataframe
+        return _rank2d_chart_from_dataframe(
+            df, algorithm=algo, annot=annot, theme=theme,
+        )
+    raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
+
+
+def parallel_coordinates_chart(
+    data: Any,
+    *,
+    features: list[str] | None = None,
+    hue: str | None = None,
+    rescale: str | None = "minmax",
+    alpha: float = 0.5,
+    theme: Any = None,
+):
+    """Parallel coordinates chart — see ferrum-spec.md §3.14.
+
+    ``data`` is a polars / pandas DataFrame or a 2D numpy array of
+    features. ``hue`` is the column name to color samples by (typically
+    the target / cluster id); pass None for monochrome.
+    """
+    from ferrum._diagnostics.charts import _parallel_coords_chart_from_dataframe
+    return _parallel_coords_chart_from_dataframe(
+        data, features=features, hue=hue, rescale=rescale,
+        alpha=alpha, theme=theme,
+    )
+
+
 def decision_boundary_chart(
     model: Any,
     X: Any,
@@ -645,3 +727,4 @@ def decision_boundary_chart(
         scatter=bool(scatter),
         theme=theme,
     )
+
