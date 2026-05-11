@@ -331,6 +331,43 @@ def shap_chart(
     )
 
 
+def pdp_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    features: list | None = None,
+    grid_resolution: int = 100,
+    kind: str = "average",
+    ice_alpha: float = 0.2,
+    center: bool = False,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Partial-dependence chart — see ferrum-spec.md §3.14.
+
+    Pass ``features`` as a list of column names or indices. ``kind="average"``
+    is the only supported value today; ``kind="individual"``/``"both"``
+    require the deferred ``detail`` encoding channel.
+    """
+    from ferrum._diagnostics.charts import _pdp_chart_from_source
+
+    if features is None:
+        raise ValueError(
+            "pdp_chart requires features=<list of column names or indices>."
+        )
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _pdp_chart_from_source(
+        source,
+        list(features),
+        grid_resolution=grid_resolution,
+        kind=kind,
+        ice_alpha=ice_alpha,
+        center=center,
+        theme=theme,
+    )
+
+
 def discrimination_threshold_chart(
     model_or_source: Any,
     X: Any = None,

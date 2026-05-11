@@ -783,6 +783,72 @@ class ModelSource:
         self._cache[key] = df
         return df
 
+    def partial_dependence(
+        self,
+        features: list[str | int],
+        *,
+        grid_resolution: int = 100,
+        kind: str = "average",
+    ) -> pl.DataFrame:
+        """Partial dependence per feature.
+
+        ``kind="average"`` (default) returns the marginal PD curve per
+        feature with ``sample_id = -1``. ``kind="individual"`` / ``"both"``
+        require per-sample ICE curves with the ``detail`` encoding
+        channel, which lands alongside the Phase 9-deferred encoding
+        work; passing those values raises ``NotImplementedError``.
+        """
+        if kind not in ("average", "individual", "both"):
+            raise ValueError(
+                f"ModelSource.partial_dependence(kind={kind!r}) — expected "
+                "'average', 'individual', or 'both'."
+            )
+        if kind in ("individual", "both"):
+            raise NotImplementedError(
+                f"ModelSource.partial_dependence(kind={kind!r}) requires the "
+                "'detail' encoding channel for per-sample ICE polylines, "
+                "which lands alongside the Phase 9-deferred channel work. "
+                "Use kind='average' for now."
+            )
+        key = self._cache_key(
+            "partial_dependence",
+            features=tuple(features),
+            grid_resolution=grid_resolution,
+            kind=kind,
+        )
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("partial_dependence")
+        from sklearn.inspection import partial_dependence as _sk_pd
+
+        feature_idxs = [
+            self._feature_names.index(f) if isinstance(f, str) else f
+            for f in features
+        ]
+        X_np = self._X.to_numpy()
+        rows: list[dict] = []
+        for f_idx in feature_idxs:
+            fname = self._feature_names[f_idx]
+            r = _sk_pd(
+                self._model,
+                X_np,
+                features=[f_idx],
+                grid_resolution=grid_resolution,
+                kind="average",
+            )
+            grid = r["grid_values"][0]
+            avg = np.asarray(r["average"])[0]
+            for v, p in zip(grid, avg):
+                rows.append({
+                    "feature": str(fname),
+                    "feature_value": float(v),
+                    "pd_value": float(p),
+                    "sample_id": -1,
+                })
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
     def _sweep_thresholds(
         self,
         y_true: np.ndarray,

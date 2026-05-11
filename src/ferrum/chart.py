@@ -1170,6 +1170,44 @@ class Chart:
         new._position = position
         return new
 
+    def mark_pdp(
+        self,
+        *,
+        kind: str = "average",
+        ice_alpha: float = 0.2,
+        center: bool = False,
+        color_field: str | None = "feature",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Partial-dependence mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data from ``ModelSource.partial_dependence()``:
+        ``feature``, ``feature_value``, ``pd_value`` (one polyline per
+        feature, colored by feature). The chart builder is responsible
+        for sorting ascending by ``feature_value`` so the line renders
+        monotonically.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pdp", position)
+        from ferrum.marks.diagnostic import desugar_pdp
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "pdp",
+            {
+                "kind": kind,
+                "ice_alpha": ice_alpha,
+                "center": center,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_pdp,
+        )
+        new._position = position
+        return new
+
     def mark_shap_waterfall(
         self,
         *,

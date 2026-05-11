@@ -499,6 +499,39 @@ def _shap_waterfall_chart_from_source(
     return chart
 
 
+# ---------------------------------------------------------------------------
+# 10d builders — partial dependence
+# ---------------------------------------------------------------------------
+
+
+def _pdp_chart_from_source(
+    source: Any,
+    features: list,
+    *,
+    grid_resolution: int = 100,
+    kind: str = "average",
+    ice_alpha: float = 0.2,
+    center: bool = False,
+    theme: Any = None,
+):
+    """Partial-dependence chart: one polyline per feature."""
+    import ferrum
+
+    df = source.partial_dependence(
+        features, grid_resolution=grid_resolution, kind=kind,
+    )
+    # Pre-sort ascending by feature_value within each feature so the line
+    # layer renders monotonically (line.rs groups rows by color in batch
+    # order, so the sort order matters).
+    df = df.sort(["feature", "feature_value"])
+    chart = ferrum.Chart(df).mark_pdp(
+        kind=kind, ice_alpha=ice_alpha, center=center,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,

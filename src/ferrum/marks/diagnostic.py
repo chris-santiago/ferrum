@@ -537,6 +537,49 @@ def desugar_shap_waterfall(
     ])
 
 
+def desugar_pdp(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    kind: str = "average",
+    ice_alpha: float = 0.2,
+    center: bool = False,
+    color_field: str | None = "feature",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Partial-dependence mark: one polyline per feature.
+
+    Data contract: ``feature`` (Utf8), ``feature_value`` (Float64),
+    ``pd_value`` (Float64) as emitted by
+    ``ModelSource.partial_dependence()``. The chart builder is
+    responsible for sorting per feature so the line layer renders as a
+    monotonic curve in ``feature_value``.
+
+    ``kind="individual"``/``"both"`` and ``center=True`` are reserved for
+    a later sub-batch that adds the ``detail`` encoding channel (needed
+    for per-sample ICE polylines without categorical color collisions);
+    passing non-default values raises ``NotImplementedError``.
+    """
+    del x_field, y_field, ice_alpha
+    if kind != "average":
+        raise NotImplementedError(
+            f"mark_pdp(kind={kind!r}) requires the 'detail' encoding channel "
+            "for per-sample ICE polylines (Phase 9-deferred). Use "
+            "kind='average' for now."
+        )
+    if center:
+        raise NotImplementedError(
+            "mark_pdp(center=True) lands alongside ICE support (Phase 9+)."
+        )
+
+    line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
+    if color_field is not None:
+        line_enc["color"] = color_field
+    return ("__layered__", [], None, None, [
+        {"mark": "line", "encoding": line_enc},
+    ])
+
+
 def desugar_class_prediction_error(
     x_field: str | None,
     y_field: str | None,

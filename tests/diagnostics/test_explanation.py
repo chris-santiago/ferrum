@@ -272,3 +272,98 @@ def test_shap_visualizer_invalid_kind():
     viz = ferrum.SHAPVisualizer(model, kind="not_a_kind")
     with pytest.raises(ValueError, match="kind="):
         viz.fit(X, df["y"])
+
+
+# --- ModelSource.partial_dependence() -----------------------------------
+
+
+def _rf_xy():
+    model = load_fixture("regression_rf")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    return model, X, df["y"]
+
+
+def test_partial_dependence_schema():
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    pd_df = src.partial_dependence(["f0", "f1"], grid_resolution=20)
+    assert set(pd_df.columns) == {
+        "feature", "feature_value", "pd_value", "sample_id",
+    }
+    assert set(pd_df["feature"].unique().to_list()) == {"f0", "f1"}
+    # sample_id is -1 for kind="average" (marginal curve, not per-sample).
+    assert (pd_df["sample_id"] == -1).all()
+    # 2 features × 20 grid points.
+    assert pd_df.height == 40
+
+
+def test_partial_dependence_caches():
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y)
+    a = src.partial_dependence(["f0"], grid_resolution=10)
+    b = src.partial_dependence(["f0"], grid_resolution=10)
+    assert a is b
+
+
+def test_partial_dependence_invalid_kind():
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y)
+    with pytest.raises(ValueError, match="kind="):
+        src.partial_dependence(["f0"], kind="not_a_kind")
+
+
+def test_partial_dependence_individual_not_implemented():
+    """ICE/both require the deferred 'detail' channel."""
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y)
+    with pytest.raises(NotImplementedError, match="detail"):
+        src.partial_dependence(["f0"], kind="individual")
+    with pytest.raises(NotImplementedError, match="detail"):
+        src.partial_dependence(["f0"], kind="both")
+
+
+# --- pdp_chart figure function -----------------------------------------
+
+
+def test_pdp_chart_single_feature():
+    model, X, y = _rf_xy()
+    chart = ferrum.pdp_chart(model, X, y, features=["f0"], grid_resolution=20)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert svg.count("<polyline ") == 1
+
+
+def test_pdp_chart_multiple_features():
+    model, X, y = _rf_xy()
+    chart = ferrum.pdp_chart(
+        model, X, y, features=["f0", "f1", "f2"], grid_resolution=20,
+    )
+    svg = chart.show_svg()
+    # One polyline per feature.
+    assert svg.count("<polyline ") == 3
+
+
+def test_pdp_chart_requires_features():
+    model, X, y = _rf_xy()
+    with pytest.raises(ValueError, match="features="):
+        ferrum.pdp_chart(model, X, y)
+
+
+def test_mark_pdp_individual_not_implemented():
+    """mark_pdp(kind='individual') raises with detail-channel reference."""
+    df = pl.DataFrame({
+        "feature": ["a"], "feature_value": [0.0], "pd_value": [0.0],
+        "sample_id": [-1],
+    })
+    with pytest.raises(NotImplementedError, match="detail"):
+        ferrum.Chart(df).mark_pdp(kind="individual").show_svg()
+
+
+def test_mark_pdp_center_not_implemented():
+    df = pl.DataFrame({
+        "feature": ["a"], "feature_value": [0.0], "pd_value": [0.0],
+        "sample_id": [-1],
+    })
+    with pytest.raises(NotImplementedError, match="center"):
+        ferrum.Chart(df).mark_pdp(center=True).show_svg()

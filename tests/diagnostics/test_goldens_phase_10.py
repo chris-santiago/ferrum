@@ -198,3 +198,11 @@ def test_golden_shap_chart_waterfall():
     model, X, _y = _ridge_xy()
     chart = ferrum.shap_chart(model, X, kind="waterfall", sample_idx=3)
     _check_golden(chart.show_svg(), "shap_chart_waterfall_sample3")
+
+
+def test_golden_pdp_chart_three_features():
+    model, X, y = _regression_xy()
+    chart = ferrum.pdp_chart(
+        model, X, y, features=["f0", "f1", "f2"], grid_resolution=20,
+    )
+    _check_golden(chart.show_svg(), "pdp_chart_three_features")

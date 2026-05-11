@@ -90,6 +90,7 @@ from ferrum.figures import (
     class_prediction_error_chart,
     importance_chart,
     shap_chart,
+    pdp_chart,
 )
 
 # Phase 9e — figure-level convenience functions
@@ -152,5 +153,5 @@ __all__ = [
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
     "confusion_matrix_chart", "class_prediction_error_chart",
-    "importance_chart", "shap_chart",
+    "importance_chart", "shap_chart", "pdp_chart",
 ]

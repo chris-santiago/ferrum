@@ -86,6 +86,13 @@ SCHEMA_IMPORTANCES = pl.Schema({
     # "model": pl.Utf8 (optional)
 })
 
+SCHEMA_PDP = pl.Schema({
+    "feature": pl.Utf8,
+    "feature_value": pl.Float64,
+    "pd_value": pl.Float64,
+    "sample_id": pl.Int64,
+})
+
 SCHEMA_SHAP_VALUES = pl.Schema({
     "sample_id": pl.Int64,
     "feature": pl.Utf8,
