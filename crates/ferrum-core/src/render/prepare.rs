@@ -280,7 +280,17 @@ pub fn prepare_render_inputs(
     let x_field = rendering_encoding.x.as_ref().map(|e| e.field.clone());
     let y_field = rendering_encoding.y.as_ref().map(|e| e.field.clone());
     let x_tick_labels = provisional_scales.x.tick_labels(10);
-    let y_tick_labels = provisional_scales.y.tick_labels(10);
+    // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
+    // places the first label at the TOP of the panel, which is the correct
+    // top-down convention for ordinal y (heatmaps, confusion matrices) but
+    // INVERTS quantitative/temporal labels relative to the data placement
+    // (scale_resolve.rs inverts the pixel range for non-ordinal y so high
+    // data → top pixel). Reverse the tick labels here for non-ordinal y so
+    // the axis labels and data points share the same orientation.
+    let mut y_tick_labels = provisional_scales.y.tick_labels(10);
+    if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
+        y_tick_labels.reverse();
+    }
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
