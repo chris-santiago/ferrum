@@ -397,8 +397,15 @@ fn build_axis_scale(
         .column_by_name(&enc.field)
         .expect("locate_field_batch guarantees field presence");
     let dtype = infer_spec_type(enc, col.data_type());
-    // Y-axis pixel range is inverted (top of plot is min y, bottom is max y).
-    let pr = if channel == "y" {
+    // Y-axis pixel range is inverted ONLY for quantitative/temporal scales —
+    // Cartesian convention: low data value → bottom of plot. Ordinal/nominal
+    // y-axes keep the natural top-down order (first domain value → top of
+    // plot, last → bottom) so heatmaps, confusion matrices, and any other
+    // chart with categorical rows render with the first row at the top,
+    // matching the y-axis label order printed by the tick generator.
+    let pr = if channel == "y"
+        && !matches!(dtype, SpecDataType::Ordinal | SpecDataType::Nominal)
+    {
         (pixel_range.1, pixel_range.0)
     } else {
         pixel_range
