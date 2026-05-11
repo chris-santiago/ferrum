@@ -320,19 +320,26 @@ def desugar_discrimination_threshold(
     Data contract (long form): ``threshold``, ``metric``, ``value`` — the
     figure builder is responsible for unpivoting
     ``ModelSource.discrimination_threshold()`` output into this shape.
-    ``threshold_line`` is reserved for Phase 10h (rule at the F1-best
-    threshold); passing ``True`` raises ``NotImplementedError``.
+
+    When ``threshold_line=True`` the chart builder injects a
+    ``_threshold_best`` column with one non-null row at the F1-best
+    threshold (argmax of the ``f1`` series in the un-melted source
+    output). The desugar emits a vertical ``mark_rule`` layer on
+    ``x=_threshold_best``; Rust's mark_rule renders one vertical span
+    per non-null row, so exactly one rule appears.
     """
-    if threshold_line:
-        raise NotImplementedError(
-            "mark_discrimination_threshold(threshold_line=True) lands in "
-            "Phase 10h alongside rule-annotation support."
-        )
     del metrics, n_thresholds  # informational; data is pre-melted
-    return ("__layered__", [], None, None, [
+    layers: list[dict] = [
         {"mark": "line",
          "encoding": {"x": "threshold", "y": "value", "color": "metric"}},
-    ])
+    ]
+    if threshold_line:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"x": "_threshold_best"},
+            "mark_kwargs": {"stroke_dash": [4, 4], "opacity": 0.6},
+        })
+    return ("__layered__", [], None, None, layers)
 
 
 # --- 10c: classification matrices ------------------------------------

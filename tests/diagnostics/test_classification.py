@@ -122,18 +122,19 @@ def test_mark_discrimination_threshold_renders(binary_source):
     assert "<svg" in svg
 
 
-def test_mark_discrimination_threshold_threshold_line_raises(binary_source):
-    dt = binary_source.discrimination_threshold(n_thresholds=10)
-    long = dt.unpivot(
-        index="threshold",
-        on=["precision", "recall", "f1", "queue_rate"],
-        variable_name="metric",
-        value_name="value",
-    )
-    with pytest.raises(NotImplementedError, match="threshold_line"):
-        ferrum.Chart(long).mark_discrimination_threshold(
-            threshold_line=True,
-        ).show_svg()
+def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
+    """threshold_line=True emits a vertical mark_rule at the F1-best
+    threshold. The chart builder computes argmax(f1) on the un-melted
+    source frame and injects a `_threshold_best` sentinel column with
+    one non-null row at the optimal threshold; Rust's mark_rule renders
+    exactly one vertical span there.
+    """
+    svg = ferrum.discrimination_threshold_chart(
+        binary_source, threshold_line=True, n_thresholds=20,
+    ).show_svg()
+    assert "<svg" in svg
+    # mark_rule emits an SVG <line> element for the vertical span.
+    assert "<line " in svg
 
 
 # --- Figure-function tests (Task 16) --------------------------------

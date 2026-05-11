@@ -143,6 +143,16 @@ def test_golden_lift_chart_binary():
     _check_golden(chart.show_svg(), "lift_chart_binary")
 
 
+def test_golden_discrimination_threshold_binary_threshold_line():
+    model, X, y = _binary_xy()
+    chart = ferrum.discrimination_threshold_chart(
+        model, X, y, n_thresholds=20, threshold_line=True,
+    )
+    _check_golden(
+        chart.show_svg(), "discrimination_threshold_binary_threshold_line",
+    )
+
+
 def test_golden_discrimination_threshold_binary():
     model, X, y = _binary_xy()
     chart = ferrum.discrimination_threshold_chart(model, X, y, n_thresholds=20)

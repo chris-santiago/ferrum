@@ -739,6 +739,17 @@ def _discrimination_threshold_chart_from_source(
         variable_name="metric",
         value_name="value",
     )
+    if threshold_line:
+        # Compute argmax(f1) from the un-melted DataFrame so we get the
+        # exact threshold value (not the per-melted-row value of the F1
+        # series). Inject _threshold_best as a sentinel column on the
+        # long-form frame: one non-null row at the best threshold so
+        # mark_rule renders exactly one vertical line.
+        best_idx = int(df["f1"].arg_max() or 0)
+        best_threshold = float(df["threshold"][best_idx])
+        long_df = _inject_constant(
+            long_df, "_threshold_best", best_threshold,
+        )
     chart = ferrum.Chart(long_df).mark_discrimination_threshold(
         metrics=metrics,
         n_thresholds=n_thresholds,
