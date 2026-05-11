@@ -1319,17 +1319,18 @@ def cluster_diagnostics(
     *,
     ks: Any,
     method: str = "kmeans",
+    scoring: str = "both",
     n_init: int = 10,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """Elbow and silhouette diagnostics over a range of cluster counts.
 
-    Fits one clusterer per value of k and renders a side-by-side
-    HConcatChart: distortion (inertia) vs. k on the left, mean
-    silhouette score vs. k on the right. Unlike the other figure
-    functions, this sweeps the model class itself rather than wrapping a
-    single pre-fitted ``ModelSource``.
+    Fits one clusterer per value of k and renders the requested
+    diagnostic panel(s): distortion (inertia) vs. k, mean silhouette
+    score vs. k, or both side-by-side. Unlike the other figure
+    functions, this sweeps the model class itself rather than wrapping
+    a single pre-fitted ``ModelSource``.
 
     Parameters
     ----------
@@ -1339,63 +1340,111 @@ def cluster_diagnostics(
         accepted.
     ks : iterable of int
         Values of k (number of clusters) to evaluate.
-    method : {"kmeans"}, default "kmeans"
-        Clustering algorithm. Only ``"kmeans"`` is supported in Phase
-        10f; other methods raise ``NotImplementedError``.
+    method : {"kmeans", "hierarchical"}, default "kmeans"
+        Clustering algorithm.
+
+        - ``"kmeans"`` — ``sklearn.cluster.KMeans``. Uses the estimator's
+          native ``inertia_`` attribute.
+        - ``"hierarchical"`` — ``sklearn.cluster.AgglomerativeClustering``
+          (Ward linkage). Inertia is computed manually as the sum of
+          squared distances from each sample to its cluster centroid,
+          since AgglomerativeClustering does not expose ``inertia_``.
+
+        DBSCAN is intentionally not supported — its number of clusters
+        is determined by ``eps`` / ``min_samples``, not by a swept k,
+        so the chart's elbow / silhouette-vs-k axis doesn't apply.
+    scoring : {"elbow", "silhouette", "both"}, default "both"
+        Which diagnostic panel(s) to render.
+
+        - ``"elbow"`` — inertia-vs-k line chart only.
+        - ``"silhouette"`` — mean silhouette-vs-k line chart only.
+        - ``"both"`` — side-by-side HConcatChart of the two.
     n_init : int, default 10
         Number of KMeans initializations per k; forwarded to
-        ``sklearn.cluster.KMeans(n_init=...)``.
+        ``sklearn.cluster.KMeans(n_init=...)``. Ignored for hierarchical
+        clustering, which is deterministic given the linkage strategy.
     random_state : int or None, default None
         Random seed for KMeans initialisation. When ``None``, defaults
-        to seed 0 for deterministic results.
+        to seed 0 for deterministic results. Ignored for hierarchical
+        clustering.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
     Returns
     -------
     Chart
-        HConcatChart: inertia-vs-k line chart | silhouette-vs-k line
-        chart.
+        Single-panel line chart when ``scoring`` is ``"elbow"`` or
+        ``"silhouette"``; HConcatChart of both panels when
+        ``scoring="both"``.
 
     Raises
     ------
-    NotImplementedError
-        If ``method`` is not ``"kmeans"``.
+    ValueError
+        If ``method`` is unknown or ``scoring`` is not in the supported
+        set.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11))
+    >>> fm.cluster_diagnostics(X_train, ks=range(2, 11),
+    ...                         method="hierarchical", scoring="silhouette")
     """
     from ferrum._diagnostics.deps import require_sklearn
     require_sklearn("cluster_diagnostics")
-    if method != "kmeans":
-        raise NotImplementedError(
-            f"cluster_diagnostics(method={method!r}) — Phase 10f ships "
-            "'kmeans' only; other estimators land in 10h."
+    if method not in ("kmeans", "hierarchical"):
+        raise ValueError(
+            f"cluster_diagnostics(method={method!r}) — expected one of "
+            "'kmeans', 'hierarchical'. DBSCAN and other density-based "
+            "methods don't fit the sweep-k framework and are not supported."
+        )
+    if scoring not in ("elbow", "silhouette", "both"):
+        raise ValueError(
+            f"cluster_diagnostics(scoring={scoring!r}) — expected one of "
+            "'elbow', 'silhouette', 'both'."
         )
     import polars as pl
     import numpy as np
     import ferrum
-    from sklearn.cluster import KMeans
+    from sklearn.cluster import KMeans, AgglomerativeClustering
     from sklearn.metrics import silhouette_score
 
     X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    X_np = np.ascontiguousarray(X_np, dtype=np.float64)
     seed = 0 if random_state is None else int(random_state)
     rows = []
     for k in ks:
-        m = KMeans(
-            n_clusters=int(k), n_init=int(n_init), random_state=seed,
-        ).fit(X_np)
+        if method == "kmeans":
+            m = KMeans(
+                n_clusters=int(k), n_init=int(n_init), random_state=seed,
+            ).fit(X_np)
+            inertia = float(m.inertia_)
+            labels = m.labels_
+        else:  # hierarchical
+            m = AgglomerativeClustering(n_clusters=int(k), linkage="ward").fit(X_np)
+            labels = m.labels_
+            # AgglomerativeClustering doesn't expose inertia_; compute
+            # manually as the sum of squared distances from each sample
+            # to its cluster centroid (the same definition KMeans uses).
+            inertia = 0.0
+            for cluster_id in np.unique(labels):
+                mask = labels == cluster_id
+                centroid = X_np[mask].mean(axis=0)
+                inertia += float(np.sum((X_np[mask] - centroid) ** 2))
         rows.append({
             "k": int(k),
-            "inertia": float(m.inertia_),
-            "silhouette": float(silhouette_score(X_np, m.labels_)),
+            "inertia": inertia,
+            "silhouette": float(silhouette_score(X_np, labels)),
         })
     df = pl.DataFrame(rows)
     elbow = ferrum.Chart(df).mark_line().encode(x="k", y="inertia")
     sil = ferrum.Chart(df).mark_line().encode(x="k", y="silhouette")
-    chart = elbow | sil
+    if scoring == "elbow":
+        chart = elbow
+    elif scoring == "silhouette":
+        chart = sil
+    else:
+        chart = elbow | sil
     if theme is not None:
         chart = chart.theme(theme)
     return chart

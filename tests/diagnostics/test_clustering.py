@@ -98,6 +98,50 @@ def test_cluster_diagnostics_figure():
     assert "<svg" in chart.show_svg()
 
 
+def test_cluster_diagnostics_scoring_elbow_only():
+    df = load_dataset("clustering")
+    chart = ferrum.cluster_diagnostics(
+        df, ks=[2, 3, 4], scoring="elbow", random_state=0,
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # Single-panel: should NOT be an HConcatChart (no panel separator).
+    # HConcatChart renders two <svg> sub-panels nested in a wrapper.
+    assert svg.count("<svg") == 1
+
+
+def test_cluster_diagnostics_scoring_silhouette_only():
+    df = load_dataset("clustering")
+    chart = ferrum.cluster_diagnostics(
+        df, ks=[2, 3, 4], scoring="silhouette", random_state=0,
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_cluster_diagnostics_hierarchical():
+    """Method='hierarchical' uses AgglomerativeClustering (Ward) and
+    computes inertia manually as the sum of squared distances from each
+    sample to its cluster centroid (KMeans' inertia definition).
+    """
+    df = load_dataset("clustering")
+    chart = ferrum.cluster_diagnostics(
+        df, ks=[2, 3, 4], method="hierarchical",
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_cluster_diagnostics_rejects_dbscan():
+    df = load_dataset("clustering")
+    with pytest.raises(ValueError, match="don't fit the sweep-k framework"):
+        ferrum.cluster_diagnostics(df, ks=[2, 3], method="dbscan")
+
+
+def test_cluster_diagnostics_rejects_bad_scoring():
+    df = load_dataset("clustering")
+    with pytest.raises(ValueError, match="expected one of"):
+        ferrum.cluster_diagnostics(df, ks=[2, 3], scoring="invalid")
+
+
 # --- Mark-kwargs validation ------------------------------------------
 
 
