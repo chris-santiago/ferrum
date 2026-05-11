@@ -83,10 +83,22 @@ def test_golden_roc_chart_binary():
     _check_golden(chart.show_svg(), "roc_chart_binary")
 
 
+def test_golden_roc_chart_binary_annotate_auc():
+    model, X, y = _binary_xy()
+    chart = ferrum.roc_chart(model, X, y, annotate_auc=True)
+    _check_golden(chart.show_svg(), "roc_chart_binary_annotate_auc")
+
+
 def test_golden_roc_chart_multiclass():
     model, X, y = _multi_xy()
     chart = ferrum.roc_chart(model, X, y)
     _check_golden(chart.show_svg(), "roc_chart_multiclass")
+
+
+def test_golden_roc_chart_multiclass_annotate_auc():
+    model, X, y = _multi_xy()
+    chart = ferrum.roc_chart(model, X, y, annotate_auc=True)
+    _check_golden(chart.show_svg(), "roc_chart_multiclass_annotate_auc")
 
 
 def test_golden_pr_chart_binary():

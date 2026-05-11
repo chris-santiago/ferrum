@@ -38,10 +38,23 @@ def test_mark_roc_renders_multiclass(multi_source):
     assert "<svg" in svg
 
 
-def test_mark_roc_annotate_auc_raises(binary_source):
-    roc = binary_source.roc_curve()
-    with pytest.raises(NotImplementedError, match="annotate_auc"):
-        ferrum.Chart(roc).mark_roc(annotate_auc=True).show_svg()
+def test_mark_roc_annotate_auc_renders_text_label(binary_source):
+    """annotate_auc=True emits a per-class text layer at fixed (x, y)
+    coordinates with the formatted AUC value. The chart builder injects
+    `_auc_label_x/_y/text` columns one-non-null-per-class, and Rust's
+    mark_text skips null rows so exactly N labels render for N classes.
+    """
+    # Direct mark_roc(...) on a raw DataFrame doesn't go through the
+    # chart builder, so the annotation columns won't be present and the
+    # text layer will render zero labels. The figure-function path is
+    # the canonical entry: build via ferrum.roc_chart(annotate_auc=True).
+    svg = ferrum.roc_chart(
+        binary_source, annotate_auc=True,
+    ).show_svg()
+    assert "<svg" in svg
+    assert "<text" in svg
+    # The formatted "AUC = 0." literal should appear in the SVG text.
+    assert "AUC = 0." in svg
 
 
 def test_mark_pr_renders(binary_source):

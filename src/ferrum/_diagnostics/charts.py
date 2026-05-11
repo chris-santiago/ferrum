@@ -140,6 +140,14 @@ def _roc_chart_from_source(
     """Build an ROC chart from a ModelSource."""
     import ferrum
     df = source.roc_curve(average=None if per_class else average)
+    if annotate_auc:
+        df = _inject_curve_annotation(
+            df,
+            group_field="class",
+            metric_field="auc",
+            metric_label="AUC",
+            prefix="_auc",
+        )
     chart = ferrum.Chart(df).mark_roc(
         average=None if per_class else average,
         annotate_auc=annotate_auc,
@@ -148,6 +156,56 @@ def _roc_chart_from_source(
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+def _inject_curve_annotation(
+    df: pl.DataFrame,
+    *,
+    group_field: str,
+    metric_field: str,
+    metric_label: str,
+    prefix: str,
+) -> pl.DataFrame:
+    """Inject one-non-null-row-per-group annotation columns.
+
+    Adds three columns:
+    - ``{prefix}_label_x: Float64`` — x coordinate of the label anchor
+      (fixed at 0.65 on the data axis so labels live in the lower-right
+      region where ROC / PR curves typically asymptote).
+    - ``{prefix}_label_y: Float64`` — staggered y per group (one slot
+      every 0.06 of axis range, starting at 0.05) so multi-class labels
+      don't overlap.
+    - ``{prefix}_label: Utf8`` — formatted string
+      ``"{group_value}: {metric_label} = {value:.3f}"``.
+
+    All rows except one per group are null; ``mark_text`` skips nulls
+    so exactly N labels render for N groups. Used by ``mark_roc``'s
+    ``annotate_auc`` and ``mark_pr``'s ``annotate_ap`` paths.
+    """
+    n_rows = df.height
+    if n_rows == 0:
+        return df
+    group_values = df[group_field].to_list()
+    metric_values = df[metric_field].to_list()
+    groups: list[str] = []
+    for g in group_values:
+        if g not in groups:
+            groups.append(str(g))
+    label_x: list[float | None] = [None] * n_rows
+    label_y: list[float | None] = [None] * n_rows
+    label_text: list[str | None] = [None] * n_rows
+    for i, g in enumerate(groups):
+        # First row matching this group anchors the label.
+        idx = group_values.index(g)
+        label_x[idx] = 0.65
+        label_y[idx] = 0.05 + i * 0.06
+        value = float(metric_values[idx])
+        label_text[idx] = f"{g}: {metric_label} = {value:.3f}"
+    return df.with_columns(
+        pl.Series(f"{prefix}_label_x", label_x, dtype=pl.Float64),
+        pl.Series(f"{prefix}_label_y", label_y, dtype=pl.Float64),
+        pl.Series(f"{prefix}_label", label_text, dtype=pl.Utf8),
+    )
 
 
 def _pr_chart_from_source(

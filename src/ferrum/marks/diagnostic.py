@@ -123,22 +123,21 @@ def desugar_roc(
 ) -> tuple:
     """ROC curve mark.
 
-    Data contract: columns ``fpr``, ``tpr``, and (typically) ``class`` and
-    ``auc`` as emitted by ``ModelSource.roc_curve()``. When
-    ``reference_line=True`` the calling ``Chart.mark_roc`` method pre-sorts
-    the data ascending by ``fpr`` so the diagonal line layer is monotonic.
+    Data contract: columns ``fpr``, ``tpr``, ``class``, ``auc`` as emitted
+    by ``ModelSource.roc_curve()``. When ``reference_line=True`` the
+    calling ``Chart.mark_roc`` method pre-sorts the data ascending by
+    ``fpr`` so the diagonal line layer is monotonic.
 
-    ``annotate_auc`` is reserved for Phase 10h (text annotation); passing
-    ``True`` raises ``NotImplementedError``. ``average`` is informational
-    at the mark layer — the figure builder is responsible for shaping the
-    data appropriately before constructing the chart.
+    When ``annotate_auc=True`` the chart builder
+    (``_roc_chart_from_source``) injects ``_auc_label_x`` / ``_auc_label_y``
+    / ``_auc_label`` columns — one non-null row per class — and this
+    desugar emits a ``mark_text`` layer that references them. Rust's
+    ``mark_text`` skips null rows, so exactly one label renders per
+    class. ``average`` is informational at the mark layer — the figure
+    builder is responsible for shaping the data appropriately before
+    constructing the chart.
     """
     del average  # informational at the mark layer
-    if annotate_auc:
-        raise NotImplementedError(
-            "mark_roc(annotate_auc=True) lands in Phase 10h alongside text "
-            "annotations on diagnostic curves."
-        )
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -148,6 +147,17 @@ def desugar_roc(
             "mark": "line",
             "encoding": {"x": "fpr", "y": "fpr"},
             "mark_kwargs": {"stroke_dash": [4, 4]},
+        })
+    if annotate_auc:
+        text_enc: dict[str, Any] = {
+            "x": "_auc_label_x", "y": "_auc_label_y", "text": "_auc_label",
+        }
+        if color_field is not None:
+            text_enc["color"] = color_field
+        layers.append({
+            "mark": "text",
+            "encoding": text_enc,
+            "mark_kwargs": {"align": "left"},
         })
     return ("__layered__", [], None, None, layers)
 
