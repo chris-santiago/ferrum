@@ -355,9 +355,17 @@ pub fn resolve_scales_with_outputs(
             Some(ColorScale::Continuous { domain: (lo, hi), scheme })
         } else {
             let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-            let palette: &'static [Color] = match &c_enc.scheme {
-                Some(name) => palette::categorical_palette(name),
-                None => &*palette::OKABE_ITO,
+            // Precedence: encoding.scheme (per-encoding override, e.g. heatmap
+            // cmap=) → theme.color_scheme (Theme default) → OKABE_ITO fallback.
+            // A sequential scheme name (viridis/plasma/…) on a nominal
+            // encoding can't be interpolated for n categories yet, so we
+            // substitute tableau10 — the canonical Vega-Lite categorical
+            // default — rather than collapsing to OKABE_ITO silently.
+            let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
+            let palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+                palette::categorical_palette("tableau10")
+            } else {
+                palette::categorical_palette(resolved_name)
             };
             if domain.len() > palette.len() {
                 warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
