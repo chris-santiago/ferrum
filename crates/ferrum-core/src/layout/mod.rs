@@ -250,6 +250,7 @@ pub fn compute_layout(
     axes: &AxesInput,
     facet_groups: &[FacetGroup],
     legend_entries: &[LegendEntry],
+    legend_title: Option<String>,
     metrics: &dyn TextMetrics,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
@@ -317,6 +318,8 @@ pub fn compute_layout(
         theme.label_font_size,
         metrics,
         theme.legend_direction,
+        legend_title.as_deref(),
+        theme.legend_title_font_size,
     );
     let legend_dropped = legend_entries
         .len()
@@ -574,6 +577,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             &m,
         )
         .expect("layout should succeed on minimal spec");
@@ -603,6 +607,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             &m,
         )
         .unwrap_err();
@@ -625,6 +630,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             &m,
         )
         .unwrap_err();
@@ -646,6 +652,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             &m,
         )
         .unwrap();
@@ -694,6 +701,7 @@ mod tests {
             &axes,
             &groups,
             &legend,
+            None,
             &m,
         )
         .unwrap();
@@ -732,6 +740,7 @@ mod tests {
             &axes,
             &groups,
             &[],
+            None,
             &m,
         )
         .unwrap();
@@ -758,6 +767,7 @@ mod tests {
             &axes,
             &groups,
             &[],
+            None,
             &m,
         ).unwrap();
 
@@ -785,6 +795,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             &m,
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());

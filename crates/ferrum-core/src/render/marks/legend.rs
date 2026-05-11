@@ -19,6 +19,24 @@ pub fn draw(
         font_weight: None,
     };
 
+    // Legend title (Themes-T2.5b). Drawn before entries so it stays on top
+    // visually if there's any overlap during layout shrink.
+    if let Some(title) = &legend.title {
+        let title_style = TextStyle {
+            fill: theme.title_color,
+            font_size: theme.legend_title_font_size,
+            anchor: TextAnchor::Start,
+            angle: 0.0,
+            font_family: &theme.title_font_family,
+            font_weight: if theme.title_font_weight == "normal" {
+                None
+            } else {
+                Some(&theme.title_font_weight)
+            },
+        };
+        out.text(title.x, title.y, &title.text, &title_style);
+    }
+
     for entry in &legend.entries {
         let color = color_scale
             .and_then(|s| match s {
@@ -77,6 +95,7 @@ mod tests {
                     symbol_kind: SymbolKind::Circle,
                 },
             ],
+            title: None,
         };
         let theme = ThemeInputs::default();
         let mut out = SvgBuffer::new(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, None, false);

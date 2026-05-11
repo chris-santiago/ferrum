@@ -185,6 +185,7 @@ pub fn render_svg(
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
+        prep.legend_title.clone(),
         &metrics,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;

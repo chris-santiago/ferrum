@@ -202,6 +202,9 @@ pub struct PreparedInputs {
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
     pub legend_entries: Vec<LegendEntry>,
+    /// Legend title (Themes-T2.5b). Defaults to the color encoding's field
+    /// name; None when no categorical color encoding drives a legend.
+    pub legend_title: Option<String>,
     pub warnings: Vec<RenderWarning>,
     /// One entry per layer. Single-layer charts have len() == 1.
     pub layers: Vec<LayerPrepared>,
@@ -363,6 +366,13 @@ pub fn prepare_render_inputs(
         None => Vec::new(),
     };
 
+    // Legend title (Themes-T2.5b): default to the color encoding's field name.
+    let legend_title = if !legend_entries.is_empty() {
+        spec.encoding.color.as_ref().map(|c| c.field.clone())
+    } else {
+        None
+    };
+
     Ok(PreparedInputs {
         transformed,
         transform_outputs,
@@ -370,6 +380,7 @@ pub fn prepare_render_inputs(
         axes,
         facet_groups,
         legend_entries,
+        legend_title,
         warnings: scale_warnings,
         layers,
         coord_flipped,
