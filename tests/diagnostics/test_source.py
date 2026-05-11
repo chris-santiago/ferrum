@@ -149,3 +149,51 @@ def test_roc_curve_caching():
     X = df.select(["f0", "f1", "f2", "f3"])
     source = ferrum.ModelSource(model, X, df["y"])
     assert source.roc_curve() is source.roc_curve()
+
+
+def test_calibration_curve_binary():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    cal = source.calibration_curve(n_bins=5)
+    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count"}
+    assert cal.height <= 5
+    assert cal.height > 0
+    assert (cal["mean_predicted"] >= 0).all()
+    assert (cal["mean_predicted"] <= 1).all()
+    assert (cal["count"] >= 0).all()
+
+
+def test_calibration_curve_rejects_multiclass():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    with pytest.raises(ValueError, match="binary-classifier only"):
+        source.calibration_curve()
+
+
+def test_cumulative_gain_includes_baseline():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    gain = source.cumulative_gain()
+    assert set(gain.columns) == {"percent_population", "gain", "class"}
+    classes_seen = set(gain["class"].unique().to_list())
+    assert "baseline" in classes_seen
+    # Per-class curves start at (0, 0) and end at (1, 1).
+    assert gain.filter(pl.col("class") != "baseline").height > 0
+
+
+def test_lift_curve_baseline_at_one():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    lift = source.lift_curve()
+    assert set(lift.columns) == {"percent_population", "lift", "class"}
+    baseline = lift.filter(pl.col("class") == "baseline")
+    assert baseline.height == 2
+    assert (baseline["lift"] == 1.0).all()

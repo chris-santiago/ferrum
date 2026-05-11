@@ -323,6 +323,160 @@ class ModelSource:
         self._cache[key] = df
         return df
 
+    def calibration_curve(
+        self,
+        *,
+        n_bins: int = 10,
+        strategy: str = "uniform",
+    ) -> pl.DataFrame:
+        """Calibration (reliability) curve for binary classifiers.
+
+        Returns one row per non-empty bin with ``mean_predicted``,
+        ``fraction_positive``, and ``count``. Uses sklearn's
+        ``calibration_curve`` for the means/fractions and a parallel pass
+        over ``y_score`` to count rows per bin.
+        """
+        key = self._cache_key(
+            "calibration_curve", n_bins=n_bins, strategy=strategy,
+        )
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("calibration_curve")
+        from sklearn.calibration import calibration_curve as _ccurve
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.calibration_curve() requires y to be provided."
+            )
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        if len(proba_cols) != 2:
+            raise ValueError(
+                "calibration_curve() is binary-classifier only; "
+                f"got {len(proba_cols)} classes."
+            )
+        y_true = np.asarray(self._y.to_numpy())
+        y_score = proba_df[proba_cols[1]].to_numpy()
+
+        frac_pos, mean_pred = _ccurve(
+            y_true, y_score, n_bins=n_bins, strategy=strategy,
+        )
+
+        if strategy == "uniform":
+            edges = np.linspace(0.0, 1.0, n_bins + 1)
+        elif strategy == "quantile":
+            edges = np.quantile(y_score, np.linspace(0.0, 1.0, n_bins + 1))
+        else:
+            raise ValueError(
+                f"calibration_curve(strategy={strategy!r}) not supported; "
+                "use 'uniform' or 'quantile'."
+            )
+        bin_idx = np.clip(np.digitize(y_score, edges[1:-1]), 0, n_bins - 1)
+        counts_all = np.bincount(bin_idx, minlength=n_bins)
+        centers = edges[:-1] + np.diff(edges) / 2.0
+        used_bins = np.array([
+            int(np.argmin(np.abs(centers - mp))) for mp in mean_pred
+        ], dtype=int)
+        counts = counts_all[used_bins] if used_bins.size else np.empty(0, dtype=int)
+
+        df = pl.DataFrame({
+            "mean_predicted": [float(x) for x in mean_pred],
+            "fraction_positive": [float(x) for x in frac_pos],
+            "count": [int(x) for x in counts],
+        })
+        self._cache[key] = df
+        return df
+
+    def cumulative_gain(self) -> pl.DataFrame:
+        """Cumulative-gain curve per class. Appends a 2-row ``class='baseline'``
+        diagonal for plotting reference.
+        """
+        key = self._cache_key("cumulative_gain")
+        if key in self._cache:
+            return self._cache[key]
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.cumulative_gain() requires y to be provided."
+            )
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        y_true = np.asarray(self._y.to_numpy())
+        classes = [c[len("proba_"):] for c in proba_cols]
+        n = len(y_true)
+
+        rows: list[dict] = []
+        for i, cls in enumerate(classes):
+            y_bin = (
+                y_true == _coerce_class_label(cls, y_true.dtype)
+            ).astype(int)
+            order = np.argsort(-proba_df[proba_cols[i]].to_numpy())
+            cum_pos = np.cumsum(y_bin[order])
+            total_pos = max(int(cum_pos[-1]), 1) if n else 1
+            pct_pop = np.arange(1, n + 1) / max(n, 1)
+            gain = cum_pos / total_pos
+            xs = np.concatenate([[0.0], pct_pop])
+            ys = np.concatenate([[0.0], gain])
+            for pp, g in zip(xs, ys):
+                rows.append({
+                    "percent_population": float(pp),
+                    "gain": float(g),
+                    "class": str(cls),
+                })
+
+        rows.append({"percent_population": 0.0, "gain": 0.0, "class": "baseline"})
+        rows.append({"percent_population": 1.0, "gain": 1.0, "class": "baseline"})
+
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
+    def lift_curve(self) -> pl.DataFrame:
+        """Lift curve per class. Appends a 2-row ``class='baseline'`` line at
+        lift=1.0.
+        """
+        key = self._cache_key("lift_curve")
+        if key in self._cache:
+            return self._cache[key]
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.lift_curve() requires y to be provided."
+            )
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        y_true = np.asarray(self._y.to_numpy())
+        classes = [c[len("proba_"):] for c in proba_cols]
+        n = len(y_true)
+
+        rows: list[dict] = []
+        for i, cls in enumerate(classes):
+            y_bin = (
+                y_true == _coerce_class_label(cls, y_true.dtype)
+            ).astype(int)
+            base_rate = float(y_bin.mean()) if n else 0.0
+            if base_rate == 0.0:
+                continue
+            order = np.argsort(-proba_df[proba_cols[i]].to_numpy())
+            cum_pos = np.cumsum(y_bin[order])
+            denom = np.arange(1, n + 1)
+            cum_rate = cum_pos / denom
+            lift = cum_rate / base_rate
+            pct_pop = denom / n
+            for pp, lv in zip(pct_pop, lift):
+                rows.append({
+                    "percent_population": float(pp),
+                    "lift": float(lv),
+                    "class": str(cls),
+                })
+
+        rows.append({"percent_population": 0.0, "lift": 1.0, "class": "baseline"})
+        rows.append({"percent_population": 1.0, "lift": 1.0, "class": "baseline"})
+
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
 
 def _coerce_class_label(label_str: str, target_dtype) -> object:
     """Coerce a stringified class label back to y's dtype for equality
