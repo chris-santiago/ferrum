@@ -1,129 +1,134 @@
-# Follow-up: phase_9_e2e tests render at ~100s/chart
+# Follow-up: pytest SVG-diff renderer is slow on failing golden tests
 
 **Surfaced:** 2026-05-11 during themes-T4 golden regen.
-**Worktree:** any (issue is in `main`-merged code).
-**Severity:** Maintenance smell — every theme-or-renderer change forces a
-20+ minute golden regeneration sweep across `tests/test_phase_9_e2e.py` and
-the heavy phase_10 KDE/contour goldens.
+**Verified:** 2026-05-11 (post feat/themes merge to main).
+**Severity:** Maintenance smell on the failure path. Steady-state is fine.
+
+## TL;DR
+
+There is **no** ferrum render-perf problem. Charts render fast (47 s for
+all 921 phase-9 / phase-10 / theme goldens combined; ~50 ms / chart
+average, ~1-4 s on the heaviest KDE charts). The earlier 104 s / chart
+observation was pytest's failure-diff machinery formatting ~500 KB
+SVG-mismatch strings, not chart rendering.
+
+**Practical impact:** when a renderer change invalidates the goldens,
+the first `pytest -v` or `pytest --tb=short` sweep hangs for many
+minutes per failing test while pytest builds the diff display.
+`pytest --tb=no` and the regen path (`FERRUM_UPDATE_GOLDENS=1` /
+`FERRUM_REGENERATE_GOLDENS=1`) bypass that machinery entirely and
+finish in seconds.
 
 ## Symptom
 
-**Caveat (2026-05-11 update):** initial measurement of 100s/chart was
-misleading. Re-running with `--tb=no` showed a full regen sweep of 921
-tests in **47 seconds**. The 104s observed for a single test was
-pytest's failure-diff renderer formatting a ~500 KB SVG mismatch, not
-the chart-render cost. Symptom is real but narrower than first read.
-
-What's actually slow:
-- **Failure-path display.** When a golden mismatches, pytest assembles a
-  unified diff of the entire SVG string (hundreds of KB) and chokes for
-  60–120 s. The render itself takes ~1–4 s.
-- **The first run after a renderer change is therefore much slower than
-  steady state** — every golden mismatch costs the diff display.
-
-If the goldens are pre-blessed and matching, the suite is fine. The
-worst case is "I just changed a default and haven't regen'd yet".
-
 Reproduce the diff-display slowness:
 ```bash
+# An intentionally-failing test (defaults differ from committed golden):
 unset CONDA_PREFIX && uv run --no-sync pytest \
   tests/test_phase_9_e2e.py::test_displot_hist_golden -v
-# 104s — almost all of it in the assertion diff renderer.
+# 100+ s — almost all of it in the assertion-diff renderer.
 ```
 
-Reproduce the actual render cost (regen path):
+Reproduce the actual render cost (no failure → no diff):
 ```bash
 unset CONDA_PREFIX && FERRUM_UPDATE_GOLDENS=1 \
   FERRUM_REGENERATE_GOLDENS=1 uv run --no-sync pytest tests/ --tb=no
-# 921 tests in ~47 s.
+# 921 tests in ~47 s; 980 in ~10 s on the post-merge run.
 ```
 
-## Root cause (hypothesis — needs verification)
+Same suite with `--tb=no` and no regen (so failing tests still fail,
+just without the diff display):
+```bash
+unset CONDA_PREFIX && uv run --no-sync pytest tests/ -q --no-header --tb=no
+# Failing tests report F/. in 4-7 s each; whole suite completes in
+# the same ~10 s order as the green case.
+```
 
-The expensive phase_9 tests all chain through KDE or contour:
-- `displot_hist`, `displot_stacked_hist`: simple histograms — these should
-  NOT be slow, investigate separately.
-- `jointplot_kde_hist`, `jointplot_kde_marginals`: 2D KDE.
-- `clustermap_basic`, `clustermap_row_col_dendrograms`: hierarchical
-  clustering + heatmap rect grid.
-- `lmplot_lm_ci`, `residplot_lowess`: bootstrap CI bands (1000 iters
-  default).
-- `pairplot_3x3`, `pairplot_3x3_hue`: 9-panel grid each rendering its own
-  KDE/scatter/hist.
-- `catplot_box`, `heatmap_annot`: less obvious.
+## Root cause
 
-Three plausible cost centers per chart:
+Each `_check_golden` style helper does `assert svg == expected` on two
+strings that are typically 200 KB - 1 MB. When the byte-equality fails,
+pytest's pytest-pluggable rewrite + `pytest._diff_pp` machinery walks
+both strings character-by-character to build a colorised unified diff
+for the terminal. For SVG strings dominated by long contiguous runs of
+floating-point coordinates this is `O(n²)` work in the diff algorithm
+and `O(n)` allocations in the formatter — multiple minutes per failing
+test on a modern Mac.
 
-1. **KDE grid resolution.** `Kde2D` and `Contour` likely default to a
-   high-resolution evaluation grid (256×256?). For tiny test data this is
-   ~65k grid evaluations producing thousands of contour polygons. The
-   contour-fill polygons then walk through SVG path emission — every vertex
-   formatted to 3 decimal places via `fmt_f`. Resolution is theoretical,
-   not data-driven.
-2. **Bootstrap CI default iterations.** `Smooth.bootstrap_ci=true` (the
-   default for `lmplot` / `residplot`) runs `n_bootstrap=1000` resamples
-   per chart. For 150-row datasets the iteration count is hugely over-
-   sampled relative to the precision needed for a CI band.
-3. **SVG hand-formatting.** Every coordinate goes through `fmt_f` which
-   uses `format!("{x:.*}", FLOAT_PRECISION)` then trims trailing zeros.
-   For a 9000-polygon density contour fill this is millions of small
-   allocations.
+**The chart rendering itself is not the cost.** Profiling the regen
+path (no assertion failures, so no diff display) shows the heaviest
+charts (`jointplot_kde_marginals`, `pairplot_3x3_hue`) at 1-4 s each;
+the median chart is well under 100 ms.
 
 ## What another session should do
 
-**Top priority is the diff-display slowness, not the render itself.** A
-500 KB SVG mismatch shouldn't take 104 seconds for pytest to format. The
-fix is likely a custom `__eq__` / pytest hook that emits "byte counts
-differ; first divergence at offset N" instead of a unified diff, OR
-storing goldens as gzipped files and comparing hashes.
+1. **Add a custom assertion helper** that produces a small failure
+   message for SVG golden mismatches: byte count delta, first
+   divergence offset, ~80 chars of context on each side. Use it in
+   `tests/test_phase_9_e2e.py::_check_or_update` and
+   `tests/diagnostics/test_goldens_phase_10.py::_check_golden`. This
+   makes failure-path runs as fast as success-path runs.
 
-1. **Verify the diff hypothesis first.** Time a failing test with
-   `--tb=line` vs `-v`; if `--tb=line` is 1–5 s and `-v` is 100+ s, the
-   diff renderer is the cost and the chart render itself is fine.
-2. **Quick win, if KDE resolution is the culprit:** Drop default grid from
-   N×N to ceil(sqrt(n))×ceil(sqrt(n)) or some n-aware heuristic for any
-   `Kde2D`/`Contour` invocation in tests; expose a public knob if not
-   already there.
-3. **Quick win, if bootstrap iters dominate:** Per-fixture override of
-   `n_bootstrap` to 100 (or `seed=0` + deterministic n=200). Visual
-   fidelity of CI bands at n=200 is indistinguishable from n=1000 on tiny
-   data; the goldens just need byte-stability.
-4. **Long-term, if SVG formatting dominates:** Pre-allocate the buffer
-   (`String::with_capacity` already in `SvgBuffer::new` at 8192 bytes —
-   bump for KDE-heavy charts) or replace the `format!` per-coord with a
-   manual digit writer. This is touchy because golden goldens are
-   byte-exact; investigate only after profiling confirms.
-5. **Either way, add a `pytest.mark.slow` tier.** Tag the >10s tests, add
-   a `--runslow` flag, exclude from the default `pytest` sweep used in
-   development. CI runs `pytest --runslow`. This decouples iteration speed
-   from coverage.
+   Sketch:
+   ```python
+   def _assert_svg_eq(actual: str, expected: str, *, name: str) -> None:
+       if actual == expected:
+           return
+       # Find first divergence cheaply.
+       n = min(len(actual), len(expected))
+       i = next((k for k in range(n) if actual[k] != expected[k]), n)
+       ctx = 80
+       a_ctx = actual[max(0, i - ctx) : i + ctx]
+       b_ctx = expected[max(0, i - ctx) : i + ctx]
+       raise AssertionError(
+           f"golden mismatch for {name!r}: got {len(actual)} bytes, "
+           f"expected {len(expected)} bytes; first divergence at offset {i}.\n"
+           f"actual:   ...{a_ctx!r}...\n"
+           f"expected: ...{b_ctx!r}...\n"
+           f"Set FERRUM_UPDATE_GOLDENS=1 (or FERRUM_REGENERATE_GOLDENS=1 for "
+           f"the phase_10 file) to refresh after intentional changes."
+       )
+   ```
+
+2. **Bonus, only if (1) doesn't fully fix it:** add a `pytest.mark.slow`
+   tier and tag the >5 s charts. The bottleneck is the diff display so
+   (1) alone should suffice; only fall through to slow-tiering if some
+   intrinsic chart-render cost remains after the diff display is fixed.
+
+## What another session should NOT do
+
+The earlier framing of this issue as "phase_9 / phase_10 charts are too
+slow to render" was wrong. **Do not** spend time:
+
+- Lowering KDE grid resolution in `crates/ferrum-core/src/transform/kde2d.rs`
+- Reducing bootstrap CI iterations in `crates/ferrum-core/src/transform/smooth.rs`
+- Optimising `fmt_f` in `crates/ferrum-core/src/render/svg.rs`
+
+unless you have a profiler trace showing one of them dominates on
+the **regen path** (the path that doesn't trigger pytest's diff
+display). The regen-path numbers above suggest none of them are
+binding.
 
 ## Touch points
 
-- `crates/ferrum-core/src/transform/kde2d.rs` (grid resolution default)
-- `crates/ferrum-core/src/transform/contour.rs` (polygon emission)
-- `crates/ferrum-core/src/transform/smooth.rs` (bootstrap iter default)
-- `crates/ferrum-core/src/render/svg.rs::fmt_f` (per-coord formatter)
-- `tests/test_phase_9_e2e.py` (mark slow)
-- `tests/diagnostics/test_goldens_phase_10.py` (mark slow on KDE/contour
-  rows: pdp_chart_three_features, decision_boundary_binary_logistic,
-  parallel_coordinates_multiclass, shap_chart_beeswarm — all 30s+)
-
-## Why it's not in scope for T4
-
-T4 is visual defaults + per-scale padding plumbing. Touching KDE/contour
-internals is unrelated and would balloon the worktree. Documenting and
-moving on is the right call.
+- `tests/_snapshots.py` — likely where the helper lands.
+- `tests/test_phase_9_e2e.py::_check_or_update` — replace `assert ==`
+  call site.
+- `tests/diagnostics/test_goldens_phase_10.py::_check_golden` — same.
 
 ## Suggested session prompt
 
-> Profile and reduce the per-chart cost in `tests/test_phase_9_e2e.py`
-> and the KDE-heavy rows of `tests/diagnostics/test_goldens_phase_10.py`.
-> Each chart takes 60–120s; full regen takes ~30 min. Start with
-> `cargo flamegraph` on `test_displot_hist_golden` to identify the
-> dominant cost center (KDE grid resolution, bootstrap iterations, or
-> SVG formatting). Apply the smallest fix that brings the mean per-chart
-> cost under 5 seconds. Add a `pytest.mark.slow` tier for anything that
-> remains over 10s. See
-> `docs/superpowers/followups/2026-05-11-phase-9-render-perf.md` for the
+> The pytest assertion-diff renderer takes 60-120s per failing SVG
+> golden test because the two strings are 200 KB - 1 MB and pytest
+> walks them to build a unified diff. The chart renders themselves are
+> fast (~50 ms - 4 s; full 921-test suite in 47 s when not failing).
+> Replace the `assert svg == expected` call sites in
+> `tests/test_phase_9_e2e.py::_check_or_update` and
+> `tests/diagnostics/test_goldens_phase_10.py::_check_golden` with a
+> custom helper that reports byte-count delta + first-divergence offset
+> + ~80 chars of context on each side, skipping pytest's diff display
+> entirely. Verify by intentionally breaking one phase_10 golden and
+> timing the failing test before and after. Target: failure-path test
+> latency under 5 s. See
+> `docs/superpowers/followups/2026-05-11-phase-9-render-perf.md` for
 > handoff context.
