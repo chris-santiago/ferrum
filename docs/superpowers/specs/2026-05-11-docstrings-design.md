@@ -273,7 +273,7 @@ Joins the existing `uv run pytest` step in CI (if/when CI is wired — currently
 
 ## 7. Execution order
 
-Eleven commits along Approach A. Each commit passes `uv run pytest` and `uv run --no-sync ruff check src/ tests/` before landing.
+Twelve commits along Approach A — eleven for the sweep, one trailing commit that captures the conventions as a project-local skill so future docstring work follows the same rules without re-deriving them. Each commit passes `uv run pytest` and `uv run --no-sync ruff check src/ tests/` before landing.
 
 Each Python commit also **removes its scope from `[tool.ruff.lint.per-file-ignores]`** so lint enforcement ratchets module by module. Rust commits **expand `_DOC_ALLOWLIST` in `tests/test_docstring_coverage.py`** for the same reason.
 
@@ -290,6 +290,7 @@ Each Python commit also **removes its scope from `[tool.ruff.lint.per-file-ignor
 | 9 | `docs: scales and schemes (Rust)` | `crates/ferrum-core/src/scale/*.rs` (singular `scale/`), `crates/ferrum-core/src/render/color/*.rs` | Add 7 scales + `ContinuousScheme`/`Gradient` to allowlist | Yes |
 | 10 | `docs: render, layout, compose, transport (Rust)` | `crates/ferrum-core/src/render/binding.rs`, `compositor.rs`, `grid_compose.rs`, `svg.rs`, `png.rs`; `crates/ferrum-core/src/layout/binding.rs`; `crates/ferrum-core/src/transport.rs` | Add 7 free-function symbols to allowlist | Yes |
 | 11 | `docs: module-level docstrings + final lint sweep` | `src/ferrum/__init__.py` + any touched module missing a top-of-file `"""..."""` | Remove `__init__.py` from ignores; assert allowlist covers all of `ferrum.__all__` | No |
+| 12 | `chore: add ferrum-docstrings skill for follow-on updates` | `.claude/skills/ferrum-docstrings/SKILL.md` | — | No |
 
 **Branch**: `worktree-chore+docs` (current). PR/merge after commit 11.
 
@@ -318,7 +319,18 @@ Each Python commit also **removes its scope from `[tool.ruff.lint.per-file-ignor
 11. `tests/test_docstring_coverage.py` (new — added in commit 1) asserts that every symbol in an explicit `_DOC_ALLOWLIST` set has a non-empty `__doc__`. The allowlist starts empty in commit 1 and grows commit-by-commit (see §7 "Ratchet" column); the test passes throughout the sweep. Commit 11 contains a final assertion that `set(_DOC_ALLOWLIST) >= set(ferrum.__all__) - {"themes", "encoding", "figure"}` (the three namespace re-exports are exempt). After commit 11 the test effectively guards all of `ferrum.__all__`.
 12. Every `#[pyclass]` carries a `///` block; every `#[new]` and `#[pymethods]` carries a `#[pyo3(signature = (...))]` attribute.
 
-### 8.4 Out of scope (deferred specs)
+### 8.4 The trailing skill commit (commit 12)
+
+After commit 11 lands and the conventions have been validated against every real public symbol, commit 12 distills them into `.claude/skills/ferrum-docstrings/SKILL.md`. The skill:
+
+- **Triggers** on phrases like "add a docstring", "document this method", "new public class", "add a PyO3 class" — concrete activations from the Anthropic skills guidance.
+- **Body** captures: the §4 NumPy template, the §5 PyO3 rules (class-not-init, mandatory `#[pyo3(signature = (...))]`, batched-rebuild discipline), the §3.2 contextual example shape for channels, and a one-line link back to this spec for the full taxonomy.
+- **Scope** is project-local (lives in `.claude/skills/`, ships with the repo); not a generic docstring skill.
+- **Timing rationale** for landing it last: writing the skill before the sweep risks encoding rules we end up softening during real implementation; writing it after means every example in the skill is grounded in code that actually merged.
+
+The skill is the *trigger*; this spec remains the long-form *reference*. They are complementary.
+
+### 8.5 Out of scope (deferred specs)
 
 - mkdocstrings/zensical site configuration.
 - API reference page generation.
