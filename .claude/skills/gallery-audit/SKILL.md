@@ -20,6 +20,22 @@ The output answers one question: **does ferrum's default plot look bad or lack i
 - maturin-built ferrum: `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` (per project CLAUDE.md).
 - No `ANTHROPIC_API_KEY` required — judging runs inside this Claude Code session via the `gallery-judge` subagent (one per row).
 
+## On-invocation: check for unwired rows first
+
+Before running the pipeline, check `RESUME.md` and each row's `config.toml`. If any row has `ferrum_status = "READY"` (or `"PARTIAL"`) but `panels = []`, that row is unwired — the ferrum API exists but no panel scripts were written. Surface this to the user with a short list:
+
+```
+The following rows are READY in ferrum but unwired:
+  - 05_learning_curve (if its ferrum_status flipped from BLOCKED)
+  - <any others>
+
+Wire them before running, or run the audit on the currently wired rows only?
+```
+
+If the user says wire them, follow the **Resume protocol** in `RESUME.md`: read the row's `TODO.md`, copy `plots/01_roc/<library>_panel.py` as a template, swap the dataset/model/library call, update the row's `config.toml` (`panels = [...]`, `ferrum_status` if needed), then continue to the generate stage.
+
+For BLOCKED rows (the ferrum API doesn't exist yet), do **not** attempt to wire — surface the gap and skip.
+
 ## How to invoke
 
 The pipeline has three stages. **You (Claude) drive all three when the user invokes `/gallery-audit`** — the parent script is mechanical, the judging is delegated to subagents in this session.
