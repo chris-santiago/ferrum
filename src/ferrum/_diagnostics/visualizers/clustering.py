@@ -75,29 +75,37 @@ class SilhouetteVisualizer(FerrumVisualizer):
 
 
 class ElbowVisualizer(FerrumVisualizer):
-    """Elbow / distortion sweep over a range of k for a clusterer class.
+    """Elbow / score sweep over a range of k for a clusterer class.
 
     Unlike other ferrum visualizers, ``ElbowVisualizer`` takes a model *class*
     (e.g. ``KMeans``) — not a fitted instance — and constructs and fits one
     model per k value inside its own ``fit()`` override. The ``ModelSource``
     round-trip is skipped entirely; per-k models are transient and discarded
-    after their score is recorded. Renders an inertia-vs-k line chart.
+    after their score is recorded. Renders a score-vs-k line chart.
 
-    Records ``best_k`` — the integer k whose distortion score is smallest —
-    as the headline metric.
+    Records ``best_k`` — the integer k whose score is optimal for the
+    selected metric — as the headline metric. For ``"distortion"`` the
+    optimal score is the minimum; for ``"silhouette"`` and
+    ``"calinski_harabasz"`` it is the maximum (higher is better).
 
     Parameters
     ----------
     model_class : type
         Uninstantiated clustering class (e.g. ``sklearn.cluster.KMeans``).
         Must accept ``n_clusters``, ``random_state``, and ``n_init`` keyword
-        arguments and expose ``.inertia_`` after fitting.
+        arguments and expose ``.inertia_`` after fitting (for the
+        ``"distortion"`` metric) or ``.labels_`` (for ``"silhouette"`` /
+        ``"calinski_harabasz"``).
     ks : sequence of int
-        The candidate k values to sweep (e.g. ``range(2, 11)``).
-    metric : {"distortion"}, default "distortion"
-        Score to minimize. Only ``"distortion"`` (sum of squared distances to
-        the nearest centroid, i.e. ``.inertia_``) is implemented today; any
-        other value raises ``NotImplementedError``.
+        The candidate k values to sweep (e.g. ``range(2, 11)``). Note that
+        ``"silhouette"`` and ``"calinski_harabasz"`` are undefined at
+        ``k == 1`` — such entries are silently skipped from the score sweep.
+    metric : {"distortion", "silhouette", "calinski_harabasz"}, default "distortion"
+        Score to optimize. ``"distortion"`` (sum of squared distances to the
+        nearest centroid, i.e. ``.inertia_``) is minimized;
+        ``"silhouette"`` (mean Rousseeuw silhouette coefficient) and
+        ``"calinski_harabasz"`` (Calinski–Harabasz / Variance Ratio Criterion)
+        are maximized. Any other value raises ``ValueError``.
     random_state : int, optional
         Integer seed passed as ``random_state`` to every per-k model
         instantiation. When ``None``, seed ``0`` is used.
@@ -114,6 +122,8 @@ class ElbowVisualizer(FerrumVisualizer):
     >>> viz._metrics["best_k"]
     """
 
+    _VALID_METRICS = ("distortion", "silhouette", "calinski_harabasz")
+
     def __init__(
         self,
         model_class: Any,
@@ -124,6 +134,11 @@ class ElbowVisualizer(FerrumVisualizer):
         theme: Any = None,
     ):
         super().__init__(model=None, random_state=random_state, theme=theme)
+        if metric not in self._VALID_METRICS:
+            raise ValueError(
+                f"ElbowVisualizer(metric={metric!r}) is not valid; expected "
+                f"one of {self._VALID_METRICS}."
+            )
         self.model_class = model_class
         self.ks = list(ks)
         self.metric = metric
@@ -138,20 +153,41 @@ class ElbowVisualizer(FerrumVisualizer):
         seed = 0 if self.random_state is None else int(self.random_state)
         rows: list[dict] = []
         for k in self.ks:
+            k_int = int(k)
+            # silhouette and calinski_harabasz are undefined at k=1.
+            if self.metric in ("silhouette", "calinski_harabasz") and k_int < 2:
+                continue
             m = self.model_class(
-                n_clusters=int(k), random_state=seed, n_init=10,
+                n_clusters=k_int, random_state=seed, n_init=10,
             ).fit(X_np)
             if self.metric == "distortion":
                 score = float(m.inertia_)
-            else:
-                raise NotImplementedError(
-                    f"ElbowVisualizer(metric={self.metric!r}) is not yet "
-                    "implemented. Use metric='distortion' for now."
-                )
-            rows.append({"k": int(k), "score": score})
+            elif self.metric == "silhouette":
+                from sklearn.metrics import silhouette_score
+                labels = getattr(m, "labels_", None)
+                if labels is None:
+                    labels = m.predict(X_np)
+                score = float(silhouette_score(X_np, labels))
+            else:  # "calinski_harabasz"
+                from sklearn.metrics import calinski_harabasz_score
+                labels = getattr(m, "labels_", None)
+                if labels is None:
+                    labels = m.predict(X_np)
+                score = float(calinski_harabasz_score(X_np, labels))
+            rows.append({"k": k_int, "score": score})
+        if not rows:
+            raise ValueError(
+                f"ElbowVisualizer.fit produced no scores for metric="
+                f"{self.metric!r} over ks={self.ks!r}. For "
+                "silhouette/calinski_harabasz, ks must contain values >= 2."
+            )
         df = pl.DataFrame(rows)
         scores = df["score"].to_numpy()
-        idx = int(np.argmin(scores))
+        # distortion is minimized; silhouette and CH are maximized.
+        if self.metric == "distortion":
+            idx = int(np.argmin(scores))
+        else:
+            idx = int(np.argmax(scores))
         self._metrics["best_k"] = float(df["k"][idx])
         chart = ferrum.Chart(df).mark_line().encode(x="k", y="score")
         if self.theme is not None:

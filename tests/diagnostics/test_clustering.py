@@ -272,6 +272,54 @@ def test_elbow_visualizer():
     assert viz._metrics["best_k"] in {3.0, 4.0, 5.0}
 
 
+def test_elbow_visualizer_silhouette():
+    """metric='silhouette' must fit, score, and pick a finite best_k."""
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    viz = ferrum.ElbowVisualizer(
+        KMeans, ks=[2, 3, 4, 5], metric="silhouette", random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    best_k = viz._metrics["best_k"]
+    assert np.isfinite(best_k)
+    assert best_k in {2.0, 3.0, 4.0, 5.0}
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_elbow_visualizer_calinski_harabasz():
+    """metric='calinski_harabasz' must fit, score, and pick a finite best_k."""
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    viz = ferrum.ElbowVisualizer(
+        KMeans, ks=[2, 3, 4, 5], metric="calinski_harabasz", random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    best_k = viz._metrics["best_k"]
+    assert np.isfinite(best_k)
+    assert best_k in {2.0, 3.0, 4.0, 5.0}
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_elbow_visualizer_rejects_bad_metric():
+    """An unknown metric value must raise ValueError at construction."""
+    from sklearn.cluster import KMeans
+    with pytest.raises(ValueError, match="not valid"):
+        ferrum.ElbowVisualizer(
+            KMeans, ks=[2, 3], metric="badmetric", random_state=0,
+        )
+
+
+def test_elbow_visualizer_silhouette_skips_k1():
+    """k=1 has undefined silhouette; sweep skips it but still fits k>=2."""
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    viz = ferrum.ElbowVisualizer(
+        KMeans, ks=[1, 2, 3], metric="silhouette", random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    assert viz._metrics["best_k"] in {2.0, 3.0}
+
+
 def test_manifold_visualizer_pca():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     model = load_fixture("pca_4comp")
