@@ -270,6 +270,13 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         self.normalize = normalize
 
     def _materialize(self) -> None:
+        # accuracy is a per-sample headline metric and must be computed
+        # from raw integer counts, never from a row/col/all-normalized
+        # frame — so this call is intentionally hardcoded to
+        # normalize=None, independent of self.normalize (which controls
+        # only the rendered heatmap's cell values). The docstring
+        # documents this; the comment lives here so a future reader of
+        # the code doesn't "fix" it by passing self.normalize through.
         cm = self._source.confusion_matrix(normalize=None)
         n_correct = float(
             cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum()
