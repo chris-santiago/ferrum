@@ -43,7 +43,7 @@ def test_predictions_requires_predict():
 
 
 def test_predictions_against_ridge_fixture():
-    """Studentized residuals computed for linear estimator."""
+    """Studentized residuals + Cook's distance computed for linear estimator."""
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -51,13 +51,20 @@ def test_predictions_against_ridge_fixture():
 
     source = ferrum.ModelSource(model, X, y)
     pred = source.predictions()
-    assert pred.columns == ["y_true", "y_pred", "residual", "studentized_residual"]
-    assert pred.shape == (df.height, 4)
+    assert pred.columns == [
+        "y_true", "y_pred", "residual", "studentized_residual",
+        "cooks_distance",
+    ]
+    assert pred.shape == (df.height, 5)
     np.testing.assert_allclose(
         pred["residual"].to_numpy(),
         pred["y_true"].to_numpy() - pred["y_pred"].to_numpy(),
         rtol=1e-12,
     )
+    cooks = pred["cooks_distance"].to_numpy()
+    # Cook's D must be non-negative and finite for a linear estimator.
+    assert (cooks >= 0.0).all()
+    assert np.isfinite(cooks).all()
 
 
 def test_probabilities_against_binary_logistic_fixture():

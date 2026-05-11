@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 
 from .deps import require_shap, require_sklearn, require_umap
-from .stats import studentized_residual
+from .stats import cooks_distance, studentized_residual
 
 
 _PROTOCOL_ATTRS: tuple[str, ...] = (
@@ -147,18 +147,25 @@ class ModelSource:
         )
         residual = y_true - y_pred
 
-        # Studentized residual: linear-estimator path if model exposes coef_.
+        # Studentized residual + Cook's distance: leverage-aware variants
+        # require the design matrix. Linear-estimator path uses `coef_` as
+        # the gate; non-linear estimators fall back to the no-X studentized
+        # residual and report NaN for Cook's D (it's undefined without a
+        # hat matrix).
         if "coef_" in self._capabilities and self._y is not None:
             X_with_intercept = np.column_stack([np.ones(len(X_np)), X_np])
             stud = studentized_residual(y_true, y_pred, X_with_intercept)
+            cooks = cooks_distance(y_true, y_pred, X_with_intercept)
         else:
             stud = studentized_residual(y_true, y_pred, X=None)
+            cooks = np.full_like(y_pred, np.nan)
 
         df = pl.DataFrame({
             "y_true": y_true,
             "y_pred": y_pred,
             "residual": residual,
             "studentized_residual": stud,
+            "cooks_distance": cooks,
         })
         self._cache[key] = df
         return df

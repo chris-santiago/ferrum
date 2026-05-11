@@ -171,13 +171,49 @@ def test_visualizer_show_before_fit_errors():
 # --- Phase 9+ no-defer guards: deferred kwargs must raise -------------------
 
 
-def test_mark_residuals_cook_threshold_raises():
-    import pytest
+def test_mark_residuals_cook_threshold_highlights_outliers():
+    """cook_threshold='auto' (the 4/n rule) overlays a second mark_point
+    layer keyed on `_cook_outlier_x/y` — outlier coordinates are
+    non-null on rows whose Cook's D exceeds the threshold, null
+    elsewhere. mark_point skips null rows so exactly K outliers render.
+    """
+    source, df_full = _ridge_source()
+    chart = ferrum.residuals_chart(
+        source, cook_threshold="auto",
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # The outlier overlay uses the explicit red fill #e15759.
+    assert "#e15759" in svg
+
+
+def test_mark_residuals_cook_threshold_explicit_float():
+    """A numeric cook_threshold (not 'auto') routes through the same
+    injection helper with the supplied value. We pick a tiny threshold
+    so the regression fixture is guaranteed to surface outliers."""
     source, _ = _ridge_source()
-    pred = source.predictions()
-    chart = ferrum.Chart(pred).mark_residuals(cook_threshold=4.0)
-    with pytest.raises(NotImplementedError, match="cook_threshold"):
-        chart.show_svg()
+    svg = ferrum.residuals_chart(
+        source, cook_threshold=0.001,
+    ).show_svg()
+    assert "#e15759" in svg
+
+
+def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
+    """For non-linear estimators ModelSource.predictions emits NaN
+    Cook's D. NaN > threshold is False so no outliers highlight; chart
+    still renders cleanly."""
+    from sklearn.ensemble import RandomForestRegressor
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    model = RandomForestRegressor(n_estimators=5, random_state=0).fit(
+        X.to_numpy(), df["y"].to_numpy(),
+    )
+    svg = ferrum.residuals_chart(
+        model, X, df["y"], cook_threshold="auto",
+    ).show_svg()
+    assert "<svg" in svg
+    # No red outlier overlay since Cook's D is NaN for every row.
+    assert "#e15759" not in svg
 
 
 def test_mark_prediction_error_ci_raises():

@@ -45,6 +45,41 @@ def studentized_residual(
     return r / (sigma * np.sqrt(1.0 - h_diag))
 
 
+def cooks_distance(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    X: np.ndarray,
+) -> np.ndarray:
+    """Per-observation Cook's distance for a linear estimator.
+
+    Formula
+    -------
+    D_i = (r_i² / (p · σ̂²)) · (h_ii / (1 − h_ii)²)
+
+    where r_i = y_true − y_pred at observation i, p = column count of
+    X (caller is responsible for adding an intercept column when the
+    model fits one), σ̂² = SSE / (n − p), and h_ii is the i-th diagonal
+    of the hat matrix H = X (Xᵀ X)⁻¹ Xᵀ. Returns a non-negative array
+    of length n.
+    """
+    r = y_true - y_pred
+    n, p = X.shape
+    if n <= p:
+        return np.zeros(n, dtype=np.float64)
+    XtX_inv = np.linalg.pinv(X.T @ X)
+    h_diag = np.einsum("ij,jk,ik->i", X, XtX_inv, X)
+    # Clamp h_ii to (0, 1) — h_ii = 1 means the observation is its own
+    # model and Cook's D is undefined.
+    h_diag = np.clip(h_diag, 0.0, 1.0 - 1e-12)
+    sse = float((r * r).sum())
+    sigma_sq = sse / max(n - p, 1)
+    if sigma_sq <= 0.0:
+        return np.zeros(n, dtype=np.float64)
+    one_minus_h_sq = (1.0 - h_diag) ** 2
+    safe_denom = np.where(one_minus_h_sq > 0.0, one_minus_h_sq, 1e-24)
+    return (r * r / (p * sigma_sq)) * (h_diag / safe_denom)
+
+
 # ---------- Phase 10g: feature-ranking statistics ----------
 
 

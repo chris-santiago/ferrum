@@ -40,6 +40,14 @@ def _check_golden(svg: str, name: str) -> None:
 # --- 10a goldens ---
 
 
+def test_golden_residuals_chart_regression_cook_outliers():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.residuals_chart(model, X, df["y"], cook_threshold="auto")
+    _check_golden(chart.show_svg(), "residuals_chart_regression_cook_outliers")
+
+
 def test_golden_residuals_chart_regression():
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")

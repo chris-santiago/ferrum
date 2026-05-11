@@ -700,7 +700,7 @@ class Chart:
         *,
         kind: str = "studentized",
         reference_line: bool = True,
-        cook_threshold: float | None = None,
+        cook_threshold: float | str | None = None,
         color_field: str | None = None,
         position=None,
         **mark_kwargs,
@@ -709,9 +709,18 @@ class Chart:
 
         Expects the chart's data to carry the schema emitted by
         ``ModelSource.predictions()``: ``y_true``, ``y_pred``, ``residual``,
-        ``studentized_residual``. When ``reference_line`` is true, a sentinel
-        ``_ref_zero`` column (one row at 0.0, rest null) is injected so the
-        downstream ``mark_rule`` renders exactly one horizontal line at y=0.
+        ``studentized_residual``, and (since Phase 10h) ``cooks_distance``.
+        When ``reference_line`` is true, a sentinel ``_ref_zero`` column
+        (one row at 0.0, rest null) is injected so the downstream
+        ``mark_rule`` renders exactly one horizontal line at y=0.
+
+        ``cook_threshold`` accepts a float (the absolute Cook's D
+        threshold), the literal ``"auto"`` (the conventional ``4 / n``
+        rule), or ``None`` (no highlighting). When set, the chart
+        builder injects ``_cook_outlier_x/y`` columns containing the
+        ``(y_pred, residual)`` coordinates of outliers, and the desugar
+        emits a second ``mark_point`` layer drawn in red with a black
+        outline.
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility

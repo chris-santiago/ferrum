@@ -32,6 +32,45 @@ def _inject_constant(df: pl.DataFrame, name: str, value: float) -> pl.DataFrame:
     return df.with_columns(series)
 
 
+def _inject_cook_outliers(
+    df: pl.DataFrame,
+    *,
+    kind: str = "studentized",
+    threshold: float | str = "auto",
+) -> pl.DataFrame:
+    """Inject ``_cook_outlier_x`` / ``_cook_outlier_y`` columns.
+
+    For each row whose ``cooks_distance`` exceeds ``threshold``, the
+    outlier-coordinate columns hold the (y_pred, residual) pair; all
+    other rows are null so the residual mark's outlier-overlay layer
+    skips them.
+
+    ``threshold`` accepts:
+    - a float — use that value directly.
+    - ``"auto"`` — use the conventional ``4 / n`` rule (Hair et al.).
+    """
+    if df.height == 0 or "cooks_distance" not in df.columns:
+        return df
+    if threshold == "auto":
+        thr = 4.0 / df.height
+    else:
+        thr = float(threshold)
+    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
+    # Polars treats NaN > anything as True (NaN sorts after Infinity), so
+    # the comparison must be guarded with `is_not_nan()` to keep non-linear
+    # estimators (whose cooks_distance is NaN for every row) from
+    # silently flagging every observation as an outlier.
+    is_outlier = (
+        pl.col("cooks_distance").is_not_nan()
+        & pl.col("cooks_distance").is_not_null()
+        & (pl.col("cooks_distance") > thr)
+    )
+    return df.with_columns(
+        pl.when(is_outlier).then(pl.col("y_pred")).otherwise(None).alias("_cook_outlier_x"),
+        pl.when(is_outlier).then(pl.col(y_col)).otherwise(None).alias("_cook_outlier_y"),
+    )
+
+
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
     """Sort the frame ascending by `col` so a downstream ``mark_line`` over
     that column draws a monotonic polyline.
@@ -50,14 +89,30 @@ def _residuals_chart_from_source(
     source: Any,
     *,
     kind: str = "studentized",
+    cook_threshold: float | str | None = None,
     panels: Any = None,  # None / "single" / list of panel names
     theme: Any = None,
 ):
-    """Build a residuals diagnostic chart from a ModelSource."""
+    """Build a residuals diagnostic chart from a ModelSource.
+
+    When ``cook_threshold`` is set, identify observations whose
+    ``cooks_distance`` exceeds the threshold and inject
+    ``_cook_outlier_x`` / ``_cook_outlier_y`` columns (one per outlier
+    row, null elsewhere). ``cook_threshold`` may be a float, or the
+    literal ``"auto"`` to use the conventional ``4 / n`` rule, or
+    ``None`` to skip outlier highlighting. The wrapped estimator must
+    expose ``coef_`` for Cook's distance to be defined; non-linear
+    estimators surface ``NaN`` Cook's D and silently produce no
+    outliers (the threshold comparison is False for NaN).
+    """
     import ferrum
     df = source.predictions()
+    if cook_threshold is not None:
+        df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
     if panels in (None, "single"):
-        chart = ferrum.Chart(df).mark_residuals(kind=kind)
+        chart = ferrum.Chart(df).mark_residuals(
+            kind=kind, cook_threshold=cook_threshold,
+        )
         if theme is not None:
             chart = chart.theme(theme)
         return chart

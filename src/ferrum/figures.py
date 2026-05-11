@@ -60,16 +60,23 @@ def residuals_chart(
     y: Any = None,
     *,
     kind: str = "studentized",
+    cook_threshold: float | str | None = None,
     panels: Any = "auto",
     random_state: int | None = None,
     theme: Any = None,
 ):
     """Residuals diagnostic chart — see ferrum-spec.md §3.14.
 
+    ``cook_threshold`` highlights observations whose leverage-aware
+    Cook's distance exceeds the threshold. Accepts a float (absolute
+    threshold), the literal ``"auto"`` (the ``4 / n`` rule), or
+    ``None`` (no highlighting). Requires the wrapped estimator to
+    expose ``coef_`` so the hat matrix is computable.
+
     ``panels="auto"`` ships only the residuals-vs-fitted panel in 10a;
-    the QQ / scale-location / leverage panels join in 10h. Pass an explicit
-    list (e.g. ``panels=["residuals_vs_fitted", "qq"]``) to force the
-    multi-panel path.
+    the QQ / scale-location / leverage panels join in 10h. Pass an
+    explicit list (e.g. ``panels=["residuals_vs_fitted", "qq"]``) to
+    force the multi-panel path.
     """
     from ferrum._diagnostics.charts import _residuals_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
@@ -80,7 +87,11 @@ def residuals_chart(
     else:
         panel_list = list(panels)
     return _residuals_chart_from_source(
-        source, kind=kind, panels=panel_list, theme=theme,
+        source,
+        kind=kind,
+        cook_threshold=cook_threshold,
+        panels=panel_list,
+        theme=theme,
     )
 
 

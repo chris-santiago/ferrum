@@ -41,19 +41,23 @@ def desugar_residuals(
 
     Data contract: the chart's data must carry columns ``y_pred`` and either
     ``residual`` (kind="raw") or ``studentized_residual`` (kind in
-    "studentized"/"scaled"). When ``reference_line=True`` the data must also
-    carry the injected ``_ref_zero`` column (the ``Chart.mark_residuals``
+    "studentized"/"scaled"). When ``reference_line=True`` the data must
+    also carry the injected ``_ref_zero`` column (the ``Chart.mark_residuals``
     method takes care of this).
 
-    ``cook_threshold`` is reserved for the multi-panel residuals_chart in
-    Phase 10h; passing a non-default value raises ``NotImplementedError``
-    rather than silently ignoring it (per the Phase 9+ no-defer principle).
+    When ``cook_threshold`` is set (a float, or the literal ``"auto"`` for
+    the conventional ``4 / n`` rule), the chart builder injects
+    ``_cook_outlier_x`` / ``_cook_outlier_y`` columns that hold the
+    (y_pred, residual) coordinates only for observations whose leverage-
+    aware Cook's distance exceeds the threshold (all other rows null).
+    This desugar then overlays a second ``mark_point`` layer keyed on
+    those columns; Rust's mark_point skips null rows so exactly K outlier
+    markers render, drawn in red with a black outline to stand out
+    against the base scatter. Requires the wrapped estimator to expose
+    ``coef_`` so the hat matrix is computable (the
+    ``ModelSource.predictions()`` step has already filled
+    ``cooks_distance`` with NaN for non-linear estimators).
     """
-    if cook_threshold is not None:
-        raise NotImplementedError(
-            "mark_residuals(cook_threshold=...) lands in Phase 10h alongside "
-            "the leverage-aware Cook's D path."
-        )
     y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     point_enc: dict[str, Any] = {"x": "y_pred", "y": y_col}
     if color_field is not None:
@@ -64,6 +68,20 @@ def desugar_residuals(
             "mark": "rule",
             "encoding": {"y": "_ref_zero"},
             "mark_kwargs": {"stroke_dash": [4, 4]},
+        })
+    if cook_threshold is not None:
+        layers.append({
+            "mark": "point",
+            "encoding": {
+                "x": "_cook_outlier_x",
+                "y": "_cook_outlier_y",
+            },
+            "mark_kwargs": {
+                "fill": "#e15759",  # tableau red
+                "stroke": "#000000",
+                "stroke_width": 1.0,
+                "size": 80.0,
+            },
         })
     return ("__layered__", [], None, None, layers)
 
