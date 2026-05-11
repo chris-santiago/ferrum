@@ -79,6 +79,13 @@ pub enum ScaleSpec {
         zero: bool,
         #[serde(default)]
         clamp: bool,
+        /// Fractional inward pixel padding (0.0 = no padding). Themes-T4
+        /// quantitative default is 0.05, applied at the renderer when
+        /// `padding.is_none()` and `domain.is_none()`. User-specified
+        /// `domain` suppresses the default to 0.0 unless `padding` is
+        /// also set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
     },
     Log {
         #[serde(default = "default_log_base")]
@@ -91,6 +98,8 @@ pub enum ScaleSpec {
         nice: bool,
         #[serde(default)]
         clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
     },
     Time {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +110,8 @@ pub enum ScaleSpec {
         nice: bool,
         #[serde(default)]
         clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
     },
     Symlog {
         #[serde(default = "default_symlog_constant")]
@@ -113,6 +124,8 @@ pub enum ScaleSpec {
         nice: bool,
         #[serde(default)]
         clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
     },
     Ordinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -565,6 +578,7 @@ mod tests {
                 range: None,
                 nice: true,
                 clamp: false,
+                padding: None,
             }),
             ..Default::default()
         };

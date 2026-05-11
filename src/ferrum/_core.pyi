@@ -70,6 +70,7 @@ class LinearScale:
     domain: list[float]
     range: list[float]
     clamp: bool
+    padding: float | None
     def __init__(
         self,
         *,
@@ -77,6 +78,7 @@ class LinearScale:
         range: Sequence[float],
         clamp: bool = False,
         nice: bool = False,
+        padding: float | None = None,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -91,6 +93,7 @@ class LogScale:
     range: list[float]
     base: float
     clamp: bool
+    padding: float | None
     def __init__(
         self,
         *,
@@ -99,6 +102,7 @@ class LogScale:
         base: float = 10.0,
         clamp: bool = False,
         nice: bool = False,
+        padding: float | None = None,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -112,6 +116,7 @@ class TimeScale:
     domain: list[float]
     range: list[float]
     clamp: bool
+    padding: float | None
     def __init__(
         self,
         *,
@@ -119,6 +124,7 @@ class TimeScale:
         range: Sequence[float],
         clamp: bool = False,
         nice: bool = False,
+        padding: float | None = None,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -133,6 +139,7 @@ class SymlogScale:
     range: list[float]
     constant: float
     clamp: bool
+    padding: float | None
     def __init__(
         self,
         *,
@@ -141,6 +148,7 @@ class SymlogScale:
         constant: float = 1.0,
         clamp: bool = False,
         nice: bool = False,
+        padding: float | None = None,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...

@@ -28,6 +28,8 @@ pub fn draw(
         font_size: strip.font_size,
         anchor: strip.align,
         angle: 0.0,
+        font_family: &theme.font_family,
+        font_weight: None,
     });
 }
 

@@ -4059,6 +4059,8 @@ class Chart:
             kw["layers"] = resolved._build_layers_list()
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()
+        if resolved._title is not None:
+            kw["title"] = resolved._title
         return ChartSpec(**kw)
 
     def _build_spec(self):

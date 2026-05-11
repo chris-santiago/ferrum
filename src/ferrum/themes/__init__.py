@@ -11,35 +11,54 @@ class Theme:
     ``set_default_theme(t)``. Per-chart ``.theme()`` always wins at render
     time.
 
-    ``Theme`` accepts arbitrary keyword arguments. Only the keys listed below
-    are currently wired to the Rust renderer — all others are stored and
-    round-trip through ``update()`` / ``to_theme_inputs_dict()`` but are
-    silently ignored at render time (reserved for future phases).
+    All keys listed in ``ferrum-spec.md`` §3.13 are plumbed end-to-end to
+    the Rust renderer. Unknown keys raise ``ValueError`` at construction.
 
     Parameters
     ----------
     background : str, optional
         Chart background color as a CSS hex string (e.g. ``"#ffffff"``).
+        ``background_color`` accepted as an alias.
     mark_color : str, optional
         Default mark fill/stroke color for marks that have no explicit color
         encoding.
-    point_size : float, optional
-        Default point radius in pixels.
-    line_stroke_width : float, optional
-        Default line stroke width in pixels.
-    bar_corner_radius : float, optional
-        Corner radius applied to bar marks.
-    area_opacity : float, optional
-        Default opacity for area marks.
+    font_family, font_weight, font_color, font_size : optional
+        Default text styling for body text (axis titles, etc.).
+    title_font_family, title_font_size, title_font_weight, title_color, \
+title_anchor, title_offset : optional
+        Chart title styling. ``title_anchor`` ∈ {"start", "middle", "end"}.
+        Unset values fall back to the corresponding body-text key
+        (``title_color`` → ``font_color``, etc.).
+    label_font_family, label_color : optional
+        Tick label styling. Fall back to ``font_family`` / ``font_color``.
     grid : bool, optional
-        Whether to draw grid lines.
-    padding : float, optional
-        Chart padding in pixels applied to all four sides.
-    **kwargs : any
-        Additional styling keys (e.g. ``font_color``, ``title_color``,
-        ``color_scheme``, ``font_family``, ``axis_line``, ``grid_color``).
-        Stored in the theme and returned by ``to_theme_inputs_dict()`` but
-        not yet consumed by the Rust renderer — reserved for future phases.
+        Whether to draw grid lines (default True).
+    grid_color, grid_width, grid_dash, grid_opacity : optional
+        Grid line styling. ``grid_dash`` is a list of dash lengths.
+    axis_line : bool, optional
+        Whether to draw axis strokes (default True).
+    axis_line_color, axis_line_width, tick_color, tick_size, tick_width : optional
+        Axis and tick styling.
+    point_size, point_opacity, line_stroke_width, bar_corner_radius, \
+area_opacity, opacity : optional
+        Mark styling.
+    color_scheme : str, optional
+        Named categorical palette: one of ``okabe_ito`` (default),
+        ``tableau10``, ``set1``, ``set2``, ``paired``, ``pastel``, ``dark2``.
+        Sequential names (``viridis``, ``plasma``, ``magma``, ``inferno``,
+        ``cividis``) also accepted.
+    legend_orient, legend_direction, legend_title_font_size : optional
+        Legend layout.
+    padding, axis_title_padding, column_padding, row_padding : optional
+        Spacing in pixels.
+    strip_background_color : optional
+        Facet strip-title background color.
+
+    Raises
+    ------
+    ValueError
+        If any keyword argument is not in the supported key list (see
+        ``Theme._KNOWN_KEYS``).
 
     Examples
     --------
@@ -52,7 +71,39 @@ class Theme:
 
     __slots__ = ("_props",)
 
+    _KNOWN_KEYS: frozenset[str] = frozenset({
+        # Canvas
+        "background", "background_color", "padding",
+        # Typography
+        "font_family", "font_weight", "font_color", "font_size",
+        "title_font_family", "title_font_size", "title_font_weight",
+        "title_color", "title_anchor", "title_offset",
+        "label_font_family", "label_color",
+        # Grid
+        "grid", "grid_color", "grid_width", "grid_dash", "grid_opacity",
+        # Axes
+        "axis_line", "axis_line_color", "axis_line_width",
+        "tick_color", "tick_size", "tick_width",
+        # Marks
+        "mark_color", "point_size", "point_opacity",
+        "line_stroke_width", "bar_corner_radius", "area_opacity", "opacity",
+        # Palette
+        "color_scheme",
+        # Strip
+        "strip_background_color",
+        # Legend
+        "legend_orient", "legend_direction", "legend_title_font_size",
+        # Spacing
+        "axis_title_padding", "column_padding", "row_padding",
+    })
+
     def __init__(self, **kwargs: Any) -> None:
+        unknown = set(kwargs) - self._KNOWN_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown Theme key(s): {sorted(unknown)!r}. "
+                f"See ferrum-spec.md §3.13 for the supported key list."
+            )
         self._props: dict = {k: v for k, v in kwargs.items() if v is not None}
 
     def update(self, **kwargs: Any) -> "Theme":
@@ -85,11 +136,31 @@ class Theme:
                 merged[k] = v
         return Theme(**merged)
 
+    _FALLBACKS: dict[str, str] = {
+        "title_color": "font_color",
+        "label_color": "font_color",
+        "title_font_family": "font_family",
+        "label_font_family": "font_family",
+    }
+
     def to_theme_inputs_dict(self) -> dict:
-        """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``."""
+        """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``.
+
+        Resolves spec-defined fallbacks (e.g. ``title_color`` falls back to
+        ``font_color`` if unset) and normalises the public Python alias
+        ``background`` to the Rust binding's canonical ``background_color``
+        key. Rust sees a fully-resolved dict; no Option fallback chains in
+        the binding.
+        """
         d = dict(self._props)
+        # Apply fallback chains BEFORE the background rename so a future
+        # fallback whose source is "background" (none today) still resolves.
+        for derived, source in self._FALLBACKS.items():
+            if derived not in d and source in d:
+                d[derived] = d[source]
         # Rust binding reads "background_color"; normalise the public Python
-        # key "background" to the Rust key so built-in themes work correctly.
+        # alias "background" so every built-in theme renders its configured
+        # background regardless of which key was used at construction.
         if "background" in d:
             d["background_color"] = d.pop("background")
         return d

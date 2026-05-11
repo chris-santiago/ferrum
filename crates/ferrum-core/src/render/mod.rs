@@ -185,6 +185,7 @@ pub fn render_svg(
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
+        prep.legend_title.clone(),
         &metrics,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
@@ -194,13 +195,52 @@ pub fn render_svg(
 
     let mut out = svg::SvgBuffer::new(layout.viewport, background, true);
 
+    // Chart-level title (Themes-T2.5a). Emits at the position computed by
+    // compute_layout in the reserved top band.
+    if let Some(title) = &layout.chart_title {
+        let style = svg::TextStyle {
+            fill: theme.title_color,
+            font_size: theme.title_font_size,
+            anchor: title.anchor,
+            angle: 0.0,
+            font_family: &theme.title_font_family,
+            font_weight: if theme.title_font_weight == "normal" {
+                None
+            } else {
+                Some(&theme.title_font_weight)
+            },
+        };
+        out.text(title.x, title.y, &title.text, &style);
+    }
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
             continue;
         }
 
-        for axis in layout.axes.iter().filter(|a| a.panel_index == panel_idx) {
+        // Per-panel axes: collect first so we can hand both x and y to
+        // draw_grid before the axis lines themselves render.
+        let panel_axes: Vec<&crate::layout::AxisLayout> = layout
+            .axes
+            .iter()
+            .filter(|a| a.panel_index == panel_idx)
+            .collect();
+        let panel_x_axis = panel_axes
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
+        let panel_y_axis = panel_axes
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
+
+        // Gridlines render below axis lines + marks so they sit behind both.
+        marks::axis::draw_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, &mut out);
+
+        for axis in &panel_axes {
             marks::axis::draw(axis, theme, &mut out);
         }
 
@@ -415,6 +455,7 @@ mod orchestration_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -508,6 +549,7 @@ mod orchestration_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec,
@@ -559,6 +601,7 @@ mod png_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -590,6 +633,7 @@ mod png_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -667,6 +711,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -715,6 +760,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -747,6 +793,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -778,6 +825,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -809,6 +857,7 @@ mod golden_tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -848,6 +897,7 @@ mod golden_tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

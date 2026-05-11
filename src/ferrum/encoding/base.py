@@ -30,6 +30,8 @@ def _scale_to_dict(scale: Any) -> Any:
             d["domain"] = list(scale.domain)
         if scale.range:
             d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
         return d
     if isinstance(scale, LinearScale):
         d = {"type": "linear", "clamp": scale.clamp}
@@ -37,6 +39,8 @@ def _scale_to_dict(scale: Any) -> Any:
             d["domain"] = list(scale.domain)
         if scale.range:
             d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
         return d
     if isinstance(scale, TimeScale):
         d = {"type": "time", "clamp": scale.clamp}
@@ -44,6 +48,8 @@ def _scale_to_dict(scale: Any) -> Any:
             d["domain"] = list(scale.domain)
         if scale.range:
             d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
         return d
     if isinstance(scale, SymlogScale):
         d = {"type": "symlog", "constant": scale.constant, "clamp": scale.clamp}
@@ -51,6 +57,8 @@ def _scale_to_dict(scale: Any) -> Any:
             d["domain"] = list(scale.domain)
         if scale.range:
             d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
         return d
     if isinstance(scale, OrdinalScale):
         d = {"type": "ordinal", "padding": scale.padding}

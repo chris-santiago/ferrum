@@ -156,7 +156,25 @@ pub fn resolve_mark_style(
             detail: None,
             cmap: None,
         },
-        Mark::Tick | Mark::Point | Mark::Text | Mark::Image => MarkStyle {
+        Mark::Point => MarkStyle {
+            fill: base_fill,
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: theme.point_opacity,
+            point_size: theme.point_size,
+            corner_radius: 0.0,
+            stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
+            detail: None,
+            cmap: None,
+        },
+        Mark::Tick | Mark::Text | Mark::Image => MarkStyle {
             fill: base_fill,
             stroke: None,
             stroke_width: 0.0,
@@ -299,9 +317,10 @@ mod tests {
 
     #[test]
     fn resolve_style_for_area_uses_area_opacity() {
+        // Themes-T4: area_opacity default flipped 0.4 → 0.35; alpha 0.35*255 ≈ 89.
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Area);
-        assert!((style.fill.alpha as i32 - 102).abs() <= 1);
+        assert!((style.fill.alpha as i32 - 89).abs() <= 1);
     }
 
     #[test]

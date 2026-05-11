@@ -355,9 +355,17 @@ pub fn resolve_scales_with_outputs(
             Some(ColorScale::Continuous { domain: (lo, hi), scheme })
         } else {
             let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-            let palette: &'static [Color] = match &c_enc.scheme {
-                Some(name) => palette::categorical_palette(name),
-                None => &*palette::OKABE_ITO,
+            // Precedence: encoding.scheme (per-encoding override, e.g. heatmap
+            // cmap=) → theme.color_scheme (Theme default) → OKABE_ITO fallback.
+            // A sequential scheme name (viridis/plasma/…) on a nominal
+            // encoding can't be interpolated for n categories yet, so we
+            // substitute tableau10 — the canonical Vega-Lite categorical
+            // default — rather than collapsing to OKABE_ITO silently.
+            let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
+            let palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+                palette::categorical_palette("tableau10")
+            } else {
+                palette::categorical_palette(resolved_name)
             };
             if domain.len() > palette.len() {
                 warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
@@ -445,6 +453,44 @@ fn find_stack_for_y<'a>(
     None
 }
 
+
+/// Themes-T4 default inward padding fraction for quantitative / temporal
+/// scales when neither `scale.padding` nor `scale.domain` is set.
+const DEFAULT_SCALE_PADDING_FRAC: f64 = 0.05;
+
+/// Themes-T4 maximum inward padding in pixels. The padding band is the
+/// smaller of `fraction * span` and this cap so small panels don't lose
+/// too much plot area.
+const SCALE_PADDING_MAX_PX: f64 = 8.0;
+
+/// Resolve the effective padding fraction.
+///
+/// Precedence:
+///  - `Some(p)` → use `p` (including 0.0 to disable).
+///  - `None && has_explicit_domain` → 0.0 (user-specified domain wins).
+///  - `None && !has_explicit_domain` → `DEFAULT_SCALE_PADDING_FRAC`.
+fn resolve_padding_fraction(scale_padding: Option<f64>, has_explicit_domain: bool) -> f64 {
+    if let Some(p) = scale_padding {
+        return p;
+    }
+    if has_explicit_domain {
+        return 0.0;
+    }
+    DEFAULT_SCALE_PADDING_FRAC
+}
+
+/// Inset a pixel range by the resolved padding band (capped at
+/// `SCALE_PADDING_MAX_PX`). Handles inverted ranges (y-axis is
+/// `(high_px, low_px)` for quantitative scales).
+fn inset_pixel_range(pr: (f64, f64), padding_frac: f64) -> (f64, f64) {
+    if padding_frac == 0.0 {
+        return pr;
+    }
+    let span = (pr.1 - pr.0).abs();
+    let pad = (span * padding_frac).min(SCALE_PADDING_MAX_PX);
+    let sign = if pr.1 >= pr.0 { 1.0 } else { -1.0 };
+    (pr.0 + sign * pad, pr.1 - sign * pad)
+}
 
 fn build_axis_scale(
     channel: &'static str,
@@ -543,13 +589,18 @@ fn build_axis_scale(
         Ok((mn, mx))
     };
 
+    // No explicit scale spec → quantitative / temporal get the T4 default
+    // 5% inward padding (capped at 8px); ordinal / nominal use band-side
+    // half-step padding internally and are unaffected here.
+    let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
+
     match dtype {
         SpecDataType::Quantitative => {
             let (min, max) = combined_min_max()
                 .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max],
-                vec![pr.0, pr.1],
+                vec![inset.0, inset.1],
                 false,
                 false,
             )))
@@ -567,7 +618,7 @@ fn build_axis_scale(
                 .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max],
-                vec![pr.0, pr.1],
+                vec![inset.0, inset.1],
                 false,
                 false,
             )))
@@ -609,10 +660,13 @@ fn build_from_scale_spec(
         .column_by_name(&enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
 
-    let default_pixel_range = vec![pr.0, pr.1];
-
+    // Themes-T4 padding precedence per ScaleSpec variant: if user supplied
+    // `padding`, honor it (including 0.0 to disable). Else if `domain` is
+    // explicit, suppress padding to 0.0 (user-specified domain wins). Else
+    // fall back to the 5% default. Caller's `range` override (when set)
+    // bypasses padding entirely — `range` is treated as the final pixel band.
     Ok(match scale_spec {
-        ScaleSpec::Linear { domain, range, nice, clamp, .. } => {
+        ScaleSpec::Linear { domain, range, nice, clamp, padding, .. } => {
             let d = match domain {
                 Some(d) => d.clone(),
                 None => {
@@ -621,14 +675,16 @@ fn build_from_scale_spec(
                     vec![mn, mx]
                 }
             };
-            ScaleKind::Linear(LinearScale::new_internal(
-                d,
-                range.clone().unwrap_or(default_pixel_range),
-                *clamp,
-                *nice,
-            ))
+            let r = if let Some(r) = range {
+                r.clone()
+            } else {
+                let frac = resolve_padding_fraction(*padding, domain.is_some());
+                let inset = inset_pixel_range(pr, frac);
+                vec![inset.0, inset.1]
+            };
+            ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, *nice))
         }
-        ScaleSpec::Log { base, domain, range, nice, clamp } => {
+        ScaleSpec::Log { base, domain, range, nice, clamp, padding } => {
             let d = match domain {
                 Some(d) => d.clone(),
                 None => {
@@ -637,15 +693,16 @@ fn build_from_scale_spec(
                     vec![mn, mx]
                 }
             };
-            ScaleKind::Log(LogScale::new_internal(
-                d,
-                range.clone().unwrap_or(default_pixel_range),
-                *base,
-                *clamp,
-                *nice,
-            ))
+            let r = if let Some(r) = range {
+                r.clone()
+            } else {
+                let frac = resolve_padding_fraction(*padding, domain.is_some());
+                let inset = inset_pixel_range(pr, frac);
+                vec![inset.0, inset.1]
+            };
+            ScaleKind::Log(LogScale::new_internal(d, r, *base, *clamp, *nice))
         }
-        ScaleSpec::Time { domain, range, nice, clamp } => {
+        ScaleSpec::Time { domain, range, nice, clamp, padding } => {
             let d = match domain {
                 Some(d) => d.clone(),
                 None => {
@@ -654,14 +711,16 @@ fn build_from_scale_spec(
                     vec![mn, mx]
                 }
             };
-            ScaleKind::Time(TimeScale::new_internal(
-                d,
-                range.clone().unwrap_or(default_pixel_range),
-                *clamp,
-                *nice,
-            ))
+            let r = if let Some(r) = range {
+                r.clone()
+            } else {
+                let frac = resolve_padding_fraction(*padding, domain.is_some());
+                let inset = inset_pixel_range(pr, frac);
+                vec![inset.0, inset.1]
+            };
+            ScaleKind::Time(TimeScale::new_internal(d, r, *clamp, *nice))
         }
-        ScaleSpec::Symlog { constant, domain, range, nice, clamp } => {
+        ScaleSpec::Symlog { constant, domain, range, nice, clamp, padding } => {
             let d = match domain {
                 Some(d) => d.clone(),
                 None => {
@@ -670,22 +729,25 @@ fn build_from_scale_spec(
                     vec![mn, mx]
                 }
             };
-            ScaleKind::Symlog(SymlogScale::new_internal(
-                d,
-                range.clone().unwrap_or(default_pixel_range),
-                *constant,
-                *clamp,
-                *nice,
-            ))
+            let r = if let Some(r) = range {
+                r.clone()
+            } else {
+                let frac = resolve_padding_fraction(*padding, domain.is_some());
+                let inset = inset_pixel_range(pr, frac);
+                vec![inset.0, inset.1]
+            };
+            ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, *clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
             let d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
+            // Ordinal scales use their own internal half-step padding;
+            // the T4 quantitative inset does NOT apply here.
             ScaleKind::Ordinal(OrdinalScale::new_internal(
                 d,
-                range.clone().unwrap_or(default_pixel_range),
+                range.clone().unwrap_or_else(|| vec![pr.0, pr.1]),
                 *padding,
             ))
         }
@@ -993,6 +1055,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -1041,14 +1104,16 @@ mod tests {
         use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::mark::Mark;
+        // Themes-T4: default palette is tableau10 (10 colors); 11+ categories
+        // are needed to trigger ColorPaletteOverflowed (was 9+ under OKABE_ITO).
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", ArrowDataType::Float64, false),
             Field::new("y", ArrowDataType::Float64, false),
             Field::new("g", ArrowDataType::Utf8, false),
         ]));
-        let groups: Vec<String> = (0..10).map(|i| format!("g{i}")).collect();
+        let groups: Vec<String> = (0..11).map(|i| format!("g{i}")).collect();
         let groups_str: Vec<&str> = groups.iter().map(String::as_str).collect();
-        let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let xs: Vec<f64> = (0..11).map(|i| i as f64).collect();
         let ys = xs.clone();
         let batch = RecordBatch::try_new(
             schema,
@@ -1074,12 +1139,13 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
         assert!(matches!(
             warnings[0],
-            crate::render::RenderWarning::ColorPaletteOverflowed { categories: 10 }
+            crate::render::RenderWarning::ColorPaletteOverflowed { categories: 11 }
         ));
     }
 
@@ -1126,6 +1192,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -1148,6 +1215,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -1170,6 +1238,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -1183,6 +1252,7 @@ mod tests {
             range: None,
             nice: false,
             clamp: false,
+            padding: None,
         });
         let b = make_batch_q_q_n();
         let theme = ThemeInputs::default();
@@ -1191,14 +1261,15 @@ mod tests {
     }
 
     #[test]
-    fn size_scale_defaults_to_3_to_30_px() {
+    fn size_scale_defaults_to_theme_point_size_range() {
+        // Themes-T4: point_size_min/max defaults flipped 3.0/30.0 → 4.0/36.0.
         let batch = make_batch_q_q_n_n_q();
         let theme = ThemeInputs::default();
         let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &theme)
             .unwrap()
             .unwrap();
-        assert_eq!(scale.min_px, 3.0);
-        assert_eq!(scale.max_px, 30.0);
+        assert_eq!(scale.min_px, 4.0);
+        assert_eq!(scale.max_px, 36.0);
     }
 
     #[test]
@@ -1251,6 +1322,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1304,6 +1376,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1357,6 +1430,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1396,6 +1470,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

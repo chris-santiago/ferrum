@@ -133,7 +133,7 @@ pub fn compute_layout(
 
     let metrics = HeuristicMetrics::default();
     let result = compute_layout_internal(
-        spec, &theme, viewport, &axes, &groups, &entries, &metrics,
+        spec, &theme, viewport, &axes, &groups, &entries, None, &metrics,
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 

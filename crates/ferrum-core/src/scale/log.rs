@@ -33,7 +33,7 @@ use super::core::{validate_continuous_pair, Scale};
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LogScale(Scale);
+pub struct LogScale(Scale, Option<f64>);
 
 impl LogScale {
     /// Rust-side constructor (no Python validation overhead).
@@ -45,7 +45,7 @@ impl LogScale {
             clamp,
         };
         if nice { s = s.nice(); }
-        LogScale(s)
+        LogScale(s, None)
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
@@ -79,8 +79,15 @@ impl LogScale {
 #[pymethods]
 impl LogScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, base = 10.0, clamp = false, nice = false))]
-    fn new(domain: Vec<f64>, range: Vec<f64>, base: f64, clamp: bool, nice: bool) -> PyResult<Self> {
+    #[pyo3(signature = (*, domain, range, base = 10.0, clamp = false, nice = false, padding = None))]
+    fn new(
+        domain: Vec<f64>,
+        range: Vec<f64>,
+        base: f64,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+    ) -> PyResult<Self> {
         validate_continuous_pair(&domain, &range)?;
         if !base.is_finite() || base <= 0.0 || base == 1.0 {
             return Err(PyValueError::new_err(format!(
@@ -106,7 +113,7 @@ impl LogScale {
         if nice {
             s = s.nice();
         }
-        Ok(LogScale(s))
+        Ok(LogScale(s, padding))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -119,7 +126,12 @@ impl LogScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(Some(count)) }
 
     /// Return a copy of this scale with domain endpoints rounded to the nearest power of ``base``.
-    fn nice(&self) -> Self { LogScale(self.0.clone().nice()) }
+    fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1) }
+
+    /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
+    /// apply the 5% default when ``domain`` is unset.
+    #[getter]
+    fn padding(&self) -> Option<f64> { self.1 }
 
     /// Input domain as ``[min, max]``.
     #[getter]

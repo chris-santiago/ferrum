@@ -30,7 +30,7 @@ use super::ticks::nice_time_interval_ms;
 ///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimeScale(Scale);
+pub struct TimeScale(Scale, Option<f64>);
 
 impl TimeScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -41,7 +41,7 @@ impl TimeScale {
             range:  [range[0],  range[1]],
             clamp,
         };
-        let s = TimeScale(inner);
+        let s = TimeScale(inner, None);
         if nice { s.time_nice() } else { s }
     }
 
@@ -117,22 +117,28 @@ impl TimeScale {
         let new_lo = (lo / interval).floor() * interval;
         let new_hi = (hi / interval).ceil() * interval;
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
-        TimeScale(Scale::Linear { domain: new_domain, range, clamp })
+        TimeScale(Scale::Linear { domain: new_domain, range, clamp }, self.1)
     }
 }
 
 #[pymethods]
 impl TimeScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, clamp = false, nice = false))]
-    fn new(domain: Vec<f64>, range: Vec<f64>, clamp: bool, nice: bool) -> PyResult<Self> {
+    #[pyo3(signature = (*, domain, range, clamp = false, nice = false, padding = None))]
+    fn new(
+        domain: Vec<f64>,
+        range: Vec<f64>,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+    ) -> PyResult<Self> {
         validate_continuous_pair(&domain, &range)?;
         let inner = Scale::Linear {
             domain: [domain[0], domain[1]],
             range:  [range[0],  range[1]],
             clamp,
         };
-        let s = TimeScale(inner);
+        let s = TimeScale(inner, padding);
         if nice {
             Ok(s.time_nice())
         } else {
@@ -185,6 +191,11 @@ impl TimeScale {
         }
     }
 
+    /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
+    /// apply the 5% default when ``domain`` is unset.
+    #[getter]
+    fn padding(&self) -> Option<f64> { self.1 }
+
     fn __repr__(&self) -> String { self.repr_string() }
 }
 
@@ -201,6 +212,7 @@ mod tests {
             vec![0.0, 1000.0],
             false,
             false,
+            None,
         ).unwrap();
         let mid = (1_767_225_600_000.0 + 1_798_761_599_000.0) / 2.0;
         let y = t.scale(mid);
@@ -215,6 +227,7 @@ mod tests {
             vec![0.0, 1000.0],
             false,
             false,
+            None,
         ).unwrap();
         let ticks = t.ticks(10);
         assert!(!ticks.is_empty(), "expected non-empty ticks");

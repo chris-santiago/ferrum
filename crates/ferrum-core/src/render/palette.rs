@@ -67,8 +67,35 @@ pub static DARK2: LazyLock<[Color; 8]> = LazyLock::new(|| [
     from_rgb(0xA6, 0x76, 0x1D), from_rgb(0x66, 0x66, 0x66),
 ]);
 
+/// Categorical scheme names recognized by [`categorical_palette`]. Source of
+/// truth for theme-side validation in `binding::theme_from_dict`.
+pub const CATEGORICAL_SCHEMES: &[&str] = &[
+    "okabe_ito", "tableau10", "set1", "set2", "paired", "pastel", "dark2",
+];
+
+/// Sequential scheme names recognized by `ContinuousScheme` in `render/color`.
+/// Listed here so theme-side validation can accept them without depending on
+/// the continuous-scale machinery.
+pub const SEQUENTIAL_SCHEMES: &[&str] = &[
+    "viridis", "plasma", "magma", "inferno", "cividis",
+];
+
+/// True when `name` is one of the recognized categorical schemes.
+pub fn is_categorical_scheme(name: &str) -> bool {
+    CATEGORICAL_SCHEMES.contains(&name)
+}
+
+/// True when `name` is one of the recognized sequential schemes (handled by
+/// `ContinuousScheme`).
+pub fn is_sequential_scheme(name: &str) -> bool {
+    SEQUENTIAL_SCHEMES.contains(&name)
+}
+
 /// Look up a categorical palette by scheme name. Returns OKABE_ITO when the
-/// name is unknown (caller may emit a warning).
+/// name is unknown (caller may emit a warning). Theme-level validation in
+/// `binding::theme_from_dict` rejects unknown names eagerly, so callers
+/// reaching this function with an unknown name are using an encoding-level
+/// override (e.g. `encoding.color.scheme`) — fallback preserved for that path.
 pub fn categorical_palette(name: &str) -> &'static [Color] {
     match name {
         "okabe_ito"  => &*OKABE_ITO,
@@ -121,5 +148,37 @@ mod tests {
         for name in &["okabe_ito", "tableau10", "set1", "set2", "paired", "pastel", "dark2"] {
             assert!(categorical_palette(name).len() >= 8, "{name} has < 8 colors");
         }
+    }
+
+    #[test]
+    fn categorical_schemes_const_matches_match_arms() {
+        // Every entry in CATEGORICAL_SCHEMES must resolve to its own palette,
+        // not the fallback. Detect via pointer identity.
+        for name in CATEGORICAL_SCHEMES {
+            let p = categorical_palette(name).as_ptr();
+            let fallback = (&*OKABE_ITO).as_ptr();
+            if *name == "okabe_ito" {
+                assert!(std::ptr::eq(p, fallback));
+            } else {
+                assert!(
+                    !std::ptr::eq(p, fallback),
+                    "{name} resolved to OKABE_ITO fallback",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_scheme_predicates_partition() {
+        for name in CATEGORICAL_SCHEMES {
+            assert!(is_categorical_scheme(name));
+            assert!(!is_sequential_scheme(name));
+        }
+        for name in SEQUENTIAL_SCHEMES {
+            assert!(is_sequential_scheme(name));
+            assert!(!is_categorical_scheme(name));
+        }
+        assert!(!is_categorical_scheme("nonexistent"));
+        assert!(!is_sequential_scheme("nonexistent"));
     }
 }

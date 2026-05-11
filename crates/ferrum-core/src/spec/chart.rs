@@ -68,6 +68,8 @@ pub struct ChartSpec {
     pub mark_style: Option<MarkKwargsSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<crate::spec::position::PositionAdjust>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[pymethods]
@@ -84,6 +86,7 @@ impl ChartSpec {
         facet = None,                                         // NEW here
         mark_style = None,                                    // NEW here
         position = None,                                      // Phase 9c
+        title = None,                                         // Themes-T2.5: chart-level title
     ))]
     fn new(
         mark: &str,
@@ -103,6 +106,7 @@ impl ChartSpec {
         facet: Option<&Bound<'_, PyAny>>,
         mark_style: Option<&Bound<'_, PyAny>>,
         position: Option<&Bound<'_, PyAny>>,
+        title: Option<String>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -187,6 +191,7 @@ impl ChartSpec {
             coord,
             mark_style,
             position,
+            title,
         })
     }
 
@@ -563,6 +568,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         }
     }
 
@@ -649,6 +655,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -677,6 +684,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -705,6 +713,7 @@ mod tests {
             coord: None,
             mark_style: None,
         position: None,
+        title: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");

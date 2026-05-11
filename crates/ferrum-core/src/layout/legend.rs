@@ -40,6 +40,17 @@ pub struct LegendLayout {
     pub orient: LegendOrient,
     pub direction: LegendDirection,
     pub entries: Vec<LegendEntryLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<LegendTitleLayout>,
+}
+
+/// Legend title placement (Themes-T2.5b). Positioned above the entries
+/// when direction=Vertical, or to the left when direction=Horizontal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LegendTitleLayout {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,11 +69,39 @@ const SYMBOL_WIDTH: f64 = 12.0;
 const SYMBOL_LABEL_GAP: f64 = 4.0;
 const LEGEND_OUTER_PAD: f64 = 8.0;
 const LEGEND_ENTRY_ROW_PAD: f64 = 4.0;
+const LEGEND_TITLE_GAP: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LegendSize {
     pub width: f64,
     pub height: f64,
+}
+
+/// Title-aware version of `estimate_legend_size`. For Vertical-direction
+/// legends, adds a title line to the height. For Horizontal, adds title
+/// width to the left. Falls through to the no-title shape when title=None.
+pub fn estimate_legend_size_with_title(
+    entries: &[LegendEntry],
+    orient: LegendOrient,
+    label_font_size: f64,
+    title: Option<&str>,
+    title_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> LegendSize {
+    let base = estimate_legend_size(entries, orient, label_font_size, metrics);
+    let Some(title_text) = title else { return base };
+    let title_h = metrics.line_height(title_font_size);
+    let title_w = metrics.measure_width(title_text, title_font_size);
+    match orient {
+        LegendOrient::Right | LegendOrient::Left => LegendSize {
+            width: base.width.max(title_w + 2.0 * LEGEND_OUTER_PAD),
+            height: base.height + title_h + LEGEND_TITLE_GAP,
+        },
+        LegendOrient::Top | LegendOrient::Bottom => LegendSize {
+            width: base.width + title_w + LEGEND_TITLE_GAP,
+            height: base.height.max(title_h + 2.0 * LEGEND_OUTER_PAD),
+        },
+    }
 }
 
 pub fn estimate_legend_size(
@@ -112,11 +151,16 @@ pub fn layout_legend(
     inner: Rect,
     label_font_size: f64,
     metrics: &dyn TextMetrics,
+    direction_override: Option<LegendDirection>,
+    title: Option<&str>,
+    title_font_size: f64,
 ) -> (Option<LegendLayout>, Rect) {
     if entries.is_empty() {
         return (None, inner);
     }
-    let size = estimate_legend_size(entries, orient, label_font_size, metrics);
+    let size = estimate_legend_size_with_title(
+        entries, orient, label_font_size, title, title_font_size, metrics,
+    );
 
     let (legend_rect, plot_inner) = match orient {
         LegendOrient::Right => {
@@ -141,15 +185,47 @@ pub fn layout_legend(
         }
     };
 
-    let direction = match orient {
+    let direction = direction_override.unwrap_or_else(|| match orient {
         LegendOrient::Right | LegendOrient::Left => LegendDirection::Vertical,
         LegendOrient::Top | LegendOrient::Bottom => LegendDirection::Horizontal,
-    };
+    });
 
     let line_h = metrics.line_height(label_font_size);
+
+    // Title placement: above entries (Vertical) or to the left (Horizontal).
+    // y_offset / x_offset values push entry layout to start past the title.
+    let (title_layout, title_y_offset, title_x_offset) = if let Some(title_text) = title {
+        let title_h = metrics.line_height(title_font_size);
+        let title_w = metrics.measure_width(title_text, title_font_size);
+        match direction {
+            LegendDirection::Vertical => {
+                // Title sits at the top, left-aligned with entry symbols.
+                let tx = legend_rect.x + LEGEND_OUTER_PAD;
+                let ty = legend_rect.y + LEGEND_OUTER_PAD + title_h;
+                (
+                    Some(LegendTitleLayout { text: title_text.to_string(), x: tx, y: ty }),
+                    title_h + LEGEND_TITLE_GAP,
+                    0.0,
+                )
+            }
+            LegendDirection::Horizontal => {
+                // Title sits to the left, vertically centered with entry row.
+                let tx = legend_rect.x + LEGEND_OUTER_PAD;
+                let ty = legend_rect.y + legend_rect.h / 2.0 + title_h / 3.0;
+                (
+                    Some(LegendTitleLayout { text: title_text.to_string(), x: tx, y: ty }),
+                    0.0,
+                    title_w + LEGEND_TITLE_GAP,
+                )
+            }
+        }
+    } else {
+        (None, 0.0, 0.0)
+    };
+
     let entries_laid_out: Vec<LegendEntryLayout> = match direction {
         LegendDirection::Vertical => {
-            let avail_h = (legend_rect.h - 2.0 * LEGEND_OUTER_PAD).max(0.0);
+            let avail_h = (legend_rect.h - 2.0 * LEGEND_OUTER_PAD - title_y_offset).max(0.0);
             let row_pitch = line_h + LEGEND_ENTRY_ROW_PAD;
             let max_rows = if row_pitch > 0.0 {
                 ((avail_h + LEGEND_ENTRY_ROW_PAD) / row_pitch).floor() as usize
@@ -162,7 +238,8 @@ pub fn layout_legend(
                 .take(n_fit)
                 .enumerate()
                 .map(|(i, e)| {
-                    let y = legend_rect.y + LEGEND_OUTER_PAD + (i as f64) * row_pitch + line_h / 2.0;
+                    let y = legend_rect.y + LEGEND_OUTER_PAD + title_y_offset
+                        + (i as f64) * row_pitch + line_h / 2.0;
                     let symbol_x = legend_rect.x + LEGEND_OUTER_PAD + SYMBOL_WIDTH / 2.0;
                     let label_x = legend_rect.x + LEGEND_OUTER_PAD + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
                     LegendEntryLayout {
@@ -177,7 +254,7 @@ pub fn layout_legend(
                 .collect()
         }
         LegendDirection::Horizontal => {
-            let avail_w = (legend_rect.w - 2.0 * LEGEND_OUTER_PAD).max(0.0);
+            let avail_w = (legend_rect.w - 2.0 * LEGEND_OUTER_PAD - title_x_offset).max(0.0);
             let max_label_w = entries
                 .iter()
                 .map(|e| metrics.measure_width(&e.label, label_font_size))
@@ -195,7 +272,8 @@ pub fn layout_legend(
                 .take(n_fit)
                 .enumerate()
                 .map(|(i, e)| {
-                    let entry_x = legend_rect.x + LEGEND_OUTER_PAD + (i as f64) * pitch;
+                    let entry_x = legend_rect.x + LEGEND_OUTER_PAD + title_x_offset
+                        + (i as f64) * pitch;
                     let cy = legend_rect.y + legend_rect.h / 2.0;
                     let symbol_x = entry_x + SYMBOL_WIDTH / 2.0;
                     let label_x = entry_x + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
@@ -217,6 +295,7 @@ pub fn layout_legend(
         orient,
         direction,
         entries: entries_laid_out,
+        title: title_layout,
     };
     (Some(legend), plot_inner)
 }
@@ -239,6 +318,7 @@ mod tests {
                 symbol_anchor_y: 70.0,
                 symbol_kind: SymbolKind::Circle,
             }],
+            title: None,
         };
         let json = serde_json::to_string(&l).unwrap();
         let parsed: LegendLayout = serde_json::from_str(&json).unwrap();
@@ -282,7 +362,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.expect("legend should be Some");
         assert_eq!(legend.orient, LegendOrient::Right);
         assert_eq!(legend.direction, LegendDirection::Vertical);
@@ -296,7 +376,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.unwrap();
         assert_eq!(legend.rect.x, inner.x);
         assert!((plot_inner.x - (inner.x + legend.rect.w)).abs() < 1e-6);
@@ -307,7 +387,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert_eq!(legend.rect.y, inner.y);
@@ -319,7 +399,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert!((legend.rect.y - (inner.y + plot_inner.h)).abs() < 1e-6);
@@ -329,7 +409,7 @@ mod tests {
     fn legend_layout_empty_entries_returns_none_and_inner_unchanged() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m);
+        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
         assert!(legend.is_none());
         assert_eq!(plot_inner, inner);
     }
@@ -339,7 +419,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let es = entries(50, 4);
         let m = mock(10.0);
-        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m);
+        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.unwrap();
         assert!(legend.entries.len() < 50, "expected overflow drop; got {} entries", legend.entries.len());
     }

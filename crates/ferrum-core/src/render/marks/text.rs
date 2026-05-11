@@ -93,6 +93,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         font_size: ctx.theme.label_font_size,
         anchor: TextAnchor::Middle,
         angle: 0.0,
+        font_family: &ctx.theme.font_family,
+        font_weight: None,
     };
 
     for i in 0..n_x {
@@ -174,6 +176,7 @@ mod tests {
  coord: None,
  mark_style: None,
         position: None,
+        title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -210,7 +213,7 @@ mod tests {
                 ..Default::default()
             },
             transforms: Vec::new(), facet: None, layers: None,
-            coord: None, mark_style: None, position: None,
+            coord: None, mark_style: None, position: None, title: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("px", DataType::Utf8, false),
