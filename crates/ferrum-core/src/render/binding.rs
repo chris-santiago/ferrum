@@ -305,7 +305,18 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
 
     // Palette
     if let Some(v) = d.get_item("color_scheme")? {
-        t.color_scheme = v.extract::<String>()?;
+        let s: String = v.extract()?;
+        if !super::palette::is_categorical_scheme(&s)
+            && !super::palette::is_sequential_scheme(&s)
+        {
+            return Err(PyValueError::new_err(format!(
+                "Unknown color_scheme: '{s}'. Supported categorical: {}. \
+                 Supported sequential: {}.",
+                super::palette::CATEGORICAL_SCHEMES.join(", "),
+                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+            )));
+        }
+        t.color_scheme = s;
     }
 
     // Strip
@@ -415,6 +426,35 @@ mod theme_dict_tests {
             assert_eq!(t.background_color.red, 0xFF);
             assert_eq!(t.background_color.green, 0x00);
             assert_eq!(t.background_color.blue, 0x00);
+        });
+    }
+
+    #[test]
+    fn unknown_color_scheme_raises() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("color_scheme", "nonexistent").unwrap();
+            let err = theme_from_dict(Some(&d)).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("Unknown color_scheme"), "got: {msg}");
+            assert!(msg.contains("nonexistent"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn known_color_schemes_accepted() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for name in [
+                "okabe_ito", "tableau10", "set1", "set2", "paired", "pastel",
+                "dark2", "viridis", "plasma", "magma", "inferno", "cividis",
+            ] {
+                let d = PyDict::new(py);
+                d.set_item("color_scheme", name).unwrap();
+                let t = theme_from_dict(Some(&d)).expect(name);
+                assert_eq!(t.color_scheme, name);
+            }
         });
     }
 }
