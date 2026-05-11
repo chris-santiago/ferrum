@@ -7,10 +7,28 @@ from typing import Any
 from ferrum import Bin, Kde, Smooth
 
 
-def desugar_density(field: str, *, chart_encoding: Any = None, **kwargs: Any) -> tuple:
+def desugar_density(
+    field: str,
+    *,
+    chart_encoding: Any = None,
+    bandwidth: Any = "scott",
+    bw_adjust: float = 1.0,
+    kernel: str = "gaussian",
+    n: int = 512,
+    extent: Any = None,
+    cumulative: bool = False,
+    multiple: str = "layer",
+    fill: bool = True,
+    # Bivariate-only kwargs (forwarded to desugar_contour when both x and y
+    # encoded). Ignored on the 1D path.
+    thresholds: int = 6,
+    smooth: bool = True,
+    cmap: str = "viridis",
+) -> tuple:
     """mark_density desugar.
 
-    1D path (only x encoded): ``mark_area`` + ``Kde(field)`` + remap
+    1D path (only x encoded): ``mark_area`` (when ``fill=True``, the default)
+    or ``mark_line`` (when ``fill=False``) over ``Kde(field)`` with remap
     ``x → value``, ``y → density``. Returns the legacy 3-tuple
     ``(mark, transforms, remap)``.
 
@@ -18,6 +36,14 @@ def desugar_density(field: str, *, chart_encoding: Any = None, **kwargs: Any) ->
     ``desugar_contour(fill=True)`` to emit a filled-contour layer over a
     2D KDE. Returns the 5-tuple
     ``("__layered__", transforms, None, None, layers)``.
+
+    Every kwarg is explicitly named so Python rejects unknown kwargs at
+    the call boundary — no silent-drop fallthrough. ``bw_adjust`` scales
+    a numeric ``bandwidth`` multiplicatively; combining it with the
+    string ``"scott"`` rule requires resolving Scott's factor against
+    the data which the Kde transform does in Rust, so the no-op default
+    1.0 passes through and any non-default value raises (the path-of-
+    correctness fix lives in the Rust transform).
     """
     # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
     # contour fill instead of a 1D KDE area.
@@ -29,48 +55,57 @@ def desugar_density(field: str, *, chart_encoding: Any = None, **kwargs: Any) ->
             from ferrum.marks.heavy_stat import desugar_contour
             x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
             y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-            # Forward only kwargs that desugar_contour understands; the 1D
-            # KDE-only kwargs (n, extent, cumulative, kernel, multiple) are
-            # silently dropped in the bivariate branch.
-            contour_kwargs = {}
-            if "bandwidth" in kwargs:
-                contour_kwargs["bandwidth"] = kwargs["bandwidth"]
-            if "thresholds" in kwargs:
-                contour_kwargs["thresholds"] = kwargs["thresholds"]
-            if "smooth" in kwargs:
-                contour_kwargs["smooth"] = kwargs["smooth"]
-            if "cmap" in kwargs:
-                contour_kwargs["cmap"] = kwargs["cmap"]
-            return desugar_contour(x_field, y_field, fill=True, **contour_kwargs)
+            return desugar_contour(
+                x_field, y_field, fill=True,
+                bandwidth=bandwidth, thresholds=thresholds,
+                smooth=smooth, cmap=cmap,
+            )
 
-    bandwidth = kwargs.pop("bandwidth", "scott")
-    kernel = kwargs.pop("kernel", "gaussian")
-    n = kwargs.pop("n", 512)
-    extent = kwargs.pop("extent", None)
-    cumulative = kwargs.pop("cumulative", False)
-    # `multiple` parameter from spec §3.3 deferred (no stack support yet)
-    if kwargs.pop("multiple", "layer") != "layer":
-        # warn-once at Chart layer; here we just drop it
-        pass
+    del kernel  # informational; underlying Kde uses gaussian only
+    if multiple != "layer":
+        # `multiple` parameter from spec §3.3 deferred (no stack support yet).
+        raise NotImplementedError(
+            f"mark_density(multiple={multiple!r}) lands in Phase 11; "
+            "only 'layer' is supported today."
+        )
+    # Resolve bw_adjust on the numeric path; raise on the "scott" path.
+    if bw_adjust != 1.0:
+        if isinstance(bandwidth, (int, float)):
+            bandwidth = float(bandwidth) * float(bw_adjust)
+        else:
+            raise NotImplementedError(
+                "mark_density(bw_adjust=...) with a string bandwidth rule "
+                "('scott', etc.) requires resolving the rule on the data "
+                "first; pass a numeric bandwidth (and bw_adjust multiplies "
+                "it), or land bw_adjust support inside the Rust Kde."
+            )
 
     transforms = [Kde(field, bandwidth=bandwidth, n=n, extent=extent, cumulative=cumulative)]
     # Phase 5 Kde produces columns ("value", "density") — remap both x and y.
     encoding_remap = {"x": "value", "y": "density"}
-    return ("area", transforms, encoding_remap)
+    mark = "area" if fill else "line"
+    return (mark, transforms, encoding_remap)
 
 
-def desugar_histogram(field: str, **kwargs: Any) -> tuple[str, list, dict]:
-    """mark_histogram → mark_bar + Bin(field, ...) + count or density on y."""
-    bin_count = kwargs.pop("bin_count", None)
-    bin_width = kwargs.pop("bin_width", None)
-    extent = kwargs.pop("extent", None)
-    nice = kwargs.pop("nice", True)
-    density = kwargs.pop("density", False)
-    cumulative = kwargs.pop("cumulative", False)
-    right = kwargs.pop("right", False)
-    multiple = kwargs.pop("multiple", "layer")
-    groupby = kwargs.pop("groupby", None)
+def desugar_histogram(
+    field: str,
+    *,
+    bin_count: Any = None,
+    bin_width: Any = None,
+    extent: Any = None,
+    nice: bool = True,
+    density: bool = False,
+    cumulative: bool = False,
+    right: bool = False,
+    multiple: str = "layer",
+    groupby: Any = None,
+) -> tuple[str, list, dict]:
+    """mark_histogram → mark_bar + Bin(field, ...) + count or density on y.
 
+    Every kwarg is explicitly named so Python rejects unknown kwargs at
+    the call boundary — no silent-drop fallthrough.
+    """
+    del right, multiple  # forwarded to renderer in a later phase
     bin_kwargs: dict = dict(bin_count=bin_count, bin_width=bin_width, extent=extent,
                             nice=nice, cumulative=cumulative)
     if groupby is not None:
@@ -82,7 +117,19 @@ def desugar_histogram(field: str, **kwargs: Any) -> tuple[str, list, dict]:
     return ("bar", transforms, encoding_remap)
 
 
-def desugar_smooth(x_field: str, y_field: str, **kwargs: Any) -> tuple:
+def desugar_smooth(
+    x_field: str,
+    y_field: str,
+    *,
+    method: str = "loess",
+    ci: float | None = None,
+    bandwidth: float = 0.75,
+    degree: int = 2,
+    n: int = 200,
+    seed: int = 0,
+    x_bins: Any = None,
+    x_estimator: Any = None,
+) -> tuple:
     """mark_smooth → mark_line + Smooth(x, y, ...).
 
     With ``ci=None`` (the default): single ``line`` mark layer, returns the
@@ -92,15 +139,10 @@ def desugar_smooth(x_field: str, y_field: str, **kwargs: Any) -> tuple:
     ribbon (CI band, semi-transparent) below a line, both bound to the same
     named ``Smooth`` transform output. Returns the 5-tuple
     ``("__layered__", transforms, None, None, layers)``.
+
+    Every kwarg is explicitly named so Python rejects unknown kwargs at
+    the call boundary — no silent-drop fallthrough.
     """
-    method = kwargs.pop("method", "loess")
-    ci = kwargs.pop("ci", None)
-    bandwidth = kwargs.pop("bandwidth", 0.75)
-    degree = kwargs.pop("degree", 2)
-    n = kwargs.pop("n", 200)
-    seed = kwargs.pop("seed", 0)
-    x_bins = kwargs.pop("x_bins", None)
-    x_estimator = kwargs.pop("x_estimator", None)
 
     if ci is None:
         # 8a-compatible single-line path: keep the legacy 3-tuple shape so the

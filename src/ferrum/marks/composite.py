@@ -21,7 +21,6 @@ def desugar_boxplot(
     size: Optional[float] = None,
     color_field: Optional[str] = None,
     horizontal: bool = False,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
@@ -67,7 +66,6 @@ def desugar_errorbar(
     *,
     extent: str = "ci",
     ticks: bool = True,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
@@ -91,7 +89,6 @@ def desugar_errorband(
     *,
     extent: str = "ci",
     borders: bool = False,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
@@ -115,7 +112,6 @@ def desugar_ribbon(
     y2_field: str | None = None,
     opacity: float = 0.3,
     interpolate: str = "linear",
-    **mark_kwargs: Any,
 ) -> tuple:
     """mark_ribbon directly emits a ribbon layer; no transform.
 
@@ -144,7 +140,6 @@ def desugar_boxen(
     palette=None,
     horizontal: bool = False,
     color_field: str | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Letter-value (boxen) composite mark.
 

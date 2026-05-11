@@ -22,7 +22,6 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = False,
     cmap: str = "viridis",
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
@@ -48,7 +47,6 @@ def desugar_violin(
     *,
     bandwidth: str | float = "scott",
     inner: Optional[str] = "box",
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_violin() requires .encode(x=..., y=...)")
@@ -89,7 +87,6 @@ def desugar_qq(
     distribution: str = "normal",
     dequantize: bool = False,
     line: bool = True,
-    **mark_kwargs: Any,
 ) -> tuple:
     if distribution not in ("normal", "uniform", "exponential"):
         raise ValueError(
@@ -118,7 +115,6 @@ def desugar_raster(
     blend: str = "alpha",
     min_count: Optional[int] = None,
     log_scale: bool = False,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
@@ -151,7 +147,6 @@ def desugar_hex(
     cmap: str = "viridis",
     stroke: Optional[str] = None,
     stroke_width: float = 0,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
@@ -182,7 +177,6 @@ def desugar_swarm(
     spacing: float = 1.0,
     side: str = "both",
     dodge: Optional[str] = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
@@ -226,7 +220,6 @@ def desugar_function(
     domain: Optional[tuple] = None,
     n: int = 200,
     clip: bool = True,
-    **mark_kwargs: Any,
 ) -> tuple:
     """The only desugar that materializes a synthetic Arrow table."""
     import numpy as np

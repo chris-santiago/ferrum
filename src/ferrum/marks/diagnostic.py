@@ -22,6 +22,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ferrum.marks._mark_kwargs import (
+    apply_user_mark_kwargs as _apply,
+    validate_user_mark_kwargs as _validate,
+)
+
 
 def desugar_residuals(
     x_field: str | None,
@@ -31,7 +36,6 @@ def desugar_residuals(
     reference_line: bool = True,
     cook_threshold: float | None = None,
     color_field: str | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Residuals diagnostic: scatter of (y_pred, residual) plus optional y=0 rule.
 
@@ -72,7 +76,6 @@ def desugar_prediction_error(
     ci: float | None = None,
     reference_band: bool = False,
     color_field: str | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Actual vs predicted: scatter of (y_true, y_pred) + optional identity line.
 
@@ -117,7 +120,6 @@ def desugar_roc(
     reference_line: bool = True,
     annotate_auc: bool = False,
     color_field: str | None = "class",
-    **mark_kwargs: Any,
 ) -> tuple:
     """ROC curve mark.
 
@@ -158,7 +160,6 @@ def desugar_pr(
     annotate_ap: bool = False,
     iso_lines: bool = False,
     color_field: str | None = "class",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Precision-recall curve mark.
 
@@ -192,7 +193,6 @@ def desugar_calibration(
     strategy: str = "uniform",
     reference_line: bool = True,
     color_field: str | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Calibration (reliability) curve mark.
 
@@ -225,7 +225,6 @@ def desugar_gain(
     *,
     reference_lines: bool = True,
     color_field: str | None = "class",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Cumulative-gain mark.
 
@@ -249,7 +248,6 @@ def desugar_lift(
     *,
     reference_line: bool = True,
     color_field: str | None = "class",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Lift curve mark.
 
@@ -274,7 +272,6 @@ def desugar_discrimination_threshold(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     n_thresholds: int = 50,
     threshold_line: bool = False,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Discrimination-threshold sweep mark.
 
@@ -306,7 +303,6 @@ def desugar_confusion(
     normalize: str | None = None,
     annotate: bool = True,
     color_field: str = "value",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
@@ -347,7 +343,6 @@ def desugar_importance(
     top_k: int | None = None,
     color_field: str | None = None,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Feature-importance mark: bars (per feature) + optional error bars.
 
@@ -418,7 +413,6 @@ def desugar_shap_beeswarm(
     color_bar: bool = True,
     order: str = "abs_mean",
     x_scale_domain: tuple[float, float] | list[float] | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """SHAP beeswarm mark: categorical scatter of per-sample shap values.
 
@@ -468,7 +462,6 @@ def desugar_shap_bar(
     *,
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """Aggregated-SHAP bar mark: mean(|shap_value|) per feature.
 
@@ -500,7 +493,6 @@ def desugar_shap_waterfall(
     sample_idx: int = -1,
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
-    **mark_kwargs: Any,
 ) -> tuple:
     """SHAP waterfall mark: per-feature contribution segments for one sample.
 
@@ -545,7 +537,6 @@ def desugar_pdp(
     ice_alpha: float = 0.2,
     center: bool = False,
     color_field: str | None = "feature",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Partial-dependence mark: one polyline per feature.
 
@@ -581,53 +572,6 @@ def desugar_pdp(
 
 
 # --- 10e: model selection / CV curves --------------------------------
-
-
-def _validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
-    """Validate user-supplied ``**mark_kwargs`` against the renderer-level
-    allowlist before merging them into composite-mark layers.
-
-    Diagnostic marks accept ``**mark_kwargs`` and conventionally dropped
-    them silently — that violates the Phase 9+ no-defer principle and
-    leaves users guessing why ``mark_<name>(stroke="red")`` has no
-    effect. This helper raises ``TypeError`` on unknown kwargs (mirroring
-    primitive-mark validation in ``MarkBase`` / ``_set_mark``) and
-    returns the validated dict for merging into each layer's
-    ``mark_kwargs``.
-    """
-    if not kwargs:
-        return {}
-    from ferrum.marks.base import _VALID_MARK_KWARGS  # type: ignore[attr-defined]
-
-    unknown = [k for k in kwargs if k not in _VALID_MARK_KWARGS]
-    if unknown:
-        raise TypeError(
-            f"mark_{mark_name}: unknown keyword argument(s) {unknown!r}. "
-            f"Valid: {sorted(_VALID_MARK_KWARGS)}"
-        )
-    return dict(kwargs)
-
-
-def _apply_user_mark_kwargs(layers: list[dict], user_kwargs: dict) -> list[dict]:
-    """Merge ``user_kwargs`` into every layer's ``mark_kwargs`` dict.
-
-    User-supplied kwargs win on conflict with the desugar's hard-coded
-    defaults (e.g. ``opacity=0.3`` on ribbon, ``stroke_dash=[4,4]`` on
-    a sentinel rule) so explicit user intent is honored. The renderer
-    ignores kwargs that don't apply to a given mark type, so spreading
-    across all layers is safe even when only one layer can render the
-    kwarg.
-    """
-    if not user_kwargs:
-        return layers
-    merged = []
-    for layer in layers:
-        existing = dict(layer.get("mark_kwargs") or {})
-        existing.update(user_kwargs)  # user wins
-        new_layer = dict(layer)
-        new_layer["mark_kwargs"] = existing
-        merged.append(new_layer)
-    return merged
 
 
 def _log_x_channel(field: str, log_scale: bool) -> Any:
@@ -671,7 +615,7 @@ def desugar_learning_curve(
     del x_field, y_field
     from ferrum.encoding import X, Y
 
-    user_kw = _validate_user_mark_kwargs("learning_curve", mark_kwargs)
+    user_kw = _validate("learning_curve", mark_kwargs)
     y_axis = Y("lower", title="score")
     x_axis = X("train_size", title="training samples")
     if ci_style == "band":
@@ -699,7 +643,7 @@ def desugar_learning_curve(
     }
     layers = [ci_layer, {"mark": "line", "encoding": line_enc}]
     return ("__layered__", [], None, None,
-            _apply_user_mark_kwargs(layers, user_kw))
+            _apply(layers, user_kw))
 
 
 def desugar_validation_curve(
@@ -727,7 +671,7 @@ def desugar_validation_curve(
     del x_field, y_field
     from ferrum.encoding import X, Y
 
-    user_kw = _validate_user_mark_kwargs("validation_curve", mark_kwargs)
+    user_kw = _validate("validation_curve", mark_kwargs)
     scale = {"type": "log"} if log_scale else None
     x_kwargs: dict[str, Any] = {}
     if param_label is not None:
@@ -762,7 +706,7 @@ def desugar_validation_curve(
          "encoding": {"x": "param_value", "y": "mean_score", "color": color_field}},
     ]
     return ("__layered__", [], None, None,
-            _apply_user_mark_kwargs(layers, user_kw))
+            _apply(layers, user_kw))
 
 
 def desugar_cv_scores(
@@ -785,7 +729,7 @@ def desugar_cv_scores(
     del x_field, y_field, split
     from ferrum.encoding import Y
 
-    user_kw = _validate_user_mark_kwargs("cv_scores", mark_kwargs)
+    user_kw = _validate("cv_scores", mark_kwargs)
     if kind == "box":
         from ferrum.marks.composite import desugar_boxplot
 
@@ -802,7 +746,7 @@ def desugar_cv_scores(
                 first["encoding"] = enc
                 layers = [first, *layers[1:]]
         return (prefix, transforms, _ig1, _ig2,
-                _apply_user_mark_kwargs(layers, user_kw))
+                _apply(layers, user_kw))
     if kind == "bar":
         layers = [
             {"mark": "bar",
@@ -810,7 +754,7 @@ def desugar_cv_scores(
                           "color": "split"}},
         ]
         return ("__layered__", [], None, None,
-                _apply_user_mark_kwargs(layers, user_kw))
+                _apply(layers, user_kw))
     if kind == "strip":
         from ferrum.position import Jitter
 
@@ -821,7 +765,7 @@ def desugar_cv_scores(
              "position": Jitter(axis="x", width=0.3, seed=42)},
         ]
         return ("__layered__", [], None, None,
-                _apply_user_mark_kwargs(layers, user_kw))
+                _apply(layers, user_kw))
     raise ValueError(
         f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'."
     )
@@ -851,7 +795,7 @@ def desugar_alpha_selection(
     del x_field, y_field, ci_style
     from ferrum.encoding import Y
 
-    user_kw = _validate_user_mark_kwargs("alpha_selection", mark_kwargs)
+    user_kw = _validate("alpha_selection", mark_kwargs)
     x_ch = _log_x_channel("alpha", log_scale)
     layers: list[dict] = [
         {"mark": "line",
@@ -864,7 +808,7 @@ def desugar_alpha_selection(
             "mark_kwargs": {"stroke_dash": [4, 4]},
         })
     return ("__layered__", [], None, None,
-            _apply_user_mark_kwargs(layers, user_kw))
+            _apply(layers, user_kw))
 
 
 def desugar_class_prediction_error(
@@ -873,7 +817,6 @@ def desugar_class_prediction_error(
     *,
     normalize: bool = False,
     color_field: str = "actual",
-    **mark_kwargs: Any,
 ) -> tuple:
     """Stacked-bar diagnostic of predicted-class composition.
 
