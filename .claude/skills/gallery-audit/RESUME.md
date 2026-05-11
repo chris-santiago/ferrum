@@ -26,7 +26,7 @@ the TODO.md as the recipe.
 | 02_pr | Precision-recall | **WIRED** | 4 panels rendering. |
 | 03_confusion_matrix | Confusion matrix | **WIRED** | 4 panels rendering (500×500). |
 | 04_calibration | Calibration | **WIRED (PARTIAL)** | 2/3 panels render; ferrum.calibration_chart raises `NotImplementedError` in single-model mode (reserved for Phase 10h). Audit flags this. |
-| 05_learning_curve | Learning curve | **BLOCKED** | No `ferrum.learning_curve_chart` — see plots/05_learning_curve/TODO.md |
+| 05_learning_curve | Learning curve | **WIRED** | 3 panels rendering. Unblocked by Task 28 (`ferrum.learning_curve_chart`, commit `cf6858a`). **First audit run surfaced a ferrum-side polygon-vertex-ordering bug on the test-curve ribbon — flagged for follow-up.** |
 | 06_residuals | Residuals | **WIRED** | 4 panels rendering on load_diabetes. |
 | 07_feature_importance | Feature importance | **WIRED** | 3 panels rendering. Unblocked by Task 21 (`ferrum.importance_chart`, commit `bcaeb65`). |
 | 08_histogram | Histogram + KDE | **WIRED** | 2 panels rendering (ferrum, seaborn). |
