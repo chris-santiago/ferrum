@@ -208,10 +208,17 @@ def test_calibration_visualizer():
     assert "<svg" in viz.show().show_svg()
 
 
-def test_calibration_visualizer_multi_model_rejected():
+def test_calibration_visualizer_multi_model_variadic():
+    """Multi-model CalibrationVisualizer (Phase 10h) routes through
+    ComparedModelSource, auto-naming each positional model 'model_0',
+    'model_1', etc. and rendering an overlay reliability diagram.
+    """
     model = load_fixture("binary_logistic")
-    with pytest.raises(NotImplementedError, match="Multi-model"):
-        ferrum.CalibrationVisualizer(model, model, n_bins=5)
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    viz = ferrum.CalibrationVisualizer(model, model, n_bins=5).fit(X, df["y"])
+    assert "calibration_error=" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
 
 
 def test_discrimination_threshold_visualizer():

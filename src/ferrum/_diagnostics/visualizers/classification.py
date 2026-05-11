@@ -86,8 +86,13 @@ class PRVisualizer(FerrumVisualizer):
 
 
 class CalibrationVisualizer(FerrumVisualizer):
-    """Calibration (reliability) diagram. Variadic in models for Phase 10h;
-    10b accepts a single model only.
+    """Calibration (reliability) diagram.
+
+    Variadic in ``*models``: pass a single model for a one-curve diagram,
+    or two or more for an overlay (routed through ``ComparedModelSource``
+    so each curve is labeled by ``model_0``, ``model_1``, ...).
+    Single-positional-dict form is also accepted to supply named models
+    (``CalibrationVisualizer({"a": m_a, "b": m_b})``).
     """
 
     def __init__(
@@ -100,18 +105,53 @@ class CalibrationVisualizer(FerrumVisualizer):
     ):
         if len(models) == 0:
             raise TypeError("CalibrationVisualizer requires at least one model")
-        if len(models) != 1:
-            raise NotImplementedError(
-                "Multi-model CalibrationVisualizer ships in Phase 10h."
-            )
+        # Stash the raw inputs; fit() resolves them into a single
+        # ModelSource or ComparedModelSource (the parent class's fit()
+        # always builds a single-model ModelSource, so we override fit
+        # for the multi-model path).
         super().__init__(models[0], random_state=random_state, theme=theme)
+        self._models = models
         self.n_bins = n_bins
         self.strategy = strategy
+
+    def fit(self, X: Any, y: Any = None) -> "CalibrationVisualizer":
+        import ferrum
+        from ferrum._diagnostics.source import ComparedModelSource
+
+        if len(self._models) == 1:
+            m = self._models[0]
+            if isinstance(m, dict):
+                # Dict-of-models form.
+                self._source = ferrum.ModelSource.compare(
+                    m, X, y, random_state=self.random_state,
+                )
+            else:
+                self._source = ferrum.ModelSource(
+                    m, X, y, random_state=self.random_state,
+                )
+        else:
+            # Positional N-model overlay.
+            if all(isinstance(m, ferrum.ModelSource) for m in self._models):
+                self._source = ComparedModelSource(
+                    {f"model_{i}": m for i, m in enumerate(self._models)},
+                )
+            else:
+                self._source = ferrum.ModelSource.compare(
+                    {f"model_{i}": m for i, m in enumerate(self._models)},
+                    X, y, random_state=self.random_state,
+                )
+        self._materialize()
+        self._chart = self._build_chart()
+        self._fitted = True
+        return self
 
     def _materialize(self) -> None:
         cal = self._source.calibration_curve(
             n_bins=self.n_bins, strategy=self.strategy,
         )
+        # When the source is a ComparedModelSource the frame carries one
+        # row per (model, bin). Per-model calibration_error then
+        # surfaces as a dict in the repr via the dispatched mean.
         diff = (
             cal["fraction_positive"].to_numpy()
             - cal["mean_predicted"].to_numpy()
