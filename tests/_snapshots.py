@@ -1,0 +1,97 @@
+"""SVG-to-PNG rasterization helpers for visually inspecting ferrum goldens.
+
+SVG byte-equality remains the regression check in the test suite; the PNGs
+produced here are a side-channel for humans and multimodal agents to look at
+what a golden actually renders as.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUT_DIR = _REPO_ROOT / "tests" / "snapshots"
+
+
+def _load_resvg():
+    try:
+        import resvg_py
+    except ImportError as e:
+        raise ImportError(
+            "resvg-py is required for SVG snapshot rasterization. "
+            "It ships in the dev dependency group: `uv sync` (or "
+            "`pip install resvg-py>=0.3`)."
+        ) from e
+    return resvg_py
+
+
+def rasterize_svg(svg: str | bytes, *, dpi: int = 96) -> bytes:
+    """Convert an SVG string (or bytes) to PNG bytes."""
+    resvg_py = _load_resvg()
+    if isinstance(svg, bytes):
+        svg = svg.decode("utf-8")
+    return bytes(resvg_py.svg_to_bytes(svg_string=svg, dpi=dpi))
+
+
+def snapshot_golden(
+    svg_path: str | Path,
+    *,
+    out_dir: Path | None = None,
+    dpi: int = 96,
+) -> Path:
+    """Read an SVG golden file, rasterize it, write a PNG, and return the PNG path.
+
+    The output path mirrors the golden's relative location under the repo:
+    ``tests/goldens/phase_10/foo.svg`` -> ``<out_dir>/phase_10/foo.png``.
+    """
+    svg_path = Path(svg_path).resolve()
+    if out_dir is None:
+        out_dir = DEFAULT_OUT_DIR
+    out_dir = Path(out_dir)
+
+    rel = _mirror_relpath(svg_path)
+    out_path = out_dir / rel.with_suffix(".png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    svg_bytes = svg_path.read_bytes()
+    png_bytes = rasterize_svg(svg_bytes, dpi=dpi)
+    out_path.write_bytes(png_bytes)
+    return out_path
+
+
+def find_goldens(*roots: str | Path) -> list[Path]:
+    """Return all ``*.svg`` files under the given root directories."""
+    out: list[Path] = []
+    for root in roots:
+        root_path = Path(root)
+        if not root_path.exists():
+            continue
+        out.extend(sorted(root_path.rglob("*.svg")))
+    return out
+
+
+def _mirror_relpath(svg_path: Path) -> Path:
+    """Strip the ``tests/goldens/`` or ``tests/<dir>/goldens/`` prefix.
+
+    Produces a relative path suitable for placement under tests/snapshots/.
+    Falls back to the file's basename if no recognized prefix is found.
+    """
+    parts = svg_path.parts
+    if "goldens" in parts:
+        idx = parts.index("goldens")
+        # Discriminate by what sits above "goldens":
+        #   tests/goldens/phase_10/foo.svg -> phase_10/foo.svg
+        #   tests/test_phase_9_e2e/goldens/foo.svg -> test_phase_9_e2e/foo.svg
+        if idx >= 2 and parts[idx - 1] != "tests":
+            parent_dir = parts[idx - 1]
+            tail = parts[idx + 1 :]
+            return Path(parent_dir, *tail)
+        return Path(*parts[idx + 1 :])
+    return Path(svg_path.name)
+
+
+def iter_default_roots() -> Iterable[Path]:
+    """The two known ferrum golden roots."""
+    yield _REPO_ROOT / "tests" / "goldens"
+    yield _REPO_ROOT / "tests" / "test_phase_9_e2e" / "goldens"

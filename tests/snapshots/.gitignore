@@ -1,0 +1,5 @@
+# PNGs in this directory are generated on demand by scripts/snapshot-goldens.py
+# for visual inspection of golden SVGs. They are intentionally untracked —
+# regenerate locally with `python scripts/snapshot-goldens.py`.
+*
+!.gitignore
