@@ -20,6 +20,13 @@ from .regression import (
     PredictionErrorVisualizer,
     ResidualsVisualizer,
 )
+from .clustering import (
+    ElbowVisualizer,
+    InterclusterDistanceVisualizer,
+    ManifoldVisualizer,
+    PCAVarianceVisualizer,
+    SilhouetteVisualizer,
+)
 from .selection import (
     AlphaSelectionVisualizer,
     CVScoresVisualizer,
@@ -46,4 +53,9 @@ __all__ = [
     "ValidationCurveVisualizer",
     "CVScoresVisualizer",
     "AlphaSelectionVisualizer",
+    "SilhouetteVisualizer",
+    "ElbowVisualizer",
+    "ManifoldVisualizer",
+    "InterclusterDistanceVisualizer",
+    "PCAVarianceVisualizer",
 ]

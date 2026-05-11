@@ -243,3 +243,67 @@ def test_mark_decision_boundary_rejects_unknown_kwarg():
     })
     with pytest.raises(TypeError, match="unknown keyword"):
         ferrum.Chart(grid).mark_decision_boundary(strokr="red").show_svg()
+
+
+# --- Task 33: clustering / manifold visualizers ----------------------
+
+
+def test_silhouette_visualizer():
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    viz = ferrum.SilhouetteVisualizer(model).fit(df)
+    assert viz._fitted
+    assert "mean_silhouette=" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_elbow_visualizer():
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    viz = ferrum.ElbowVisualizer(
+        KMeans, ks=[2, 3, 4, 5], random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    assert "best_k=" in repr(viz)
+    # On a well-separated 3-cluster dataset, distortion drops sharply
+    # at k=3; the minimum-distortion k will be the largest k tried
+    # (more centers can only reduce inertia), but best_k should match
+    # the smallest k whose score equals the minimum within tolerance.
+    assert viz._metrics["best_k"] in {3.0, 4.0, 5.0}
+
+
+def test_manifold_visualizer_pca():
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    model = load_fixture("pca_4comp")
+    viz = ferrum.ManifoldVisualizer(
+        model, method="pca", random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_intercluster_distance_visualizer():
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    viz = ferrum.InterclusterDistanceVisualizer(
+        model, random_state=0,
+    ).fit(df)
+    assert viz._fitted
+    assert "max_intercluster_dist=" in repr(viz)
+
+
+def test_pca_variance_visualizer():
+    model = load_fixture("pca_4comp")
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    viz = ferrum.PCAVarianceVisualizer(model).fit(df)
+    assert viz._fitted
+    assert "first_component_var=" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_visualizer_show_before_fit_raises():
+    """The FerrumVisualizer base must reject .show() on unfit instances."""
+    model = load_fixture("kmeans_3cluster")
+    viz = ferrum.SilhouetteVisualizer(model)
+    with pytest.raises(RuntimeError, match="must be fit"):
+        viz.show()
