@@ -7,6 +7,7 @@ what a golden actually renders as.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -58,6 +59,51 @@ def snapshot_golden(
     png_bytes = rasterize_svg(svg_bytes, dpi=dpi)
     out_path.write_bytes(png_bytes)
     return out_path
+
+
+def regen_and_verify(
+    golden_path: str | Path,
+    svg: str | bytes,
+    *,
+    out_dir: Path | None = None,
+    dpi: int = 96,
+    emit: bool = True,
+) -> Path:
+    """Write ``svg`` to ``golden_path``, rasterize a PNG, and return the PNG path.
+
+    The intended entry point for any script or fixture that regenerates a
+    golden SVG. Writing the SVG and producing the inspection PNG happen in
+    one call so a regen flow cannot silently skip the visual check — when
+    ``emit=True`` (default), a line of the form::
+
+        regenerated <golden>
+        inspect    <png>
+
+    is printed to stdout so the calling agent can immediately ``Read`` the
+    PNG and confirm the new golden renders correctly before committing.
+
+    See the "Goldens are not blessed until visually inspected" rule in
+    CLAUDE.md for the obligation this helper exists to support.
+    """
+    golden_path = Path(golden_path)
+    golden_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(svg, bytes):
+        golden_path.write_bytes(svg)
+    else:
+        golden_path.write_text(svg)
+
+    png_path = snapshot_golden(golden_path, out_dir=out_dir, dpi=dpi)
+
+    if emit:
+        try:
+            golden_rel = golden_path.resolve().relative_to(_REPO_ROOT)
+            png_rel = png_path.resolve().relative_to(_REPO_ROOT)
+        except ValueError:
+            golden_rel, png_rel = golden_path, png_path
+        print(f"regenerated {golden_rel}", file=sys.stdout)
+        print(f"inspect    {png_rel}", file=sys.stdout)
+
+    return png_path
 
 
 def find_goldens(*roots: str | Path) -> list[Path]:
