@@ -608,6 +608,25 @@ Scales map data domain values to visual range values. Attached to encoding chann
 > implemented and currently rejected by theme-level validation. T4 will flip
 > the default to `tableau10`.
 
+> **Implementation note (2026-05-11, themes-T4):** `Scale.padding` (listed in
+> the base Scale class above) is now plumbed end-to-end and defaults to
+> `0.05` for quantitative / temporal scales when unset. The visual mapping
+> reserves 5% of the plot dimension on each side (capped at 8 px) so marks
+> do not touch axis lines or the plot edge. Precedence at the renderer:
+> `Scale(padding=p)` honors `p` (including `0.0` to disable); a user-supplied
+> `Scale(domain=[...])` with no explicit padding suppresses the default to
+> `0.0` (the user-explicit domain is treated as authoritative); otherwise
+> `0.05` applies. Categorical / ordinal scales (`ScaleBand`, `ScalePoint`,
+> `OrdinalScale`) are unaffected — they keep their own internal half-step
+> band padding. Pixel ranges supplied via `Scale(range=[...])` bypass the
+> inset entirely and are treated as the final scale range. The 4 quantitative
+> PyO3 scale classes (`LinearScale`, `LogScale`, `TimeScale`, `SymlogScale`)
+> accept a new keyword `padding` and expose a `.padding` getter; the
+> `Ordinal` variant's existing `padding` field is unchanged. The default
+> `ThemeInputs::default()` color scheme flips from `okabe_ito` to
+> `tableau10` (loud divergence from the §3.6 *"`okabe_ito` (default)"*
+> annotation above) — see the §3.13 Themes-T2 → T4 note.
+
 ---
 
 ### 3.7 Axes and Legends
@@ -814,6 +833,25 @@ Theme(
 > in `Theme.to_theme_inputs_dict()` so the Rust binding sees a fully-populated
 > dict. Render-side consumption of the newly-plumbed keys lands in Themes-T2
 > through T4; defaults remain at their pre-T1 values in this sub-phase.
+
+> **2026-05-11 (Themes-T2 → T4):** Render-side consumers now read every
+> plumbed key. New `ThemeInputs::default()` ships an Observable Plot-flavored
+> visual identity: `mark_color="#4C78A8"` (tableau blue, was Okabe orange
+> `#E69F00`), faint visible grid (`grid_color="#DDDDDD"` width `0.5`, was
+> `#EEEEEE` width `1.0`), left-aligned semibold title (`title_anchor="start"`,
+> `title_font_weight="600"`), three-stop text color ramp (body `#222` / label
+> `#555` / axis `#888`), `point_size=36` (was `30`), `padding=16`,
+> `column_padding=row_padding=12`. `theme.color_scheme` defaults flip from
+> `okabe_ito` (§3.6) to `tableau10` — `okabe_ito` remains accessible via
+> `Theme(color_scheme="okabe_ito")`. `theme.grid` now actually emits
+> gridlines via `axis::draw_grid` (was a no-op before T3). `theme.axis_line:
+> bool` suppresses the axis stroke when `False`. Font family is kept as
+> `"Inter"` (bundled in `crates/ferrum-core/src/render/embed_font.rs`) rather
+> than the design spec's `"DejaVu Sans"` — Inter is deterministic across CI
+> hosts, DejaVu Sans would resolve through the system font path. The 8
+> built-in themes are rebuilt to use the newly-plumbed keys; each is visibly
+> distinct from the others on the same chart (see
+> `tests/goldens/theme_gallery/`).
 
 **Built-in themes** (`ferrum.themes`)
 
