@@ -785,6 +785,230 @@ class Chart:
         new._position = position
         return new
 
+    def mark_roc(
+        self,
+        *,
+        average: str | None = None,
+        reference_line: bool = True,
+        annotate_auc: bool = False,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """ROC curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.roc_curve()``:
+        ``fpr``, ``tpr``, ``threshold``, ``class``, ``auc``. When
+        ``reference_line=True`` the data is pre-sorted ascending by ``fpr``
+        so the downstream ``mark_line`` renders a monotonic y=x diagonal.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("roc", position)
+        from ferrum.marks.diagnostic import desugar_roc
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "fpr")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "roc",
+            {
+                "average": average,
+                "reference_line": reference_line,
+                "annotate_auc": annotate_auc,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_roc,
+        )
+        new._position = position
+        return new
+
+    def mark_pr(
+        self,
+        *,
+        average: str | None = None,
+        annotate_ap: bool = False,
+        iso_lines: bool = False,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Precision-recall curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.pr_curve()``:
+        ``precision``, ``recall``, ``threshold``, ``class``, ``ap``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pr", position)
+        from ferrum.marks.diagnostic import desugar_pr
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "pr",
+            {
+                "average": average,
+                "annotate_ap": annotate_ap,
+                "iso_lines": iso_lines,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_pr,
+        )
+        new._position = position
+        return new
+
+    def mark_calibration(
+        self,
+        *,
+        n_bins: int = 10,
+        strategy: str = "uniform",
+        reference_line: bool = True,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Calibration (reliability) curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.calibration_curve()``:
+        ``mean_predicted``, ``fraction_positive``, ``count``. When
+        ``reference_line=True`` the data is pre-sorted ascending by
+        ``mean_predicted``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("calibration", position)
+        from ferrum.marks.diagnostic import desugar_calibration
+        from ferrum._diagnostics.charts import _sort_by
+        new = self._clone()
+        new._mark = "point"
+        if reference_line and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = _sort_by(new._data, "mean_predicted")
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "calibration",
+            {
+                "n_bins": n_bins,
+                "strategy": strategy,
+                "reference_line": reference_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_calibration,
+        )
+        new._position = position
+        return new
+
+    def mark_gain(
+        self,
+        *,
+        reference_lines: bool = True,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Cumulative-gain mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.cumulative_gain()``:
+        ``percent_population``, ``gain``, ``class``. The baseline diagonal
+        is encoded in the data via ``class='baseline'`` rows.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("gain", position)
+        from ferrum.marks.diagnostic import desugar_gain
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "gain",
+            {
+                "reference_lines": reference_lines,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_gain,
+        )
+        new._position = position
+        return new
+
+    def mark_lift(
+        self,
+        *,
+        reference_line: bool = True,
+        color_field: str | None = "class",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Lift curve mark — see ferrum-spec.md §3.3.
+
+        Expects the data shape emitted by ``ModelSource.lift_curve()``:
+        ``percent_population``, ``lift``, ``class``. The lift=1 baseline
+        is encoded via ``class='baseline'`` rows.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("lift", position)
+        from ferrum.marks.diagnostic import desugar_lift
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "lift",
+            {
+                "reference_line": reference_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_lift,
+        )
+        new._position = position
+        return new
+
+    def mark_discrimination_threshold(
+        self,
+        *,
+        metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
+        n_thresholds: int = 50,
+        threshold_line: bool = False,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Discrimination-threshold sweep mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data ``threshold``, ``metric``, ``value`` —
+        callers are responsible for unpivoting
+        ``ModelSource.discrimination_threshold()`` output (the figure
+        builder handles this).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("discrimination_threshold", position)
+        from ferrum.marks.diagnostic import desugar_discrimination_threshold
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "discrimination_threshold",
+            {
+                "metrics": metrics,
+                "n_thresholds": n_thresholds,
+                "threshold_line": threshold_line,
+                **mark_kwargs,
+            },
+            desugar_discrimination_threshold,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
