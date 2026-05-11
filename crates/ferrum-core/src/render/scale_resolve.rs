@@ -693,6 +693,11 @@ fn build_from_scale_spec(
 }
 
 /// Build a SizeScale if `encoding.size` is present.
+///
+/// Honors a user-supplied `scale.range` (Phase 10f); when absent, falls back
+/// to `[theme.point_size_min, theme.point_size_max]`. This lets diagnostic
+/// marks (intercluster_distance, future bubble charts) request larger point
+/// sizes per the spec without modifying the global theme.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -706,16 +711,31 @@ pub fn build_size_scale(
         .ok_or_else(|| RenderError::UnknownColumn { name: size_enc.field.clone() })?;
     let (min, max) = column_min_max_f64(col)
         .map_err(|e| RenderError::ScaleResolutionFailed(format!("size: {e}")))?;
+    let (lo, hi) = if let Some(crate::spec::encoding::ScaleSpec::Linear { range, .. })
+        = &size_enc.scale
+    {
+        if let Some(r) = range {
+            if r.len() == 2 {
+                (r[0], r[1])
+            } else {
+                (theme.point_size_min, theme.point_size_max)
+            }
+        } else {
+            (theme.point_size_min, theme.point_size_max)
+        }
+    } else {
+        (theme.point_size_min, theme.point_size_max)
+    };
     let inner = ScaleKind::Linear(LinearScale::new_internal(
         vec![min, max],
-        vec![theme.point_size_min, theme.point_size_max],
+        vec![lo, hi],
         false,
         true,
     ));
     Ok(Some(SizeScale {
         inner,
-        min_px: theme.point_size_min,
-        max_px: theme.point_size_max,
+        min_px: lo,
+        max_px: hi,
     }))
 }
 

@@ -117,3 +117,73 @@ def test_mark_pca_scree_rejects_unknown_kwarg():
     pca = source.pca_variance()
     with pytest.raises(TypeError, match="unknown keyword"):
         ferrum.Chart(pca).mark_pca_scree(strokr="red").show_svg()
+
+
+# --- Task 31: embeddings + intercluster_distance --------------------
+
+
+def test_embeddings_pca():
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(
+        load_fixture("pca_4comp"), df, random_state=0,
+    )
+    emb = source.embeddings(method="pca", n_components=2)
+    assert {"dim_0", "dim_1", "label"} <= set(emb.columns)
+    assert emb.height == df.height
+
+
+def test_embeddings_rejects_bad_method():
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(load_fixture("pca_4comp"), df)
+    with pytest.raises(ValueError, match="expected"):
+        source.embeddings(method="badmethod")
+
+
+def test_intercluster_distance_method():
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    source = ferrum.ModelSource(model, df, random_state=0)
+    icd = source.intercluster_distance(k=3, method="mds")
+    assert icd.height == 3
+    assert set(icd.columns) == {"cluster", "x", "y", "size"}
+    # sizes sum to the total sample count (kmeans assigns every point).
+    assert int(icd["size"].sum()) == df.height
+
+
+def test_intercluster_distance_raises_without_capability():
+    """Models that lack cluster_centers_ must raise on intercluster_distance."""
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, df)
+    with pytest.raises(AttributeError, match="cluster_centers_"):
+        source.intercluster_distance(k=3)
+
+
+def test_intercluster_distance_chart_renders():
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    chart = ferrum.intercluster_distance_chart(
+        model, df, k=3, random_state=0,
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_intercluster_distance_chart_auto_k():
+    """When k is omitted, the figure resolves it from model.n_clusters."""
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    chart = ferrum.intercluster_distance_chart(model, df, random_state=0)
+    assert "<svg" in chart.show_svg()
+
+
+def test_mark_intercluster_distance_rejects_unknown_kwarg():
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    source = ferrum.ModelSource(model, df, random_state=0)
+    icd = source.intercluster_distance(k=3)
+    with pytest.raises(TypeError, match="unknown keyword"):
+        (
+            ferrum.Chart(icd)
+            .mark_intercluster_distance(strokr="red")
+            .show_svg()
+        )

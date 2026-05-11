@@ -755,11 +755,36 @@ def _intercluster_distance_chart_from_source(
     method: str = "mds",
     theme: Any = None,
 ):
-    """Cluster-center 2D scatter sized by cluster count."""
+    """Cluster-center 2D scatter sized by cluster count.
+
+    Adds 15% padding around the data x/y range so the large
+    size-encoded points don't clip at the axis edges (MDS pushes
+    cluster centers to the extreme corners of the embedded space).
+    """
     import ferrum
+    from ferrum.encoding import X, Y
 
     df = source.intercluster_distance(k, method=method)
-    chart = ferrum.Chart(df).mark_intercluster_distance()
+    x_lo = float(df["x"].min() or 0.0)
+    x_hi = float(df["x"].max() or 0.0)
+    y_lo = float(df["y"].min() or 0.0)
+    y_hi = float(df["y"].max() or 0.0)
+    x_pad = max((x_hi - x_lo) * 0.15, 0.5)
+    y_pad = max((y_hi - y_lo) * 0.15, 0.5)
+    chart = (
+        ferrum.Chart(df)
+        .mark_intercluster_distance()
+        .encode(
+            x=X("x", scale={
+                "type": "linear",
+                "domain": [x_lo - x_pad, x_hi + x_pad],
+            }),
+            y=Y("y", scale={
+                "type": "linear",
+                "domain": [y_lo - y_pad, y_hi + y_pad],
+            }),
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart

@@ -1000,18 +1000,32 @@ def desugar_intercluster_distance(
     *,
     label_clusters: bool = True,
     color_field: str | None = "cluster",
+    min_size: float = 60.0,
+    max_size: float = 600.0,
     **mark_kwargs: Any,
 ) -> tuple:
     """Cluster-center 2D embedding: one point per cluster, sized by count.
 
-    Data contract: ``cluster`` (Int64), ``x`` (Float64), ``y`` (Float64),
+    Data contract: ``cluster`` (Utf8), ``x`` (Float64), ``y`` (Float64),
     ``size`` (Int64). When ``label_clusters=True`` a text layer overlays
-    the cluster id at each point.
+    the cluster id at each point. ``min_size`` and ``max_size`` set the
+    point-area range (in pixel² units, before sqrt → radius); the
+    default ``[100, 1500]`` produces ~6–22 px radii, well above the
+    theme default ``[3, 30]`` that collapses to a 1–3 px speck on
+    typical KMeans cluster counts.
     """
     del x_field, y_field
+    from ferrum.encoding import Size
 
     user_kw = _validate("intercluster_distance", mark_kwargs)
-    point_enc: dict[str, Any] = {"x": "x", "y": "y", "size": "size"}
+    # Pass scale as a dict so we can specify range without needing a
+    # domain (the renderer infers domain from the data). The `_core`
+    # LinearScale constructor requires domain explicitly.
+    size_channel = Size(
+        "size",
+        scale={"type": "linear", "range": [float(min_size), float(max_size)]},
+    )
+    point_enc: dict[str, Any] = {"x": "x", "y": "y", "size": size_channel}
     if color_field is not None:
         point_enc["color"] = color_field
     layers: list[dict] = [{"mark": "point", "encoding": point_enc}]

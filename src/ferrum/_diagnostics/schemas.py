@@ -162,7 +162,7 @@ SCHEMA_PCA_VARIANCE = pl.Schema({
 # so we document the contract here rather than enumerating in a Schema.
 
 SCHEMA_INTERCLUSTER_DISTANCE = pl.Schema({
-    "cluster": pl.Int64,
+    "cluster": pl.Utf8,
     "x": pl.Float64,
     "y": pl.Float64,
     "size": pl.Int64,

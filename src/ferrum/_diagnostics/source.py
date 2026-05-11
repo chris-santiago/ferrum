@@ -1164,7 +1164,7 @@ class ModelSource:
         """
         key = self._cache_key(
             "embeddings",
-            method=method,
+            embed_method=method,
             n_components=n_components,
             kwargs=tuple(sorted(method_kwargs.items())),
         )
@@ -1223,7 +1223,9 @@ class ModelSource:
         (Float64, the 2D embedded coordinate), and ``size`` (Int64, sample
         count). Requires the wrapped model to expose ``cluster_centers_``.
         """
-        key = self._cache_key("intercluster_distance", k=int(k), method=method)
+        key = self._cache_key(
+            "intercluster_distance", k=int(k), embed_method=method,
+        )
         if key in self._cache:
             return self._cache[key]
         require_sklearn("intercluster_distance")
@@ -1260,7 +1262,10 @@ class ModelSource:
         else:
             sizes = np.ones(int(k), dtype=int)
         df = pl.DataFrame({
-            "cluster": list(range(int(k))),
+            # cluster routes through a categorical color scale (one
+            # color per cluster id); serialize as Utf8 — same Int64 →
+            # continuous-scale gotcha as silhouette.cluster.
+            "cluster": [str(i) for i in range(int(k))],
             "x": [float(v) for v in xy[:, 0]],
             "y": [float(v) for v in xy[:, 1]],
             "size": [int(s) for s in sizes],

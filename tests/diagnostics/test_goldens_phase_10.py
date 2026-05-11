@@ -264,3 +264,16 @@ def test_golden_pca_scree_4comp():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pca_scree_chart(model, df, threshold=0.95)
     _check_golden(chart.show_svg(), "pca_scree_4comp")
+
+
+def test_golden_intercluster_distance_kmeans():
+    # MDS is deterministic under a fixed random_state and an Arrow/PyO3
+    # build pinned to a single platform; we ship this golden as
+    # byte-identical (no quantization tier needed — FLOAT_PRECISION = 3
+    # already collapses solver micro-jitter).
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    chart = ferrum.intercluster_distance_chart(
+        model, df, k=3, method="mds", random_state=0,
+    )
+    _check_golden(chart.show_svg(), "intercluster_distance_mds_3cluster")

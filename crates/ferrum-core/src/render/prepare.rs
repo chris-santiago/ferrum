@@ -58,20 +58,47 @@ impl LayerPrepared {
         spec: &crate::spec::chart::ChartSpec,
         layer: &crate::spec::layer::Layer,
     ) -> Self {
+        // Phase 10f: when a layer encoding references the same field as the
+        // chart-level encoding but has no scale of its own, merge the
+        // chart-level scale spec into the layer. Keeps the per-layer field
+        // (the drawer reads from there) while letting the chart-level
+        // scale-resolution receive the user's explicit domain / range
+        // override (intercluster_distance padding, future bubble-chart
+        // size ranges, etc). Layer-supplied scales win on conflict so
+        // explicit per-layer overrides still apply.
+        fn merge_scale(
+            layer_enc: &mut Option<crate::spec::encoding::EncodingSpec>,
+            chart_enc: &Option<crate::spec::encoding::EncodingSpec>,
+        ) {
+            let (Some(le), Some(ce)) = (layer_enc.as_mut(), chart_enc.as_ref())
+            else { return };
+            if le.field == ce.field && le.scale.is_none() && ce.scale.is_some() {
+                le.scale = ce.scale.clone();
+            }
+        }
+
         let mut encoding = layer.encoding.clone();
         // Inherit chart-level encoding when layer encoding fields are unset.
         if encoding.x.is_none() {
             encoding.x = spec.encoding.x.clone();
+        } else {
+            merge_scale(&mut encoding.x, &spec.encoding.x);
         }
         if encoding.y.is_none() {
             encoding.y = spec.encoding.y.clone();
+        } else {
+            merge_scale(&mut encoding.y, &spec.encoding.y);
         }
         if encoding.color.is_none() {
             encoding.color = spec.encoding.color.clone();
+        } else {
+            merge_scale(&mut encoding.color, &spec.encoding.color);
         }
         // Also inherit size/shape/opacity (Phase 8a channels) if present
         if encoding.size.is_none() {
             encoding.size = spec.encoding.size.clone();
+        } else {
+            merge_scale(&mut encoding.size, &spec.encoding.size);
         }
         if encoding.shape.is_none() {
             encoding.shape = spec.encoding.shape.clone();
