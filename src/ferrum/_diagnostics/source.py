@@ -186,3 +186,192 @@ class ModelSource:
         df = pl.DataFrame(data)
         self._cache[key] = df
         return df
+
+    # --- 10b: classification curves --------------------------------------
+
+    def roc_curve(
+        self,
+        *,
+        average: str | None = None,
+        drop_intermediate: bool = True,
+    ) -> pl.DataFrame:
+        """ROC curve(s). One row per (class, threshold). ``auc`` repeats per class.
+
+        For binary classifiers with ``average=None`` (default), returns a
+        single curve on the positive (second) class. For multiclass,
+        returns one-vs-rest curves per class; pass ``average`` in
+        {"micro", "macro", "weighted"} to additionally include a summary
+        curve under ``class="<average>"``.
+        """
+        key = self._cache_key(
+            "roc_curve", average=average, drop_intermediate=drop_intermediate,
+        )
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("roc_curve")
+        from sklearn.metrics import roc_curve as _sk_roc_curve, roc_auc_score
+
+        if self._y is None:
+            raise ValueError("ModelSource.roc_curve() requires y to be provided.")
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        y_true = np.asarray(self._y.to_numpy())
+        classes = [c[len("proba_"):] for c in proba_cols]
+        n_classes = len(classes)
+
+        rows: list[dict] = []
+        if n_classes == 2 and average is None:
+            y_score = proba_df[proba_cols[1]].to_numpy()
+            fpr, tpr, thr = _sk_roc_curve(
+                y_true, y_score, drop_intermediate=drop_intermediate,
+            )
+            auc = float(roc_auc_score(y_true, y_score))
+            for f, t, h in zip(fpr, tpr, thr):
+                rows.append({
+                    "fpr": float(f), "tpr": float(t),
+                    "threshold": float(h), "class": classes[1], "auc": auc,
+                })
+        else:
+            for i, cls in enumerate(classes):
+                y_bin = (
+                    y_true == _coerce_class_label(cls, y_true.dtype)
+                ).astype(int)
+                y_score = proba_df[proba_cols[i]].to_numpy()
+                fpr, tpr, thr = _sk_roc_curve(
+                    y_bin, y_score, drop_intermediate=drop_intermediate,
+                )
+                try:
+                    auc = float(roc_auc_score(y_bin, y_score))
+                except ValueError:
+                    auc = float("nan")
+                for f, t, h in zip(fpr, tpr, thr):
+                    rows.append({
+                        "fpr": float(f), "tpr": float(t),
+                        "threshold": float(h), "class": str(cls), "auc": auc,
+                    })
+
+            if average in ("micro", "macro", "weighted"):
+                rows.extend(_compute_avg_roc(
+                    y_true,
+                    proba_df[proba_cols].to_numpy(),
+                    classes, average, drop_intermediate,
+                ))
+
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
+    def pr_curve(self, *, average: str | None = None) -> pl.DataFrame:
+        """Precision-recall curve(s). One row per (class, threshold).
+
+        For binary classifiers, returns a single curve on the positive
+        (second) class. For multiclass, returns one-vs-rest curves per
+        class. ``threshold`` is NaN at the final (recall=0) point per
+        sklearn's convention.
+        """
+        if average is not None:
+            # The spec exposes `average` for API symmetry with roc_curve but
+            # multiclass averaged PR variants aren't part of Phase 10b.
+            raise NotImplementedError(
+                "ModelSource.pr_curve(average=...) lands in a later phase; "
+                "use average=None for per-class curves."
+            )
+        key = self._cache_key("pr_curve", average=average)
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("pr_curve")
+        from sklearn.metrics import precision_recall_curve, average_precision_score
+
+        if self._y is None:
+            raise ValueError("ModelSource.pr_curve() requires y to be provided.")
+        proba_df = self.probabilities()
+        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+        y_true = np.asarray(self._y.to_numpy())
+        classes = [c[len("proba_"):] for c in proba_cols]
+        n_classes = len(classes)
+
+        rows: list[dict] = []
+        if n_classes == 2:
+            y_score = proba_df[proba_cols[1]].to_numpy()
+            p, r, thr = precision_recall_curve(y_true, y_score)
+            ap = float(average_precision_score(y_true, y_score))
+            thresholds_padded = np.concatenate([thr, [float("nan")]])
+            for pi, ri, ti in zip(p, r, thresholds_padded):
+                rows.append({
+                    "precision": float(pi), "recall": float(ri),
+                    "threshold": float(ti), "class": classes[1], "ap": ap,
+                })
+        else:
+            for i, cls in enumerate(classes):
+                y_bin = (
+                    y_true == _coerce_class_label(cls, y_true.dtype)
+                ).astype(int)
+                y_score = proba_df[proba_cols[i]].to_numpy()
+                p, r, thr = precision_recall_curve(y_bin, y_score)
+                try:
+                    ap = float(average_precision_score(y_bin, y_score))
+                except ValueError:
+                    ap = float("nan")
+                thresholds_padded = np.concatenate([thr, [float("nan")]])
+                for pi, ri, ti in zip(p, r, thresholds_padded):
+                    rows.append({
+                        "precision": float(pi), "recall": float(ri),
+                        "threshold": float(ti), "class": str(cls), "ap": ap,
+                    })
+
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
+
+def _coerce_class_label(label_str: str, target_dtype) -> object:
+    """Coerce a stringified class label back to y's dtype for equality
+    comparison. Falls back to the original string if conversion fails.
+    """
+    if np.issubdtype(target_dtype, np.integer):
+        try:
+            return int(label_str)
+        except ValueError:
+            return label_str
+    if np.issubdtype(target_dtype, np.floating):
+        try:
+            return float(label_str)
+        except ValueError:
+            return label_str
+    return label_str
+
+
+def _compute_avg_roc(y_true, y_score_matrix, classes, average, drop_intermediate):
+    from sklearn.metrics import roc_curve, roc_auc_score
+    from sklearn.preprocessing import label_binarize
+
+    coerced_classes = [_coerce_class_label(c, y_true.dtype) for c in classes]
+    y_bin = label_binarize(y_true, classes=coerced_classes)
+    if average == "micro":
+        fpr, tpr, thr = roc_curve(
+            y_bin.ravel(), y_score_matrix.ravel(),
+            drop_intermediate=drop_intermediate,
+        )
+        auc = float(roc_auc_score(y_bin, y_score_matrix, average="micro"))
+        return [
+            {"fpr": float(f), "tpr": float(t), "threshold": float(h),
+             "class": "micro", "auc": auc}
+            for f, t, h in zip(fpr, tpr, thr)
+        ]
+    grid = np.linspace(0.0, 1.0, 100)
+    tprs = []
+    for i in range(y_bin.shape[1]):
+        fpr_i, tpr_i, _ = roc_curve(y_bin[:, i], y_score_matrix[:, i])
+        tprs.append(np.interp(grid, fpr_i, tpr_i))
+    if average == "macro":
+        weights = np.ones(len(classes)) / len(classes)
+    else:  # weighted
+        total = max(int(y_bin.sum()), 1)
+        weights = y_bin.sum(axis=0) / total
+    tpr_avg = (np.array(tprs).T * weights).sum(axis=1)
+    auc = float(roc_auc_score(y_bin, y_score_matrix, average=average))
+    return [
+        {"fpr": float(f), "tpr": float(t), "threshold": float("nan"),
+         "class": average, "auc": auc}
+        for f, t in zip(grid, tpr_avg)
+    ]

@@ -82,3 +82,70 @@ def test_probabilities_caching():
     p1 = source.probabilities()
     p2 = source.probabilities()
     assert p1 is p2  # cache returns same object
+
+
+# --- 10b: classification curves --------------------------------------
+
+
+def test_roc_curve_binary_schema():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    roc = source.roc_curve()
+    assert set(roc.columns) == {"fpr", "tpr", "threshold", "class", "auc"}
+    assert roc.height >= 2
+    aucs = roc["auc"].unique().to_list()
+    assert len(aucs) == 1  # binary → one AUC
+    assert 0.0 <= aucs[0] <= 1.0
+
+
+def test_roc_curve_multiclass_macro_average():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    roc = source.roc_curve(average="macro")
+    classes_seen = set(roc["class"].unique().to_list())
+    assert "macro" in classes_seen
+    assert len(classes_seen - {"macro"}) >= 3
+
+
+def test_pr_curve_binary():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pr = source.pr_curve()
+    assert set(pr.columns) == {"precision", "recall", "threshold", "class", "ap"}
+    assert pr.height >= 2
+    aps = pr["ap"].unique().to_list()
+    assert len(aps) == 1
+    assert 0.0 <= aps[0] <= 1.0
+
+
+def test_pr_curve_multiclass():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    pr = source.pr_curve()
+    classes_seen = set(pr["class"].unique().to_list())
+    assert len(classes_seen) >= 3
+
+
+def test_pr_curve_average_raises():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    with pytest.raises(NotImplementedError):
+        source.pr_curve(average="macro")
+
+
+def test_roc_curve_caching():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    assert source.roc_curve() is source.roc_curve()
