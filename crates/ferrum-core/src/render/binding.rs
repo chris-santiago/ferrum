@@ -357,7 +357,66 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
         t.row_padding = v.extract()?;
     }
 
+    // Reject unknown keys to surface typos that previously silently dropped.
+    const KNOWN_THEME_KEYS: &[&str] = &[
+        "background", "background_color", "padding",
+        "font_family", "font_weight", "font_color", "font_size",
+        "title_font_family", "title_font_size", "title_font_weight",
+        "title_color", "title_anchor", "title_offset",
+        "label_font_family", "label_color",
+        "grid", "grid_color", "grid_width", "grid_dash", "grid_opacity",
+        "axis_line", "axis_line_color", "axis_line_width",
+        "tick_color", "tick_size", "tick_width",
+        "mark_color", "point_size", "point_opacity",
+        "line_stroke_width", "bar_corner_radius", "area_opacity", "opacity",
+        "color_scheme",
+        "strip_background_color",
+        "legend_orient", "legend_direction", "legend_title_font_size",
+        "axis_title_padding", "column_padding", "row_padding",
+    ];
+    for key_obj in d.keys() {
+        let key: String = key_obj.extract()?;
+        if !KNOWN_THEME_KEYS.contains(&key.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "Unknown Theme key: '{key}'. \
+                 See ferrum-spec.md §3.13 for the supported key list."
+            )));
+        }
+    }
+
     Ok(t)
+}
+
+#[cfg(test)]
+mod theme_dict_tests {
+    use super::*;
+    use pyo3::types::PyDict;
+
+    #[test]
+    fn unknown_key_raises() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("not_a_real_key", "value").unwrap();
+            let err = theme_from_dict(Some(&d)).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("Unknown Theme key"), "got: {msg}");
+            assert!(msg.contains("not_a_real_key"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn background_alias_accepted() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("background", "#ff0000").unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.background_color.red, 0xFF);
+            assert_eq!(t.background_color.green, 0x00);
+            assert_eq!(t.background_color.blue, 0x00);
+        });
+    }
 }
 
 fn config_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RenderConfig> {
