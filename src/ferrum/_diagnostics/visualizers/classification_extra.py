@@ -21,9 +21,37 @@ from .base import FerrumVisualizer
 
 
 class DiscriminationThresholdVisualizer(FerrumVisualizer):
-    """Sweeps a probability threshold for a binary classifier; reports the
-    F1-maximizing threshold + F1 as scalar metrics and renders the four
-    per-threshold metric curves.
+    """Sweep a decision threshold for a binary classifier and plot four metric curves.
+
+    Evaluates ``precision``, ``recall``, ``f1``, and ``queue_rate`` (or a
+    caller-supplied subset) at ``n_thresholds`` evenly-spaced probability
+    thresholds between 0 and 1. After ``fit``, the F1-maximising threshold
+    and its F1 score are available via ``_metrics``.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted binary sklearn estimator that exposes ``predict_proba``.
+    n_thresholds : int, default 50
+        Number of probability thresholds to evaluate across ``[0, 1]``.
+    metrics : tuple of str, default ("precision", "recall", "f1", "queue_rate")
+        Which per-threshold metrics to include as curves in the chart.
+        Passed through to the underlying ``ModelSource.discrimination_threshold``
+        call and to ``mark_discrimination_threshold``.
+    cv : Any, optional
+        Cross-validation strategy forwarded to ``ModelSource.discrimination_threshold``.
+        ``None`` uses the model as-is (no CV averaging).
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for any randomness in CV splits.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.DiscriminationThresholdVisualizer(model).fit(X, y)
+    >>> viz.show()                   # returns the four-curve Chart
+    >>> viz._metrics["best_threshold"], viz._metrics["best_f1"]
     """
 
     def __init__(
@@ -61,11 +89,36 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
 
 
 class ClassPredictionErrorVisualizer(FerrumVisualizer):
-    """Per-predicted-class stacked-bar of actual-class composition.
+    """Stacked-bar chart of actual-class composition per predicted class.
 
-    Reports overall ``accuracy`` (raw-count basis) as a scalar metric.
-    The visual stack is rendered via ``mark_class_prediction_error``; the
-    100% stack variant is available via ``normalize=True``.
+    For each predicted class label on the x-axis, the bar is stacked by
+    the true class, showing how often a predicted class is correct vs.
+    confused with another class. When ``normalize=True`` every bar is
+    scaled to 100 % so proportions are comparable across imbalanced
+    classes.
+
+    After ``fit``, overall accuracy (total correct / total predictions,
+    computed from raw counts regardless of ``normalize``) is stored in
+    ``_metrics["accuracy"]``.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted sklearn classifier that exposes ``predict``.
+    normalize : bool, default False
+        When ``True``, each predicted-class bar is scaled to sum to 1
+        (100 % stacked view). When ``False``, bars show absolute counts.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for any randomness in data prep.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ClassPredictionErrorVisualizer(model).fit(X, y)
+    >>> viz.show()                   # returns the stacked-bar Chart
+    >>> viz._metrics["accuracy"]     # proportion of correct predictions
     """
 
     def __init__(
@@ -94,12 +147,36 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
 
 
 class ClassBalanceVisualizer(FerrumVisualizer):
-    """Per-class count bar chart computed from ``y`` alone (no model).
+    """Bar chart of per-class label counts, computed from target labels alone.
 
-    Accepts the sklearn ``.fit(X, y)`` shape as well as the ``.fit(y)``
-    shorthand — when ``y`` is omitted, the first positional argument is
-    treated as the labels. Reports ``n_classes`` and ``imbalance_ratio``
-    (``max_count / max(min_count, 1)``).
+    Accepts both the standard sklearn ``fit(X, y)`` signature and the
+    label-only shorthand ``fit(y)`` — when the second argument is omitted,
+    the first positional argument is treated as the label array. No model
+    is required; pass nothing for the ``model`` argument (it is always
+    ``None`` internally).
+
+    After ``fit``, ``_metrics`` contains:
+
+    - ``n_classes`` — number of unique class labels.
+    - ``imbalance_ratio`` — ``max_count / max(min_count, 1)``, where 1.0
+      indicates perfectly balanced classes and larger values indicate
+      increasing imbalance.
+
+    Parameters
+    ----------
+    random_state : int, optional
+        Reserved for future use (no-op today). ``ClassBalanceVisualizer``
+        overrides ``fit()`` entirely and never constructs a ``ModelSource``,
+        so this value is accepted for API consistency but is never read.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ClassBalanceVisualizer().fit(X, y)
+    >>> viz.show()                   # returns the per-class count bar Chart
+    >>> viz._metrics["imbalance_ratio"]
     """
 
     def __init__(

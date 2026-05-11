@@ -22,8 +22,34 @@ from .base import FerrumVisualizer
 class SilhouetteVisualizer(FerrumVisualizer):
     """Rousseeuw silhouette plot for a fitted clusterer.
 
-    Records ``mean_silhouette`` (the per-cluster mean averaged over all
-    samples) as the headline metric.
+    Computes per-sample silhouette coefficients via ``ModelSource.silhouette``
+    and renders a horizontal bar chart sorted by cluster, one bar per sample.
+    Records ``mean_silhouette`` — the grand mean silhouette coefficient
+    averaged across all samples — as the headline metric.
+
+    Takes a *fitted* estimator (not a class); for the k-sweep variant use
+    ``ElbowVisualizer``.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted clustering estimator (e.g. ``sklearn.cluster.KMeans`` instance)
+        that exposes ``labels_`` (and optionally ``cluster_centers_``).
+    random_state : int, optional
+        Seed forwarded to the underlying ``ModelSource``. Ignored when the
+        silhouette computation is deterministic.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> model = KMeans(n_clusters=3, random_state=0).fit(X)
+    >>> viz = fm.SilhouetteVisualizer(model).fit(X)
+    >>> viz.show()
+    >>> viz._metrics["mean_silhouette"]
     """
 
     def __init__(
@@ -49,13 +75,43 @@ class SilhouetteVisualizer(FerrumVisualizer):
 
 
 class ElbowVisualizer(FerrumVisualizer):
-    """Elbow / distortion sweep over a clusterer class.
+    """Elbow / distortion sweep over a range of k for a clusterer class.
 
-    Unlike most visualizers, ``ElbowVisualizer`` takes a model *class*
-    (e.g. ``KMeans``) and fits one instance per k inside ``fit()``.
-    Records ``best_k`` — the k minimizing distortion (inertia) — and
-    skips the ``ModelSource`` round-trip since per-k models are
-    transient. Renders an inertia-vs-k line plot.
+    Unlike other ferrum visualizers, ``ElbowVisualizer`` takes a model *class*
+    (e.g. ``KMeans``) — not a fitted instance — and constructs and fits one
+    model per k value inside its own ``fit()`` override. The ``ModelSource``
+    round-trip is skipped entirely; per-k models are transient and discarded
+    after their score is recorded. Renders an inertia-vs-k line chart.
+
+    Records ``best_k`` — the integer k whose distortion score is smallest —
+    as the headline metric.
+
+    Parameters
+    ----------
+    model_class : type
+        Uninstantiated clustering class (e.g. ``sklearn.cluster.KMeans``).
+        Must accept ``n_clusters``, ``random_state``, and ``n_init`` keyword
+        arguments and expose ``.inertia_`` after fitting.
+    ks : sequence of int
+        The candidate k values to sweep (e.g. ``range(2, 11)``).
+    metric : {"distortion"}, default "distortion"
+        Score to minimize. Only ``"distortion"`` (sum of squared distances to
+        the nearest centroid, i.e. ``.inertia_``) is implemented today; any
+        other value raises ``NotImplementedError``.
+    random_state : int, optional
+        Integer seed passed as ``random_state`` to every per-k model
+        instantiation. When ``None``, seed ``0`` is used.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> viz = fm.ElbowVisualizer(KMeans, ks=range(2, 9)).fit(X)
+    >>> viz.show()
+    >>> viz._metrics["best_k"]
     """
 
     def __init__(
@@ -106,10 +162,44 @@ class ElbowVisualizer(FerrumVisualizer):
 
 
 class ManifoldVisualizer(FerrumVisualizer):
-    """Low-dimensional embedding scatter (UMAP / t-SNE / PCA).
+    """Low-dimensional manifold-embedding scatter (UMAP / t-SNE / PCA).
 
-    Records ``n_samples`` so the repr surfaces the embedding's row count
-    without forcing the chart to compute the embedding twice.
+    Projects the input data to two dimensions via the method selected by
+    ``method`` and renders a point chart with axes ``dim_0`` / ``dim_1``
+    colored by cluster label. The embedding is computed by
+    ``ModelSource.embeddings`` and cached so ``_build_chart`` does not
+    recompute it.
+
+    Takes a *fitted* clustering estimator whose ``labels_`` attribute is used
+    to color points. Pass ``model=None`` only if you override ``fit`` in a
+    subclass and supply ``labels_`` by other means.
+
+    Records ``n_samples`` — the number of rows in the embedding — as the
+    headline metric.
+
+    Parameters
+    ----------
+    model : Any, optional
+        Fitted clustering estimator (e.g. ``KMeans`` instance) that exposes
+        ``labels_``. Defaults to ``None`` (for subclass overrides).
+    method : str, default "umap"
+        Embedding algorithm forwarded to ``ModelSource.embeddings``. Typical
+        values are ``"umap"``, ``"tsne"``, and ``"pca"``.
+    random_state : int, optional
+        Seed forwarded to the underlying ``ModelSource``. Controls
+        reproducibility for stochastic embeddings such as UMAP and t-SNE.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> model = KMeans(n_clusters=4, random_state=0).fit(X)
+    >>> viz = fm.ManifoldVisualizer(model, method="umap").fit(X)
+    >>> viz.show()
+    >>> viz._metrics["n_samples"]
     """
 
     def __init__(
@@ -143,11 +233,44 @@ class ManifoldVisualizer(FerrumVisualizer):
 
 
 class InterclusterDistanceVisualizer(FerrumVisualizer):
-    """Cluster-center 2D MDS embedding + cluster-size bubbles.
+    """Cluster-center 2D embedding with cluster-size bubble overlay.
 
-    Records ``max_intercluster_dist`` — the largest Euclidean distance
-    from any cluster center to the centroid of all centers — as a rough
-    measure of how spread the clusters are in the 2D embedding.
+    Projects cluster centers into 2D via the algorithm selected by ``method``
+    and renders a bubble chart where each bubble represents one cluster; bubble
+    area encodes the cluster's sample count. Built on
+    ``ferrum.intercluster_distance_chart``.
+
+    Takes a *fitted* clustering estimator that exposes either ``n_clusters`` or
+    ``cluster_centers_`` so the number of clusters can be inferred.
+
+    Records ``max_intercluster_dist`` — the largest Euclidean distance from any
+    cluster center to the centroid of all centers in the 2D embedding — as a
+    rough measure of how spread-out the clusters are.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted clustering estimator (e.g. ``KMeans`` instance) that exposes
+        ``n_clusters`` or ``cluster_centers_``.
+    method : str, default "mds"
+        Dimensionality-reduction algorithm forwarded to
+        ``ModelSource.intercluster_distance``. Typical values include
+        ``"mds"`` and ``"tsne"``.
+    random_state : int, optional
+        Seed forwarded to the underlying ``ModelSource``. Controls
+        reproducibility for stochastic layout algorithms.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> model = KMeans(n_clusters=5, random_state=0).fit(X)
+    >>> viz = fm.InterclusterDistanceVisualizer(model).fit(X)
+    >>> viz.show()
+    >>> viz._metrics["max_intercluster_dist"]
     """
 
     def __init__(
@@ -193,10 +316,42 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
 
 
 class PCAVarianceVisualizer(FerrumVisualizer):
-    """PCA scree plot for a fitted decomposition model.
+    """PCA scree plot showing explained variance per principal component.
 
-    Records ``first_component_var`` (the fraction of total variance the
-    first principal component captures) as the headline metric.
+    Retrieves per-component explained-variance ratios via
+    ``ModelSource.pca_variance`` and renders a bar chart of
+    explained-variance ratio vs. component index, optionally limited to the
+    first ``n_components`` components. Built on ``ferrum.pca_scree_chart``.
+
+    Takes a *fitted* decomposition estimator (e.g. ``sklearn.decomposition.PCA``
+    instance) that exposes ``explained_variance_ratio_``.
+
+    Records ``first_component_var`` — the fraction of total variance captured
+    by the first principal component — as the headline metric.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted decomposition estimator (e.g. ``PCA`` instance) that exposes
+        ``explained_variance_ratio_``.
+    n_components : int, optional
+        Number of components to display in the scree plot. When ``None``,
+        all components present in the model are shown.
+    random_state : int, optional
+        Seed forwarded to the underlying ``ModelSource``. Ignored when
+        the PCA variance computation is deterministic.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.decomposition import PCA
+    >>> model = PCA(n_components=10).fit(X)
+    >>> viz = fm.PCAVarianceVisualizer(model, n_components=5).fit(X)
+    >>> viz.show()
+    >>> viz._metrics["first_component_var"]
     """
 
     def __init__(

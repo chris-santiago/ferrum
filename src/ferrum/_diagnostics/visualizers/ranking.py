@@ -27,12 +27,55 @@ from ..stats import (
 
 
 class Rank1DVisualizer(FerrumVisualizer):
-    """Univariate feature ranking — see ferrum-spec.md §3.15.
+    """Rank features by a univariate statistic and display as a bar chart.
 
-    ``algorithm`` in ``{"shapiro", "variance", "covariance"}``. The
-    ``"covariance"`` variant requires ``y`` to be supplied at ``fit()``
-    time. Records ``top_feature_score`` (the score of the highest-ranked
-    feature) as the headline metric.
+    A no-model visualizer (``model=None``) that computes a scalar score
+    for each feature column and renders them as a ranked horizontal or
+    vertical bar chart.  ``fit`` is overridden directly — the base-class
+    ``ModelSource`` round-trip is bypassed entirely.
+
+    Records ``top_feature_score`` (the score of the highest-ranked
+    feature) in ``_metrics``.
+
+    Parameters
+    ----------
+    algorithm : {"shapiro", "variance", "covariance"}, default "shapiro"
+        Scoring algorithm.
+
+        - ``"shapiro"`` — Shapiro-Wilk W statistic (normality score).
+        - ``"variance"`` — variance of each feature column.
+        - ``"covariance"`` — absolute covariance with the target ``y``.
+          Requires ``y`` to be passed at ``fit`` time; raises
+          ``ValueError`` when ``y`` is ``None``.
+    orient : {"horizontal", "vertical"}, default "horizontal"
+        Bar orientation of the resulting chart.
+    top_k : int, optional
+        If given, display only the top ``top_k`` features.  ``None``
+        shows all features.
+    color_field : str, optional
+        Column name forwarded to the chart's color encoding.  ``None``
+        produces a single-color chart.
+    random_state : int, optional
+        Reserved for future use (no-op today). Accepted for API
+        symmetry with model-backed visualizers.
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Raises
+    ------
+    ValueError
+        When ``algorithm="covariance"`` and ``y`` is ``None`` at ``fit``
+        time.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.read_csv("wine.csv")
+    >>> X, y = df.drop("target"), df["target"]
+    >>> viz = fm.Rank1DVisualizer(algorithm="variance").fit(X)
+    >>> viz.show()
     """
 
     def __init__(
@@ -85,12 +128,47 @@ class Rank1DVisualizer(FerrumVisualizer):
 
 
 class Rank2DVisualizer(FerrumVisualizer):
-    """Pairwise feature ranking — see ferrum-spec.md §3.15.
+    """Rank feature pairs by pairwise correlation and display as a heatmap.
 
-    ``algorithm`` in ``{"pearson", "spearman", "kendall", "covariance"}``.
+    A no-model visualizer (``model=None``) that computes an N×N
+    correlation matrix and renders it as an annotated heatmap.  ``fit``
+    is overridden directly — the base-class ``ModelSource`` round-trip is
+    bypassed entirely.
+
+    The ``"kendall"`` algorithm routes pairwise computation through
+    ``ferrum._core.kendall_tau_b`` (Rust) for performance.
+
     Records ``max_abs_corr`` (the largest absolute off-diagonal
-    correlation) as the headline metric — useful for detecting
+    correlation value) in ``_metrics`` — useful for detecting
     multicollinearity at a glance.
+
+    Parameters
+    ----------
+    algorithm : {"pearson", "spearman", "kendall", "covariance"}, default "pearson"
+        Pairwise association measure.
+
+        - ``"pearson"`` — Pearson linear correlation coefficient.
+        - ``"spearman"`` — Spearman rank correlation.
+        - ``"kendall"`` — Kendall tau-b, computed via
+          ``ferrum._core.kendall_tau_b`` for performance.
+        - ``"covariance"`` — raw covariance (not normalized to [-1, 1]).
+    annot : bool, default True
+        Whether to annotate each heatmap cell with its numeric value.
+    random_state : int, optional
+        Reserved for future use (no-op today). Accepted for API
+        symmetry with model-backed visualizers.
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.read_csv("wine.csv")
+    >>> X = df.drop("target")
+    >>> viz = fm.Rank2DVisualizer(algorithm="spearman").fit(X)
+    >>> viz.show()
     """
 
     def __init__(
@@ -126,11 +204,47 @@ class Rank2DVisualizer(FerrumVisualizer):
 
 
 class ParallelCoordinatesVisualizer(FerrumVisualizer):
-    """Parallel coordinates — see ferrum-spec.md §3.15.
+    """Visualize multivariate samples as a parallel-coordinates chart.
 
-    ``hue`` is the column name to color samples by; ``features`` selects
-    a subset of feature columns. Records ``n_samples`` and ``n_features``
-    so the repr surfaces the chart's shape.
+    A no-model visualizer (``model=None``) that draws one polyline per
+    sample across a set of parallel vertical axes (one per feature).
+    ``fit`` is overridden directly — the base-class ``ModelSource``
+    round-trip is bypassed entirely.
+
+    Records ``n_samples`` and ``n_features`` in ``_metrics`` so the
+    ``repr`` surfaces the chart's shape.
+
+    Parameters
+    ----------
+    features : list of str, optional
+        Subset of column names to include as axes.  When ``None``, all
+        non-``hue`` columns are used.
+    hue : str, optional
+        Column name used to color-encode each sample line.  ``None``
+        produces a single-color chart.
+    rescale : {"minmax", "zscore", None}, default "minmax"
+        Per-axis normalization applied before plotting.
+
+        - ``"minmax"`` — rescale each axis to [0, 1].
+        - ``"zscore"`` — standardize each axis to zero mean, unit variance.
+        - ``None`` — no rescaling; raw values are plotted.
+    alpha : float, default 0.5
+        Opacity of each sample line (0 = fully transparent, 1 = opaque).
+    random_state : int, optional
+        Reserved for future use (no-op today). Accepted for API
+        symmetry with model-backed visualizers.
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.read_csv("iris.csv")
+    >>> viz = fm.ParallelCoordinatesVisualizer(hue="species", rescale="minmax")
+    >>> viz.fit(df.drop("species"), df["species"])
+    >>> viz.show()
     """
 
     def __init__(

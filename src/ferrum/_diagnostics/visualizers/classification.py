@@ -19,9 +19,33 @@ from .base import FerrumVisualizer
 class ROCVisualizer(FerrumVisualizer):
     """ROC curve(s) for binary or multiclass classifiers.
 
-    ``per_class=True`` (default) draws one curve per class. ``micro`` /
-    ``macro`` toggle which averaged curve is reported by
-    ``_metrics["auc_mean"]`` and overlaid when ``per_class=False``.
+    Wraps ``ModelSource.roc_curve()``. ``per_class=True`` (default)
+    draws one curve per class; pass ``per_class=False`` to plot a
+    single averaged curve. Records ``auc_mean`` as the headline metric.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted classifier (must implement ``predict_proba`` or
+        ``decision_function``).
+    micro : bool, default True
+        Compute the micro-averaged AUC.
+    macro : bool, default True
+        Compute the macro-averaged AUC. Takes precedence over ``micro``
+        when choosing which averaged curve to plot at
+        ``per_class=False``.
+    per_class : bool, default True
+        Render one curve per class. When False, only the averaged
+        curve is rendered.
+    random_state : int, optional
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ROCVisualizer(clf).fit(X, y)
+    >>> viz._metrics["auc_mean"]
+    0.92
     """
 
     def __init__(
@@ -65,7 +89,26 @@ class ROCVisualizer(FerrumVisualizer):
 
 
 class PRVisualizer(FerrumVisualizer):
-    """Precision-recall curve(s)."""
+    """Precision-recall curve(s) for binary or multiclass classifiers.
+
+    Wraps ``ModelSource.pr_curve()``. Records ``ap_mean`` (average
+    precision averaged across classes) as the headline metric.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted classifier exposing ``predict_proba`` or
+        ``decision_function``.
+    random_state : int, optional
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.PRVisualizer(clf).fit(X, y)
+    >>> viz._metrics["ap_mean"]
+    0.88
+    """
 
     def __init__(
         self,
@@ -86,13 +129,31 @@ class PRVisualizer(FerrumVisualizer):
 
 
 class CalibrationVisualizer(FerrumVisualizer):
-    """Calibration (reliability) diagram.
+    """Calibration (reliability) diagram for a probability classifier.
 
-    Variadic in ``*models``: pass a single model for a one-curve diagram,
-    or two or more for an overlay (routed through ``ComparedModelSource``
-    so each curve is labeled by ``model_0``, ``model_1``, ...).
-    Single-positional-dict form is also accepted to supply named models
-    (``CalibrationVisualizer({"a": m_a, "b": m_b})``).
+    Wraps ``ModelSource.calibration_curve()``. Records the mean squared
+    deviation between ``mean_predicted`` and ``fraction_positive`` as
+    ``calibration_error``.
+
+    Parameters
+    ----------
+    *models : Any
+        One or more fitted classifiers. Pass a single model for a
+        single-curve diagram; pass two or more (or a single dict
+        positional argument like ``{"a": m_a, "b": m_b}``) to overlay
+        multiple curves via ``ComparedModelSource``.
+    n_bins : int, default 10
+        Number of bins for the calibration histogram.
+    strategy : {"uniform", "quantile"}, default "uniform"
+        Bin-edge strategy (matches ``sklearn.calibration``).
+    random_state : int, optional
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.CalibrationVisualizer(clf, n_bins=5).fit(X, y)
+    >>> viz_overlay = fm.CalibrationVisualizer(clf_a, clf_b).fit(X, y)
     """
 
     def __init__(
@@ -168,10 +229,33 @@ class CalibrationVisualizer(FerrumVisualizer):
 
 
 class ConfusionMatrixVisualizer(FerrumVisualizer):
-    """Confusion-matrix heatmap with per-cell counts (or normalized fractions).
+    """Confusion-matrix heatmap with per-cell counts or normalized fractions.
 
-    ``accuracy`` is reported as a scalar metric (computed on raw counts
-    regardless of the ``normalize`` setting used for rendering).
+    Wraps ``ModelSource.confusion_matrix()``. Renders a rect-mark heatmap
+    with cell-value text overlaid. Records ``accuracy`` (diagonal sum / total,
+    always computed from raw counts regardless of the ``normalize`` setting).
+
+    Parameters
+    ----------
+    model : Any
+        Fitted classifier implementing ``predict``.
+    normalize : {"true", "pred", "all"} or None, default "true"
+        Row-normalization strategy passed to the chart builder.
+        ``"true"`` normalizes each row by the true-class total (recall
+        fractions); ``"pred"`` by the predicted-class total (precision
+        fractions); ``"all"`` by the grand total; ``None`` shows raw counts.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for reproducible train/test splits.
+    theme : Theme, optional
+        Ferrum theme applied to the output chart.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ConfusionMatrixVisualizer(clf).fit(X, y)
+    >>> viz._metrics["accuracy"]
+    0.94
+    >>> viz.show_svg()
     """
 
     def __init__(
@@ -200,9 +284,29 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
 
 
 class ClassificationReportVisualizer(FerrumVisualizer):
-    """Per-class precision/recall/F1 heatmap (rect + text overlay).
+    """Per-class precision, recall, and F1-score heatmap with text overlay.
 
-    Reports ``f1_macro`` as a scalar metric.
+    Wraps ``_classification_report_chart()``. Produces a rect-mark heatmap
+    with one row per class and columns for precision, recall, and F1.
+    Records ``f1_macro`` (macro-averaged F1 across all classes, computed via
+    ``sklearn.metrics.f1_score``) as the headline scalar metric.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted classifier implementing ``predict``.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for reproducible train/test splits.
+    theme : Theme, optional
+        Ferrum theme applied to the output chart.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ClassificationReportVisualizer(clf).fit(X, y)
+    >>> viz._metrics["f1_macro"]
+    0.91
+    >>> viz.show_svg()
     """
 
     def __init__(

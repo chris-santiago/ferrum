@@ -18,10 +18,47 @@ from .base import FerrumVisualizer
 
 
 class LearningCurveVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``learning_curve_chart``.
+    """Visualize training and cross-validation scores as training size grows.
 
-    Materializes per-(train_size, split) mean scores and records the
-    final-training-size test mean as ``final_test_score`` for the repr.
+    Wraps ``learning_curve_chart`` in the sklearn visualizer protocol.
+    Call ``fit(X, y)`` to run cross-validation across the requested
+    training-size grid; call ``show()`` to retrieve the rendered
+    ``Chart``.  The headline metric ``final_test_score`` (mean test score
+    at the largest training size) is recorded in ``_metrics`` and shown
+    in ``repr``.
+
+    Parameters
+    ----------
+    model : Any
+        Unfitted or fitted sklearn-compatible estimator.
+    cv : int, default 5
+        Number of cross-validation folds passed to
+        ``sklearn.model_selection.learning_curve``.
+    scoring : str or callable, optional
+        Sklearn scoring string or callable.  Defaults to the estimator's
+        own ``score`` method when ``None``.
+    train_sizes : array-like, optional
+        Relative or absolute training-set sizes to evaluate.  Passed
+        directly to ``learning_curve``; defaults to ``np.linspace(0.1,
+        1.0, 5)`` when ``None``.
+    ci_style : {"band", "bar"}, default "band"
+        How to render the cross-validation confidence interval.
+        ``"band"`` draws a shaded ribbon; ``"bar"`` draws error bars.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` and from there to
+        ``learning_curve`` for reproducible CV splits (ChaCha8 RNG).
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> viz = fm.LearningCurveVisualizer(
+    ...     LogisticRegression(), cv=5, scoring="accuracy"
+    ... ).fit(X_train, y_train)
+    >>> chart = viz.show()
     """
 
     def __init__(
@@ -68,10 +105,54 @@ class LearningCurveVisualizer(FerrumVisualizer):
 
 
 class ValidationCurveVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``validation_curve_chart``.
+    """Visualize train/test scores as a single hyperparameter is swept.
 
-    Records the test-score-maximizing ``param`` value as ``best_param``
-    and the corresponding mean as ``best_test_score``.
+    Wraps ``validation_curve_chart`` in the sklearn visualizer protocol.
+    For each value in ``values``, ``sklearn.model_selection.validation_curve``
+    runs ``cv`` folds and records the mean score.  The value that
+    maximises the mean test score is stored as ``best_param`` in
+    ``_metrics``; the corresponding mean score is stored as
+    ``best_test_score``.
+
+    Parameters
+    ----------
+    model : Any
+        Unfitted or fitted sklearn-compatible estimator.
+    param : str
+        Name of the hyperparameter to sweep, e.g. ``"C"`` for
+        ``LogisticRegression`` or ``"max_depth"`` for tree estimators.
+        Must be a valid ``__init__`` parameter of ``model``.
+    values : array-like
+        Grid of candidate values for ``param``.  Passed directly to
+        ``sklearn.model_selection.validation_curve`` as ``param_range``.
+    cv : int, default 5
+        Number of cross-validation folds.
+    scoring : str or callable, optional
+        Sklearn scoring string or callable.  Defaults to the estimator's
+        own ``score`` method when ``None``.
+    log_scale : bool or "auto", default "auto"
+        Whether to render the x-axis (param values) on a log scale.
+        ``"auto"`` enables log scale when the ratio between the largest
+        and smallest value exceeds 100.
+    ci_style : {"band", "bar"}, default "band"
+        How to render the cross-validation confidence interval.
+        ``"band"`` draws a shaded ribbon; ``"bar"`` draws error bars.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for reproducible CV splits
+        (ChaCha8 RNG).
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.svm import SVC
+    >>> import numpy as np
+    >>> viz = fm.ValidationCurveVisualizer(
+    ...     SVC(), param="C", values=np.logspace(-3, 3, 7), cv=5
+    ... ).fit(X_train, y_train)
+    >>> chart = viz.show()
     """
 
     def __init__(
@@ -128,9 +209,43 @@ class ValidationCurveVisualizer(FerrumVisualizer):
 
 
 class CVScoresVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``cv_scores_chart``.
+    """Visualize the distribution of per-fold cross-validation scores.
 
-    Records the test-fold mean and std as ``test_mean`` / ``test_std``.
+    Wraps ``cv_scores_chart`` in the sklearn visualizer protocol.  After
+    ``fit(X, y)``, ``_metrics`` contains ``test_mean`` (mean test-fold
+    score across all folds) and ``test_std`` (standard deviation of
+    test-fold scores).
+
+    Parameters
+    ----------
+    model : Any
+        Unfitted or fitted sklearn-compatible estimator.
+    cv : int, default 5
+        Number of cross-validation folds.
+    scoring : str or callable, optional
+        Sklearn scoring string or callable.  Defaults to the estimator's
+        own ``score`` method when ``None``.
+    kind : {"box", "bar", "strip"}, default "box"
+        Chart geometry used to display the fold-score distributions.
+    split : {"both", "test", "train"}, default "both"
+        Which CV splits to include in the chart.  ``"both"`` shows train
+        and test folds side by side; ``"test"`` or ``"train"`` shows
+        only one.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for reproducible CV splits
+        (ChaCha8 RNG).
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import RandomForestClassifier
+    >>> viz = fm.CVScoresVisualizer(
+    ...     RandomForestClassifier(n_estimators=100), cv=10, kind="box"
+    ... ).fit(X_train, y_train)
+    >>> chart = viz.show()
     """
 
     def __init__(
@@ -172,9 +287,55 @@ class CVScoresVisualizer(FerrumVisualizer):
 
 
 class AlphaSelectionVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``alpha_selection_chart``.
+    """Visualize cross-validated scores over a regularization-strength grid.
 
-    Records the test-score-maximizing alpha as ``best_alpha``.
+    Wraps ``alpha_selection_chart`` in the sklearn visualizer protocol.
+    Designed for regularized regressors such as ``Ridge``, ``Lasso``, and
+    ``ElasticNet`` — estimators that expose an ``alpha`` hyperparameter
+    controlling L1/L2 penalty strength.  For each value in ``alphas``,
+    cross-validation produces a mean score; the alpha that maximises the
+    mean test score is stored as ``best_alpha`` in ``_metrics``, and the
+    corresponding score as ``best_score``.
+
+    Parameters
+    ----------
+    model : Any
+        Unfitted regularized regressor with an ``alpha`` hyperparameter
+        (e.g. ``sklearn.linear_model.Ridge``, ``Lasso``, ``ElasticNet``).
+        Passing an estimator without an ``alpha`` parameter will raise at
+        ``fit`` time.
+    alphas : array-like
+        Grid of regularization-strength values to evaluate.  Passed
+        directly to the underlying ``alpha_selection`` compute; log-spaced
+        grids (e.g. ``np.logspace(-4, 4, 50)``) are typical.
+    cv : int, default 5
+        Number of cross-validation folds.
+    scoring : str or callable, optional
+        Sklearn scoring string or callable.  Defaults to the estimator's
+        own ``score`` method when ``None``.
+    log_scale : bool, default True
+        Whether to render the x-axis (alpha values) on a log scale.
+        Defaults to ``True`` because alpha grids are almost always
+        log-spaced.
+    highlight_best : bool, default True
+        When ``True``, draws a vertical rule at the alpha value that
+        maximises the mean test score.
+    random_state : int, optional
+        Seed forwarded to ``ModelSource`` for reproducible CV splits
+        (ChaCha8 RNG).
+    theme : Theme, optional
+        Per-chart theme override.  Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.linear_model import Ridge
+    >>> import numpy as np
+    >>> viz = fm.AlphaSelectionVisualizer(
+    ...     Ridge(), alphas=np.logspace(-4, 4, 40), cv=5
+    ... ).fit(X_train, y_train)
+    >>> chart = viz.show()
     """
 
     def __init__(

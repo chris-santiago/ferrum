@@ -15,14 +15,48 @@ from .base import FerrumVisualizer
 
 
 class FeatureImportancesVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``importance_chart``.
+    """Visualize feature importances from a fitted sklearn estimator.
 
-    ``method``: ``"builtin"`` reads the estimator's ``feature_importances_``
-    or ``coef_`` (std=0); ``"permutation"`` runs sklearn
-    ``permutation_importance`` with the supplied ``random_state``.
-    ``top_k`` is informational at the materialization layer and threaded
-    into the chart builder so the rendered chart shows only the most
-    important features.
+    Wraps ``importance_chart`` in the sklearn-protocol visualizer interface.
+    ``method="builtin"`` reads ``feature_importances_`` or ``coef_`` directly
+    from the estimator (std is 0 in this case). ``method="permutation"`` runs
+    ``sklearn.inspection.permutation_importance`` using the supplied
+    ``random_state`` seed. The headline metric recorded in ``_metrics`` is
+    ``top_feature_importance`` — the importance of the highest-ranked feature
+    after sorting.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted sklearn-compatible estimator. Must expose
+        ``feature_importances_`` or ``coef_`` (``method="builtin"``) or
+        support ``predict`` / ``predict_proba`` (``method="permutation"``).
+    method : {"builtin", "permutation"}, default "builtin"
+        Strategy for extracting importances. ``"builtin"`` reads the
+        estimator attribute directly (zero standard deviation). ``"permutation"``
+        shuffles each feature and measures the drop in score.
+    top_k : int or None, default 20
+        Maximum number of features to display, ranked by importance. Pass
+        ``None`` to show all features.
+    orient : {"horizontal", "vertical"}, default "horizontal"
+        Bar orientation in the rendered chart.
+    error_bars : bool, default True
+        Whether to draw ±1 std error bars. Has no visual effect when
+        ``method="builtin"`` because std is always 0 in that case.
+    random_state : int or None, optional
+        RNG seed forwarded to ``permutation_importance``. Ignored when
+        ``method="builtin"``.
+    theme : Theme or None, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import RandomForestClassifier
+    >>> model = RandomForestClassifier(n_estimators=50, random_state=0).fit(X_train, y_train)
+    >>> viz = fm.FeatureImportancesVisualizer(model).fit(X_train, y_train)
+    >>> viz.show()
     """
 
     def __init__(
@@ -64,13 +98,53 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
 
 
 class SHAPVisualizer(FerrumVisualizer):
-    """Sklearn-protocol visualizer for ``shap_chart``.
+    """Visualize SHAP values from a fitted sklearn estimator.
 
-    ``kind`` selects the underlying chart: ``"beeswarm"`` (default,
-    per-sample scatter), ``"bar"`` (mean-|shap| aggregated), or
-    ``"waterfall"`` (single-sample cumulative — requires ``sample_idx``).
-    The visualizer records ``top_abs_shap`` (max mean-|shap| across
-    features) in ``_metrics`` for the repr.
+    Wraps the ``shap_chart`` family in the sklearn-protocol visualizer
+    interface. Requires the ``shap`` library (``pip install ferrum[shap]``).
+    Three chart kinds are supported: ``"beeswarm"`` shows per-sample SHAP
+    scatter colored by feature value; ``"bar"`` shows mean absolute SHAP
+    aggregated per feature; ``"waterfall"`` shows the cumulative contribution
+    for a single sample selected by ``sample_idx``. The headline metric
+    recorded in ``_metrics`` is ``top_abs_shap`` — the maximum mean absolute
+    SHAP value across all features.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted sklearn-compatible estimator supported by the ``shap`` library
+        (e.g. tree ensembles, linear models with a ``shap.Explainer``).
+    kind : {"beeswarm", "bar", "waterfall"}, default "beeswarm"
+        Chart style to render. ``"waterfall"`` requires ``sample_idx`` to be
+        set; a ``ValueError`` is raised at ``.show()`` time if it is omitted.
+    max_display : int, default 20
+        Maximum number of features to include in the chart, ranked by mean
+        absolute SHAP value.
+    sample_idx : int or None, optional
+        Row index of the sample to explain. Required when ``kind="waterfall"``;
+        ignored for ``"beeswarm"`` and ``"bar"``.
+    order : str, default "abs_mean"
+        Feature ordering strategy. Applied only when ``kind="beeswarm"``.
+        Reserved for future use (no-op today) when ``kind`` is ``"bar"`` or
+        ``"waterfall"``.
+    background : Any or None, optional
+        Background dataset passed to the SHAP explainer for models that
+        require a reference distribution (e.g. kernel SHAP). Pass ``None``
+        to use the explainer's default.
+    random_state : int or None, optional
+        RNG seed forwarded to the underlying ``ModelSource``. Ignored when
+        SHAP computation is deterministic.
+    theme : Theme or None, optional
+        Per-chart theme override. Falls back to the global default when
+        ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import GradientBoostingClassifier
+    >>> model = GradientBoostingClassifier(random_state=0).fit(X_train, y_train)
+    >>> viz = fm.SHAPVisualizer(model, kind="beeswarm").fit(X_train, y_train)
+    >>> viz.show()
     """
 
     def __init__(
