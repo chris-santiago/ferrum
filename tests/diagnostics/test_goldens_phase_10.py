@@ -117,3 +117,18 @@ def test_golden_discrimination_threshold_binary():
     model, X, y = _binary_xy()
     chart = ferrum.discrimination_threshold_chart(model, X, y, n_thresholds=20)
     _check_golden(chart.show_svg(), "discrimination_threshold_binary")
+
+
+# --- 10c goldens (classification matrices) ---
+
+
+def test_golden_confusion_matrix_binary():
+    model, X, y = _binary_xy()
+    chart = ferrum.confusion_matrix_chart(model, X, y)
+    _check_golden(chart.show_svg(), "confusion_matrix_binary")
+
+
+def test_golden_confusion_matrix_multiclass():
+    model, X, y = _multi_xy()
+    chart = ferrum.confusion_matrix_chart(model, X, y, normalize="true")
+    _check_golden(chart.show_svg(), "confusion_matrix_multiclass")

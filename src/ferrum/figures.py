@@ -186,6 +186,33 @@ def lift_chart(
     return _lift_chart_from_source(source, theme=theme)
 
 
+# --- 10c: classification matrices ------------------------------------
+
+
+def confusion_matrix_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    normalize: str | None = "true",
+    annotate: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Confusion matrix heatmap — see ferrum-spec.md §3.14.
+
+    Ordinal heatmap of (actual, predicted) cell values with optional
+    per-cell text labels via the Phase 10c text channel. ``normalize``
+    follows sklearn semantics: ``None`` for raw counts,
+    ``"true"``/``"pred"``/``"all"`` for normalized fractions.
+    """
+    from ferrum._diagnostics.charts import _confusion_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _confusion_chart_from_source(
+        source, normalize=normalize, annotate=annotate, theme=theme,
+    )
+
+
 def discrimination_threshold_chart(
     model_or_source: Any,
     X: Any = None,

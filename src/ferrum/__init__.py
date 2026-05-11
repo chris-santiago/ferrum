@@ -80,6 +80,7 @@ from ferrum.figures import (
     gain_chart,
     lift_chart,
     discrimination_threshold_chart,
+    confusion_matrix_chart,
 )
 
 # Phase 9e — figure-level convenience functions
@@ -138,4 +139,5 @@ __all__ = [
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
+    "confusion_matrix_chart",
 ]

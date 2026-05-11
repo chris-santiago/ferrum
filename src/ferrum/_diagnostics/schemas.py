@@ -67,3 +67,12 @@ SCHEMA_DISCRIMINATION_THRESHOLD = pl.Schema({
     "queue_rate": pl.Float64,
     # "model": pl.Utf8 (optional)
 })
+
+# Phase 10c — classification matrices
+SCHEMA_CONFUSION = pl.Schema({
+    "actual": pl.Utf8,
+    "predicted": pl.Utf8,
+    "value": pl.Float64,
+    "value_fmt": pl.Utf8,
+    # "model": pl.Utf8 (optional)
+})

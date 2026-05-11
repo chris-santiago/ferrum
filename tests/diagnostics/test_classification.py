@@ -226,3 +226,68 @@ def test_visualizer_unfit_repr():
     model = load_fixture("binary_logistic")
     viz = ferrum.ROCVisualizer(model)
     assert repr(viz) == "ROCVisualizer(unfit)"
+
+
+# --- 10c: confusion matrix (Task 18) ----------------------------------
+
+
+def test_confusion_matrix_schema(binary_source):
+    cm = binary_source.confusion_matrix()
+    assert set(cm.columns) == {"actual", "predicted", "value", "value_fmt"}
+    assert cm.height == 4  # 2x2 for binary
+
+
+def test_confusion_matrix_normalized(binary_source):
+    import polars as pl
+    cm = binary_source.confusion_matrix(normalize="true")
+    assert cm.height == 4
+    row_sums = (
+        cm.group_by("actual")
+        .agg(pl.col("value").sum())
+        .sort("actual")["value"]
+        .to_list()
+    )
+    for s in row_sums:
+        assert abs(s - 1.0) < 1e-9
+
+
+def test_confusion_matrix_multiclass(multi_source):
+    cm = multi_source.confusion_matrix()
+    assert cm.height == 9  # 3x3 for 3-class
+
+
+def test_confusion_matrix_caching(binary_source):
+    assert binary_source.confusion_matrix() is binary_source.confusion_matrix()
+
+
+def test_mark_confusion_renders(binary_source):
+    cm = binary_source.confusion_matrix(normalize="true")
+    svg = ferrum.Chart(cm).mark_confusion(normalize="true").show_svg()
+    assert "<svg" in svg
+    # Annotated by default — text labels appear (data labels + axis labels).
+    assert svg.count("<text ") >= 4
+
+
+def test_mark_confusion_annotate_off(binary_source):
+    cm = binary_source.confusion_matrix(normalize=None)
+    svg = ferrum.Chart(cm).mark_confusion(annotate=False).show_svg()
+    assert "<svg" in svg
+
+
+def test_confusion_matrix_chart_binary():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.confusion_matrix_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_confusion_matrix_chart_multiclass():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.confusion_matrix_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        normalize="true",
+    )
+    assert "<svg" in chart.show_svg()

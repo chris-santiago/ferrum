@@ -1009,6 +1009,42 @@ class Chart:
         new._position = position
         return new
 
+    def mark_confusion(
+        self,
+        *,
+        normalize: str | None = None,
+        annotate: bool = True,
+        color_field: str = "value",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Confusion-matrix mark — see ferrum-spec.md §3.3.
+
+        Expects the long-form data shape from ``ModelSource.confusion_matrix()``:
+        ``actual``, ``predicted``, ``value``, ``value_fmt``. Renders an
+        ordinal heatmap of cell values with optional per-cell text labels
+        (controlled by ``annotate``; reads ``value_fmt`` via the Phase 10c
+        text channel).
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("confusion", position)
+        from ferrum.marks.diagnostic import desugar_confusion
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "confusion",
+            {
+                "normalize": normalize,
+                "annotate": annotate,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_confusion,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

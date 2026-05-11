@@ -294,3 +294,42 @@ def desugar_discrimination_threshold(
         {"mark": "line",
          "encoding": {"x": "threshold", "y": "value", "color": "metric"}},
     ])
+
+
+# --- 10c: classification matrices ------------------------------------
+
+
+def desugar_confusion(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    normalize: str | None = None,
+    annotate: bool = True,
+    color_field: str = "value",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
+
+    Data contract: ``actual``, ``predicted``, ``value``, ``value_fmt`` as
+    emitted by ``ModelSource.confusion_matrix()``. The heatmap layer
+    encodes ``color=value`` (continuous color scale, see Phase 10c-pre
+    mark_rect fix); the optional text layer encodes ``text=value_fmt``
+    via the Phase 10c-pre ``text`` channel.
+
+    ``normalize`` is informational at the mark layer (the chart builder
+    is responsible for shaping the data); the user-visible normalization
+    happens upstream in ``ModelSource.confusion_matrix``.
+    """
+    del normalize, x_field, y_field
+    layers: list[dict] = [
+        {
+            "mark": "rect",
+            "encoding": {"x": "predicted", "y": "actual", "color": color_field},
+        },
+    ]
+    if annotate:
+        layers.append({
+            "mark": "text",
+            "encoding": {"x": "predicted", "y": "actual", "text": "value_fmt"},
+        })
+    return ("__layered__", [], None, None, layers)

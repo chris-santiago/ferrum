@@ -570,6 +570,52 @@ class ModelSource:
         self._cache[key] = df
         return df
 
+    def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
+        """Confusion matrix in long form: one row per (actual, predicted) cell.
+
+        ``normalize``: ``None`` for raw counts, ``"true"``/``"pred"``/``"all"``
+        for sklearn-style normalization. ``value`` is the (possibly
+        normalized) count; ``value_fmt`` is a stringified label suitable for
+        ``mark_text`` overlay (integer counts when unnormalized, two-decimal
+        fractions when normalized).
+        """
+        key = self._cache_key("confusion_matrix", normalize=normalize)
+        if key in self._cache:
+            return self._cache[key]
+        require_sklearn("confusion_matrix")
+        from sklearn.metrics import confusion_matrix as _cm
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.confusion_matrix() requires y to be provided."
+            )
+        y_true = np.asarray(self._y.to_numpy())
+        X_np = self._X.to_numpy()
+        y_pred = np.asarray(self._model.predict(X_np))
+
+        if self._class_names is not None:
+            labels: list = list(self._class_names)
+        elif hasattr(self._model, "classes_"):
+            labels = list(self._model.classes_)
+        else:
+            labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
+
+        cm = _cm(y_true, y_pred, labels=labels, normalize=normalize)
+        rows: list[dict] = []
+        for i, a in enumerate(labels):
+            for j, p in enumerate(labels):
+                val = float(cm[i, j])
+                fmt = f"{val:.2f}" if normalize is not None else f"{int(val)}"
+                rows.append({
+                    "actual": str(a),
+                    "predicted": str(p),
+                    "value": val,
+                    "value_fmt": fmt,
+                })
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
     def _sweep_thresholds(
         self,
         y_true: np.ndarray,

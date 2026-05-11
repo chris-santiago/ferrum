@@ -225,6 +225,24 @@ def _lift_chart_from_source(
     return chart
 
 
+def _confusion_chart_from_source(
+    source: Any,
+    *,
+    normalize: str | None = "true",
+    annotate: bool = True,
+    theme: Any = None,
+):
+    """Build a confusion-matrix heatmap chart from a ModelSource."""
+    import ferrum
+    df = source.confusion_matrix(normalize=normalize)
+    chart = ferrum.Chart(df).mark_confusion(
+        normalize=normalize, annotate=annotate,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,
