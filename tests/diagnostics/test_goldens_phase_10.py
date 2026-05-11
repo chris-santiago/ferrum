@@ -389,6 +389,22 @@ def test_golden_decision_boundary_binary():
     _check_golden(chart.show_svg(), "decision_boundary_binary_logistic")
 
 
+def test_golden_decision_boundary_binary_with_scatter():
+    """scatter=True overlay golden — true class colors and boundary
+    colors share the same continuous viridis scale so misclassifications
+    pop.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.decision_boundary_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        features=(0, 1), grid_resolution=40, scatter=True,
+    )
+    _check_golden(
+        chart.show_svg(), "decision_boundary_binary_with_scatter",
+    )
+
+
 # --- 10g goldens (feature ranking + parallel coordinates) ---
 
 

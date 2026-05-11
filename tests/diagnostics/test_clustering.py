@@ -250,6 +250,49 @@ def test_decision_boundary_chart_binary():
     assert "<svg" in chart.show_svg()
 
 
+def test_decision_boundary_chart_scatter_overlay():
+    """scatter=True must produce a TRUE multi-layer overlay (not an
+    HConcatChart fallthrough). Both layers share the same DataFrame so
+    the chart-level color scale resolves continuous-from-z and the
+    scatter's true-class-as-float column maps onto the same scale —
+    matching boundary color and point color makes misclassifications
+    visually pop. Regression test for the post-merge fix.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.decision_boundary_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        features=(0, 1), grid_resolution=40, scatter=True,
+    )
+    # Must be a single layered Chart (not HConcatChart).
+    assert type(chart).__name__ == "Chart"
+    assert chart._layers is not None
+    assert len(chart._layers) == 2
+    svg = chart.show_svg()
+    # The scatter overlay emits SVG <circle> elements with a black
+    # stroke (uniform across all points).
+    assert 'stroke="#000000"' in svg
+    # Boundary cells and points share the same viridis color palette;
+    # both #440154 (low end) and #fde725 (high end) should appear.
+    assert "#440154" in svg
+    assert "#fde725" in svg
+
+
+def test_decision_boundary_chart_scatter_overlay_proba_mode():
+    """scatter=True works with proba=True too (z domain shifts from
+    class index to [0,1] but the scatter_z mapping handles both).
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    chart = ferrum.decision_boundary_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        features=(0, 1), grid_resolution=40, proba=True, scatter=True,
+    )
+    assert chart._layers is not None
+    assert len(chart._layers) == 2
+    assert "<svg" in chart.show_svg()
+
+
 def test_decision_boundary_rejects_three_features():
     """features=(0, 1, 2) must raise; the path needs exactly 2 axes."""
     model = load_fixture("binary_logistic")

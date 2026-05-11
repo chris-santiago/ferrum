@@ -1425,14 +1425,30 @@ def _decision_boundary_chart_from_source(
 ):
     """Decision-boundary heatmap of model predictions over a 2D feature grid.
 
-    Pre-computes a grid_resolution × grid_resolution grid of x/x2/y/y2
-    cell bounds and the model's prediction (class index when
-    ``proba=False``, probability when ``proba=True``). The grid is fed to
-    ``mark_decision_boundary`` (rect-based). When ``scatter=True`` an
-    overlay scatter of the training points is composed via ferrum's
-    ``+`` compositor — note that multi-data layering currently renders
-    as horizontal concatenation per the ChartSpec one-batch contract;
-    ``scatter=False`` (default) keeps the focus on the boundary itself.
+    Pre-computes a ``grid_resolution × grid_resolution`` grid of
+    ``x / x2 / y / y2`` cell bounds and the model's prediction
+    (``z`` = class index when ``proba=False``, ``P(class=1)`` when
+    ``proba=True``). The grid is fed to ``mark_decision_boundary``
+    (rect-based).
+
+    When ``scatter=True`` and ``y`` is available, the training scatter
+    is composed as a true overlay layer (not horizontal concat) by
+    constructing a single unified DataFrame: grid rows hold
+    ``x/x2/y/y2/z`` with the scatter coordinates null, and scatter rows
+    hold ``scatter_x/scatter_y/scatter_z`` (= true class label mapped to
+    the same numeric domain as ``z``) with the grid columns null. Both
+    layers share the same DataFrame identity so ``Chart.__add__``
+    produces a true layered chart and both color encodings resolve
+    against the same continuous color scale — matching boundary and
+    point colors means the cell-color directly says "predicted class /
+    probability" while the point's color says "true class", so a
+    misclassified point pops against its neighborhood.
+
+    Non-numeric class labels (e.g. string labels) are mapped to a
+    zero-based class-index float via the model's ``classes_`` attribute
+    when present, otherwise via lexicographic order. The black point
+    stroke is uniform; ``size=80`` ensures visibility against any
+    background color including same-color cells.
     """
     import ferrum
     import numpy as np
@@ -1469,24 +1485,76 @@ def _decision_boundary_chart_from_source(
         z = np.asarray(source._model.predict(grid)).astype(np.float64)
     flat_x = xx.ravel()
     flat_y = yy.ravel()
-    grid_df = pl.DataFrame({
-        "x": [float(v) - dx / 2 for v in flat_x],
-        "x2": [float(v) + dx / 2 for v in flat_x],
-        "y": [float(v) - dy / 2 for v in flat_y],
-        "y2": [float(v) + dy / 2 for v in flat_y],
-        "z": [float(v) for v in z],
-    })
-    chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
-    if scatter and source._y is not None:
-        scatter_df = pl.DataFrame({
-            "x": [float(v) for v in x_col],
-            "y": [float(v) for v in y_col],
-            "label": source._y.to_numpy().tolist(),
+
+    do_scatter = scatter and source._y is not None
+    if not do_scatter:
+        # Pure-boundary path: no overlay, no padding columns, no row mixing.
+        grid_df = pl.DataFrame({
+            "x": [float(v) - dx / 2 for v in flat_x],
+            "x2": [float(v) + dx / 2 for v in flat_x],
+            "y": [float(v) - dy / 2 for v in flat_y],
+            "y2": [float(v) + dy / 2 for v in flat_y],
+            "z": [float(v) for v in z],
         })
-        overlay = ferrum.Chart(scatter_df).mark_point().encode(
-            x="x", y="y", color="label",
-        )
-        chart = chart + overlay
+        chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
+        if theme is not None:
+            chart = chart.theme(theme)
+        return chart
+
+    # Map y labels to the same numeric domain as z. For proba=False,
+    # z is the predicted class index (e.g. integer-cast prediction);
+    # scatter_z should be the true class index in the same encoding so
+    # matching colors = correct prediction. For proba=True, z is
+    # P(class=1) ∈ [0, 1] and the true label is 0 or 1; map y → float
+    # accordingly. Prefer the model's classes_ attribute when present;
+    # fall back to lex sort.
+    y_raw = source._y.to_numpy()
+    if hasattr(source._model, "classes_"):
+        class_order = list(source._model.classes_)
+    else:
+        class_order = sorted({v for v in y_raw.tolist()})
+    label_to_idx = {c: float(i) for i, c in enumerate(class_order)}
+    scatter_z = np.array(
+        [label_to_idx.get(v, float("nan")) for v in y_raw.tolist()],
+        dtype=np.float64,
+    )
+
+    n_grid = len(flat_x)
+    n_scatter = len(x_col)
+    nulls_grid = [None] * n_grid
+    nulls_scatter = [None] * n_scatter
+
+    # Unified DataFrame: grid rows first, then scatter rows. Each layer's
+    # encoded columns are populated on its own rows and null on the
+    # other layer's rows — mark_rect skips null x/x2/y/y2 cells and
+    # mark_point skips null scatter_x/scatter_y, so each layer renders
+    # only its intended rows. The shared `z` color scale is built from
+    # the union of grid `z` and scatter `scatter_z` values; both are on
+    # the same numeric domain (class indices, or [0,1] for proba) so the
+    # continuous scale resolves coherently across layers.
+    unified = pl.DataFrame({
+        "x": [float(v) - dx / 2 for v in flat_x] + nulls_scatter,
+        "x2": [float(v) + dx / 2 for v in flat_x] + nulls_scatter,
+        "y": [float(v) - dy / 2 for v in flat_y] + nulls_scatter,
+        "y2": [float(v) + dy / 2 for v in flat_y] + nulls_scatter,
+        "z": [float(v) for v in z] + nulls_scatter,
+        "scatter_x": nulls_grid + [float(v) for v in x_col],
+        "scatter_y": nulls_grid + [float(v) for v in y_col],
+        "scatter_z": nulls_grid + [float(v) for v in scatter_z],
+    }, schema={
+        "x": pl.Float64, "x2": pl.Float64, "y": pl.Float64, "y2": pl.Float64,
+        "z": pl.Float64,
+        "scatter_x": pl.Float64, "scatter_y": pl.Float64,
+        "scatter_z": pl.Float64,
+    })
+
+    grid_chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
+    overlay = ferrum.Chart(unified).mark_point(
+        stroke="#000000",
+        stroke_width=1.0,
+        size=80.0,
+    ).encode(x="scatter_x", y="scatter_y", color="scatter_z")
+    chart = grid_chart + overlay
     if theme is not None:
         chart = chart.theme(theme)
     return chart
