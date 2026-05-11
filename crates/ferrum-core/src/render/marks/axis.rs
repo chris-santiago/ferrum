@@ -4,21 +4,23 @@ use crate::layout::{AxisLayout, AxisOrient, TextAnchor, ThemeInputs};
 use crate::render::svg::{Stroke, SvgBuffer, TextStyle};
 
 pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
-    let line_style = Stroke {
-        stroke: theme.axis_line_color,
-        stroke_width: theme.axis_line_width,
-        stroke_dash: None,
-    };
     let r = axis.axis_line;
-    out.line(r.x, r.y, r.x + r.w, r.y + r.h, &line_style);
+    if theme.axis_line {
+        let line_style = Stroke {
+            stroke: theme.axis_line_color,
+            stroke_width: theme.axis_line_width,
+            stroke_dash: None,
+        };
+        out.line(r.x, r.y, r.x + r.w, r.y + r.h, &line_style);
+    }
 
     let tick_style = Stroke {
         stroke: theme.tick_color,
-        stroke_width: theme.axis_line_width,
+        stroke_width: theme.tick_width,
         stroke_dash: None,
     };
     let label_style_base = TextStyle {
-        fill: theme.font_color,
+        fill: theme.label_color,
         font_size: theme.label_font_size,
         anchor: TextAnchor::Middle,
         angle: 0.0,
