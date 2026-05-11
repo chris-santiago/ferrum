@@ -11,6 +11,8 @@ reference lines that Rust's mark_rule renders one-line-per-row.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import polars as pl
 
 
@@ -37,3 +39,79 @@ def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
     if col not in df.columns:
         return df
     return df.sort(col, nulls_last=True)
+
+
+# ---------------------------------------------------------------------------
+# 10a builders
+# ---------------------------------------------------------------------------
+
+
+def _residuals_chart_from_source(
+    source: Any,
+    *,
+    kind: str = "studentized",
+    panels: Any = None,  # None / "single" / list of panel names
+    theme: Any = None,
+):
+    """Build a residuals diagnostic chart from a ModelSource."""
+    import ferrum
+    df = source.predictions()
+    if panels in (None, "single"):
+        chart = ferrum.Chart(df).mark_residuals(kind=kind)
+        if theme is not None:
+            chart = chart.theme(theme)
+        return chart
+
+    panel_list = panels if isinstance(panels, list) else ["residuals_vs_fitted"]
+    charts = [_residuals_panel(df, name) for name in panel_list]
+    return _grid_panels(charts, theme=theme)
+
+
+def _residuals_panel(df: pl.DataFrame, name: str):
+    """One sub-panel of a multi-panel residuals chart. 10a ships only the
+    canonical residuals_vs_fitted; the rest land in 10h alongside the
+    leverage-aware Cook's distance path.
+    """
+    import ferrum
+    if name == "residuals_vs_fitted":
+        return ferrum.Chart(df).mark_residuals()
+    if name == "qq":
+        return ferrum.Chart(df).mark_qq().encode(x="studentized_residual")
+    if name == "scale_location":
+        d2 = df.with_columns(
+            pl.col("studentized_residual").abs().sqrt().alias("sqrt_abs_resid")
+        )
+        return ferrum.Chart(d2).mark_point().encode(x="y_pred", y="sqrt_abs_resid")
+    if name == "residuals_vs_leverage":
+        return ferrum.Chart(df).mark_point().encode(x="y_pred", y="residual")
+    raise ValueError(f"unknown residuals panel: {name!r}")
+
+
+def _grid_panels(charts: list, theme: Any = None):
+    """Compose up to 4 panels into a grid using Phase 8a hstack/vstack."""
+    if len(charts) == 1:
+        c = charts[0]
+    elif len(charts) == 2:
+        c = charts[0] | charts[1]
+    elif len(charts) == 3:
+        c = (charts[0] | charts[1]) & charts[2]
+    else:
+        c = (charts[0] | charts[1]) & (charts[2] | charts[3])
+    if theme is not None:
+        c = c.theme(theme)
+    return c
+
+
+def _prediction_error_chart_from_source(
+    source: Any,
+    *,
+    identity_line: bool = True,
+    theme: Any = None,
+):
+    """Build an actual-vs-predicted error chart from a ModelSource."""
+    import ferrum
+    df = source.predictions()
+    chart = ferrum.Chart(df).mark_prediction_error(identity_line=identity_line)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart

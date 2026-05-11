@@ -76,3 +76,30 @@ def test_chart_mark_prediction_error_sorts_by_y_true():
     chart = ferrum.Chart(pred).mark_prediction_error()
     ys = chart._data["y_true"].to_list()
     assert ys == sorted(ys)
+
+
+# --- Task 9: chart builders -------------------------------------------------
+
+
+def test_residuals_chart_from_source_builder():
+    from ferrum._diagnostics.charts import _residuals_chart_from_source
+    source, _ = _ridge_source()
+    chart = _residuals_chart_from_source(source)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_residuals_chart_from_source_raw_kind():
+    from ferrum._diagnostics.charts import _residuals_chart_from_source
+    source, _ = _ridge_source()
+    chart = _residuals_chart_from_source(source, kind="raw")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_prediction_error_chart_from_source_builder():
+    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    source, _ = _ridge_source()
+    chart = _prediction_error_chart_from_source(source)
+    svg = chart.show_svg()
+    assert "<svg" in svg
