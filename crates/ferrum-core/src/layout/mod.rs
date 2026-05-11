@@ -83,7 +83,7 @@ impl std::error::Error for LayoutError {}
 ///
 /// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
 /// and `from_hex_str` helper; for now we construct directly via Srgba::new.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ThemeInputs {
     // Phase 6 layout fields.
     pub padding: f64,
@@ -121,6 +121,37 @@ pub struct ThemeInputs {
     pub point_size_max: f64,  // default 30.0
     pub opacity_min: f64,     // default 0.1
     pub opacity_max: f64,     // default 1.0
+
+    // Themes-T1 additions (ferrum-spec.md §3.13).
+
+    // Typography
+    pub font_family: String,
+    pub font_weight: String,
+    pub title_font_family: String,
+    pub title_font_weight: String,
+    pub title_color: palette::Srgba<u8>,
+    pub title_anchor: TextAnchor,
+    pub title_offset: f64,
+    pub label_font_family: String,
+    pub label_color: palette::Srgba<u8>,
+
+    // Axes
+    pub axis_line: bool,
+    pub tick_width: f64,
+
+    // Grid
+    pub grid_dash: Option<Vec<f64>>,
+    pub grid_opacity: f64,
+
+    // Marks
+    pub point_opacity: f64,
+
+    // Palette
+    pub color_scheme: String,
+
+    // Legend
+    pub legend_direction: LegendDirection,
+    pub legend_title_font_size: f64,
 }
 
 impl Default for ThemeInputs {
@@ -170,6 +201,30 @@ impl Default for ThemeInputs {
             point_size_max: 30.0,
             opacity_min: 0.1,
             opacity_max: 1.0,
+
+            // Themes-T1 — values match current visual identity. T4 will flip these.
+            font_family: "DejaVu Serif".into(),       // resvg default; T4 → "DejaVu Sans"
+            font_weight: "normal".into(),
+            title_font_family: "DejaVu Serif".into(),
+            title_font_weight: "bold".into(),         // T4 → "600"
+            title_color: text_222,
+            title_anchor: TextAnchor::Middle,         // T4 → Start
+            title_offset: 4.0,                        // T4 → 6.0
+            label_font_family: "DejaVu Serif".into(),
+            label_color: text_222,                    // T4 → label_555 = #555555
+
+            axis_line: true,
+            tick_width: 1.0,
+
+            grid_dash: None,
+            grid_opacity: 1.0,
+
+            point_opacity: 1.0,
+
+            color_scheme: "okabe_ito".into(),         // T4 → "tableau10"
+
+            legend_direction: LegendDirection::Vertical,
+            legend_title_font_size: 13.0,             // matches title_font_size
         }
     }
 }
