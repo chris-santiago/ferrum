@@ -14,6 +14,7 @@ from .classification_extra import (
     ClassPredictionErrorVisualizer,
     DiscriminationThresholdVisualizer,
 )
+from .explanation import FeatureImportancesVisualizer
 from .regression import (
     CooksDistanceVisualizer,
     PredictionErrorVisualizer,
@@ -33,4 +34,5 @@ __all__ = [
     "ClassificationReportVisualizer",
     "ClassPredictionErrorVisualizer",
     "ClassBalanceVisualizer",
+    "FeatureImportancesVisualizer",
 ]

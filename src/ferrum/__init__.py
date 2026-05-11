@@ -70,6 +70,7 @@ from ferrum._diagnostics.visualizers import (
     ConfusionMatrixVisualizer,
     CooksDistanceVisualizer,
     DiscriminationThresholdVisualizer,
+    FeatureImportancesVisualizer,
     FerrumVisualizer,
     PRVisualizer,
     PredictionErrorVisualizer,
@@ -86,6 +87,7 @@ from ferrum.figures import (
     discrimination_threshold_chart,
     confusion_matrix_chart,
     class_prediction_error_chart,
+    importance_chart,
 )
 
 # Phase 9e — figure-level convenience functions
@@ -143,8 +145,10 @@ __all__ = [
     "DiscriminationThresholdVisualizer",
     "ConfusionMatrixVisualizer", "ClassificationReportVisualizer",
     "ClassPredictionErrorVisualizer", "ClassBalanceVisualizer",
+    "FeatureImportancesVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
     "confusion_matrix_chart", "class_prediction_error_chart",
+    "importance_chart",
 ]

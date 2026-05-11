@@ -76,3 +76,12 @@ SCHEMA_CONFUSION = pl.Schema({
     "value_fmt": pl.Utf8,
     # "model": pl.Utf8 (optional)
 })
+
+# Phase 10d — feature importance
+SCHEMA_IMPORTANCES = pl.Schema({
+    "feature": pl.Utf8,
+    "importance": pl.Float64,
+    "std": pl.Float64,
+    "rank": pl.Int64,
+    # "model": pl.Utf8 (optional)
+})

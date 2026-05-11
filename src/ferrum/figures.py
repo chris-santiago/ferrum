@@ -236,6 +236,41 @@ def class_prediction_error_chart(
     )
 
 
+# --- 10d: feature importance / SHAP / PDP ----------------------------
+
+
+def importance_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    method: str = "builtin",
+    top_k: int | None = 20,
+    orient: str = "horizontal",
+    error_bars: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Feature-importance chart — see ferrum-spec.md §3.14.
+
+    ``method="builtin"`` reads ``feature_importances_`` / ``coef_`` from
+    the wrapped estimator (std=0). ``method="permutation"`` runs sklearn's
+    ``permutation_importance`` and populates ``std`` for the error bars.
+    """
+    from ferrum._diagnostics.charts import _importance_chart_from_source
+
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _importance_chart_from_source(
+        source,
+        method=method,
+        top_k=top_k,
+        orient=orient,
+        error_bars=error_bars,
+        random_state=random_state,
+        theme=theme,
+    )
+
+
 def discrimination_threshold_chart(
     model_or_source: Any,
     X: Any = None,

@@ -335,6 +335,81 @@ def desugar_confusion(
     return ("__layered__", [], None, None, layers)
 
 
+# --- 10d: feature importance / SHAP / PDP -----------------------------
+
+
+def desugar_importance(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    orient: str = "horizontal",
+    error_bars: bool = True,
+    top_k: int | None = None,
+    color_field: str | None = None,
+    x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Feature-importance mark: bars (per feature) + optional error bars.
+
+    Data contract: ``feature`` (Utf8), ``importance`` (Float64), ``std``
+    (Float64) as emitted by ``ModelSource.importances()``. The calling
+    chart builder pre-computes ``imp_lower = importance - std`` and
+    ``imp_upper = importance + std`` so the rule layer can reference them
+    directly. ``top_k`` is informational at the mark layer — the chart
+    builder truncates the DataFrame to the top-k rows before constructing
+    the chart so the scale domain reflects only the visible rows.
+
+    ``orient="horizontal"`` (default) renders horizontal bars with the
+    Phase 10d-pre quantitative-x + ordinal-y bar path and horizontal
+    ranged-rule error bars. ``orient="vertical"`` flips the axes (ordinal
+    x, quantitative y), using the original boxplot-whisker-style ranged
+    rule.
+
+    ``x_scale_domain`` is supplied by the chart builder so the value axis
+    starts at 0 (bar charts conventionally include zero) and extends
+    slightly past the max error-bar upper bound; without it bars look
+    truncated by the auto-derived [min, max] domain.
+    """
+    del x_field, y_field, top_k
+    if orient not in ("horizontal", "vertical"):
+        raise ValueError(
+            f"mark_importance(orient={orient!r}) — expected 'horizontal' or 'vertical'."
+        )
+
+    if orient == "horizontal":
+        value_axis, group_axis, err_axis2 = "x", "y", "x2"
+    else:
+        value_axis, group_axis, err_axis2 = "y", "x", "y2"
+    value_field, group_field = "importance", "feature"
+    err_lower, err_upper = "imp_lower", "imp_upper"
+
+    def _value_channel(field: str) -> Any:
+        if x_scale_domain is None:
+            return field
+        from ferrum.encoding import X, Y
+
+        ch_cls = X if value_axis == "x" else Y
+        return ch_cls(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+
+    bar_enc: dict[str, Any] = {
+        value_axis: _value_channel(value_field),
+        group_axis: group_field,
+    }
+    if color_field is not None:
+        bar_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "bar", "encoding": bar_enc}]
+
+    if error_bars:
+        err_enc: dict[str, Any] = {
+            value_axis: _value_channel(err_lower),
+            err_axis2: err_upper,
+            group_axis: group_field,
+        }
+        layers.append({"mark": "rule", "encoding": err_enc})
+
+    return ("__layered__", [], None, None, layers)
+
+
 def desugar_class_prediction_error(
     x_field: str | None,
     y_field: str | None,

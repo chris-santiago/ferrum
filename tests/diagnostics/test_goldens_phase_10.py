@@ -147,3 +147,27 @@ def test_golden_class_prediction_error_multiclass():
     model, X, y = _multi_xy()
     chart = ferrum.class_prediction_error_chart(model, X, y)
     _check_golden(chart.show_svg(), "class_prediction_error_multiclass")
+
+
+# --- 10d goldens (feature importance + SHAP + PDP) ---
+
+
+def _regression_xy():
+    model = load_fixture("regression_rf")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    return model, X, df["y"]
+
+
+def test_golden_importance_chart_builtin():
+    model, X, y = _regression_xy()
+    chart = ferrum.importance_chart(model, X, y)
+    _check_golden(chart.show_svg(), "importance_chart_builtin")
+
+
+def test_golden_importance_chart_permutation():
+    model, X, y = _regression_xy()
+    chart = ferrum.importance_chart(
+        model, X, y, method="permutation", random_state=0,
+    )
+    _check_golden(chart.show_svg(), "importance_chart_permutation")

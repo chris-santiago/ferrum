@@ -1078,6 +1078,43 @@ class Chart:
         new._position = position
         return new
 
+    def mark_importance(
+        self,
+        *,
+        orient: str = "horizontal",
+        error_bars: bool = True,
+        top_k: int | None = None,
+        color_field: str | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Feature-importance mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.importances()``:
+        ``feature``, ``importance``, ``std``. The chart builder is
+        responsible for computing ``imp_lower``/``imp_upper`` columns and
+        truncating to ``top_k`` rows before invoking this method.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("importance", position)
+        from ferrum.marks.diagnostic import desugar_importance
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "importance",
+            {
+                "orient": orient,
+                "error_bars": error_bars,
+                "top_k": top_k,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_importance,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

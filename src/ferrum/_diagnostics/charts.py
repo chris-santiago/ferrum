@@ -335,6 +335,50 @@ def _class_balance_chart_from_dataframe(y_series: Any, *, theme: Any = None):
     return chart
 
 
+def _importance_chart_from_source(
+    source: Any,
+    *,
+    method: str = "builtin",
+    top_k: int | None = 20,
+    orient: str = "horizontal",
+    error_bars: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Build a feature-importance chart from a ModelSource.
+
+    Computes ``imp_lower``/``imp_upper`` from ``importance`` ± ``std`` and
+    truncates to the top-k rows by absolute importance. The value-axis
+    scale domain is set to ``[0, max(imp_upper) * 1.05]`` so bars start
+    at zero (the conventional bar-chart anchor) and the rightmost error
+    bar has a small visual margin.
+    """
+    import ferrum
+
+    df = source.importances(method=method, random_state=random_state)
+    if top_k is not None:
+        df = df.head(top_k)
+    df = df.with_columns([
+        (pl.col("importance") - pl.col("std")).alias("imp_lower"),
+        (pl.col("importance") + pl.col("std")).alias("imp_upper"),
+    ])
+
+    upper_max = float(df["imp_upper"].max())
+    lower_min = float(df["imp_lower"].min())
+    domain_lo = min(0.0, lower_min)
+    domain_hi = max(upper_max, 0.0) * 1.05 if upper_max > 0 else 1.0
+
+    chart = ferrum.Chart(df).mark_importance(
+        orient=orient,
+        error_bars=error_bars,
+        top_k=top_k,
+        x_scale_domain=(domain_lo, domain_hi),
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,

@@ -616,6 +616,97 @@ class ModelSource:
         self._cache[key] = df
         return df
 
+    # --- 10d: feature importance ----------------------------------------
+
+    def importances(
+        self,
+        *,
+        method: str = "builtin",
+        n_repeats: int = 30,
+        scoring: Any = None,
+        random_state: int | None = None,
+    ) -> pl.DataFrame:
+        """Feature importance per feature, sorted by descending |importance|.
+
+        ``method="builtin"`` reads the wrapped model's ``feature_importances_``
+        (tree-based estimators) or ``coef_`` (linear estimators, averaged
+        absolute value across classes for multi-output linears). ``std`` is
+        zero in this path — sklearn's built-in attribute exposes no
+        per-feature variance.
+
+        ``method="permutation"`` calls sklearn's
+        ``permutation_importance`` with ``n_repeats``/``scoring`` and
+        populates ``std`` with the per-feature standard deviation across
+        repeats.
+        """
+        rs = random_state if random_state is not None else self._random_state
+        key = self._cache_key(
+            "importances",
+            kind=method,
+            n_repeats=n_repeats,
+            scoring=str(scoring) if scoring is not None else None,
+            random_state=rs,
+        )
+        if key in self._cache:
+            return self._cache[key]
+
+        if method == "builtin":
+            if "feature_importances_" in self._capabilities:
+                imp = np.asarray(
+                    self._model.feature_importances_, dtype=np.float64,
+                )
+            elif "coef_" in self._capabilities:
+                coef = np.asarray(self._model.coef_, dtype=np.float64)
+                imp = (
+                    np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+                )
+            else:
+                raise AttributeError(
+                    "ModelSource.importances(method='builtin') requires the "
+                    "wrapped model to expose 'feature_importances_' or "
+                    f"'coef_'. Got {type(self._model).__name__!r} which "
+                    "exposes neither."
+                )
+            std = np.zeros_like(imp)
+        elif method == "permutation":
+            require_sklearn("importances(permutation)")
+            from sklearn.inspection import permutation_importance
+
+            if self._y is None:
+                raise ValueError(
+                    "ModelSource.importances(method='permutation') requires "
+                    "y to be provided."
+                )
+            X_np = self._X.to_numpy()
+            y_np = np.asarray(self._y.to_numpy())
+            result = permutation_importance(
+                self._model, X_np, y_np,
+                n_repeats=n_repeats,
+                scoring=scoring,
+                random_state=rs if rs is not None else 0,
+            )
+            imp = np.asarray(result.importances_mean, dtype=np.float64)
+            std = np.asarray(result.importances_std, dtype=np.float64)
+        else:
+            raise ValueError(
+                f"ModelSource.importances(method={method!r}) — expected "
+                "'builtin' or 'permutation'."
+            )
+
+        order = np.argsort(-np.abs(imp))
+        rows = [
+            {
+                "feature": str(self._feature_names[i]),
+                "importance": float(imp[i]),
+                "std": float(std[i]),
+                "rank": int(r),
+            }
+            for r, i in enumerate(order, start=1)
+        ]
+        df = pl.DataFrame(rows)
+        self._cache[key] = df
+        return df
+
     def _sweep_thresholds(
         self,
         y_true: np.ndarray,
