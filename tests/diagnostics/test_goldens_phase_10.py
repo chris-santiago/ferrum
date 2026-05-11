@@ -57,6 +57,26 @@ def test_golden_residuals_chart_regression():
     _check_golden(svg, "residuals_chart_regression")
 
 
+def test_golden_prediction_error_regression_ci95():
+    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    chart = _prediction_error_chart_from_source(source, ci=0.95)
+    _check_golden(chart.show_svg(), "prediction_error_regression_ci95")
+
+
+def test_golden_prediction_error_regression_reference_band():
+    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    chart = _prediction_error_chart_from_source(source, reference_band=True)
+    _check_golden(chart.show_svg(), "prediction_error_regression_reference_band")
+
+
 def test_golden_prediction_error_regression():
     from ferrum._diagnostics.charts import _prediction_error_chart_from_source
     model = load_fixture("regression_ridge")

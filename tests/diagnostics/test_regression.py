@@ -216,19 +216,36 @@ def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
     assert "#e15759" not in svg
 
 
-def test_mark_prediction_error_ci_raises():
-    import pytest
+def test_mark_prediction_error_ci_renders_quantile_ribbon():
+    """ci=0.95 emits a ribbon layer spanning the central 95% of
+    residuals around the identity line. The chart builder computes
+    quantile_low and quantile_high of residual and injects
+    _pe_band_lo / _pe_band_hi columns.
+    """
     source, _ = _ridge_source()
-    pred = source.predictions()
-    chart = ferrum.Chart(pred).mark_prediction_error(ci=0.95)
-    with pytest.raises(NotImplementedError, match="ci="):
-        chart.show_svg()
+    viz = ferrum.PredictionErrorVisualizer(source._model, ci=0.95).fit(
+        source._X, source._y,
+    )
+    svg = viz.show().show_svg()
+    assert "<svg" in svg
+    # mark_ribbon emits a closed <path> element for the filled band.
+    assert "<path " in svg
 
 
-def test_mark_prediction_error_reference_band_raises():
+def test_mark_prediction_error_reference_band_renders_rmse_band():
+    """reference_band=True (without ci) draws ±1 RMSE around y=x."""
+    source, _ = _ridge_source()
+    viz = ferrum.PredictionErrorVisualizer(
+        source._model, reference_band=True,
+    ).fit(source._X, source._y)
+    svg = viz.show().show_svg()
+    assert "<path " in svg
+
+
+def test_mark_prediction_error_ci_out_of_range_raises():
+    """ci must be in (0, 1); 0.0 or 1.5 raises ValueError, not silent."""
     import pytest
     source, _ = _ridge_source()
-    pred = source.predictions()
-    chart = ferrum.Chart(pred).mark_prediction_error(reference_band=True)
-    with pytest.raises(NotImplementedError, match="reference_band"):
-        chart.show_svg()
+    viz = ferrum.PredictionErrorVisualizer(source._model, ci=1.5)
+    with pytest.raises(ValueError, match="0, 1"):
+        viz.fit(source._X, source._y)

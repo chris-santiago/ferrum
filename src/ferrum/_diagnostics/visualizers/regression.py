@@ -55,6 +55,10 @@ class PredictionErrorVisualizer(FerrumVisualizer):
     Wraps ``ModelSource.predictions()``. Records ``rmse`` as the headline
     metric; the chart shows ``y_true`` on x and ``y_pred`` on y with an
     optional identity line (``y = x``) overlay.
+
+    ``ci`` (float in (0, 1)) draws a residual-quantile ribbon at the
+    central ``ci`` fraction of residuals around the identity line.
+    ``reference_band=True`` (without ``ci``) draws ±1 RMSE.
     """
 
     def __init__(
@@ -62,11 +66,15 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         model: Any,
         *,
         identity_line: bool = True,
+        ci: float | None = None,
+        reference_band: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.identity_line = identity_line
+        self.ci = ci
+        self.reference_band = reference_band
 
     def _materialize(self) -> None:
         df = self._source.predictions()
@@ -75,7 +83,11 @@ class PredictionErrorVisualizer(FerrumVisualizer):
 
     def _build_chart(self) -> Any:
         return _prediction_error_chart_from_source(
-            self._source, identity_line=self.identity_line, theme=self.theme,
+            self._source,
+            identity_line=self.identity_line,
+            ci=self.ci,
+            reference_band=self.reference_band,
+            theme=self.theme,
         )
 
     def score(self, X: Any, y: Any) -> float:

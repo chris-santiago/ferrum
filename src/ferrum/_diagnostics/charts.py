@@ -161,12 +161,48 @@ def _prediction_error_chart_from_source(
     source: Any,
     *,
     identity_line: bool = True,
+    ci: float | None = None,
+    reference_band: bool = False,
     theme: Any = None,
 ):
-    """Build an actual-vs-predicted error chart from a ModelSource."""
+    """Build an actual-vs-predicted error chart from a ModelSource.
+
+    When ``ci`` or ``reference_band`` is set, computes a residual band
+    and injects ``_pe_band_lo`` / ``_pe_band_hi`` columns:
+
+    - ``ci`` (float in (0, 1)): band spans the central ``ci`` fraction
+      of residuals — ``y_true + quantile_low`` to ``y_true +
+      quantile_high`` where the quantiles bracket ``(1 - ci) / 2``.
+    - ``reference_band=True`` (without ``ci``): band spans ±1 RMSE
+      around the identity line.
+    """
     import ferrum
-    df = source.predictions()
-    chart = ferrum.Chart(df).mark_prediction_error(identity_line=identity_line)
+    import numpy as np
+
+    df = source.predictions().sort("y_true")
+    if ci is not None or reference_band:
+        residuals = (df["y_pred"] - df["y_true"]).to_numpy()
+        if ci is not None:
+            if not 0.0 < ci < 1.0:
+                raise ValueError(
+                    f"mark_prediction_error(ci={ci!r}) — expected a value in (0, 1)."
+                )
+            alpha = (1.0 - float(ci)) / 2.0
+            q_lo = float(np.quantile(residuals, alpha))
+            q_hi = float(np.quantile(residuals, 1.0 - alpha))
+        else:
+            sigma = float(np.sqrt(np.mean(residuals ** 2)))
+            q_lo = -sigma
+            q_hi = sigma
+        df = df.with_columns(
+            (pl.col("y_true") + q_lo).alias("_pe_band_lo"),
+            (pl.col("y_true") + q_hi).alias("_pe_band_hi"),
+        )
+    chart = ferrum.Chart(df).mark_prediction_error(
+        identity_line=identity_line,
+        ci=ci,
+        reference_band=reference_band,
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart

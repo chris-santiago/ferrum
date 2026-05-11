@@ -106,18 +106,24 @@ def desugar_prediction_error(
     non-default values raises ``NotImplementedError`` (per the Phase 9+
     no-defer principle).
     """
-    if ci is not None:
-        raise NotImplementedError(
-            "mark_prediction_error(ci=...) lands in Phase 10h."
-        )
-    if reference_band:
-        raise NotImplementedError(
-            "mark_prediction_error(reference_band=True) lands in Phase 10h."
-        )
     point_enc: dict[str, Any] = {"x": "y_true", "y": "y_pred"}
     if color_field is not None:
         point_enc["color"] = color_field
+    # Layer ordering: point first so layer-0-driven axis-scale resolution
+    # picks up `y_pred` as the y-axis title. The ribbon and identity-line
+    # layers paint on top; opacity=0.2 on the ribbon keeps the underlying
+    # points visible.
     layers: list[dict] = [{"mark": "point", "encoding": point_enc}]
+    if ci is not None or reference_band:
+        layers.append({
+            "mark": "ribbon",
+            "encoding": {
+                "x": "y_true",
+                "y": "_pe_band_lo",
+                "y2": "_pe_band_hi",
+            },
+            "mark_kwargs": {"opacity": 0.2},
+        })
     if identity_line:
         layers.append({
             "mark": "line",
