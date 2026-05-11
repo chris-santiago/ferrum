@@ -172,9 +172,11 @@ class ClassBalanceVisualizer(FerrumVisualizer):
     Parameters
     ----------
     random_state : int, optional
-        Reserved for future use (no-op today). ``ClassBalanceVisualizer``
-        overrides ``fit()`` entirely and never constructs a ``ModelSource``,
-        so this value is accepted for API consistency but is never read.
+        Accepted for API symmetry with model-backed visualizers but
+        intentionally never consumed — ``ClassBalanceVisualizer`` overrides
+        ``fit()`` and never constructs a ``ModelSource``. Documented as
+        a permanent no-op so callers that script over visualizers don't
+        have to special-case which ones accept the kwarg.
     theme : Theme, optional
         Per-chart theme override. Falls back to the global default when ``None``.
 

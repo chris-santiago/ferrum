@@ -1113,6 +1113,24 @@ Document that every figure function accepts `random_state: int | None = None`. L
 
 Add `random_state: int | None = None` to every Visualizer constructor for uniform API.
 
+**Decision (2026-05-11, post-merge inconsistency sweep):** the four
+no-model visualizers — `ClassBalanceVisualizer`, `Rank1DVisualizer`,
+`Rank2DVisualizer`, `ParallelCoordinatesVisualizer` — bypass
+`ModelSource` entirely in their `fit()` and therefore never consume
+`random_state`. Two options were considered:
+
+(a) Remove `random_state` from these four constructors. Breaking change
+    for callers; cleanest contract.
+(b) Keep accepting; document as an intentional permanent no-op (not
+    deferred work). Uniform with `FerrumVisualizer` base API.
+
+**Chose (b).** The base-class uniformity (every visualizer has the same
+constructor shape) is worth more than the cosmetic asymmetry. Callers
+that script over visualizers don't have to special-case which ones
+accept the kwarg. The four docstrings document the no-op behavior
+explicitly so no caller is surprised. This is *not* a tech-debt entry
+and *not* on the deferred list — it's the chosen API contract.
+
 ### §3.16 RenderConfig
 
 Add `numeric_precision: int | None = None`. Default `None` keeps current SVG numeric formatting. When set to an integer `p ∈ [1, 12]`, all float coordinates in emitted SVG are rounded to `p` decimal places. Used by Phase 10 quantized goldens to absorb cross-platform solver variance.

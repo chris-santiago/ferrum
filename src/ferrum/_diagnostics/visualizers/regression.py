@@ -149,8 +149,13 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         Fitted regression estimator (must expose ``coef_`` for the
         leverage-aware Cook's distance).
     threshold : float, optional
-        Reserved for future use (no-op today). Will route to
-        ``mark_residuals(cook_threshold=...)`` in a follow-up commit.
+        Reserved — currently a no-op because this visualizer renders the
+        residuals_vs_leverage panel (``mark_point``) which doesn't
+        consume Cook's-outlier columns. Wiring requires either routing
+        through ``mark_residuals`` with the outlier overlay (which
+        changes the default visual to residuals_vs_fitted) or adding
+        outlier rendering to the leverage panel. Tracked outside the
+        post-merge inconsistency sweep.
     random_state : int, optional
     theme : Theme, optional
 

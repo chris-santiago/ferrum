@@ -56,8 +56,11 @@ class Rank1DVisualizer(FerrumVisualizer):
         Column name forwarded to the chart's color encoding.  ``None``
         produces a single-color chart.
     random_state : int, optional
-        Reserved for future use (no-op today). Accepted for API
-        symmetry with model-backed visualizers.
+        Accepted for API symmetry with model-backed visualizers but
+        intentionally never consumed — this visualizer bypasses
+        ``ModelSource`` entirely. Documented as a permanent no-op so
+        callers that script over visualizers don't have to special-case
+        which ones accept the kwarg.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
@@ -155,8 +158,11 @@ class Rank2DVisualizer(FerrumVisualizer):
     annot : bool, default True
         Whether to annotate each heatmap cell with its numeric value.
     random_state : int, optional
-        Reserved for future use (no-op today). Accepted for API
-        symmetry with model-backed visualizers.
+        Accepted for API symmetry with model-backed visualizers but
+        intentionally never consumed — this visualizer bypasses
+        ``ModelSource`` entirely. Documented as a permanent no-op so
+        callers that script over visualizers don't have to special-case
+        which ones accept the kwarg.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
@@ -233,8 +239,11 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
     alpha : float, default 0.5
         Opacity of each sample line (0 = fully transparent, 1 = opaque).
     random_state : int, optional
-        Reserved for future use (no-op today). Accepted for API
-        symmetry with model-backed visualizers.
+        Accepted for API symmetry with model-backed visualizers but
+        intentionally never consumed — this visualizer bypasses
+        ``ModelSource`` entirely. Documented as a permanent no-op so
+        callers that script over visualizers don't have to special-case
+        which ones accept the kwarg.
     theme : Theme, optional
         Per-chart theme override.  Falls back to the global default
         when ``None``.
