@@ -97,7 +97,6 @@ def test_function_renders():
     assert "<svg" in svg
 
 
-@pytest.mark.skip(reason="layered overlay of violin + swarm requires per-layer scale unification")
 def test_layered_violin_plus_swarm(df_grouped):
     svg = (fe.Chart(df_grouped).mark_violin(inner=None).encode(x="g", y="v") +
            fe.Chart(df_grouped).mark_swarm().encode(x="g", y="v")).show_svg()

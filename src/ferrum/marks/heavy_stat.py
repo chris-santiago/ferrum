@@ -194,11 +194,28 @@ def desugar_swarm(
     val = y_field if orient == "vertical" else x_field
     transforms = [Swarm(category=cat, value=val, point_size=float(size), spacing=spacing, side=side,
                         name="swarm")]
-    layers = [{
-        "mark": "point",
-        "encoding": {"x": "swarm_x", "y": "swarm_y"},
-        "data_source": "swarm",
-    }]
+    if orient == "vertical":
+        # Encode the chart's original category & value fields so the ordinal x
+        # axis renders properly with the category labels. The Swarm transform
+        # also emits a `__pos_x_offset__` column (pixel offset on the cross axis)
+        # which the renderer's standard position-offset path applies on top of
+        # the category band center — same mechanism Dodge uses (Phase 9c).
+        layers = [{
+            "mark": "point",
+            "encoding": {"x": cat, "y": val},
+            "data_source": "swarm",
+        }]
+    else:
+        # TODO(phase-10g+): horizontal-orient swarm still uses the legacy
+        # value-axis-data-unit encoding. Fixing it requires either threading
+        # orient through the Rust transform so it emits __pos_y_offset__ instead,
+        # or adding a column-rename step in the Python pipeline. Lightly tested
+        # path; smoke render still produces an SVG.
+        layers = [{
+            "mark": "point",
+            "encoding": {"x": "swarm_x", "y": "swarm_y"},
+            "data_source": "swarm",
+        }]
     return ("__layered__", transforms, None, None, layers)
 
 

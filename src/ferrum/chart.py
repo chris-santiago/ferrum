@@ -1292,22 +1292,36 @@ class Chart:
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-        new._layers = [
-            {
-                "mark": lhs._mark,
-                "encoding": dict(lhs._encoding),
-                "transforms": list(lhs._transforms),
-                "mark_style": dict(lhs._mark_kwargs),
-                "position": lhs._position,
-            },
-            {
-                "mark": rhs._mark,
-                "encoding": dict(rhs._encoding),
-                "transforms": list(rhs._transforms),
-                "mark_style": dict(rhs._mark_kwargs),
-                "position": rhs._position,
-            },
-        ]
+
+        def _expand(c):
+            """Return (layer_dicts, top_level_transforms) for one side of `+`.
+
+            Composite-mark charts arrive pre-layered (c._layers is not None,
+            c._mark is None) — splat their layers as-is and carry their
+            top-level transforms across. Plain single-mark charts wrap into a
+            one-element list with the chart's own mark/encoding/etc.
+            """
+            if c._layers is not None:
+                return list(c._layers), list(c._transforms or [])
+            return [{
+                "mark": c._mark,
+                "encoding": dict(c._encoding),
+                "transforms": list(c._transforms),
+                "mark_style": dict(c._mark_kwargs),
+                "position": c._position,
+            }], []
+
+        lhs_layers, _ = _expand(lhs)  # lhs top-level xforms already in `new` via _clone()
+        rhs_layers, rhs_top_xforms = _expand(rhs)
+        new._layers = lhs_layers + rhs_layers
+        # Merge RHS top-level transforms (e.g. composite-mark expansion produced
+        # them) into the combined chart's top-level pipeline, deduping by
+        # identity to avoid re-running a transform shared across layers.
+        existing_ids = {id(t) for t in (new._transforms or [])}
+        for t in rhs_top_xforms:
+            if id(t) not in existing_ids:
+                new._transforms = list(new._transforms or []) + [t]
+                existing_ids.add(id(t))
         # Warn if secondary layer has conflicting theme/facet/coord
         if (
             (rhs._theme is not None and rhs._theme != lhs._theme)

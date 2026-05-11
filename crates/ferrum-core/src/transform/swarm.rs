@@ -1,8 +1,16 @@
 //! Swarm: greedy beeswarm placement.
 //!
-//! Output schema: input schema PLUS appended `swarm_x: Float64, swarm_y: Float64`.
-//! `swarm_x` is the per-category horizontal offset (relative to category center,
-//! in data-space along the category axis); `swarm_y` is the original `value`.
+//! Output schema: input schema PLUS appended `swarm_x: Float64, swarm_y: Float64,
+//! __pos_x_offset__: Float64` (vertical-orient assumption — see below).
+//! `swarm_x` is the per-category cross-axis offset in *value-axis data units*
+//! (so callers can do their own conversion if needed); `swarm_y` is the original
+//! `value`. `__pos_x_offset__` is the same offset converted to *pixels* on the
+//! cross-axis under the vertical-orient assumption (cross = x = width), so the
+//! standard position-offset rendering path (`render/position.rs`) picks it up
+//! automatically when the desugar encodes the chart's original category field
+//! on the x-axis. For horizontal-orient swarms the Python desugar currently
+//! still uses the legacy `swarm_x`/`swarm_y` encoding — fixing that requires
+//! threading orient through the transform spec (Phase 10g+ scope).
 //!
 //! Algorithm: per category, sort points by `value` ascending (stable on row index
 //! for byte-deterministic placements). For each point, try candidate offsets in
@@ -265,12 +273,37 @@ pub(crate) fn apply_with_context(
         }
     }
 
-    // 5. Build output: input columns + swarm_x + swarm_y.
+    // 5. Build output: input columns + swarm_x + swarm_y + __pos_x_offset__.
+    //
+    // __pos_x_offset__ converts the value-axis-data-units offset back to pixels
+    // on the cross-axis (= x for vertical-orient). The inverse of the conversion
+    // used to derive `radius_data` above: pixel_offset = swarm_x * (h / value_range).
+    // This means each placement slot (`radius_data` step) renders at exactly
+    // `(point_size + spacing)` pixels — the visual spacing the algorithm intends.
+    // For null offsets (skipped rows), emit 0.0 so the position-offset reader
+    // never sees a None it doesn't expect (`render/position.rs` requires non-null).
+    let pixel_per_data: f64 = match ctx.panel_pixel_size {
+        Some((_, h)) if h > 0 => {
+            let value_range = vmax - vmin;
+            if value_range.is_finite() && value_range > 0.0 {
+                (h as f64) / value_range
+            } else {
+                1.0
+            }
+        }
+        _ => 1.0,
+    };
+    let pos_x_offset: Float64Array = swarm_x
+        .iter()
+        .map(|opt| Some(opt.map(|o| o * pixel_per_data).unwrap_or(0.0)))
+        .collect();
+
     let mut out_cols: Vec<ArrayRef> = batch.columns().to_vec();
     let sx_arr: Float64Array = swarm_x.iter().copied().collect();
     let sy_arr: Float64Array = swarm_y.iter().copied().collect();
     out_cols.push(Arc::new(sx_arr));
     out_cols.push(Arc::new(sy_arr));
+    out_cols.push(Arc::new(pos_x_offset));
 
     let mut new_fields: Vec<Field> = schema
         .fields()
@@ -279,6 +312,7 @@ pub(crate) fn apply_with_context(
         .collect();
     new_fields.push(Field::new("swarm_x", DataType::Float64, true));
     new_fields.push(Field::new("swarm_y", DataType::Float64, true));
+    new_fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(new_fields));
 
     RecordBatch::try_new(out_schema, out_cols)
@@ -416,7 +450,7 @@ mod tests {
         // Big panel → small radius.
         let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
         assert_eq!(out.num_rows(), 5);
-        assert_eq!(out.num_columns(), 4); // cat, v, swarm_x, swarm_y
+        assert_eq!(out.num_columns(), 5); // cat, v, swarm_x, swarm_y, __pos_x_offset__
 
         let sx = col_f64(&out, "swarm_x");
         let mut has_pos = false;
