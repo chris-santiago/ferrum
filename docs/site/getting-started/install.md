@@ -6,18 +6,21 @@ Ferrum runs on Python 3.10 or newer. The Rust core ships as a pre-built extensio
 
 === "pip"
 
+    <!--pytest.mark.skip-->
     ```bash
     pip install ferrum
     ```
 
 === "uv"
 
+    <!--pytest.mark.skip-->
     ```bash
     uv add ferrum
     ```
 
 === "poetry"
 
+    <!--pytest.mark.skip-->
     ```bash
     poetry add ferrum
     ```
@@ -58,6 +61,7 @@ Ferrum supports CPython 3.10 and newer. Older Python versions are not tested. Fr
 
 Ferrum accepts data from the full Python dataframe ecosystem through Narwhals. The runtime dependencies installed above are sufficient for Polars and Arrow inputs. If you want to pass pandas or other dataframe types directly to Ferrum, install them alongside:
 
+<!--pytest.mark.skip-->
 ```bash
 pip install pandas
 ```

@@ -8,12 +8,13 @@ Real teams move between pandas, Polars, Arrow tables, modin, cuDF, dask, ibis, a
 
 Pandas, Polars, modin, cuDF, dask, ibis, Arrow tables, and NumPy arrays all flow through the same `Chart(data)` constructor. They are internally normalized to Arrow once, then routed through the Rust core unchanged. There are no per-framework adapters in user code, and no special-case ingestion paths inside ferrum.
 
+<!--pytest.mark.skip-->
 ```python
-import ferrum as fr
+import ferrum as fm
 
-chart = fr.Chart(pandas_df).mark_point().encode(x="x", y="y")
-chart = fr.Chart(polars_df).mark_point().encode(x="x", y="y")
-chart = fr.Chart(arrow_table).mark_point().encode(x="x", y="y")
+chart = fm.Chart(pandas_df).mark_point().encode(x="x", y="y")
+chart = fm.Chart(polars_df).mark_point().encode(x="x", y="y")
+chart = fm.Chart(arrow_table).mark_point().encode(x="x", y="y")
 ```
 
 The chart object that comes back is the same in every case. The rest of the grammar — encodings, marks, scales, composition, themes — does not know or care which dataframe library the data came from.

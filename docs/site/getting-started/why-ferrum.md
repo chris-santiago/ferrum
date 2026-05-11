@@ -32,7 +32,7 @@ Ferrum declares intent and computes in Rust before rendering. KDE, LOESS, bootst
 
 **Stat transforms in the pipeline.** Declared in the chart spec, computed in Rust before rendering. You stop preprocessing data before plotting.
 
-**Model diagnostics that compose.** ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. `fr.hconcat(roc_chart, confusion_chart)` just works.
+**Model diagnostics that compose.** ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. `fm.hconcat(roc_chart, confusion_chart)` just works.
 
 **Handles every dataframe API.** Polars, pandas, modin, cuDF, dask, and ibis all flow through the same `Chart(data)` constructor — internally normalized to Arrow once, then routed through the Rust core unchanged. No per-framework adapters in user code; no special-case ingestion paths in ferrum.
 
