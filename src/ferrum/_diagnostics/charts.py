@@ -701,16 +701,27 @@ def _shap_bar_chart_from_source(
     source: Any,
     *,
     max_display: int = 20,
+    order: str = "abs_mean",
     background: Any = None,
     theme: Any = None,
 ):
-    """SHAP aggregated bar chart: mean(|shap_value|) per feature."""
+    """SHAP aggregated bar chart: mean(|shap_value|) per feature.
+
+    ``order`` selects the aggregation used both for sorting and as the
+    bar's x-value. ``"abs_mean"`` aggregates by ``mean(|shap_value|)``
+    (the conventional summary); ``"max"`` aggregates by
+    ``max(|shap_value|)`` to emphasize features with high-impact outliers.
+    The output column is named ``abs_mean_shap`` regardless of the
+    aggregation so the downstream mark's data contract stays stable.
+    """
     import ferrum
 
+    expr = pl.col("shap_value").abs()
+    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
     sv = source.shap_values(background=background)
     agg = (
         sv.group_by("feature")
-        .agg(pl.col("shap_value").abs().mean().alias("abs_mean_shap"))
+        .agg(agg_expr.alias("abs_mean_shap"))
         .sort("abs_mean_shap", descending=True)
         .head(max_display)
     )
@@ -729,10 +740,19 @@ def _shap_waterfall_chart_from_source(
     *,
     sample_idx: int,
     max_display: int = 20,
+    order: str = "abs_mean",
     background: Any = None,
     theme: Any = None,
 ):
-    """Waterfall chart for a single sample's SHAP contributions."""
+    """Waterfall chart for a single sample's SHAP contributions.
+
+    Feature display order follows the global aggregation chosen by
+    ``order``: ``"abs_mean"`` ranks features by ``mean(|shap_value|)``
+    across the full dataset (matching the beeswarm and bar paths);
+    ``"max"`` ranks by ``max(|shap_value|)``. The top ``max_display``
+    features are kept and rendered in descending rank order; the
+    waterfall's cumulative sum follows that same order.
+    """
     import ferrum
     import numpy as np
 
@@ -743,8 +763,20 @@ def _shap_waterfall_chart_from_source(
             f"shap_waterfall: sample_idx={sample_idx} not found in shap output "
             f"(have {sv['sample_id'].n_unique()} samples)."
         )
-    # Order by descending |shap| and trim.
-    ordered = one.sort(pl.col("shap_value").abs(), descending=True).head(max_display)
+    # Use the global aggregation (over all samples) to rank features —
+    # matches the beeswarm / bar ordering so all three views agree on
+    # which features matter for the model overall. Then project that
+    # ranking onto the single sample's rows.
+    ranked = _shap_order_features(sv, order=order, max_display=max_display)
+    rank_map = {name: i for i, name in enumerate(ranked)}
+    ordered = (
+        one.filter(pl.col("feature").is_in(ranked))
+        .with_columns(
+            pl.col("feature").replace_strict(rank_map, return_dtype=pl.Int64).alias("_rank"),
+        )
+        .sort("_rank")
+        .drop("_rank")
+    )
     sv_arr = ordered["shap_value"].to_numpy()
     cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
     plot_df = ordered.with_columns([

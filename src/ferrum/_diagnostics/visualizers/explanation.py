@@ -123,10 +123,14 @@ class SHAPVisualizer(FerrumVisualizer):
     sample_idx : int or None, optional
         Row index of the sample to explain. Required when ``kind="waterfall"``;
         ignored for ``"beeswarm"`` and ``"bar"``.
-    order : str, default "abs_mean"
-        Feature ordering strategy. Applied only when ``kind="beeswarm"``.
-        Reserved for future use (no-op today) when ``kind`` is ``"bar"`` or
-        ``"waterfall"``.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ordering strategy applied to all three ``kind`` values.
+        ``"abs_mean"`` ranks features by ``mean(|shap_value|)`` across
+        the dataset; ``"max"`` ranks by ``max(|shap_value|)`` to surface
+        features with high-impact outliers. For ``kind="bar"`` the same
+        aggregation drives both the bar's x-value and the sort order;
+        for ``kind="waterfall"`` it selects which features are shown
+        for the single sample and the order they appear in.
     background : Any or None, optional
         Background dataset passed to the SHAP explainer for models that
         require a reference distribution (e.g. kernel SHAP). Pass ``None``
@@ -168,9 +172,26 @@ class SHAPVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         sv = self._source.shap_values(background=self.background)
-        agg = sv.group_by("feature").agg(
-            pl.col("shap_value").abs().mean().alias("v")
-        )
+        # For waterfall, the chart only shows a single sample, so the
+        # headline metric should reflect that sample — not the global
+        # aggregation across the entire dataset.
+        if self.kind == "waterfall":
+            if self.sample_idx is None:
+                # Defer the ValueError to _build_chart so the error
+                # message stays consistent.
+                self._metrics["top_abs_shap"] = 0.0
+                return
+            one = sv.filter(pl.col("sample_id") == self.sample_idx)
+            if one.height:
+                self._metrics["top_abs_shap"] = float(
+                    one["shap_value"].abs().max()
+                )
+            else:
+                self._metrics["top_abs_shap"] = 0.0
+            return
+        expr = pl.col("shap_value").abs()
+        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
+        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
         if agg.height:
             self._metrics["top_abs_shap"] = float(agg["v"].max())
         else:
@@ -189,6 +210,7 @@ class SHAPVisualizer(FerrumVisualizer):
             return _shap_bar_chart_from_source(
                 self._source,
                 max_display=self.max_display,
+                order=self.order,
                 background=self.background,
                 theme=self.theme,
             )
@@ -201,6 +223,7 @@ class SHAPVisualizer(FerrumVisualizer):
                 self._source,
                 sample_idx=self.sample_idx,
                 max_display=self.max_display,
+                order=self.order,
                 background=self.background,
                 theme=self.theme,
             )

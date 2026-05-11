@@ -274,6 +274,85 @@ def test_shap_visualizer_invalid_kind():
         viz.fit(X, df["y"])
 
 
+def test_shap_visualizer_order_affects_bar_and_waterfall():
+    """Regression test: `order` must materially affect bar and waterfall
+    output, not just beeswarm. Bar values differ between mean / max
+    aggregation; waterfall feature ordering follows the global ranking
+    chosen by `order` (matching beeswarm), not per-sample |shap|.
+    """
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    # --- bar: aggregation values must change with `order` ----------------
+    bar_mean = ferrum.SHAPVisualizer(model, kind="bar", order="abs_mean").fit(
+        X, df["y"],
+    )
+    bar_max = ferrum.SHAPVisualizer(model, kind="bar", order="max").fit(
+        X, df["y"],
+    )
+    bar_mean_vals = bar_mean.show()._data["abs_mean_shap"].to_list()
+    bar_max_vals = bar_max.show()._data["abs_mean_shap"].to_list()
+    assert bar_mean_vals != bar_max_vals
+    # max(|shap|) >= mean(|shap|) per feature, so every entry should be
+    # strictly larger under order="max" once features are sorted.
+    assert all(b >= a for a, b in zip(sorted(bar_mean_vals), sorted(bar_max_vals)))
+    assert any(b > a for a, b in zip(sorted(bar_mean_vals), sorted(bar_max_vals)))
+
+    # --- waterfall: feature order must follow the global ranking, not
+    # the per-sample |shap| ordering. Sample 6 is a fixture where the
+    # per-sample ordering ('f2','f1','f0','f4','f3') diverges from the
+    # global mean ordering ('f0','f1','f2','f4','f3').
+    wf = ferrum.SHAPVisualizer(
+        model, kind="waterfall", sample_idx=6, order="abs_mean",
+    ).fit(X, df["y"])
+    wf_features = wf.show()._data["feature"].to_list()
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    sv = source.shap_values()
+    global_rank = (
+        sv.group_by("feature")
+        .agg(pl.col("shap_value").abs().mean().alias("v"))
+        .sort("v", descending=True)["feature"]
+        .to_list()
+    )
+    assert wf_features == global_rank
+    # Verify the legacy per-sample ordering would have been different,
+    # so the assertion above is meaningful for this fixture.
+    per_sample = (
+        sv.filter(pl.col("sample_id") == 6)
+        .sort(pl.col("shap_value").abs(), descending=True)["feature"]
+        .to_list()
+    )
+    assert per_sample != global_rank
+
+
+def test_shap_visualizer_waterfall_top_abs_shap_is_per_sample():
+    """`_materialize` must compute `top_abs_shap` from only the displayed
+    sample when kind='waterfall', not the full dataset.
+    """
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    sv = source.shap_values()
+    # Per-sample max(|shap|) for sample 3 should differ from the global
+    # mean(|shap|) max used in the legacy implementation.
+    sample_max = float(
+        sv.filter(pl.col("sample_id") == 3)["shap_value"].abs().max()
+    )
+    global_mean_max = float(
+        sv.group_by("feature")
+        .agg(pl.col("shap_value").abs().mean().alias("v"))["v"]
+        .max()
+    )
+    assert sample_max != pytest.approx(global_mean_max)
+
+    viz = ferrum.SHAPVisualizer(model, kind="waterfall", sample_idx=3).fit(
+        X, df["y"],
+    )
+    assert viz._metrics["top_abs_shap"] == pytest.approx(sample_max)
+
+
 # --- ModelSource.partial_dependence() -----------------------------------
 
 
