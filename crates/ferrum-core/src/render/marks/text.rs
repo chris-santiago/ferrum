@@ -1,8 +1,15 @@
-//! mark_text: minimal Phase 7 stub — renders format_numeric(y) at (scale_x(x), scale_y(y)).
+//! mark_text: renders a text label at (scale_x(x), scale_y(y)). Phase 10c-pre
+//! extends the Phase 7 stub with:
+//!   - support for ordinal x / y axes (categorical positioning, mirroring mark_rect)
+//!   - a `text` encoding channel for explicit label content (Utf8 column)
+//!
+//! Backward-compat: when the text channel is absent and y is numeric, the
+//! label is `format_numeric(y)` (Phase 7 behavior).
 
 use crate::layout::TextAnchor;
-use crate::render::draw::{col_as_f64, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::format::format_numeric;
+use crate::render::scale_resolve::ScaleKind;
 use crate::render::svg::{SvgBuffer, TextStyle};
 
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
@@ -10,9 +17,35 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b), _ => return,
     };
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    if xs.len() != ys.len() { return; }
+
+    let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
+    let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
+
+    let xs_f: Option<Vec<Option<f64>>> =
+        if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
+    let xs_s: Option<Vec<Option<String>>> =
+        if x_ordinal { col_as_str(ctx.batch, xf).ok() } else { None };
+    let ys_f: Option<Vec<Option<f64>>> =
+        if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
+    let ys_s: Option<Vec<Option<String>>> =
+        if y_ordinal { col_as_str(ctx.batch, yf).ok() } else { None };
+
+    let n_x = match (&xs_f, &xs_s) {
+        (Some(v), _) => v.len(),
+        (_, Some(v)) => v.len(),
+        _ => return,
+    };
+    let n_y = match (&ys_f, &ys_s) {
+        (Some(v), _) => v.len(),
+        (_, Some(v)) => v.len(),
+        _ => return,
+    };
+    if n_x != n_y { return; }
+
+    // Explicit text channel — Utf8 column of labels. Absent → format_numeric(y).
+    let text_field = spec.encoding.text.as_ref().map(|e| e.field.as_str());
+    let texts: Option<Vec<Option<String>>> =
+        text_field.and_then(|f| col_as_str(ctx.batch, f).ok());
 
     let style = TextStyle {
         fill: ctx.theme.font_color,
@@ -21,13 +54,53 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         angle: 0.0,
     };
 
-    for i in 0..xs.len() {
-        let (xv, yv) = match (xs[i], ys[i]) {
-            (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b), _ => continue,
+    for i in 0..n_x {
+        let px = if let Some(xs) = &xs_f {
+            match xs[i] {
+                Some(v) if v.is_finite() => match ctx.scales.x.to_pixel_f64(v) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            }
+        } else if let Some(xs) = &xs_s {
+            match xs[i].as_deref() {
+                Some(s) => match ctx.scales.x.to_pixel_str(s) {
+                    Some(p) => p, None => continue,
+                },
+                None => continue,
+            }
+        } else { continue };
+
+        let py = if let Some(ys) = &ys_f {
+            match ys[i] {
+                Some(v) if v.is_finite() => match ctx.scales.y.to_pixel_f64(v) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            }
+        } else if let Some(ys) = &ys_s {
+            match ys[i].as_deref() {
+                Some(s) => match ctx.scales.y.to_pixel_str(s) {
+                    Some(p) => p, None => continue,
+                },
+                None => continue,
+            }
+        } else { continue };
+
+        let label: String = if let Some(t) = &texts {
+            match &t[i] {
+                Some(s) => s.clone(),
+                None => continue,
+            }
+        } else {
+            match &ys_f {
+                Some(ys) => match ys[i] {
+                    Some(v) if v.is_finite() => format_numeric(v),
+                    _ => continue,
+                },
+                None => continue,
+            }
         };
-        let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-        let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-        let label = format_numeric(yv);
         out.text(px, py, &label, &style);
     }
 }
@@ -78,5 +151,55 @@ mod tests {
         super::draw(&ctx, &mut out);
         let s = out.finish();
         assert_eq!(s.matches("<text ").count(), 2);
+    }
+
+    #[test]
+    fn text_channel_renders_explicit_labels_on_ordinal_axes() {
+        // Phase 10c-pre: confusion-matrix-style labels. Ordinal x/y with an
+        // explicit `text` channel reading a Utf8 column.
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "px".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "ax".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                text: Some(EncodingSpec { field: "label".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("px", DataType::Utf8, false),
+            Field::new("ax", DataType::Utf8, false),
+            Field::new("label", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(StringArray::from(vec!["x", "y"])),
+            Arc::new(StringArray::from(vec!["42", "hello"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let mut out = SvgBuffer::new(panel.plot_area, None, false);
+        super::draw(&ctx, &mut out);
+        let s = out.finish();
+        assert_eq!(s.matches("<text ").count(), 2);
+        assert!(s.contains(">42<"), "expected literal '42' label, got: {s}");
+        assert!(s.contains(">hello<"), "expected literal 'hello' label, got: {s}");
     }
 }
