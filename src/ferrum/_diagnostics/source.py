@@ -55,10 +55,60 @@ def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, pl.Series | None]:
 
 
 class ModelSource:
-    """Wraps a fitted estimator + dataset; exposes derived data as DataFrames.
+    """Wrap a fitted estimator + dataset and expose model-diagnostic
+    derived data as polars DataFrames.
 
-    Constructor is sklearn-free: pure attribute introspection.
-    Methods that need sklearn / shap / umap lazy-import on call.
+    Constructing a ``ModelSource`` is sklearn-free — only attribute
+    introspection runs at ``__init__`` time. Derived-data methods that
+    need sklearn / shap / umap lazy-import on call, so ``import ferrum``
+    never pulls those packages into the user's process unless they
+    actually compute a diagnostic that requires them.
+
+    Each derived-data method returns a long-form polars DataFrame
+    whose schema is documented in ``ferrum._diagnostics.schemas`` —
+    chart builders and Visualizers consume the same frames.
+
+    Parameters
+    ----------
+    model : Any
+        A fitted estimator. Must expose at least ``predict``; some
+        methods require additional protocol attributes
+        (``predict_proba``, ``coef_``, ``feature_importances_``,
+        ``cluster_centers_``, ``explained_variance_ratio_``, …) and
+        raise ``AttributeError`` with the missing attribute name when
+        called against an incompatible model.
+    X : polars.DataFrame | pandas.DataFrame | pyarrow.Table | numpy.ndarray
+        Feature matrix. Coerced internally to a polars DataFrame; any
+        ``narwhals``-compatible input also works.
+    y : array-like, optional
+        Target. Required by methods that depend on ground truth (every
+        method except ``probabilities`` and the unsupervised
+        ``silhouette`` / ``pca_variance`` / ``embeddings`` /
+        ``intercluster_distance`` / ``rank1d(algorithm != "covariance")``
+        / ``rank2d`` family).
+    feature_names : sequence of str, optional
+        Column labels. Defaults to ``X.columns`` when ``X`` is a
+        DataFrame, or ``["f0", "f1", ...]`` otherwise.
+    class_names : sequence of str, optional
+        Per-class display labels for classification diagnostics.
+        Defaults to ``model.classes_`` when available, else the unique
+        values of ``y``.
+    sample_weight : array-like, optional
+        Per-row weights forwarded to sklearn scorers that accept them.
+    random_state : int, optional
+        Seed propagated to every derived-data method whose underlying
+        compute consumes randomness (importances permutation, SHAP
+        background sampling, UMAP / t-SNE / MDS embeddings,
+        cross-validation curves, partial-dependence sampling).
+        Deterministic methods ignore the value.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> source = fm.ModelSource(model, X, y, random_state=0)
+    >>> fm.roc_chart(source)              # use directly with a figure function
+    >>> source.predictions()              # access derived data as a DataFrame
+    >>> source.confusion_matrix(normalize="true")
     """
 
     def __init__(
@@ -1500,10 +1550,27 @@ class ComparedModelSource:
     ``model: Utf8`` column stamped on each frame, so downstream chart
     builders can route ``color="model"`` to render one curve per model.
 
-    ``_X`` and ``_y`` resolve to the first source's data (every wrapped
-    source shares ``X`` / ``y`` by construction in ``ModelSource.compare``,
-    so any one will do); accessing ``_model`` raises since there is no
-    single estimator. ``model_names`` reports the configured ordering.
+    ``_X``, ``_y``, ``_feature_names``, and ``_class_names`` resolve to
+    the first source's values (every wrapped source shares ``X`` / ``y``
+    by construction in ``ModelSource.compare``, so any one will do);
+    accessing ``_model`` raises since there is no single estimator.
+    ``model_names`` reports the configured ordering.
+
+    Parameters
+    ----------
+    sources : dict[str, ModelSource]
+        Mapping from model name (used for the ``model`` column) to the
+        underlying ``ModelSource``. Must contain at least one entry —
+        passing an empty dict raises ``ValueError``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> cms = fm.ModelSource.compare({"ridge": ridge, "lasso": lasso}, X, y)
+    >>> fm.roc_chart(cms)                  # overlay both curves
+    >>> cms.model_names
+    ['ridge', 'lasso']
+    >>> cms.roc_curve()                    # long-form frame with `model` column
     """
 
     __slots__ = ("_sources",)
