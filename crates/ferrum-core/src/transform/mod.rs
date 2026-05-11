@@ -4,6 +4,7 @@
 
 pub(crate) mod core;
 pub(crate) mod bin;
+pub(crate) mod bin_2d;
 pub(crate) mod context;
 pub(crate) mod kde;
 pub(crate) mod kde_2d;
@@ -19,4 +20,11 @@ pub(crate) mod qq;
 pub(crate) mod raster;
 pub(crate) mod hex;
 pub(crate) mod swarm;
+pub(crate) mod unpivot;
+pub(crate) mod reorder;
+pub(crate) mod linkage;
+pub(crate) mod letter_value;
+pub(crate) mod logistic;
+pub(crate) mod glm;
+pub(crate) mod robust;
 pub(crate) mod linalg;

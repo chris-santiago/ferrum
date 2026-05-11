@@ -26,8 +26,11 @@ def desugar_contour(
 ) -> tuple:
     if x_field is None or y_field is None:
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
+    # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
+    # Contour then runs on the chained Kde2D output. Contour is named so the
+    # downstream polygon layer can route through data_source="contour".
     transforms = [
-        Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128, name="kde2d"),
+        Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
     layers = [{

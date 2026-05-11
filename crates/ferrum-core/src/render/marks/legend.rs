@@ -21,6 +21,10 @@ pub fn draw(
         let color = color_scale
             .and_then(|s| match s {
                 ColorScale::Categorical { .. } => s.lookup(&entry.label),
+                // Continuous scales don't render legend swatches in 8a/9 — the
+                // categorical legend builder only emits entries for categorical
+                // scales, so this arm is unreachable in practice.
+                ColorScale::Continuous { .. } => None,
             })
             .unwrap_or(theme.mark_color);
         let sx = entry.symbol_anchor_x;

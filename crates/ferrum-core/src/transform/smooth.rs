@@ -12,6 +12,15 @@ pub(crate) enum SmoothMethod {
     Loess,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SmoothOutput {
+    Fitted,
+    Residuals,
+}
+
+pub(crate) fn default_smooth_output() -> SmoothOutput { SmoothOutput::Fitted }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SmoothSpec {
     pub x: String,
@@ -25,13 +34,36 @@ pub(crate) struct SmoothSpec {
     #[serde(default)]
     pub seed: u64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_bins: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_estimator: Option<crate::transform::aggregate::AggFn>,
+    #[serde(default = "default_smooth_output")]
+    pub output: SmoothOutput,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs, ys) = extract_xy(spec, batch)?;
+    let (xs_raw, ys_raw) = extract_xy(spec, batch)?;
+
+    // Pre-aggregate xs/ys into n equal-width bins if x_bins is set.
+    let (xs, ys) = if let Some(n_bins) = spec.x_bins {
+        let estimator = spec.x_estimator.unwrap_or(crate::transform::aggregate::AggFn::Mean);
+        pre_aggregate_xy(&xs_raw, &ys_raw, n_bins, estimator)
+    } else {
+        (xs_raw.clone(), ys_raw.clone())
+    };
+
     if xs.len() < 2 {
-        return all_nan_output(spec);
+        return match spec.output {
+            SmoothOutput::Fitted => all_nan_output(spec),
+            SmoothOutput::Residuals => build_residuals_batch(Vec::new(), Vec::new()),
+        };
+    }
+
+    if matches!(spec.output, SmoothOutput::Residuals) {
+        // Fit at original (un-aggregated) input xs; emit (x, y - fit(x)) rows.
+        return residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw);
     }
 
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
@@ -47,6 +79,122 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
         SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n),
         SmoothMethod::Loess => loess_fit(&xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed),
     }
+}
+
+fn pre_aggregate_xy(
+    xs: &[f64],
+    ys: &[f64],
+    n_bins: usize,
+    estimator: crate::transform::aggregate::AggFn,
+) -> (Vec<f64>, Vec<f64>) {
+    use crate::transform::aggregate::AggFn;
+    if xs.is_empty() || n_bins == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
+        |(a, b), &v| (a.min(v), b.max(v)));
+    if x_min == x_max {
+        let avg = match estimator {
+            AggFn::Mean => ys.iter().sum::<f64>() / ys.len() as f64,
+            AggFn::Sum => ys.iter().sum(),
+            AggFn::Count => ys.len() as f64,
+            AggFn::Min => ys.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+            AggFn::Max => ys.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+            AggFn::Median => median(ys),
+        };
+        return (vec![x_min], vec![avg]);
+    }
+    let mut buckets_x: Vec<Vec<f64>> = vec![Vec::new(); n_bins];
+    let mut buckets_y: Vec<Vec<f64>> = vec![Vec::new(); n_bins];
+    let width = x_max - x_min;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let mut idx = ((x - x_min) / width * n_bins as f64).floor() as isize;
+        if idx >= n_bins as isize { idx = n_bins as isize - 1; }
+        if idx < 0 { idx = 0; }
+        let u = idx as usize;
+        buckets_x[u].push(x);
+        buckets_y[u].push(y);
+    }
+    let mut out_x = Vec::new();
+    let mut out_y = Vec::new();
+    for (xs_in, ys_in) in buckets_x.iter().zip(buckets_y.iter()) {
+        if ys_in.is_empty() { continue; }
+        // x always uses mean within the bin; y uses the chosen estimator.
+        let mean_x = xs_in.iter().sum::<f64>() / xs_in.len() as f64;
+        let agg = match estimator {
+            AggFn::Mean => ys_in.iter().sum::<f64>() / ys_in.len() as f64,
+            AggFn::Sum => ys_in.iter().sum(),
+            AggFn::Count => ys_in.len() as f64,
+            AggFn::Min => ys_in.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+            AggFn::Max => ys_in.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+            AggFn::Median => median(ys_in),
+        };
+        out_x.push(mean_x);
+        out_y.push(agg);
+    }
+    (out_x, out_y)
+}
+
+fn median(v: &[f64]) -> f64 {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = s.len();
+    if n == 0 { return f64::NAN; }
+    if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
+}
+
+fn build_residuals_batch(xs: Vec<f64>, resid: Vec<f64>) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x",        DataType::Float64, true),
+        Field::new("residual", DataType::Float64, true),
+    ]));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(resid)),
+    ];
+    RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
+}
+
+fn residuals_fit(
+    spec: &SmoothSpec,
+    xs_fit: &[f64], ys_fit: &[f64],
+    xs_input: &[f64], ys_input: &[f64],
+) -> PyResult<RecordBatch> {
+    // Fit the chosen model on (xs_fit, ys_fit); then evaluate at xs_input and subtract.
+    let predictor: Box<dyn Fn(f64) -> f64> = match spec.method {
+        SmoothMethod::Lm => {
+            let n = xs_fit.len() as f64;
+            let mean_x = xs_fit.iter().sum::<f64>() / n;
+            let mean_y = ys_fit.iter().sum::<f64>() / n;
+            let sxx: f64 = xs_fit.iter().map(|x| (x - mean_x).powi(2)).sum();
+            let sxy: f64 = xs_fit.iter().zip(ys_fit).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
+            if sxx == 0.0 {
+                Box::new(|_| f64::NAN)
+            } else {
+                let beta = sxy / sxx;
+                let alpha = mean_y - beta * mean_x;
+                Box::new(move |x: f64| alpha + beta * x)
+            }
+        }
+        SmoothMethod::Loess => {
+            let n = xs_fit.len();
+            let k = ((spec.bandwidth * n as f64).ceil() as usize).max((spec.degree as usize) + 1);
+            let k = k.min(n);
+            let xs_clone = xs_fit.to_vec();
+            let ys_clone = ys_fit.to_vec();
+            let degree = spec.degree;
+            Box::new(move |x: f64| loess_at_point(&xs_clone, &ys_clone, x, k, degree))
+        }
+    };
+    let mut out_x = Vec::with_capacity(xs_input.len());
+    let mut out_r = Vec::with_capacity(xs_input.len());
+    for (&xi, &yi) in xs_input.iter().zip(ys_input.iter()) {
+        let yhat = predictor(xi);
+        let r = if yhat.is_nan() { f64::NAN } else { yi - yhat };
+        out_x.push(xi);
+        out_r.push(r);
+    }
+    build_residuals_batch(out_x, out_r)
 }
 
 fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
@@ -334,7 +482,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, name = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", name = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
@@ -343,6 +491,9 @@ impl PySmooth {
         degree: u8,
         n: usize,
         seed: u64,
+        x_bins: Option<usize>,
+        x_estimator: Option<&str>,
+        output: &str,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -373,9 +524,38 @@ impl PySmooth {
                 return Err(PyValueError::new_err("Smooth: LOESS degree must be 1 or 2"));
             }
         }
+        use crate::transform::aggregate::AggFn;
+        let x_estimator_parsed: Option<AggFn> = match x_estimator {
+            None => None,
+            Some(s) => Some(match s {
+                "mean" => AggFn::Mean,
+                "median" => AggFn::Median,
+                "sum" => AggFn::Sum,
+                "min" => AggFn::Min,
+                "max" => AggFn::Max,
+                other => return Err(PyValueError::new_err(format!(
+                    "Smooth: unknown x_estimator '{other}'; expected 'mean'|'median'|'sum'|'min'|'max'"
+                ))),
+            }),
+        };
+        let output_parsed = match output {
+            "fitted" => SmoothOutput::Fitted,
+            "residuals" => SmoothOutput::Residuals,
+            other => return Err(PyValueError::new_err(format!(
+                "Smooth: unknown output '{other}'; expected 'fitted'|'residuals'"
+            ))),
+        };
+        if let Some(b) = x_bins {
+            if b == 0 {
+                return Err(PyValueError::new_err("Smooth: x_bins must be > 0"));
+            }
+        }
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
             method, ci, bandwidth, degree, n, seed,
+            x_bins,
+            x_estimator: x_estimator_parsed,
+            output: output_parsed,
             name,
         })))
     }
@@ -383,8 +563,9 @@ impl PySmooth {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={})",
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?})",
                 s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.n, s.seed,
+                s.x_bins, s.x_estimator, s.output,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -426,6 +607,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -450,6 +632,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 51, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -474,6 +657,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -489,6 +673,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -503,6 +688,7 @@ mod tests {
             method: SmoothMethod::Lm,
             ci: Some(0.95),
             bandwidth: 0.5, degree: 2, n: 100, seed: 42,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -530,6 +716,7 @@ mod tests {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -562,6 +749,7 @@ mod tests {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -588,6 +776,7 @@ mod tests {
             method: SmoothMethod::Loess, ci: None,
             bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
             degree: 2, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         // Primary goal: no panic with k == n == degree+1.
@@ -617,6 +806,7 @@ mod tests {
             method: SmoothMethod::Loess,
             ci: Some(0.95),
             bandwidth: 0.5, degree: 1, n: 20, seed: 42,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             name: None,
         };
         let spec2 = spec1.clone();
@@ -630,5 +820,70 @@ mod tests {
             assert_eq!(lo1[i].to_bits(), lo2[i].to_bits(), "ci_lower not deterministic at {i}");
             assert_eq!(hi1[i].to_bits(), hi2[i].to_bits(), "ci_upper not deterministic at {i}");
         }
+    }
+
+    #[test]
+    fn smooth_x_bins_pre_aggregates_then_fits() {
+        let xs: Vec<f64> = (0..100).map(|i| i as f64 / 10.0).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| 2.0 * x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm, ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: Some(10),
+            x_estimator: Some(crate::transform::aggregate::AggFn::Mean),
+            output: SmoothOutput::Fitted,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        let slope = (yf[xg.len() - 1] - yf[0]) / (xg[xg.len() - 1] - xg[0]);
+        assert!((slope - 2.0).abs() < 1e-6, "expected slope 2.0, got {slope}");
+    }
+
+    #[test]
+    fn smooth_output_residuals_returns_y_minus_fitted() {
+        let xs: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)|
+            2.0 * x + 1.0 + if i % 2 == 0 { 0.1 } else { -0.1 }
+        ).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm, ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None,
+            output: SmoothOutput::Residuals,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.schema().field(0).name(), "x");
+        assert_eq!(out.schema().field(1).name(), "residual");
+        let r = col(&out, "residual");
+        let mean_r: f64 = r.iter().sum::<f64>() / r.len() as f64;
+        assert!(mean_r.abs() < 1e-9, "residual mean = {mean_r}");
+        let max_abs = r.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        assert!(max_abs < 0.5, "max |residual| = {max_abs}");
+    }
+
+    #[test]
+    fn smooth_output_default_is_fitted() {
+        let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm, ci: Some(0.95),
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None,
+            output: SmoothOutput::Fitted,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let schema = out.schema();
+        let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+        assert_eq!(names, vec!["x".to_string(), "y".to_string(), "ci_lower".to_string(), "ci_upper".to_string()]);
     }
 }

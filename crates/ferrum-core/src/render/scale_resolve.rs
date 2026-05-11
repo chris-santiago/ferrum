@@ -36,15 +36,19 @@ pub enum ScaleKind {
 
 impl ScaleKind {
     /// Map a quantitative or temporal value to a pixel coordinate.
-    /// Returns `None` for ordinal scales (use `to_pixel_str` instead).
+    /// Returns `None` for ordinal scales (use `to_pixel_str` instead) and for
+    /// inputs that fall outside the scale's domain (Phase 9c — position
+    /// adjustments such as Jitter can push values past the original domain;
+    /// the underlying scale returns `NaN` rather than `None` in that case).
     pub fn to_pixel_f64(&self, x: f64) -> Option<f64> {
-        match self {
-            Self::Linear(s) => Some(s.scale_internal(x)),
-            Self::Time(s) => Some(s.scale_internal(x)),
-            Self::Log(s) => Some(s.scale_internal(x)),
-            Self::Symlog(s) => Some(s.scale_internal(x)),
-            Self::Ordinal(_) => None,
-        }
+        let p = match self {
+            Self::Linear(s) => s.scale_internal(x),
+            Self::Time(s) => s.scale_internal(x),
+            Self::Log(s) => s.scale_internal(x),
+            Self::Symlog(s) => s.scale_internal(x),
+            Self::Ordinal(_) => return None,
+        };
+        if p.is_finite() { Some(p) } else { None }
     }
 
     /// Map an ordinal/string value to a pixel band center.
@@ -127,6 +131,13 @@ pub enum ColorScale {
         domain: Vec<String>,
         palette: &'static [Color],
     },
+    /// Continuous color scale: maps a numeric value to a color via a
+    /// ContinuousScheme. Used by heatmap, raster, and any chart with an
+    /// explicit linear color scale spec.
+    Continuous {
+        domain: (f64, f64),
+        scheme: crate::render::color::ContinuousScheme,
+    },
 }
 
 impl ColorScale {
@@ -136,6 +147,25 @@ impl ColorScale {
                 .iter()
                 .position(|v| v == value)
                 .map(|i| palette[i % palette.len()]),
+            Self::Continuous { domain, scheme } => {
+                let v: f64 = value.parse().ok()?;
+                let (lo, hi) = *domain;
+                let t = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
+                Some(scheme.sample(t.clamp(0.0, 1.0)))
+            }
+        }
+    }
+
+    /// Sample at numeric value (Continuous variant only). Returns None for
+    /// Categorical scales.
+    pub fn lookup_f64(&self, value: f64) -> Option<Color> {
+        match self {
+            Self::Continuous { domain, scheme } => {
+                let (lo, hi) = *domain;
+                let t = if hi > lo { (value - lo) / (hi - lo) } else { 0.5 };
+                Some(scheme.sample(t.clamp(0.0, 1.0)))
+            }
+            _ => None,
         }
     }
 }
@@ -278,17 +308,41 @@ pub fn resolve_scales_with_outputs(
     // resolved against the chart-level transformed batch (i.e. __final__),
     // matching Phase 8a behavior.
     let color = if let Some(c_enc) = &spec.encoding.color {
-        let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-        let palette: &'static [Color] = match &c_enc.scheme {
-            Some(name) => palette::categorical_palette(name),
-            None => &*palette::OKABE_ITO,
-        };
-        if domain.len() > palette.len() {
-            warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
-                categories: domain.len() as u32,
-            });
+        // Detect whether the color column is numeric (Float64/UInt64/Int64),
+        // in which case build a Continuous scale. Otherwise fall back to the
+        // legacy Categorical path (Utf8 / Bool / Int64-as-ordinal).
+        let lookup_batch = locate_field_batch(&c_enc.field, primary_batch, transform_outputs)
+            .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
+        let col = lookup_batch.column_by_name(&c_enc.field)
+            .expect("locate_field_batch guarantees field presence");
+        let is_continuous_color = matches!(col.data_type(),
+            arrow::datatypes::DataType::Float64 | arrow::datatypes::DataType::UInt64);
+        if is_continuous_color {
+            // Numeric domain: min/max from the column, ignoring NaNs.
+            let (lo, hi) = numeric_extent(col);
+            // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
+            // else default to viridis.
+            use crate::render::color::{ContinuousScheme, NamedContinuous};
+            let scheme = c_enc
+                .scheme
+                .as_deref()
+                .and_then(NamedContinuous::from_name)
+                .map(ContinuousScheme::Named)
+                .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis));
+            Some(ColorScale::Continuous { domain: (lo, hi), scheme })
+        } else {
+            let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+            let palette: &'static [Color] = match &c_enc.scheme {
+                Some(name) => palette::categorical_palette(name),
+                None => &*palette::OKABE_ITO,
+            };
+            if domain.len() > palette.len() {
+                warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
+                    categories: domain.len() as u32,
+                });
+            }
+            Some(ColorScale::Categorical { domain, palette })
         }
-        Some(ColorScale::Categorical { domain, palette })
     } else {
         None
     };
@@ -718,6 +772,42 @@ fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
     }
 }
 
+/// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
+/// Returns (0.0, 1.0) when no finite values are present.
+fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
+    use arrow::array::{Float64Array, Int64Array, UInt64Array};
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
+        for i in 0..a.len() {
+            if a.is_null(i) { continue; }
+            let v = a.value(i);
+            if v.is_finite() {
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
+        }
+    } else if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
+        for i in 0..a.len() {
+            if a.is_null(i) { continue; }
+            let v = a.value(i) as f64;
+            if v < lo { lo = v; }
+            if v > hi { hi = v; }
+        }
+    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
+        for i in 0..a.len() {
+            if a.is_null(i) { continue; }
+            let v = a.value(i) as f64;
+            if v < lo { lo = v; }
+            if v > hi { hi = v; }
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || lo > hi {
+        return (0.0, 1.0);
+    }
+    (lo, hi)
+}
+
 fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
@@ -801,6 +891,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -826,6 +917,7 @@ mod tests {
             ColorScale::Categorical { domain, .. } => {
                 assert_eq!(domain, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
             }
+            ColorScale::Continuous { .. } => panic!("expected Categorical, got Continuous"),
         }
     }
 
@@ -880,6 +972,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -931,6 +1024,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -952,6 +1046,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -973,6 +1068,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -1053,6 +1149,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1105,6 +1202,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1157,6 +1255,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1195,6 +1294,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

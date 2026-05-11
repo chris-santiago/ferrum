@@ -47,7 +47,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         if points.len() < 2 { continue; }
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
-            (Some(v), Some(scale @ ColorScale::Categorical { .. })) =>
+            (Some(v), Some(scale)) =>
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.fill,
         };
@@ -84,6 +84,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None,
+        position: None,
         }
     }
 

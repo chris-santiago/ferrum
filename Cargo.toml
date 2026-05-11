@@ -47,6 +47,14 @@ tiny-skia = "~0.12"
 base64  = "~0.22"
 # Phase 8b — direct PNG encode path for raster export (promoted from transitive).
 png     = "0.18"
+# Phase 9 (Linkage transform) — scipy-compatible Lance-Williams + nearest-neighbor
+# chain. Pure Rust, single-purpose, audited per Task 1 verify-before-implementing
+# (last release April 2025, MIT, 7 methods supported, no correctness/panic issues).
+kodama = "0.3"
+# Phase 9 (Jitter seed-fallback hash) — twox-hash 1.x (NOT 2.x, which has a
+# different API surface). Used by render/position.rs to derive a deterministic
+# u64 from (x, y, group) per row when the user passes seed=None.
+twox-hash = { version = "1.6", default-features = false }
 
 [profile.release]
 lto = "thin"

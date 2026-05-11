@@ -75,10 +75,14 @@ class ChannelBase:
     _renders_in_phase_8a: ClassVar[bool] = False
     _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type"])
 
-    def __init__(self, field: Optional[str] = None, **kwargs: Any) -> None:
-        if field is not None and not isinstance(field, str):
+    def __init__(self, field: Any = None, **kwargs: Any) -> None:
+        # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.
+        # The placeholder rides through encoding verbatim; RepeatChart.expand()
+        # replaces it with a concrete field name at expand time.
+        from ferrum.repeat import _RepeatPlaceholder
+        if field is not None and not isinstance(field, (str, _RepeatPlaceholder)):
             raise TypeError(
-                f"{self.__class__.__name__}: field must be str or None, "
+                f"{self.__class__.__name__}: field must be str, _RepeatPlaceholder, or None, "
                 f"got {type(field).__name__}"
             )
         self.field = field

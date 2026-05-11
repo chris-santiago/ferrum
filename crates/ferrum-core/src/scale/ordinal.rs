@@ -27,6 +27,23 @@ impl OrdinalScale {
         }
     }
 
+    /// Per-category band width in pixels (the full step between consecutive
+    /// band centers). Used by render-side position adjustments (Phase 9c
+    /// Dodge) to compute sub-band offsets. The returned value is positive even
+    /// when the range is reversed (lo > hi).
+    pub(crate) fn bandwidth(&self) -> f64 {
+        match &self.0 {
+            Scale::Ordinal { domain, range, .. } => {
+                if domain.is_empty() { return 0.0; }
+                let r_lo = *range.first().unwrap();
+                let r_hi = *range.last().unwrap();
+                ((r_hi - r_lo) / domain.len() as f64).abs()
+            }
+            #[allow(unreachable_patterns)]
+            _ => 0.0,
+        }
+    }
+
     /// Pixel-range endpoints `[lo, hi]` of the underlying scale.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
         match &self.0 {

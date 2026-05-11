@@ -17,6 +17,8 @@ pub struct Layer {
     pub mark_style: Option<crate::spec::mark_style::MarkKwargsSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub data_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub position: Option<crate::spec::position::PositionAdjust>,
 }
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
+        position: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -51,6 +54,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
+        position: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -69,6 +73,7 @@ mod tests {
                 ..Default::default()
             }),
             data_source: None,
+        position: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -83,6 +88,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: Some("box".into()),
+            position: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -94,6 +100,37 @@ mod tests {
     }
 
     #[test]
+    fn layer_position_round_trips() {
+        use crate::spec::position::PositionAdjust;
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: Some(PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(json.contains(r#""position""#));
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_position_none_omits_from_json() {
+        let layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(!json.contains("position"), "position=None must be omitted: {json}");
+    }
+
+    #[test]
     fn layer_data_source_none_omits_from_json() {
         let layer = Layer {
             mark: Mark::Point,
@@ -101,6 +138,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
+        position: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(

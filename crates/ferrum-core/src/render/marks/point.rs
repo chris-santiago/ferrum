@@ -82,6 +82,10 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // Default radius from mark_style (Phase 7 path, area → radius conversion).
     let default_radius = (ctx.mark_style.point_size / std::f64::consts::PI).sqrt();
 
+    // Phase 9c — per-row pixel offsets from a position adjustment (e.g. Dodge into
+    // an ordinal-x band). Zero-valued when no adjustment was applied.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
     for i in 0..xs.len() {
         let (xv, yv) = match (xs[i], ys[i]) {
             (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
@@ -89,12 +93,15 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let cx = match scale_value(&ctx.scales.x, xv, None) { Some(p) => p, None => continue };
         let cy = match scale_value(&ctx.scales.y, yv, None) { Some(p) => p, None => continue };
+        let cx = cx + x_offsets[i];
+        let cy = cy + y_offsets[i];
 
         // Resolve color (same logic as Phase 7).
         let fill_base = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
                 },
                 None => ctx.mark_style.fill,
             }
@@ -179,6 +186,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -277,6 +285,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -342,6 +351,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -397,6 +407,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 

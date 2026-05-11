@@ -8,3 +8,5 @@ pub mod coord;
 pub use coord::CoordKind;
 pub mod mark_style;
 pub use mark_style::MarkKwargsSpec;
+pub mod position;
+pub use position::PositionAdjust;

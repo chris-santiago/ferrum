@@ -13,20 +13,24 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         stroke_dash: ctx.mark_style.stroke_dash.clone(),
     };
 
+    // Phase 9c — per-row pixel offsets from a position adjustment.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     if let (Some(yf), None) = (y_field(ctx, spec), x_field(ctx, spec)) {
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-        for yv in ys.into_iter().flatten() {
-            if !yv.is_finite() { continue; }
+        for (i, yopt) in ys.iter().enumerate() {
+            let yv = match yopt { Some(v) if v.is_finite() => *v, _ => continue };
             let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+            let py = py + y_offsets[i];
             out.line(panel.x, py, panel.x + panel.w, py, &style);
         }
         return;
     }
     if let (Some(xf), None) = (x_field(ctx, spec), y_field(ctx, spec)) {
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-        for xv in xs.into_iter().flatten() {
-            if !xv.is_finite() { continue; }
+        for (i, xopt) in xs.iter().enumerate() {
+            let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
             let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+            let px = px + x_offsets[i];
             out.line(px, panel.y, px, panel.y + panel.h, &style);
         }
     }
@@ -59,6 +63,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
  coord: None,
  mark_style: None,
+        position: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),

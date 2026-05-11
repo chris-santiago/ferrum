@@ -1,6 +1,6 @@
 # Ferrum — Implementation Phases (Meta-Roadmap)
 
-**Last updated:** 2026-05-09
+**Last updated:** 2026-05-10
 **Concept spec:** `ferrum-spec.md` (at repo root — philosophy, API surface, design constraints)
 **This document:** implementation order, phase dependencies, done criteria, and session-orientation guide
 
@@ -66,7 +66,7 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **7** | Static renderer (SVG/PNG) | First end-to-end chart output: a scatter plot from spec → SVG file. Primitive marks only (point, line, bar, area, rect, rule, text, tick) | 4, 5, 6 | [`2026-05-09-static-renderer-design.md`](specs/2026-05-09-static-renderer-design.md) | **done** |
 | **8a** | Grammar API surface (Python) — primitives + simple stats | `Chart`, `Layer`, all 31 encoding channels, themes-as-values, `+`/`\|`/`&` composition, `Facet`, `CoordFlip`, annotations, `mark_density/histogram/smooth` | 7 | [`2026-05-10-grammar-api-design.md`](specs/2026-05-10-grammar-api-design.md) | **done** |
 | **8b** | Composite + heavy statistical marks | `mark_boxplot/errorbar/errorband/ribbon`, `mark_contour/violin/qq/raster/swarm/hex/function` + 10 new Phase 5 transforms (Outliers, ErrorExtent, BoxStats, Violin, Kde2D, Contour, QQ, Raster, Hex, Swarm) + new SVG primitives (image, polygon, beeswarm) | 8a | [`2026-05-10-composite-stat-marks-design.md`](specs/2026-05-10-composite-stat-marks-design.md) | **done** |
-| **9** | Convenience / figure-level API | `displot`, `lmplot`, `roc_chart`, `pairplot`, etc. as sugar over the grammar — they must desugar to valid `Chart` specs, not bypass the engine | 8 | *(not yet written)* | pending |
+| **9** | Convenience / figure-level API | 8 Group A figure functions (`displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`, `clustermap`, `jointplot`); 8 new transforms (Unpivot, Linkage, Reorder, Bin2D, Logistic, Glm, Robust, LetterValue); 4 position adjustments (Identity, Dodge, Jitter, Stack); 2 new marks (segment, boxen); 3 new compound views (JointChart, RepeatChart, ClusterMapChart). Group B (model-diagnostic figure-level) deferred to Phase 10. | 8 | [`2026-05-10-convenience-api-design.md`](specs/2026-05-10-convenience-api-design.md) | **done** |
 | **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter), model-diagnostic marks (`ConfusionMark`, `ROCMark`, `CalibrationMark`, etc.), `Visualizer` convenience wrappers | 8 | *(not yet written)* | pending |
 | **11** | Interactive renderer (WASM) | `ferrum-wasm` crate + `ferrum._wasm` module; `.interactive()` switches render target; selections, zoom, pan, linked views declared in chart spec | 8 | *(not yet written)* | pending |
 | **12** | Extension points | Public APIs for custom marks, custom stat transforms, custom themes, renderer plugins; stable enough to document and not break | 8 | *(not yet written)* | pending |
@@ -135,8 +135,13 @@ A phase is `done` when all of the following are true:
 - [x] `mark_smooth(ci=...)` CI band renders via the new ribbon mark
 
 ### Phase 9 — Convenience API
-- [ ] Each figure-level function in `ferrum-spec.md §3.14` is implemented
-- [ ] Each one can be deconstructed: calling the function and inspecting `.spec` yields a valid `ChartSpec`
+- [x] Each figure-level function in `ferrum-spec.md §3.14` Group A is implemented
+- [x] Each one can be deconstructed: calling the function and inspecting `.spec` (or `.charts` / `.expand()`) yields a valid `ChartSpec` or compound view
+- [x] All 4 position adjustments (Identity, Dodge, Jitter, Stack) ship with mark eligibility enforced
+- [x] `PHASE_9_PLUS_MARKS` no longer contains `segment`
+- [x] 12 SVG goldens are byte-identical across runs (4 rendering green; 8 xfail-strict pinned to documented renderer-pipeline gaps)
+- [x] All `cargo test` + `pytest` pass
+- [x] All 6 spec drift notes applied to `ferrum-spec.md`
 
 ### Phase 10 — Model diagnostics
 - [ ] `ModelSource` wraps any object with `predict`/`predict_proba`/`transform`

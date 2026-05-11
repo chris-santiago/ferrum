@@ -1,4 +1,5 @@
-# Phase 5 fixture generator — used offline only; NOT a runtime dependency.
+# Phase 5/9 fixture generator — used offline only; NOT a runtime dependency.
 # Pin exact versions so regeneration is reproducible.
 numpy==2.1.3
-scipy==1.14.1     # Used only as a sanity check that our KDE shape matches scipy's
+scipy==1.14.1     # KDE sanity check (Phase 5); Linkage reference (Phase 9 Task 7)
+statsmodels==0.14.6   # Phase 9 (Logistic, Glm, Robust) reference values

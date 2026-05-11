@@ -31,6 +31,8 @@ pub struct ChartSpec {
     pub coord: Option<CoordKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_style: Option<MarkKwargsSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<crate::spec::position::PositionAdjust>,
 }
 
 #[pymethods]
@@ -45,6 +47,7 @@ impl ChartSpec {
         coord = None,                                         // from Task 4
         facet = None,                                         // NEW here
         mark_style = None,                                    // NEW here
+        position = None,                                      // Phase 9c
     ))]
     fn new(
         mark: &str,
@@ -62,6 +65,7 @@ impl ChartSpec {
         coord: Option<&str>,
         facet: Option<&Bound<'_, PyAny>>,
         mark_style: Option<&Bound<'_, PyAny>>,
+        position: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -124,6 +128,17 @@ impl ChartSpec {
             }
         };
 
+        let position = match position {
+            None => None,
+            Some(obj) => {
+                let py = obj.py();
+                let json_module = py.import("json")?;
+                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+                Some(serde_json::from_str(&s).map_err(|e|
+                    PyValueError::new_err(format!("position: {e}")))?)
+            }
+        };
+
         Ok(ChartSpec {
             data,
             mark,
@@ -133,6 +148,7 @@ impl ChartSpec {
             layers,
             coord,
             mark_style,
+            position,
         })
     }
 
@@ -195,6 +211,8 @@ impl ChartSpec {
             let obj: Py<PyAny> = match t {
                 crate::transform::core::TransformSpec::Bin(_) =>
                     pyo3::Py::new(py, crate::transform::bin::PyBin(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Bin2D(_) =>
+                    pyo3::Py::new(py, crate::transform::bin_2d::PyBin2D(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Kde(_) =>
                     pyo3::Py::new(py, crate::transform::kde::PyKde(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Smooth(_) =>
@@ -217,12 +235,26 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::contour::PyContour(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Qq(_) =>
                     pyo3::Py::new(py, crate::transform::qq::PyQQ(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Linkage(_) =>
+                    pyo3::Py::new(py, crate::transform::linkage::PyLinkage(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Raster(_) =>
                     pyo3::Py::new(py, crate::transform::raster::PyRaster(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Hex(_) =>
                     pyo3::Py::new(py, crate::transform::hex::PyHex(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Swarm(_) =>
                     pyo3::Py::new(py, crate::transform::swarm::PySwarm(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Unpivot(_) =>
+                    pyo3::Py::new(py, crate::transform::unpivot::PyUnpivot(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Reorder(_) =>
+                    pyo3::Py::new(py, crate::transform::reorder::PyReorder(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::LetterValue(_) =>
+                    pyo3::Py::new(py, crate::transform::letter_value::PyLetterValue(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Logistic(_) =>
+                    pyo3::Py::new(py, crate::transform::logistic::PyLogistic(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Glm(_) =>
+                    pyo3::Py::new(py, crate::transform::glm::PyGlm(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::Robust(_) =>
+                    pyo3::Py::new(py, crate::transform::robust::PyRobust(t.clone()))?.into_any(),
             };
             out.push(obj);
         }
@@ -248,6 +280,19 @@ impl ChartSpec {
             None => None,
             Some(CoordKind::Cartesian) => Some("cartesian"),
             Some(CoordKind::Flip) => Some("flip"),
+        }
+    }
+
+    #[getter]
+    fn position(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.position {
+            None => Ok(None),
+            Some(p) => {
+                let s = serde_json::to_string(p).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                let val = json_module.call_method1("loads", (s,))?;
+                Ok(Some(val.unbind()))
+            }
         }
     }
 
@@ -328,6 +373,10 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(b.0);
             continue;
         }
+        if let Ok(b) = item.extract::<crate::transform::bin_2d::PyBin2D>() {
+            out.push(b.0);
+            continue;
+        }
         if let Ok(k) = item.extract::<crate::transform::kde::PyKde>() {
             out.push(k.0);
             continue;
@@ -372,6 +421,10 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(q.0);
             continue;
         }
+        if let Ok(l) = item.extract::<crate::transform::linkage::PyLinkage>() {
+            out.push(l.0);
+            continue;
+        }
         if let Ok(r) = item.extract::<crate::transform::raster::PyRaster>() {
             out.push(r.0);
             continue;
@@ -384,8 +437,32 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(sw.0);
             continue;
         }
+        if let Ok(u) = item.extract::<crate::transform::unpivot::PyUnpivot>() {
+            out.push(u.0);
+            continue;
+        }
+        if let Ok(r) = item.extract::<crate::transform::reorder::PyReorder>() {
+            out.push(r.0);
+            continue;
+        }
+        if let Ok(lv) = item.extract::<crate::transform::letter_value::PyLetterValue>() {
+            out.push(lv.0);
+            continue;
+        }
+        if let Ok(lg) = item.extract::<crate::transform::logistic::PyLogistic>() {
+            out.push(lg.0);
+            continue;
+        }
+        if let Ok(g) = item.extract::<crate::transform::glm::PyGlm>() {
+            out.push(g.0);
+            continue;
+        }
+        if let Ok(rb) = item.extract::<crate::transform::robust::PyRobust>() {
+            out.push(rb.0);
+            continue;
+        }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Raster | Hex | Swarm"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | LetterValue | Logistic | Glm | Robust"
         )));
     }
     Ok(out)
@@ -415,6 +492,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -440,7 +518,7 @@ mod tests {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
             Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect,
-            Mark::Polygon, Mark::Image, Mark::Ribbon,
+            Mark::Polygon, Mark::Image, Mark::Ribbon, Mark::Segment,
         ] {
             let mut spec = minimal_scatter();
             spec.mark = m;
@@ -500,6 +578,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -527,6 +606,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -546,12 +626,15 @@ mod tests {
                 bin_width: None,
                 extent: None,
                 nice: true,
+                cumulative: false,
+                groupby: None,
                 name: None,
             })],
             facet: None,
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -608,13 +691,31 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn chart_spec_position_round_trips() {
+        use crate::spec::position::PositionAdjust;
+        let mut spec = minimal_scatter();
+        spec.position = Some(PositionAdjust::Identity);
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""position""#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn chart_spec_position_none_omits_from_json() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains(r#""position""#), "position=None must be omitted: {json}");
     }
 
     #[test]

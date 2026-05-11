@@ -117,7 +117,7 @@ pub fn resolve_mark_style(
             detail: None,
             cmap: None,
         },
-        Mark::Rule => MarkStyle {
+        Mark::Rule | Mark::Segment => MarkStyle {
             fill: theme.mark_color,
             stroke: Some(theme.mark_color),
             stroke_width: theme.line_stroke_width,
@@ -264,6 +264,7 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
         Mark::Polygon => super::marks::polygon::draw(ctx, out),
         Mark::Image => super::marks::image::draw(ctx, out),
         Mark::Ribbon => super::marks::ribbon::draw(ctx, out),
+        Mark::Segment => super::marks::segment::draw(ctx, out),
     }
 }
 

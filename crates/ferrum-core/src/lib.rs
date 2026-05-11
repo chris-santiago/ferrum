@@ -20,6 +20,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::threshold::ThresholdScale>()?;
     m.add_class::<scale::quantile::QuantileScale>()?;
     m.add_class::<transform::bin::PyBin>()?;
+    m.add_class::<transform::bin_2d::PyBin2D>()?;
     m.add_class::<transform::kde::PyKde>()?;
     m.add_class::<transform::smooth::PySmooth>()?;
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
@@ -35,11 +36,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::raster::PyRaster>()?;
     m.add_class::<transform::hex::PyHex>()?;
     m.add_class::<transform::swarm::PySwarm>()?;
+    m.add_class::<transform::unpivot::PyUnpivot>()?;
+    m.add_class::<transform::reorder::PyReorder>()?;
+    m.add_class::<transform::linkage::PyLinkage>()?;
+    m.add_class::<transform::letter_value::PyLetterValue>()?;
+    m.add_class::<transform::logistic::PyLogistic>()?;
+    m.add_class::<transform::glm::PyGlm>()?;
+    m.add_class::<transform::robust::PyRobust>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_horizontal_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::compose_svg_grid_py, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

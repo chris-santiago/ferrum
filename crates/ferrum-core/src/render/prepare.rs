@@ -34,6 +34,10 @@ pub struct LayerPrepared {
     /// Name of the chart-level transform output this layer reads from.
     /// `None` ⇒ pipeline final output (resolved via [`FINAL_OUTPUT_KEY`]).
     pub data_source: Option<String>,
+    /// Phase 9c — position adjustment for this layer. Merged from
+    /// `Layer.position` (preferred) or `ChartSpec.position` (chart-level
+    /// fallback for single-layer charts).
+    pub position: Option<crate::spec::position::PositionAdjust>,
 }
 
 impl LayerPrepared {
@@ -45,6 +49,7 @@ impl LayerPrepared {
             transforms: spec.transforms.clone(),
             mark_style: spec.mark_style.clone(),
             data_source: None,
+            position: spec.position.clone(),
         }
     }
 
@@ -87,6 +92,7 @@ impl LayerPrepared {
             transforms: layer.transforms.clone(),
             mark_style: layer.mark_style.clone().or_else(|| spec.mark_style.clone()),
             data_source: layer.data_source.clone(),
+            position: layer.position.clone().or_else(|| spec.position.clone()),
         }
     }
 }
@@ -296,6 +302,9 @@ pub fn prepare_render_inputs(
             .iter()
             .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
             .collect(),
+        // Continuous color scales don't produce categorical legend entries.
+        // (A future colorbar artifact would be a separate legend kind.)
+        Some(super::scale_resolve::ColorScale::Continuous { .. }) => Vec::new(),
         None => Vec::new(),
     };
 
@@ -389,6 +398,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -462,6 +472,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 
@@ -494,6 +505,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
+            position: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -501,6 +513,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
+            position: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -534,6 +547,8 @@ mod tests {
             bin_width: None,
             extent: Some((10.0, 30.0)),
             nice: false,
+            cumulative: false,
+            groupby: None,
             name,
         })];
         if !named {
@@ -640,6 +655,7 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
+            position: None,
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch).unwrap_err();

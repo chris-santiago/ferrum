@@ -438,6 +438,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: None,
+        position: None,
         }
     }
 

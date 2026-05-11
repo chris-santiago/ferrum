@@ -1,0 +1,586 @@
+//! Letter-value transform (Phase 9b).
+//!
+//! Computes the letter-value statistics used by boxen plots
+//! (Hofmann/Wickham/Kafadar 2017). For each group, emits one row per
+//! depth k ∈ [1, K] with the lower/upper quantiles at probabilities
+//! `2^-k` and `1 - 2^-k`. The number of depths K is chosen by one of
+//! four strategies.
+//!
+//! Primary output schema:
+//! `[group: Utf8|Null, depth: Int32, lower: Float64, upper: Float64, level: Utf8]`
+//!
+//! Secondary named outputs:
+//! - `outliers` (or `<name>_outliers`): `[group: Utf8|Null, value: Float64, is_outlier: Bool]`
+//! - `depth_1`..`depth_8` (or `<name>_depth_K`): `[group, lower, upper, level]` rows
+//!   filtered to that depth. When the actual K < 8, the unused outputs are emitted
+//!   as zero-row batches so downstream renderers can safely consume them.
+
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, RecordBatch, StringArray,
+};
+use arrow::datatypes::{DataType, Field, Schema};
+use pyo3::exceptions::PyValueError;
+use pyo3::PyResult;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// Maximum depth for per-depth named outputs.
+pub(crate) const K_MAX_NAMED: usize = 8;
+
+/// Letter labels by depth. depth 1 → "M" (median), 2 → "F" (fourths), etc.
+const LETTERS: [&str; 8] = ["M", "F", "E", "D", "C", "B", "A", "Z"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum KDepth {
+    Tukey,
+    Proportion { p: f64 },
+    Trustworthy,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct LetterValueSpec {
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group: Option<String>,
+    pub k_depth: KDepth,
+    #[serde(default = "default_outlier_threshold")]
+    pub outlier_threshold: f64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+}
+
+fn default_outlier_threshold() -> f64 { 1.5 }
+
+/// Compute the K depth for a given strategy and group size n.
+pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
+    if n == 0 { return 0; }
+    let n_f = n as f64;
+    let k = match strategy {
+        KDepth::Tukey => {
+            let raw = n_f.log2().floor() as i64 - 3;
+            raw.max(1) as usize
+        }
+        KDepth::Proportion { p } => {
+            let target = (p * n_f).ceil() as i64;
+            let target = target.max(1);
+            let mut k = 1usize;
+            while (1i64 << (k as i64 - 1)) < target {
+                k += 1;
+                if k > K_MAX_NAMED { break; }
+            }
+            k.max(1)
+        }
+        KDepth::Trustworthy => {
+            // K = floor(log2(n / 3.32)).
+            let val = (n_f / 3.32_f64).log2().floor() as i64;
+            val.max(1) as usize
+        }
+        KDepth::Full => {
+            let raw = n_f.log2().floor() as i64;
+            raw.max(1) as usize
+        }
+    };
+    k.min(K_MAX_NAMED)
+}
+
+/// numpy-style linear-interpolation quantile on already-sorted ascending values.
+fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 0 { return f64::NAN; }
+    if n == 1 { return sorted[0]; }
+    let h = p * (n as f64 - 1.0);
+    let lo = h.floor() as usize;
+    let hi = (h.ceil() as usize).min(n - 1);
+    let frac = h - h.floor();
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+struct DepthRow {
+    group: Option<String>,
+    depth: i32,
+    lower: f64,
+    upper: f64,
+    level: String,
+}
+
+struct OutlierRow {
+    group: Option<String>,
+    value: f64,
+    is_outlier: bool,
+}
+
+fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(Option<String>, f64)>> {
+    let schema = batch.schema();
+    let vi = schema.index_of(&spec.value)
+        .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
+    if schema.field(vi).data_type() != &DataType::Float64 {
+        return Err(PyValueError::new_err(format!(
+            "stat_letter_value: column '{}' must be Float64", spec.value
+        )));
+    }
+    let varr = batch.column(vi).as_any().downcast_ref::<Float64Array>().unwrap();
+
+    let g_arr_opt = if let Some(g) = &spec.group {
+        let gi = schema.index_of(g.as_str())
+            .map_err(|_| PyValueError::new_err(format!("stat_letter_value: group column '{g}' not found")))?;
+        let dt = schema.field(gi).data_type();
+        if dt != &DataType::Utf8 {
+            return Err(PyValueError::new_err(format!(
+                "stat_letter_value: group column '{g}' must be Utf8; got {dt:?}"
+            )));
+        }
+        Some(batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap())
+    } else {
+        None
+    };
+
+    let mut out = Vec::with_capacity(varr.len());
+    for i in 0..varr.len() {
+        if varr.is_null(i) { continue; }
+        let v = varr.value(i);
+        if v.is_nan() { continue; }
+        let g = match g_arr_opt {
+            None => None,
+            Some(ga) => {
+                if ga.is_null(i) { None } else { Some(ga.value(i).to_string()) }
+            }
+        };
+        out.push((g, v));
+    }
+    Ok(out)
+}
+
+pub(crate) fn apply(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    if !(spec.outlier_threshold.is_finite() && spec.outlier_threshold >= 0.0) {
+        return Err(PyValueError::new_err(
+            "stat_letter_value: outlier_threshold must be finite and >= 0",
+        ));
+    }
+    let pairs = extract_values(spec, batch)?;
+    let depths = compute_depths(spec, &pairs);
+    build_primary_batch(&depths)
+}
+
+fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Vec<DepthRow> {
+    // Group values; preserve first-seen order via BTreeMap → group order is lexicographic
+    // for stability across runs.
+    let mut groups: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
+    for (g, v) in pairs {
+        groups.entry(g.clone()).or_insert_with(Vec::new).push(*v);
+    }
+
+    let mut rows = Vec::new();
+    for (g, vs) in groups.iter_mut() {
+        if vs.is_empty() { continue; }
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let k = k_for_depth(&spec.k_depth, vs.len());
+        for depth in 1..=k {
+            let p = 0.5_f64.powi(depth as i32);
+            let lower = quantile_sorted(vs, p);
+            let upper = quantile_sorted(vs, 1.0 - p);
+            let letter = if depth >= 1 && depth <= LETTERS.len() {
+                LETTERS[depth - 1].to_string()
+            } else {
+                format!("depth_{depth}")
+            };
+            rows.push(DepthRow {
+                group: g.clone(),
+                depth: depth as i32,
+                lower,
+                upper,
+                level: letter,
+            });
+        }
+    }
+    rows
+}
+
+fn build_primary_batch(rows: &[DepthRow]) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("group", DataType::Utf8, true),
+        Field::new("depth", DataType::Int32, false),
+        Field::new("lower", DataType::Float64, false),
+        Field::new("upper", DataType::Float64, false),
+        Field::new("level", DataType::Utf8, false),
+    ]));
+    let groups: Vec<Option<String>> = rows.iter().map(|r| r.group.clone()).collect();
+    let depths: Vec<i32> = rows.iter().map(|r| r.depth).collect();
+    let lowers: Vec<f64> = rows.iter().map(|r| r.lower).collect();
+    let uppers: Vec<f64> = rows.iter().map(|r| r.upper).collect();
+    let levels: Vec<String> = rows.iter().map(|r| r.level.clone()).collect();
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(groups.iter().map(|x| x.as_deref()).collect::<Vec<_>>())),
+        Arc::new(Int32Array::from(depths)),
+        Arc::new(Float64Array::from(lowers)),
+        Arc::new(Float64Array::from(uppers)),
+        Arc::new(StringArray::from(levels.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+    ];
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_letter_value: {e}")))
+}
+
+/// Compute the secondary named outputs: outliers + depth_1..depth_8.
+pub(crate) fn secondary_outputs(
+    spec: &LetterValueSpec,
+    input_batch: &RecordBatch,
+    primary_batch: &RecordBatch,
+) -> PyResult<Vec<(String, RecordBatch)>> {
+    let groups_col = primary_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+    let depths_col = primary_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
+    let lowers_col = primary_batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+    let uppers_col = primary_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+
+    // Per-group max-depth (lower, upper) extents — the outermost letter value.
+    let mut tail: BTreeMap<Option<String>, (i32, f64, f64)> = BTreeMap::new();
+    for i in 0..primary_batch.num_rows() {
+        let g = if groups_col.is_null(i) { None } else { Some(groups_col.value(i).to_string()) };
+        let d = depths_col.value(i);
+        let lo = lowers_col.value(i);
+        let hi = uppers_col.value(i);
+        let entry = tail.entry(g).or_insert((d, lo, hi));
+        if d >= entry.0 {
+            *entry = (d, lo, hi);
+        }
+    }
+
+    // ---- outliers output ----
+    // For each non-null input row: classify as outlier if value falls outside
+    //   [lower_K - threshold*(upper_K - lower_K), upper_K + threshold*(upper_K - lower_K)].
+    let input_pairs = extract_values(spec, input_batch)?;
+    let mut o_groups: Vec<Option<String>> = Vec::with_capacity(input_pairs.len());
+    let mut o_vals: Vec<f64> = Vec::with_capacity(input_pairs.len());
+    let mut o_flags: Vec<bool> = Vec::with_capacity(input_pairs.len());
+    for (g, v) in &input_pairs {
+        let (lo, hi) = match tail.get(g) {
+            Some((_, lo, hi)) => (*lo, *hi),
+            None => (f64::NAN, f64::NAN),
+        };
+        let span = hi - lo;
+        let low_fence = lo - spec.outlier_threshold * span;
+        let high_fence = hi + spec.outlier_threshold * span;
+        let is_outlier = !lo.is_nan() && !hi.is_nan() && (*v < low_fence || *v > high_fence);
+        o_groups.push(g.clone());
+        o_vals.push(*v);
+        o_flags.push(is_outlier);
+    }
+    let outliers_schema = Arc::new(Schema::new(vec![
+        Field::new("group", DataType::Utf8, true),
+        Field::new("value", DataType::Float64, false),
+        Field::new("is_outlier", DataType::Boolean, false),
+    ]));
+    let outliers_batch = RecordBatch::try_new(
+        outliers_schema,
+        vec![
+            Arc::new(StringArray::from(o_groups.iter().map(|x| x.as_deref()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(Float64Array::from(o_vals)) as ArrayRef,
+            Arc::new(BooleanArray::from(o_flags)) as ArrayRef,
+        ],
+    ).map_err(|e| PyValueError::new_err(format!("stat_letter_value outliers: {e}")))?;
+
+    // ---- per-depth outputs (depth_1..depth_8) ----
+    // Each depth_K output is the primary rows filtered to depth==K, projecting only
+    // [group, lower, upper, level] (no depth column — implicit in the output name).
+    let depth_schema = Arc::new(Schema::new(vec![
+        Field::new("group", DataType::Utf8, true),
+        Field::new("lower", DataType::Float64, false),
+        Field::new("upper", DataType::Float64, false),
+        Field::new("level", DataType::Utf8, false),
+    ]));
+    let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+    let mut by_depth: BTreeMap<i32, (Vec<Option<String>>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
+    for i in 0..primary_batch.num_rows() {
+        let d = depths_col.value(i);
+        let g = if groups_col.is_null(i) { None } else { Some(groups_col.value(i).to_string()) };
+        let entry = by_depth.entry(d).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        entry.0.push(g);
+        entry.1.push(lowers_col.value(i));
+        entry.2.push(uppers_col.value(i));
+        entry.3.push(level_col.value(i).to_string());
+    }
+
+    let (key_outliers, key_depth_fmt): (String, Box<dyn Fn(usize) -> String>) = match &spec.name {
+        Some(s) => {
+            let s_cloned = s.clone();
+            let fmt: Box<dyn Fn(usize) -> String> = Box::new(move |k: usize| format!("{s_cloned}_depth_{k}"));
+            (format!("{s}_outliers"), fmt)
+        }
+        None => {
+            let fmt: Box<dyn Fn(usize) -> String> = Box::new(|k: usize| format!("depth_{k}"));
+            ("outliers".to_string(), fmt)
+        }
+    };
+
+    let mut out: Vec<(String, RecordBatch)> = Vec::new();
+    out.push((key_outliers, outliers_batch));
+    for k in 1..=K_MAX_NAMED {
+        let (groups_v, lowers_v, uppers_v, levels_v) = by_depth
+            .get(&(k as i32))
+            .map(|t| t.clone())
+            .unwrap_or_else(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        let cols: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(groups_v.iter().map(|x| x.as_deref()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(Float64Array::from(lowers_v)) as ArrayRef,
+            Arc::new(Float64Array::from(uppers_v)) as ArrayRef,
+            Arc::new(StringArray::from(levels_v.iter().map(|s| s.as_str()).collect::<Vec<_>>())) as ArrayRef,
+        ];
+        let batch = RecordBatch::try_new(depth_schema.clone(), cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_letter_value depth_{k}: {e}")))?;
+        out.push((key_depth_fmt(k), batch));
+    }
+    Ok(out)
+}
+
+// ---------- PyO3 wrapper ----------
+
+use pyo3::prelude::*;
+
+use crate::transform::core::TransformSpec;
+
+#[pyclass(eq, module = "ferrum._core", name = "LetterValue")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PyLetterValue(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PyLetterValue {
+    #[new]
+    #[pyo3(signature = (
+        value, *,
+        group = None,
+        k_depth = "proportion",
+        k_proportion = 0.007,
+        outlier_threshold = 1.5,
+        name = None,
+    ))]
+    fn new(
+        value: &str,
+        group: Option<String>,
+        k_depth: &str,
+        k_proportion: f64,
+        outlier_threshold: f64,
+        name: Option<String>,
+    ) -> PyResult<Self> {
+        if value.is_empty() {
+            return Err(PyValueError::new_err("LetterValue: value must be non-empty"));
+        }
+        if !outlier_threshold.is_finite() || outlier_threshold < 0.0 {
+            return Err(PyValueError::new_err(
+                "LetterValue: outlier_threshold must be finite and >= 0",
+            ));
+        }
+        let kd = match k_depth {
+            "tukey" => KDepth::Tukey,
+            "proportion" => {
+                if !(k_proportion.is_finite() && k_proportion > 0.0 && k_proportion < 1.0) {
+                    return Err(PyValueError::new_err(
+                        "LetterValue: k_proportion must be in (0, 1)",
+                    ));
+                }
+                KDepth::Proportion { p: k_proportion }
+            }
+            "trustworthy" => KDepth::Trustworthy,
+            "full" => KDepth::Full,
+            other => return Err(PyValueError::new_err(format!(
+                "LetterValue: unknown k_depth '{other}'; expected 'tukey'|'proportion'|'trustworthy'|'full'"
+            ))),
+        };
+        Ok(PyLetterValue(TransformSpec::LetterValue(LetterValueSpec {
+            value: value.to_string(),
+            group,
+            k_depth: kd,
+            outlier_threshold,
+            name,
+        })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::LetterValue(s) => format!(
+                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={})",
+                s.value, s.group, s.k_depth, s.outlier_threshold,
+            ),
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Float64Array, StringArray};
+
+    fn batch1col(name: &str, vs: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vs))]).unwrap()
+    }
+
+    fn batch_grouped(groups: Vec<&str>, values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let g_arr: Vec<Option<&str>> = groups.iter().map(|s| Some(*s)).collect();
+        RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(g_arr)),
+            Arc::new(Float64Array::from(values)),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn test_letter_value_round_trip_json() {
+        let spec = LetterValueSpec {
+            value: "x".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Proportion { p: 0.007 },
+            outlier_threshold: 1.5,
+            name: Some("lv".into()),
+        };
+        let wrapped = TransformSpec::LetterValue(spec.clone());
+        let json = serde_json::to_string(&wrapped).unwrap();
+        let parsed: TransformSpec = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TransformSpec::LetterValue(s) => assert_eq!(s, spec),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_letter_value_basic_depth1_is_median() {
+        let vs: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // First row is depth=1 (median). lower == upper == median of 1..=100 = 50.5
+        let depth = out.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
+        let lower = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let upper = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(depth.value(0), 1);
+        assert!((lower.value(0) - 50.5).abs() < 1e-9);
+        assert!((upper.value(0) - 50.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_letter_value_tukey_k_for_n100() {
+        // Tukey: K = floor(log2(100)) - 3 = 6 - 3 = 3.
+        let k = k_for_depth(&KDepth::Tukey, 100);
+        assert_eq!(k, 3);
+    }
+
+    #[test]
+    fn test_letter_value_proportion_k_for_p007_n200() {
+        // target = ceil(0.007 * 200) = 2; smallest K with 2^(K-1) >= 2 → K=2.
+        let k = k_for_depth(&KDepth::Proportion { p: 0.007 }, 200);
+        assert_eq!(k, 2);
+    }
+
+    #[test]
+    fn test_letter_value_full_k_for_n20() {
+        // Full: K = floor(log2(20)) = 4.
+        let k = k_for_depth(&KDepth::Full, 20);
+        assert_eq!(k, 4);
+    }
+
+    #[test]
+    fn test_letter_value_grouped_3_groups() {
+        let groups: Vec<&str> = (0..30).map(|i| ["a","b","c"][i % 3]).collect();
+        let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // n=10 per group → Tukey K = max(1, floor(log2(10)) - 3) = max(1, 3-3) = 1.
+        // 3 groups × 1 depth = 3 rows.
+        assert_eq!(out.num_rows(), 3);
+        let g_arr = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..out.num_rows() {
+            seen.insert(g_arr.value(i).to_string());
+        }
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn test_letter_value_outliers_classifies_extreme_values() {
+        // Build n=50 normal-ish values plus 2 extremes; the extremes should be
+        // flagged. Threshold 1.5 means: |value - lv_K| > 1.5 * IQR(lv_K).
+        let mut vs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        vs.push(-1000.0);
+        vs.push(1000.0);
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        let sch = outliers.1.schema();
+        assert_eq!(sch.field(0).name(), "group");
+        assert_eq!(sch.field(1).name(), "value");
+        assert_eq!(sch.field(2).name(), "is_outlier");
+        // The two extreme values must be flagged is_outlier=true.
+        let val_col = outliers.1.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let flag_col = outliers.1.column(2).as_any().downcast_ref::<BooleanArray>().unwrap();
+        let mut found_extreme = 0;
+        for i in 0..outliers.1.num_rows() {
+            let v = val_col.value(i);
+            if (v - 1000.0).abs() < 1e-9 || (v + 1000.0).abs() < 1e-9 {
+                assert!(flag_col.value(i), "extreme value {v} should be flagged");
+                found_extreme += 1;
+            }
+        }
+        assert_eq!(found_extreme, 2);
+    }
+
+    #[test]
+    fn test_letter_value_named_outputs_count_eight() {
+        let vs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        assert_eq!(secs.len(), 9);
+        for k in 1..=K_MAX_NAMED {
+            let key = format!("depth_{k}");
+            assert!(secs.iter().any(|(name, _)| name == &key), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn test_letter_value_named_outputs_use_name_prefix() {
+        let vs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: Some("lv".into()),
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        assert!(secs.iter().any(|(name, _)| name == "lv_outliers"));
+        for k in 1..=K_MAX_NAMED {
+            let key = format!("lv_depth_{k}");
+            assert!(secs.iter().any(|(name, _)| name == &key), "missing {key}");
+        }
+    }
+}

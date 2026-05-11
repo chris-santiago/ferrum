@@ -120,6 +120,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     let denom = (vmax - vmin).max(f64::EPSILON);
 
+    // Phase 9c — per-row position-adjustment pixel offsets.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     // --- Emit one polygon per group ---
     for (_id, indices) in &groups {
         let ring: Vec<(f64, f64)> = indices
@@ -132,7 +134,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 }
                 let cx = ctx.scales.x.to_pixel_f64(xv)?;
                 let cy = ctx.scales.y.to_pixel_f64(yv)?;
-                Some((cx, cy))
+                let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+                let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+                Some((cx + xo, cy + yo))
             })
             .collect();
         if ring.len() < 3 {
@@ -154,7 +158,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             } else {
                 ctx.mark_style.fill
             }
-        } else if let (Some(values), Some(scale @ ColorScale::Categorical { .. })) =
+        } else if let (Some(values), Some(scale)) =
             (color_str_values.as_ref(), &ctx.scales.color)
         {
             // Categorical: take first row's category string, look up in scale.
@@ -213,6 +217,7 @@ mod tests {
             layers: None,
             coord: None,
             mark_style: Some(kwargs),
+        position: None,
         }
     }
 

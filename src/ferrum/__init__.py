@@ -4,6 +4,7 @@ from ferrum._core import (
     Aggregate,
     AggregateOp,
     Bin,
+    Bin2D,
     BoxStats,
     ChartSpec,
     ContinuousScheme,
@@ -13,7 +14,11 @@ from ferrum._core import (
     Hex,
     Kde,
     Kde2D,
+    Glm,
     LinearScale,
+    LetterValue,
+    Linkage,
+    Logistic,
     LogScale,
     TimeScale,
     SymlogScale,
@@ -22,10 +27,13 @@ from ferrum._core import (
     QQ,
     QuantileScale,
     Raster,
+    Reorder,
+    Robust,
     Smooth,
     Summary,
     Swarm,
     ThresholdScale,
+    Unpivot,
     Violin,
     compute_layout,
     process_batch,
@@ -33,6 +41,7 @@ from ferrum._core import (
     render_svg,
     compose_svg_horizontal,
     compose_svg_vertical,
+    compose_svg_grid,
 )
 from ferrum.schemes import continuous_palette, Gradient
 
@@ -42,12 +51,21 @@ from ferrum.themes import (
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
+from ferrum.position import Identity, Dodge, Jitter, Stack
 from ferrum.coord import (
     CoordFlip, CoordCartesian, CoordPolar, CoordGeo, CoordFixed,
 )
 from ferrum.layer import Layer
-from ferrum.composition import HConcatChart, VConcatChart
+from ferrum.composition import HConcatChart, VConcatChart, JointChart, RepeatChart, ClusterMapChart
+from ferrum.repeat import Repeat
 from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
+
+# Phase 9e — figure-level convenience functions
+from ferrum.figure import (
+    displot, catplot, lmplot, residplot,
+    pairplot, heatmap, clustermap, jointplot,
+)
+import ferrum.figure as figure  # so users can also do ferrum.figure.displot
 
 import ferrum.encoding as encoding
 from ferrum.encoding import (
@@ -62,13 +80,15 @@ __version__ = "0.1.0"
 
 __all__ = [
     # Phase 1-7 core
-    "Aggregate", "AggregateOp", "Bin", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
-    "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "Outliers", "QQ", "QuantileScale", "Raster", "ThresholdScale", "Smooth", "Summary", "Swarm", "Violin",
+    "Aggregate", "AggregateOp", "Bin", "Bin2D", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
+    "Glm", "LetterValue", "LinearScale", "Linkage", "Logistic", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
+    "Outliers", "QQ", "QuantileScale", "Raster", "Reorder", "Robust", "ThresholdScale", "Smooth", "Summary", "Swarm", "Unpivot", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
-    "compose_svg_horizontal", "compose_svg_vertical",
+    "compose_svg_horizontal", "compose_svg_vertical", "compose_svg_grid",
     # Phase 8a
     "Chart", "Layer", "HConcatChart", "VConcatChart",
+    # Phase 9
+    "Repeat", "JointChart", "RepeatChart", "ClusterMapChart",
     "CoordFlip", "CoordCartesian", "CoordPolar", "CoordGeo", "CoordFixed",
     "Theme", "themes", "set_default_theme", "get_default_theme", "theme_context",
     "encoding",
@@ -81,4 +101,10 @@ __all__ = [
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
     # Phase 8b
     "ContinuousScheme", "continuous_palette", "Gradient",
+    # Phase 9c position adjustments
+    "Identity", "Dodge", "Jitter", "Stack",
+    # Phase 9e figure-level convenience
+    "figure",
+    "displot", "catplot", "lmplot", "residplot",
+    "pairplot", "heatmap", "clustermap", "jointplot",
 ]

@@ -16,6 +16,7 @@ pub enum Mark {
     Polygon,
     Image,
     Ribbon,
+    Segment,
 }
 
 impl Mark {
@@ -32,6 +33,7 @@ impl Mark {
             Mark::Polygon => "polygon",
             Mark::Image => "image",
             Mark::Ribbon => "ribbon",
+            Mark::Segment => "segment",
         }
     }
 }
@@ -49,7 +51,7 @@ impl fmt::Display for ParseMarkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect, polygon, image, ribbon]",
+            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect, polygon, image, ribbon, segment]",
             self.0
         )
     }
@@ -72,6 +74,7 @@ impl FromStr for Mark {
             "polygon" => Ok(Mark::Polygon),
             "image" => Ok(Mark::Image),
             "ribbon" => Ok(Mark::Ribbon),
+            "segment" => Ok(Mark::Segment),
             other => Err(ParseMarkError(other.to_string())),
         }
     }
@@ -85,7 +88,7 @@ mod tests {
     fn test_mark_round_trip_each_variant() {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
-            Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect, Mark::Polygon, Mark::Image, Mark::Ribbon,
+            Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect, Mark::Polygon, Mark::Image, Mark::Ribbon, Mark::Segment,
         ] {
             let json = serde_json::to_string(&m).unwrap();
             let parsed: Mark = serde_json::from_str(&json).unwrap();
@@ -103,6 +106,17 @@ mod tests {
     fn test_mark_from_str_known() {
         assert_eq!(Mark::from_str("point").unwrap(), Mark::Point);
         assert_eq!(Mark::from_str("rect").unwrap(),  Mark::Rect);
+    }
+
+    #[test]
+    fn test_mark_segment_round_trip() {
+        let m = Mark::Segment;
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, "\"segment\"");
+        let parsed: Mark = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Mark::Segment);
+        assert_eq!(Mark::from_str("segment").unwrap(), Mark::Segment);
+        assert_eq!(Mark::Segment.as_str(), "segment");
     }
 
     #[test]

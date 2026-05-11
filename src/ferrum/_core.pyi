@@ -215,7 +215,19 @@ class Bin:
         bin_width: Optional[float] = None,
         extent: Optional[Tuple[float, float]] = None,
         nice: bool = True,
+        cumulative: bool = False,
+        groupby: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None: ...
+
+class Bin2D:
+    def __init__(self, x: str, y: str, *,
+                 bins_x: Union[str, int, float] = "sturges",
+                 bins_y: Union[str, int, float] = "sturges",
+                 extent_x: Optional[Tuple[float, float]] = None,
+                 extent_y: Optional[Tuple[float, float]] = None,
+                 cumulative: bool = False,
+                 name: Optional[str] = None) -> None: ...
 
 class BoxStats:
     def __init__(
@@ -272,6 +284,10 @@ class Smooth:
         degree: int = 2,
         n: int = 200,
         seed: int = 0,
+        x_bins: Optional[int] = None,
+        x_estimator: Optional[str] = None,
+        output: str = "fitted",
+        name: Optional[str] = None,
     ) -> None: ...
 
 class AggregateOp:
@@ -377,6 +393,94 @@ class Swarm:
     ) -> None: ...
 
 
+class Linkage:
+    def __init__(self, *,
+                 method: str = "ward",
+                 metric: str = "euclidean",
+                 axis: str = "rows",
+                 z_score: str | None = None,
+                 standard_scale: str | None = None,
+                 name: str | None = None) -> None: ...
+
+
+class Reorder:
+    def __init__(self, by: str, *,
+                 drop_index: bool = True,
+                 from_: Optional[str] = None,
+                 name: Optional[str] = None) -> None: ...
+
+
+class Unpivot:
+    def __init__(
+        self,
+        *,
+        id_vars: list[str] = ...,
+        value_vars: list[str] | None = None,
+        var_name: str = "variable",
+        value_name: str = "value",
+        name: str | None = None,
+    ) -> None: ...
+
+
+class LetterValue:
+    def __init__(
+        self,
+        value: str,
+        *,
+        group: Optional[str] = None,
+        k_depth: str = "proportion",
+        k_proportion: float = 0.007,
+        outlier_threshold: float = 1.5,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
+class Logistic:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        n_grid: int = 100,
+        ci: Optional[float] = None,
+        max_iter: int = 25,
+        tol: float = 1e-8,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
+class Glm:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        family: str = "gaussian",
+        link: Optional[str] = None,
+        n_grid: int = 100,
+        ci: Optional[float] = None,
+        max_iter: int = 25,
+        tol: float = 1e-8,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
+class Robust:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        n_grid: int = 100,
+        ci: Optional[float] = None,
+        huber_c: float = 1.345,
+        max_iter: int = 25,
+        tol: float = 1e-8,
+        output: str = "fitted",
+        name: Optional[str] = None,
+    ) -> None: ...
+
+
 def compute_layout(
     spec,
     *,
@@ -426,6 +530,18 @@ def compose_svg_vertical(
     *,
     spacing: float = 10.0,
     align: Literal["left", "center", "right"] = "left",
+) -> str: ...
+
+def compose_svg_grid(
+    cells: list[str | None],
+    *,
+    rows: int,
+    cols: int,
+    row_ratios: list[float],
+    col_ratios: list[float],
+    spacing: float = 10.0,
+    share_x: list[list[int]] = ...,
+    share_y: list[list[int]] = ...,
 ) -> str: ...
 
 
