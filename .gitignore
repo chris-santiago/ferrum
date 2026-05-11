@@ -212,3 +212,6 @@ crates/ferrum-wasm/pkg/
 
 # Jupyter notebooks
 notebooks/
+
+# Zensical build output (anchored to repo root only — must not match docs/site/)
+/site/

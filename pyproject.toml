@@ -47,10 +47,13 @@ addopts = "-m 'not slow'"
 dev = [
     "maturin>=1.7,<2.0",
     "pytest>=8",
+    "pytest-codeblocks>=0.17",
     "scipy>=1.10",
     "skops>=0.9",
     "resvg-py>=0.3",
     "zensical>=0.0.40",
+    "mkdocstrings>=1.0",
+    "mkdocstrings-python>=2.0",
     "ruff>=0.6",
     "ipykernel>=7.2.0",
 ]
