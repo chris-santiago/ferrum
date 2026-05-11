@@ -315,6 +315,36 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Logistic regression fit with optional confidence band.
+///
+/// Fits a binary logistic regression model ``P(y=1|x)`` via IRLS (Binomial
+/// family, logit link) and evaluates the fitted probability on an evenly-
+/// spaced grid. When ``ci`` is set, also produces Wald confidence bands.
+///
+/// Equivalent to ``Glm(family="binomial", link="logit")`` but provided as
+/// a convenience class with a simpler signature.
+///
+/// Output columns: ``x`` (Float64), ``y`` (Float64 fitted probability),
+/// ``ci_lower`` and ``ci_upper`` (Float64; ``NaN`` when ``ci`` is not set).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Predictor column (must be Float64).
+/// y : str
+///     Binary response column (must be Float64; values should be 0 or 1).
+/// n_grid : int, default 100
+///     Number of evenly-spaced grid points to evaluate. Must be > 0.
+/// ci : float, optional
+///     Confidence level in (0, 1) for Wald bands (e.g. 0.95). When
+///     omitted, ``ci_lower`` and ``ci_upper`` are ``NaN``.
+/// max_iter : int, default 25
+///     Maximum IRLS iterations. Must be > 0.
+/// tol : float, default 1e-8
+///     Convergence tolerance (relative change in coefficients). Must be
+///     finite and > 0.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Logistic")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLogistic(pub(crate) TransformSpec);

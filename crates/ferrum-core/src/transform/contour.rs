@@ -358,6 +358,31 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
 
 // ---------- PyO3 wrapper ----------
 
+/// Marching-Squares iso-contour extraction from a ``Kde2D`` density grid.
+///
+/// Reads a single-row batch in the ``Kde2D`` output schema (fields
+/// ``grid_x``, ``grid_y``, ``density``, ``nx``, ``ny``, ``extent``) and
+/// emits contour line segments or filled polygons at evenly-spaced density
+/// levels using the Marching Squares algorithm.
+///
+/// Output columns: ``level_id`` (UInt32), ``level_value`` (Float64),
+/// ``contour_x`` (Float64), ``contour_y`` (Float64). Each row is one
+/// vertex; consecutive pairs form a segment (isoline mode) or a polygon
+/// vertex sequence (isoband mode).
+///
+/// Parameters
+/// ----------
+/// thresholds : int, default 6
+///     Number of equally-spaced density levels to compute contours for.
+///     Must be > 0.
+/// fill : bool, default False
+///     When False, emit isolines (line segments); when True, emit filled
+///     isoband polygons between adjacent threshold levels.
+/// smooth : bool, default True
+///     Accepted but currently reserved; smoothing semantics are not yet
+///     fully specified and the field has no effect on output.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Contour")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyContour(pub(crate) TransformSpec);

@@ -279,6 +279,27 @@ mod tests {
 // PyO3 wrapper appended below
 use pyo3::prelude::*;
 
+/// IQR-based outlier detection transform.
+///
+/// Identifies observations that fall outside the Tukey fence
+/// ``[Q1 - extent*IQR, Q3 + extent*IQR]`` and retains only those rows.
+/// Used alongside ``BoxStats`` to draw the outlier scatter layer of a
+/// box plot.
+///
+/// Output: the subset of input rows where ``field`` is outside the fence,
+/// with all original columns preserved.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to test (must be Float64).
+/// groupby : list of str, default []
+///     Columns to group by; fences computed independently per group.
+/// extent : float, default 1.5
+///     Tukey fence multiplier (``IQR * extent``). Must be ≥ 0. Use 0 to
+///     flag points outside the IQR itself.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Outliers")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyOutliers(pub(crate) crate::transform::core::TransformSpec);

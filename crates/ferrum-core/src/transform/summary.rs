@@ -254,6 +254,35 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Point-and-error-bar summary statistics (mean ± error) per group.
+///
+/// Computes the per-group mean of ``field`` together with a symmetric error
+/// measure (bootstrap CI, standard error, or standard deviation). Used for
+/// ``mark_point`` / ``mark_errorbar`` layer combos in ``catplot``.
+///
+/// Output columns: groupby columns (if any), ``mean`` (Float64 per-group
+/// mean), ``lower`` (Float64 lower bound), ``upper`` (Float64 upper bound).
+/// The semantics of ``lower``/``upper`` depend on ``error_fn``.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to summarize (must be Float64).
+/// groupby : list of str, optional
+///     Columns to group by. Default is ``[]`` (whole-batch summary).
+/// error_fn : {"ci", "stderr", "stdev"}, default "ci"
+///     Error measure. ``"ci"`` uses a bootstrap confidence interval (see
+///     ``ci``, ``n_boot``, ``seed``); ``"stderr"`` is the standard error
+///     of the mean; ``"stdev"`` is the sample standard deviation.
+/// ci : float, default 0.95
+///     Confidence level in (0, 1) for ``error_fn="ci"``.
+/// n_boot : int, default 1000
+///     Bootstrap resamples when ``error_fn="ci"``. Must be > 0.
+/// seed : int, default 0
+///     RNG seed for the bootstrap. Seeds ``ChaCha8Rng`` for byte-
+///     deterministic output across platforms.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Summary")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySummary(pub(crate) TransformSpec);

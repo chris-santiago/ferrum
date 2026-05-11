@@ -1,17 +1,4 @@
-"""Phase 9c — position adjustments (Identity, Dodge, Jitter, Stack).
-
-These are immutable Python value classes. They serialize to a ``{"type":
-"<kind>", ...}`` dict consumed by Rust ChartSpec.position / Layer.position.
-Eligibility per-mark is enforced at chart-build time via
-``validate_position_eligibility(mark, position)``.
-
-The eligibility matrix mirrors the design spec §6.4:
-
-    Identity: every mark.
-    Dodge:    bar, point, box, boxplot, boxen, swarm, violin, errorbar, errorband, ribbon.
-    Jitter:   point, swarm, tick.
-    Stack:    bar, area, ribbon.
-"""
+"""Position-adjustment value classes: Identity, Dodge, Jitter, Stack."""
 from __future__ import annotations
 from typing import Optional
 
@@ -41,31 +28,65 @@ _VALID_STACK_OFFSETS = {"zero", "normalize", "center"}
 class Identity:
     """Explicit no-op position adjustment.
 
-    Distinct from ``position=None`` (the default which means "no adjustment
-    declared at all"): ``Identity`` is part of the spec and round-trips through
-    JSON. Useful when constructing layered charts from sugar functions that
-    want to be explicit about not stacking/dodging.
+    Distinct from ``position=None`` (which means "no adjustment declared"):
+    ``Identity`` is part of the spec and round-trips through JSON. Use it
+    when composing layered charts that need to opt out of an inherited stack
+    or dodge on a per-layer basis.
+
+    Eligible marks: all.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(x="grp", y="val").mark_bar(position=fm.Identity())
     """
 
     __slots__ = ()
 
     def to_spec_dict(self) -> dict:
+        """Return the spec dict ``{"type": "identity"}``."""
         return {"type": "identity"}
 
     def __repr__(self) -> str:
+        """Return ``Identity()``."""
         return "Identity()"
 
     def __eq__(self, other) -> bool:
+        """Return True if *other* is also an ``Identity`` instance."""
         return isinstance(other, Identity)
 
     def __hash__(self) -> int:
+        """Return a stable hash for use in sets and dict keys."""
         return hash("Identity")
 
 
 class Dodge:
-    """Side-by-side dodge across the ``by`` channel (defaults to color/fill).
+    """Side-by-side placement of marks grouped by a channel.
 
-    ``padding`` is the gap between dodged groups as a fraction of the band width.
+    Eligible marks: ``bar``, ``point``, ``box``, ``boxplot``, ``boxen``,
+    ``swarm``, ``violin``, ``errorbar``, ``errorband``, ``ribbon``,
+    ``histogram``, ``density``.
+
+    Parameters
+    ----------
+    by : str, optional
+        Channel name to group by. Defaults to the color/fill channel when
+        omitted.
+    padding : float, default 0.05
+        Gap between dodged groups as a fraction of band width. Must be in
+        ``[0, 1)``.
+
+    Raises
+    ------
+    ValueError
+        If ``padding`` is outside ``[0, 1)``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(x="cat", y="val", color="grp").mark_bar(
+    ...     position=fm.Dodge()
+    ... )
     """
 
     __slots__ = ("by", "padding")
@@ -77,18 +98,22 @@ class Dodge:
         object.__setattr__(self, "padding", padding)
 
     def to_spec_dict(self) -> dict:
+        """Return the serialized spec dict for this position adjustment."""
         d: dict = {"type": "dodge", "padding": self.padding}
         if self.by is not None:
             d["by"] = self.by
         return d
 
     def __setattr__(self, name, value):
+        """Raise AttributeError — Dodge is immutable."""
         raise AttributeError(f"Dodge is immutable; cannot set {name!r}")
 
     def __repr__(self) -> str:
+        """Return a constructor-style string representation."""
         return f"Dodge(by={self.by!r}, padding={self.padding})"
 
     def __eq__(self, other) -> bool:
+        """Return True if *other* is a ``Dodge`` with identical fields."""
         return (
             isinstance(other, Dodge)
             and self.by == other.by
@@ -96,15 +121,43 @@ class Dodge:
         )
 
     def __hash__(self) -> int:
+        """Return a stable hash for use in sets and dict keys."""
         return hash(("Dodge", self.by, self.padding))
 
 
 class Jitter:
-    """Random per-row noise on x and/or y; deterministic given a seed.
+    """Random per-row noise applied to x, y, or both axes.
 
-    With ``seed=None`` the Rust render pass derives a per-row seed via
-    ``xxh3::hash64(f"{x}|{y}")`` so output is still byte-deterministic across
-    runs for fixed inputs.
+    Uses a ChaCha8 RNG seeded from ``seed``, making SVG output
+    byte-deterministic for a given dataset and seed.  When ``seed=None`` the
+    Rust renderer derives a per-row seed from the row's data values via
+    xxh3 — output remains deterministic across runs for fixed inputs.
+
+    Eligible marks: ``point``, ``swarm``, ``tick``.
+
+    Parameters
+    ----------
+    axis : {"x", "y", "both"}, default "x"
+        Which axis or axes to jitter.
+    width : float, default 0.4
+        Maximum absolute displacement in scaled units. Must be ``> 0``.
+    seed : int or None, default None
+        RNG seed.  ``None`` means per-row data-derived seed (still
+        deterministic).
+
+    Raises
+    ------
+    ValueError
+        If ``axis`` is not one of ``"x"``, ``"y"``, ``"both"``.
+    ValueError
+        If ``width`` is ``<= 0``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(x="grp", y="value").mark_point(
+    ...     position=fm.Jitter(width=0.3, seed=42)
+    ... )
     """
 
     __slots__ = ("axis", "width", "seed")
@@ -127,18 +180,22 @@ class Jitter:
         object.__setattr__(self, "seed", seed)
 
     def to_spec_dict(self) -> dict:
+        """Return the serialized spec dict for this position adjustment."""
         d: dict = {"type": "jitter", "axis": self.axis, "width": self.width}
         if self.seed is not None:
             d["seed"] = self.seed
         return d
 
     def __setattr__(self, name, value):
+        """Raise AttributeError — Jitter is immutable."""
         raise AttributeError(f"Jitter is immutable; cannot set {name!r}")
 
     def __repr__(self) -> str:
+        """Return a constructor-style string representation."""
         return f"Jitter(axis={self.axis!r}, width={self.width}, seed={self.seed})"
 
     def __eq__(self, other) -> bool:
+        """Return True if *other* is a ``Jitter`` with identical fields."""
         return (
             isinstance(other, Jitter)
             and self.axis == other.axis
@@ -147,15 +204,40 @@ class Jitter:
         )
 
     def __hash__(self) -> int:
+        """Return a stable hash for use in sets and dict keys."""
         return hash(("Jitter", self.axis, self.width, self.seed))
 
 
 class Stack:
-    """Vertical accumulation grouped by ``by`` channel.
+    """Vertical accumulation of marks grouped by a channel.
 
-    ``offset="zero"`` (standard cumulative stack), ``"normalize"`` (100%
-    stack — each row scaled to a per-x total of 1.0), or ``"center"``
-    (streamgraph; symmetric around 0 per x-bin).
+    Eligible marks: ``bar``, ``area``, ``ribbon``, ``histogram``,
+    ``density``.
+
+    Parameters
+    ----------
+    by : str, optional
+        Channel name whose distinct values define the stack groups.
+        Defaults to the color/fill channel when omitted.
+    offset : {"zero", "normalize", "center"}, default "zero"
+        Stack baseline strategy:
+
+        - ``"zero"`` — standard cumulative stack from y = 0.
+        - ``"normalize"`` — 100 % stack; each x-bin scales to a total of 1.
+        - ``"center"`` — streamgraph; symmetric around y = 0.
+
+    Raises
+    ------
+    ValueError
+        If ``offset`` is not one of ``"zero"``, ``"normalize"``,
+        ``"center"``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(x="year", y="count", color="category").mark_bar(
+    ...     position=fm.Stack(offset="normalize")
+    ... )
     """
 
     __slots__ = ("by", "offset")
@@ -169,18 +251,22 @@ class Stack:
         object.__setattr__(self, "offset", offset)
 
     def to_spec_dict(self) -> dict:
+        """Return the serialized spec dict for this position adjustment."""
         d: dict = {"type": "stack", "offset": self.offset}
         if self.by is not None:
             d["by"] = self.by
         return d
 
     def __setattr__(self, name, value):
+        """Raise AttributeError — Stack is immutable."""
         raise AttributeError(f"Stack is immutable; cannot set {name!r}")
 
     def __repr__(self) -> str:
+        """Return a constructor-style string representation."""
         return f"Stack(by={self.by!r}, offset={self.offset!r})"
 
     def __eq__(self, other) -> bool:
+        """Return True if *other* is a ``Stack`` with identical fields."""
         return (
             isinstance(other, Stack)
             and self.by == other.by
@@ -188,6 +274,7 @@ class Stack:
         )
 
     def __hash__(self) -> int:
+        """Return a stable hash for use in sets and dict keys."""
         return hash(("Stack", self.by, self.offset))
 
 

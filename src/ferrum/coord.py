@@ -1,26 +1,47 @@
-"""Coordinate system value classes for Chart.coord().
-
-CoordFlip is fully implemented in Phase 8a.
-All others raise NotImplementedError — planned for Phase 9+.
-"""
+"""Coordinate-system declarations: CoordFlip (functional), others planned for Phase 9+."""
 from __future__ import annotations
 
 
 class CoordFlip:
-    """Flip x/y axes (horizontal bar chart, etc.)."""
+    """Flip the x and y axes — e.g. for horizontal bar charts.
+
+    Pass to ``Chart.coord(CoordFlip())``.  This is the only coordinate
+    class currently implemented; all others raise ``NotImplementedError``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(x="value", y="category").mark_bar().coord(
+    ...     fm.CoordFlip()
+    ... )
+    """
 
     def __repr__(self) -> str:
+        """Return ``CoordFlip()``."""
         return "CoordFlip()"
 
     def __eq__(self, other: object) -> bool:
+        """Return True if *other* is also a ``CoordFlip`` instance."""
         return isinstance(other, CoordFlip)
 
     def __hash__(self) -> int:
+        """Return a stable hash for use in sets and dict keys."""
         return hash("CoordFlip")
 
 
 class CoordCartesian:
-    """Standard Cartesian coordinates — default. Planned Phase 9+."""
+    """Standard Cartesian coordinates — planned for Phase 9+.
+
+    Currently raises ``NotImplementedError`` on construction. The default
+    coordinate system (no explicit ``Chart.coord()`` call) is already
+    Cartesian; this class exists for explicit declaration.
+
+    Raises
+    ------
+    NotImplementedError
+        ``CoordCartesian`` is planned for Phase 9+; omit ``Chart.coord()``
+        for Cartesian behavior today.
+    """
 
     def __init__(self) -> None:
         raise NotImplementedError(
@@ -29,7 +50,13 @@ class CoordCartesian:
 
 
 class CoordPolar:
-    """Polar coordinates (pie / radial). Planned Phase 9+."""
+    """Polar coordinates for pie and radial charts — planned for Phase 9+.
+
+    Raises
+    ------
+    NotImplementedError
+        ``CoordPolar`` is planned for Phase 9+.
+    """
 
     def __init__(self) -> None:
         raise NotImplementedError(
@@ -38,7 +65,13 @@ class CoordPolar:
 
 
 class CoordGeo:
-    """Geographic / map projection coordinates. Planned Phase 9+."""
+    """Geographic map-projection coordinates — planned for Phase 9+.
+
+    Raises
+    ------
+    NotImplementedError
+        ``CoordGeo`` is planned for Phase 9+.
+    """
 
     def __init__(self) -> None:
         raise NotImplementedError(
@@ -47,7 +80,13 @@ class CoordGeo:
 
 
 class CoordFixed:
-    """Fixed-ratio coordinates (aspect locked). Planned Phase 9+."""
+    """Fixed aspect-ratio coordinates — planned for Phase 9+.
+
+    Raises
+    ------
+    NotImplementedError
+        ``CoordFixed`` is planned for Phase 9+.
+    """
 
     def __init__(self) -> None:
         raise NotImplementedError(

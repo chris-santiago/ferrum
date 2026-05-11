@@ -99,6 +99,29 @@ pub(crate) fn apply_with_outputs(
 // PyO3 wrapper — mirror Unpivot pattern.
 use crate::transform::core::TransformSpec;
 
+/// Row-reordering transform driven by an integer index column.
+///
+/// Permutes all rows of the input batch according to the values in the
+/// ``by`` column, which must be an integer column containing a permutation
+/// of ``0..n-1``. When ``from_`` is set, the batch is consumed from a
+/// named sibling transform's output (e.g. a ``Linkage`` that emits
+/// ``new_idx``) rather than from the primary data source.
+///
+/// Parameters
+/// ----------
+/// by : str
+///     Integer column containing the target row index permutation. Must be
+///     of type Int64 or UInt64 and contain a valid permutation of
+///     ``0..n-1``.
+/// drop_index : bool, default True
+///     When True, the ``by`` column is removed from the output. Set to
+///     False to retain it for debugging.
+/// from_ : str, optional
+///     Name of a sibling transform whose output supplies this transform's
+///     input batch. Used in clustermap pipelines where ``Linkage`` feeds
+///     directly into ``Reorder``.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Reorder")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyReorder(pub(crate) TransformSpec);

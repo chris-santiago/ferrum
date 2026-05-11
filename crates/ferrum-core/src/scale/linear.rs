@@ -2,6 +2,32 @@ use pyo3::prelude::*;
 
 use super::core::{validate_continuous_pair, Scale};
 
+/// Continuous linear scale.
+///
+/// Maps a numeric domain to a numeric range via affine transformation.
+/// Domain endpoints are derived from data min/max when not supplied;
+/// range is derived from the axis pixel extent.
+///
+/// Parameters
+/// ----------
+/// domain : tuple[float, float]
+///     Input domain as ``[min, max]``.
+/// range : tuple[float, float]
+///     Output range as ``[lo, hi]`` pixel coordinates.
+/// clamp : bool, default False
+///     Clamp out-of-domain inputs to the range endpoints.
+/// nice : bool, default False
+///     Round domain endpoints to "nice" values for tick generation.
+///
+/// Examples
+/// --------
+/// Scales are normally constructed implicitly by ``Chart.encode(...)``.
+/// Pass an instance explicitly to override the defaults::
+///
+///     import ferrum as fr
+///     chart = fr.Chart(df).encode(
+///         x=fr.X("value", scale=fr.LinearScale(domain=[0, 100], range=[0, 400]))
+///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearScale(Scale);
@@ -68,23 +94,28 @@ impl LinearScale {
         Ok(LinearScale(s))
     }
 
+    /// Map a single input value ``x`` to its output range coordinate.
     fn scale(&self, x: f64) -> f64 {
         self.0.scale_f64(x)
     }
 
+    /// Invert a range coordinate ``y`` back to the domain.
     fn invert(&self, y: f64) -> f64 {
         self.0.invert_f64(y)
     }
 
+    /// Return approximately ``count`` evenly-spaced tick values within the domain.
     #[pyo3(signature = (count = 10))]
     fn ticks(&self, count: usize) -> Vec<f64> {
         self.0.ticks(Some(count))
     }
 
+    /// Return a copy of this scale with domain endpoints rounded to "nice" values.
     fn nice(&self) -> Self {
         LinearScale(self.0.clone().nice())
     }
 
+    /// Input domain as ``[min, max]``.
     #[getter]
     fn domain(&self) -> Vec<f64> {
         match &self.0 {
@@ -94,6 +125,7 @@ impl LinearScale {
         }
     }
 
+    /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
     fn range(&self) -> Vec<f64> {
         match &self.0 {
@@ -103,6 +135,7 @@ impl LinearScale {
         }
     }
 
+    /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool {
         match &self.0 {

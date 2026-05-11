@@ -291,6 +291,30 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Beeswarm (strip-plot) offset computation for non-overlapping point layout.
+///
+/// Takes a categorical-axis column and a numeric value column and computes
+/// per-point x-offsets (for a vertical beeswarm) so that circles of radius
+/// ``point_size / 2`` do not overlap. Points are placed symmetrically
+/// around the category centre, or on one side only when ``side`` is set.
+///
+/// Output: the original columns plus ``x_offset`` (Float64 per-point
+/// horizontal displacement in data units).
+///
+/// Parameters
+/// ----------
+/// category : str
+///     Categorical column that defines the swarm axis position.
+/// value : str
+///     Numeric column whose values are spread along the value axis.
+/// point_size : float, default 5.0
+///     Diameter of each point in data units. Must be > 0.
+/// spacing : float, default 1.0
+///     Minimum gap between point edges. Must be ≥ 0.
+/// side : {"both", "left", "right"}, default "both"
+///     Which side of the category centre to place displaced points.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Swarm")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySwarm(pub(crate) TransformSpec);

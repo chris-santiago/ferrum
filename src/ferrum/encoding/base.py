@@ -1,4 +1,4 @@
-"""ChannelBase — the parent class of all encoding-channel value objects."""
+"""Base classes for encoding channels (internal)."""
 from __future__ import annotations
 
 from typing import Any, ClassVar, Optional
@@ -7,10 +7,11 @@ from ferrum._warn import warn_once
 
 
 def _scale_to_dict(scale: Any) -> Any:
-    """Convert a Python Scale object (LogScale, LinearScale, etc.) to a
-    JSON-serializable dict matching Rust's ScaleSpec serde shape.
+    """Convert a Python Scale object to a JSON-serializable dict.
 
-    If `scale` is already a dict or None, return it unchanged.
+    Converts LogScale, LinearScale, TimeScale, SymlogScale, and OrdinalScale
+    instances to the dict shape expected by Rust's ScaleSpec serde deserialiser.
+    If ``scale`` is already a dict or ``None``, return it unchanged.
     """
     if scale is None or isinstance(scale, dict):
         return scale
@@ -94,7 +95,7 @@ class ChannelBase:
                 warn_once(self._channel_name, k)
 
     def _validate(self) -> None:
-        """Subclasses may override to enforce kwarg-value constraints."""
+        """Enforce kwarg-value constraints; subclasses may override."""
         type_ = self._kwargs.get("type")
         if type_ is not None and type_ not in ("Q", "N", "O", "T",
                                                  "quantitative", "nominal", "ordinal", "temporal"):
@@ -142,11 +143,13 @@ class ChannelBase:
         return out
 
     def __repr__(self) -> str:
+        """Return a string representation of this channel."""
         kw_parts = [f"{k}={v!r}" for k, v in self._kwargs.items()]
         body = ", ".join([repr(self.field)] + kw_parts)
         return f"{self.__class__.__name__}({body})"
 
     def __eq__(self, other: object) -> bool:
+        """Return True if *other* is the same channel class, field, and kwargs."""
         if not isinstance(other, ChannelBase):
             return NotImplemented
         return (self.__class__ == other.__class__
@@ -154,5 +157,6 @@ class ChannelBase:
                 and self._kwargs == other._kwargs)
 
     def __hash__(self) -> int:
+        """Return a hash based on class, field, and kwargs."""
         return hash((self.__class__, self.field,
                      tuple(sorted((k, repr(v)) for k, v in self._kwargs.items()))))

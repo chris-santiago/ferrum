@@ -584,6 +584,38 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Hierarchical clustering linkage for clustermap row/column ordering.
+///
+/// Computes a linkage tree from a numeric matrix batch and emits a
+/// leaf-order permutation index used by ``Reorder`` to sort rows or
+/// columns. Optionally z-score normalises or min-max scales before
+/// computing distances.
+///
+/// Primary output columns: ``node_id`` (Int64), ``left`` (Int64),
+/// ``right`` (Int64), ``distance`` (Float64), ``n_obs`` (Int64) — one row
+/// per merge step. Secondary named outputs (accessible via ``name``) are
+/// ``<name>_order`` (leaf permutation index), ``<name>_coords`` (node x/y),
+/// and ``<name>_segments`` (dendrogram arm segments).
+///
+/// Parameters
+/// ----------
+/// method : {"single", "complete", "average", "weighted", "centroid", \
+///           "median", "ward"}, default "ward"
+///     Linkage algorithm.
+/// metric : {"euclidean", "manhattan", "cosine", "correlation", \
+///           "chebyshev"}, default "euclidean"
+///     Distance metric between observations.
+/// axis : {"rows", "columns"}, default "rows"
+///     Whether to cluster rows or columns of the input matrix.
+/// z_score : {"rows", "columns"}, optional
+///     Standardise (subtract mean, divide by std) along the given axis
+///     before computing distances. Mutually exclusive with
+///     ``standard_scale``.
+/// standard_scale : {"rows", "columns"}, optional
+///     Min-max scale to [0, 1] along the given axis before computing
+///     distances. Mutually exclusive with ``z_score``.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Linkage")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLinkage(pub(crate) TransformSpec);

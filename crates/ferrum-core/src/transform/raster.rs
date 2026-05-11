@@ -390,6 +390,40 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// 2D raster aggregation onto a uniform pixel grid.
+///
+/// Bins ``(x, y)`` observations onto a rectangular grid and aggregates
+/// them into a raster image suitable for the ``image`` mark. Useful for
+/// rendering extremely large scatter datasets without per-point overdraw.
+///
+/// Output is a single-row batch: ``x_min``, ``x_max``, ``y_min``,
+/// ``y_max`` (Float64 data extent), ``width`` / ``height`` (UInt32 grid
+/// dimensions), and ``pixel_data`` (Binary, RGBA8 grayscale bytes of length
+/// ``width*height*4``).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Horizontal-axis column (must be numeric).
+/// y : str
+///     Vertical-axis column (must be numeric).
+/// aggregate : {"count", "density", "mean", "sum", "any"}, default "count"
+///     Aggregation per cell. ``"mean"`` and ``"sum"`` require ``field``.
+/// field : str, optional
+///     Column to aggregate when ``aggregate`` is ``"mean"`` or ``"sum"``.
+/// resolution : int, (int, int), or "screen", optional
+///     Grid size. A single int gives an ``n × n`` grid; a tuple gives
+///     ``(width, height)``; ``"screen"`` uses the panel pixel size from
+///     the render context (or 256 × 256 as fallback). Default is
+///     ``"screen"``.
+/// min_count : int, optional
+///     Cells with fewer than ``min_count`` observations are set to
+///     transparent (alpha 0) in the output image.
+/// log_scale : bool, default False
+///     Apply ``log1p`` scaling to the aggregated values before normalising
+///     to the pixel range, compressing high-density outliers.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Raster")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRaster(pub(crate) TransformSpec);

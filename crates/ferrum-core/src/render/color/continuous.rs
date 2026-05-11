@@ -89,6 +89,30 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
+/// Continuous color scheme for quantitative color encodings.
+///
+/// Wraps a named colormap or a user-defined gradient and exposes it as a
+/// Python value that can be passed to ``Color(scale=...)`` to control how
+/// numeric values are mapped to colors.
+///
+/// Named built-in colormaps: ``"viridis"``, ``"plasma"``, ``"magma"``,
+/// ``"inferno"``, ``"cividis"``.
+///
+/// Do not call the constructor directly. Obtain an instance via
+/// ``ferrum.continuous_palette(name)`` (named map) or
+/// ``ferrum.Gradient(stops)`` (custom gradient).
+///
+/// Methods
+/// -------
+/// from_name(name) : ContinuousScheme
+///     Look up a built-in colormap by name.
+/// reversed() : ContinuousScheme
+///     Return a new scheme that samples the inverse of this one (1 - t).
+///
+/// See Also
+/// --------
+/// ferrum.continuous_palette : Named colormap lookup.
+/// ferrum.Gradient : Custom gradient construction.
 #[pyclass(name = "ContinuousScheme", module = "ferrum._core")]
 #[derive(Debug, Clone)]
 pub struct PyContinuousScheme(pub ContinuousScheme);
@@ -116,9 +140,34 @@ impl PyContinuousScheme {
     }
 }
 
-/// Construct a `ContinuousScheme` from a list of (t, color) stops where
-/// each color is a CSS-style string ("#rrggbb", "#rrggbbaa", or one of a
-/// handful of named colors). `t` values must be in [0, 1].
+/// Build a continuous color scheme from explicit color stops.
+///
+/// Returns a ``ContinuousScheme`` that interpolates linearly in RGB
+/// between adjacent ``(t, color)`` pairs. Pass the result to
+/// ``Color(scale=...)`` to use a custom gradient for a color encoding.
+///
+/// Parameters
+/// ----------
+/// stops : list[tuple[float, str]]
+///     Pairs of ``t`` in ``[0, 1]`` and CSS color strings.  Each color may
+///     be an ``#rrggbb`` or ``#rrggbbaa`` hex literal, or one of the common
+///     named colors: ``"red"``, ``"green"``, ``"blue"``, ``"white"``,
+///     ``"black"``, ``"yellow"``, ``"magenta"``, ``"cyan"``,
+///     ``"gray"`` / ``"grey"``.
+///     Endpoints ``(0.0, ...)`` and ``(1.0, ...)`` should be present.
+///
+/// Returns
+/// -------
+/// ContinuousScheme
+///     Scheme that interpolates linearly between adjacent stops.
+///
+/// Examples
+/// --------
+/// ::
+///
+///     import ferrum as fr
+///     scheme = fr.Gradient([(0.0, "#ffffff"), (0.5, "#888888"), (1.0, "#000000")])
+///     chart = fr.Chart(df).encode(color=fr.Color("density", scale=scheme))
 #[pyfunction]
 #[allow(non_snake_case)]
 pub fn Gradient(stops: Vec<(f64, String)>) -> PyResult<PyContinuousScheme> {

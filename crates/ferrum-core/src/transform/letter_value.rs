@@ -339,6 +339,39 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// Letter-value (boxen) summary statistics for a numeric column.
+///
+/// Computes a hierarchical sequence of medians and quantiles extending
+/// outward from the center until the estimated uncertainty of the extreme
+/// values is too large. The depth of the hierarchy is controlled by
+/// ``k_depth``. Used to draw boxen plots that reveal the full distributional
+/// shape for large datasets.
+///
+/// Output columns: ``letter``, ``value_lo``, ``value_hi`` (Float64 edges
+/// of each letter-value interval) plus ``is_outlier`` (Bool) for the
+/// ``Outliers``-equivalent rows, optionally preceded by the ``group``
+/// column.
+///
+/// Parameters
+/// ----------
+/// value : str
+///     Numeric column to summarize (must be Float64).
+/// group : str, optional
+///     Single group-key column; letter-values computed independently per
+///     group.
+/// k_depth : {"tukey", "proportion", "trustworthy", "full"}, \
+///           default "proportion"
+///     Algorithm for choosing the number of letter-value levels:
+///     ``"tukey"`` — fixed integer depth; ``"proportion"`` — fraction of
+///     sample size (see ``k_proportion``); ``"trustworthy"`` — based on
+///     statistical trustworthiness; ``"full"`` — all levels to median.
+/// k_proportion : float, default 0.007
+///     Fraction of sample size used when ``k_depth="proportion"``. Must
+///     be in (0, 1).
+/// outlier_threshold : float, default 1.5
+///     Tukey fence multiplier for labelling outliers. Must be ≥ 0.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "LetterValue")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLetterValue(pub(crate) TransformSpec);

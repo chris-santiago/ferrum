@@ -1,4 +1,4 @@
-"""Phase 9e — catplot (categorical figure-level function)."""
+"""Categorical convenience functions (catplot)."""
 from __future__ import annotations
 from typing import Any
 
@@ -21,17 +21,90 @@ def catplot(
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
-    """Categorical figure-level function — see ferrum-spec.md §3.14.
+    """Categorical figure-level function.
 
-    Per-kind desugar:
-      strip   -> mark_point [+ Jitter if jitter=True]
-      swarm   -> mark_swarm
-      box     -> mark_boxplot
-      violin  -> mark_violin
-      boxen   -> mark_boxen
-      point   -> mark_point  (CI ribbon deferred — single-layer point chart)
-      bar     -> mark_bar    (CI ribbon deferred — single-layer bar chart)
-      count   -> Aggregate(count) + mark_bar
+    Dispatches to the appropriate mark based on ``kind``:
+
+    * ``"strip"``  -- ``mark_point`` with ``Jitter`` (when ``jitter=True``, default) or ``Dodge`` (when ``dodge=True`` and ``hue`` is set).
+    * ``"swarm"``  -- ``mark_swarm``.
+    * ``"box"``    -- ``mark_boxplot`` (box + whiskers + outliers).
+    * ``"violin"`` -- ``mark_violin`` (kernel-density outline).
+    * ``"boxen"``  -- ``mark_boxen`` (letter-value / extended box).
+    * ``"point"``  -- ``mark_point`` per observation on the categorical axis.
+    * ``"bar"``    -- ``mark_bar`` per observation on the categorical axis.
+    * ``"count"``  -- ``Aggregate(count)`` + ``mark_bar``.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str or encoding, optional
+        Column name for the horizontal axis (categorical by default).
+    y : str or encoding, optional
+        Column name for the vertical axis (value by default).
+    hue : str or encoding, optional
+        Column name to map to color (one visual group per level).
+    col : str, optional
+        Column name for faceting across columns.
+    row : str, optional
+        Column name for faceting across rows.
+    kind : {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}, default "strip"
+        Which categorical mark to draw.
+    order : list of str, optional
+        Reserved for future use (no-op today). Explicit ordering for the
+        categorical axis levels.
+    hue_order : list of str, optional
+        Reserved for future use (no-op today). Explicit ordering for hue levels.
+    orient : {"h", "v", None}, optional
+        ``"h"`` flips the axes (``x`` becomes the value axis, ``y`` the category
+        axis) and applies ``CoordFlip``.  ``"v"`` and ``None`` are both treated
+        as vertical (the default); no error is raised for other values.
+    dodge : bool, default False
+        When ``True`` and ``hue`` is set, apply ``Dodge`` so each hue level
+        is drawn side-by-side rather than overlaid.
+    jitter : bool, default True
+        For ``kind="strip"``, add ``Jitter`` on the categorical axis.
+        Ignored when ``dodge=True``.
+    native_scale : bool, default False
+        Reserved for future use (no-op in the current renderer).
+    ci : int or float, default 95
+        Reserved for future use (no-op today). When wired, will set the
+        confidence-interval level for ``"point"`` and ``"bar"`` kinds.
+    n_boot : int, default 1000
+        Reserved for future use (no-op today). When wired, will set the
+        bootstrap iteration count used to compute ``ci``.
+    seed : int or None, optional
+        Random seed forwarded to ``Jitter`` for reproducible strip positions.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Configured chart (possibly faceted or coord-flipped).
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` is not one of the supported values.
+    ValueError
+        If ``kind="count"`` is used without specifying ``x`` (or ``y`` when
+        ``orient="h"``).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.catplot(df, x="species", y="sepal_length", kind="box")
+
+    Group by a hue variable with dodged bars:
+
+    >>> fm.catplot(df, x="day", y="tip", hue="sex", kind="bar", dodge=True)
+
+    Horizontal violin plot:
+
+    >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
     if kind not in _VALID_KINDS:
         raise ValueError(

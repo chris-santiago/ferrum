@@ -1,4 +1,4 @@
-"""Phase 9e — displot (distribution figure-level function)."""
+"""Distribution convenience functions (displot)."""
 from __future__ import annotations
 from typing import Any
 
@@ -24,11 +24,94 @@ def displot(
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
-    """Distribution figure-level function — see ferrum-spec.md §3.14.
+    """Univariate distribution plot.
 
-    Builds a Chart for histogram / KDE / ECDF / rug plots. The ``multiple``
-    parameter routes to a position adjustment (Identity/Dodge/Stack); the
-    ``kde``/``rug`` flags optionally layer additional marks on top.
+    Convenience wrapper that dispatches to ``mark_histogram``, ``mark_density``,
+    or ``mark_tick`` based on ``kind``.  The ``multiple`` parameter controls how
+    overlapping groups (from ``hue``) are positioned, and the ``kde`` / ``rug``
+    flags optionally layer additional marks on top of the primary kind.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str or encoding, optional
+        Column name for the distribution variable (horizontal axis).
+    y : str or encoding, optional
+        Column name for the distribution variable (vertical axis).
+    hue : str or encoding, optional
+        Column name to map to color (one distribution per level).
+    col : str, optional
+        Column name for faceting across columns.
+    row : str, optional
+        Column name for faceting across rows.
+    kind : {"hist", "kde", "ecdf", "rug"}, default "hist"
+        Which distribution mark to draw.  ``"hist"`` calls
+        ``mark_histogram``; ``"kde"`` calls ``mark_density`` (filled by
+        default); ``"ecdf"`` builds a cumulative frequency line via ``Bin``
+        + ``mark_line``; ``"rug"`` calls ``mark_tick``.
+    fill : bool, default True
+        Fill the area under the KDE curve (``kind="kde"`` only).
+    cumulative : bool, default False
+        Produce a cumulative histogram or density (``kind="hist"`` and
+        ``kind="kde"``).
+    log_scale : bool, default False
+        Apply a ``log`` scale to the ``x`` axis.
+    stat : {"count", "density"}, default "count"
+        Statistic to plot on the value axis for ``kind="hist"``.
+        ``"density"`` normalises so the total area integrates to 1.
+    bins : int or str, default "sturges"
+        Binning rule for ``kind="hist"``.  An integer is forwarded as
+        ``bin_count``; a string (``"sturges"``, ``"fd"``, etc.) lets the
+        Rust engine decide the count automatically.
+    bandwidth : str, default "scott"
+        Bandwidth selector for ``kind="kde"`` (``"scott"`` or ``"silverman"``).
+    bw_adjust : float, default 1.0
+        Multiplicative bandwidth adjustment for ``kind="kde"``.
+    multiple : {"layer", "stack", "fill", "dodge"}, default "layer"
+        How to render multiple distributions (one per ``hue`` level).
+        ``"layer"`` overlays them (``Identity``); ``"dodge"`` places them
+        side by side; ``"stack"`` and ``"fill"`` use ``Stack`` with
+        ``offset="zero"`` or ``offset="normalize"`` respectively.
+    kde : bool, default False
+        When ``True`` and ``kind != "kde"``, layer a ``mark_density`` on
+        top of the primary mark.
+    rug : bool, default False
+        When ``True`` and ``kind != "rug"``, layer a ``mark_tick`` rug
+        on top of the primary mark.
+    height : float or None, optional
+        Height of the chart in pixels.  Width is derived from ``aspect``.
+    aspect : float or None, optional
+        Aspect ratio (width = height * aspect).  Requires ``height``.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Configured chart (possibly layered, faceted, or sized).
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` or ``multiple`` is not one of the supported values.
+    ValueError
+        If ``kind="ecdf"`` is used without specifying ``x=``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.displot(df, x="sepal_length")
+
+    KDE with per-species coloring:
+
+    >>> fm.displot(df, x="sepal_length", hue="species", kind="kde")
+
+    Stacked histogram with an overlaid rug:
+
+    >>> fm.displot(df, x="tip", hue="sex", multiple="stack", rug=True)
     """
     if kind not in _VALID_KINDS:
         raise ValueError(

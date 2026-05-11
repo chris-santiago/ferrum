@@ -215,6 +215,19 @@ use pyo3::types::PyList;
 
 use crate::transform::core::TransformSpec;
 
+/// A single aggregation operation descriptor for use with ``Aggregate``.
+///
+/// Specifies one field→output-name aggregation with a named function.
+/// Pass a list of these to ``Aggregate(ops=[...])``.
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Column to aggregate (must exist in the input batch).
+/// fn_ : {"mean", "sum", "count", "min", "max", "median"}
+///     Aggregation function to apply.
+/// as_ : str
+///     Name of the output column produced by this operation.
 #[pyclass(eq, module = "ferrum._core", name = "AggregateOp")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregateOp(pub(crate) AggregateOp);
@@ -248,6 +261,22 @@ impl PyAggregateOp {
     }
 }
 
+/// Group-by aggregation transform.
+///
+/// Computes one or more scalar summaries (mean, sum, count, min, max, median)
+/// per group, reducing the batch to one row per unique group key combination.
+/// When ``groupby`` is empty the entire batch is collapsed to a single row.
+///
+/// Parameters
+/// ----------
+/// ops : list of AggregateOp
+///     Aggregation operations to perform, each specifying ``field``,
+///     ``fn_``, and output ``as_``. Must be non-empty.
+/// groupby : list of str, optional
+///     Column names to group by. Default is ``[]`` (whole-batch aggregate).
+/// name : str, optional
+///     Named output label used by ``Reorder(from_=...)`` to look up this
+///     transform's output. Ignored when no sibling references it.
 #[pyclass(eq, module = "ferrum._core", name = "Aggregate")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregate(pub(crate) TransformSpec);

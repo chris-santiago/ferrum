@@ -168,6 +168,34 @@ use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
 
+/// One-dimensional kernel density estimate (KDE).
+///
+/// Fits a Gaussian kernel to ``field`` and evaluates the density on an
+/// evenly-spaced grid of ``n`` points spanning (or clipped to) ``extent``.
+/// The result is used to draw smooth density curves in violin plots and
+/// ridge plots.
+///
+/// Output columns: ``value`` (Float64 grid points) and ``density``
+/// (Float64 kernel density values, integrates to 1 over the grid range).
+///
+/// Parameters
+/// ----------
+/// field : str
+///     Numeric column to estimate (must be Float64).
+/// bandwidth : float or {"scott", "silverman"}, optional
+///     Kernel bandwidth. A float sets a fixed bandwidth; ``"scott"`` and
+///     ``"silverman"`` use the corresponding automatic rules. Default is
+///     ``"scott"``.
+/// n : int, default 512
+///     Number of evaluation grid points. Must be > 0.
+/// extent : (float, float), optional
+///     ``(lo, hi)`` range to evaluate over; defaults to the data min/max.
+///     Both values must be finite and ``lo < hi``.
+/// cumulative : bool, default False
+///     When True, output is the cumulative distribution function (CDF)
+///     rather than the PDF.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Kde")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde(pub(crate) TransformSpec);

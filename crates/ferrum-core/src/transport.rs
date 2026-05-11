@@ -34,6 +34,35 @@ pub(crate) fn rename_column(
     RecordBatch::try_new(Arc::new(Schema::new(new_fields)), batch.columns().to_vec())
 }
 
+/// Accept an Arrow C Data Interface stream and return a normalised stream.
+///
+/// Parameters
+/// ----------
+/// reader : pyarrow.RecordBatchReader or compatible
+///     Any Python object that implements the Arrow C Data Interface stream
+///     protocol (``__arrow_c_stream__``). Polars ``DataFrame`` and pyarrow
+///     ``RecordBatch`` / ``Table`` objects satisfy this directly with zero
+///     copy.
+///
+/// Returns
+/// -------
+/// pyarrow.RecordBatchReader
+///     A fresh ``RecordBatchReader`` over the same data after Ferrum's
+///     internal normalisation pass (column validation and canonicalisation).
+///     The returned reader is consumed once; iterate it or pass it directly
+///     to ``render_svg`` / ``render_png``.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the input stream is empty (zero columns or unreadable batches).
+///
+/// Notes
+/// -----
+/// This is the Arrow CDI entry point for the Ferrum pipeline. Polars and
+/// pyarrow take the zero-copy C Data Interface fast-path; other DataFrame
+/// libraries (pandas, modin, cuDF) should be coerced to Arrow via
+/// ``narwhals`` before calling this function.
 #[pyfunction]
 pub(crate) fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
     let reader = reader.into_reader()?;

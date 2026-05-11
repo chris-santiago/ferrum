@@ -574,6 +574,42 @@ fn parse_link(s: &str) -> PyResult<GlmLink> {
     }
 }
 
+/// Generalized Linear Model fit via IRLS.
+///
+/// Fits a univariate GLM ``g(E[y|x]) = β₀ + β₁·x`` by Iteratively
+/// Reweighted Least Squares and evaluates the fitted mean on an evenly-
+/// spaced grid of ``n_grid`` x-values. When ``ci`` is set, also computes
+/// Wald confidence bands on the linear predictor, back-transformed through
+/// the inverse link.
+///
+/// Output columns: ``x`` (Float64), ``y`` (Float64 fitted mean),
+/// ``ci_lower`` and ``ci_upper`` (Float64; present only when ``ci`` is set,
+/// otherwise ``NaN``).
+///
+/// Parameters
+/// ----------
+/// x : str
+///     Predictor column (must be Float64).
+/// y : str
+///     Response column (must be Float64).
+/// family : {"gaussian", "binomial", "poisson", "gamma", \
+///           "inverse_gaussian"}, default "gaussian"
+///     Error distribution family.
+/// link : {"identity", "log", "logit", "probit", "inverse", \
+///         "inverse_squared", "sqrt"}, optional
+///     Link function. Defaults to the canonical link for ``family``.
+/// n_grid : int, default 100
+///     Number of evenly-spaced x grid points. Must be > 0.
+/// ci : float, optional
+///     Confidence level in (0, 1) for Wald confidence bands (e.g. 0.95).
+///     When omitted, ``ci_lower`` and ``ci_upper`` are ``NaN``.
+/// max_iter : int, default 25
+///     Maximum IRLS iterations. Must be > 0.
+/// tol : float, default 1e-8
+///     Convergence tolerance (relative change in coefficients). Must be
+///     finite and > 0.
+/// name : str, optional
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "Glm")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyGlm(pub(crate) TransformSpec);
