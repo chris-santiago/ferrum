@@ -821,22 +821,23 @@ class ModelSource:
         """Partial dependence per feature.
 
         ``kind="average"`` (default) returns the marginal PD curve per
-        feature with ``sample_id = -1``. ``kind="individual"`` / ``"both"``
-        require per-sample ICE curves with the ``detail`` encoding
-        channel, which lands alongside the Phase 9-deferred encoding
-        work; passing those values raises ``NotImplementedError``.
+        feature with ``sample_id = -1`` (one row per grid point per
+        feature).
+
+        ``kind="individual"`` returns per-sample ICE curves: one row per
+        ``(feature, sample_id, grid_point)`` triple with ``sample_id`` in
+        ``[0, n_samples)``. Chart builders pair this with the ``detail``
+        encoding channel on ``sample_id`` to render one polyline per
+        sample.
+
+        ``kind="both"`` returns the union of the two: ICE rows plus
+        average rows (``sample_id = -1``), so a downstream chart can
+        overlay both layers on the same DataFrame.
         """
         if kind not in ("average", "individual", "both"):
             raise ValueError(
                 f"ModelSource.partial_dependence(kind={kind!r}) — expected "
                 "'average', 'individual', or 'both'."
-            )
-        if kind in ("individual", "both"):
-            raise NotImplementedError(
-                f"ModelSource.partial_dependence(kind={kind!r}) requires the "
-                "'detail' encoding channel for per-sample ICE polylines, "
-                "which lands alongside the Phase 9-deferred channel work. "
-                "Use kind='average' for now."
             )
         key = self._cache_key(
             "partial_dependence",
@@ -857,22 +858,38 @@ class ModelSource:
         rows: list[dict] = []
         for f_idx in feature_idxs:
             fname = self._feature_names[f_idx]
+            # sklearn returns "individual" of shape (n_outputs, n_samples,
+            # n_grid) when kind in ("individual", "both"); we use a single
+            # output (binary class index 1 / regression scalar) by indexing
+            # [0]. For "average" the shape is (n_outputs, n_grid).
             r = _sk_pd(
                 self._model,
                 X_np,
                 features=[f_idx],
                 grid_resolution=grid_resolution,
-                kind="average",
+                kind=kind,
             )
             grid = r["grid_values"][0]
-            avg = np.asarray(r["average"])[0]
-            for v, p in zip(grid, avg):
-                rows.append({
-                    "feature": str(fname),
-                    "feature_value": float(v),
-                    "pd_value": float(p),
-                    "sample_id": -1,
-                })
+            if kind in ("average", "both"):
+                avg = np.asarray(r["average"])[0]
+                for v, p in zip(grid, avg):
+                    rows.append({
+                        "feature": str(fname),
+                        "feature_value": float(v),
+                        "pd_value": float(p),
+                        "sample_id": -1,
+                    })
+            if kind in ("individual", "both"):
+                individual = np.asarray(r["individual"])[0]
+                n_samples, n_grid = individual.shape
+                for s in range(n_samples):
+                    for v, p in zip(grid, individual[s]):
+                        rows.append({
+                            "feature": str(fname),
+                            "feature_value": float(v),
+                            "pd_value": float(p),
+                            "sample_id": int(s),
+                        })
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df

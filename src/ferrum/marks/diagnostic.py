@@ -611,37 +611,99 @@ def desugar_pdp(
     center: bool = False,
     color_field: str | None = "feature",
 ) -> tuple:
-    """Partial-dependence mark: one polyline per feature.
+    """Partial-dependence mark.
 
-    Data contract: ``feature`` (Utf8), ``feature_value`` (Float64),
-    ``pd_value`` (Float64) as emitted by
-    ``ModelSource.partial_dependence()``. The chart builder is
-    responsible for sorting per feature so the line layer renders as a
-    monotonic curve in ``feature_value``.
+    Data contract (from ``ModelSource.partial_dependence``): ``feature``
+    (Utf8), ``feature_value`` (Float64), ``pd_value`` (Float64),
+    ``sample_id`` (Int64 — ``-1`` for the average row).
 
-    ``kind="individual"``/``"both"`` and ``center=True`` are reserved for
-    a later sub-batch that adds the ``detail`` encoding channel (needed
-    for per-sample ICE polylines without categorical color collisions);
-    passing non-default values raises ``NotImplementedError``.
+    ``kind="average"`` (default): single PD curve per feature (the
+    underlying data has only ``sample_id=-1`` rows).
+
+    ``kind="individual"``: per-sample ICE polylines via ``mark_style.detail``
+    routing on a Utf8-cast ``sample_id`` column (one polyline per
+    sample, no categorical color collision because the color encoding
+    stays on ``feature``).
+
+    ``kind="both"``: ICE polylines + a thicker average overlay. The chart
+    builder injects an ``_pd_ice_value`` column that holds the per-sample
+    value on ICE rows and ``None`` on the average row (mark_line skips
+    null rows). The original ``pd_value`` column holds the average curve
+    only.
+
+    When ``center=True``, the chart builder pre-subtracts the value at
+    the smallest ``feature_value`` per ``(feature, sample_id)`` group so
+    every polyline starts at 0.
     """
-    del x_field, y_field, ice_alpha
-    if kind != "average":
-        raise NotImplementedError(
-            f"mark_pdp(kind={kind!r}) requires the 'detail' encoding channel "
-            "for per-sample ICE polylines (Phase 9-deferred). Use "
-            "kind='average' for now."
-        )
-    if center:
-        raise NotImplementedError(
-            "mark_pdp(center=True) lands alongside ICE support (Phase 9+)."
-        )
+    del x_field, y_field
 
-    line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
-    if color_field is not None:
-        line_enc["color"] = color_field
-    return ("__layered__", [], None, None, [
-        {"mark": "line", "encoding": line_enc},
-    ])
+    if kind == "average":
+        # Single polyline per feature, color-coded by feature when faceted.
+        line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
+        if color_field is not None:
+            line_enc["color"] = color_field
+        return ("__layered__", [], None, None, [
+            {"mark": "line", "encoding": line_enc},
+        ])
+
+    from ferrum.encoding import Y as _Y
+
+    if kind == "individual":
+        # One polyline per sample via mark_style.detail. Color stays on
+        # the feature (each facet gets its own hue). Opacity controls
+        # the visual density of overlapping ICE lines.
+        line_enc: dict[str, Any] = {
+            "x": "feature_value",
+            "y": _Y("pd_value", title="pd_value"),
+        }
+        if color_field is not None:
+            line_enc["color"] = color_field
+        return ("__layered__", [], None, None, [
+            {
+                "mark": "line",
+                "encoding": line_enc,
+                "mark_kwargs": {
+                    "detail": "_sample_id_str",
+                    "opacity": float(ice_alpha),
+                },
+            },
+        ])
+
+    if kind == "both":
+        # ICE layer: y = _pd_ice_value (null on average row → skipped).
+        # Override the y-axis title to 'pd_value' since the underlying
+        # column name is a layer-internal artifact.
+        ice_enc = {
+            "x": "feature_value",
+            "y": _Y("_pd_ice_value", title="pd_value"),
+        }
+        if color_field is not None:
+            ice_enc["color"] = color_field
+        avg_enc: dict[str, Any] = {
+            "x": "feature_value", "y": "_pd_avg_value",
+        }
+        if color_field is not None:
+            avg_enc["color"] = color_field
+        return ("__layered__", [], None, None, [
+            {
+                "mark": "line",
+                "encoding": ice_enc,
+                "mark_kwargs": {
+                    "detail": "_sample_id_str",
+                    "opacity": float(ice_alpha),
+                },
+            },
+            {
+                "mark": "line",
+                "encoding": avg_enc,
+                "mark_kwargs": {"stroke_width": 2.5},
+            },
+        ])
+
+    raise ValueError(
+        f"mark_pdp(kind={kind!r}) — expected 'average', 'individual', or "
+        "'both'."
+    )
 
 
 # --- 10e: model selection / CV curves --------------------------------

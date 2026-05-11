@@ -268,6 +268,29 @@ def test_golden_shap_chart_waterfall():
     _check_golden(chart.show_svg(), "shap_chart_waterfall_sample3")
 
 
+def test_golden_pdp_chart_individual_ice():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.pdp_chart(
+        model, X, df["y"],
+        features=["f0", "f1"], grid_resolution=15, kind="individual",
+    )
+    _check_golden(chart.show_svg(), "pdp_chart_individual_ice")
+
+
+def test_golden_pdp_chart_both_centered():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.pdp_chart(
+        model, X, df["y"],
+        features=["f0", "f1"], grid_resolution=15,
+        kind="both", center=True,
+    )
+    _check_golden(chart.show_svg(), "pdp_chart_both_centered")
+
+
 def test_golden_pdp_chart_three_features():
     model, X, y = _regression_xy()
     chart = ferrum.pdp_chart(

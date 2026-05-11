@@ -313,14 +313,23 @@ def test_partial_dependence_invalid_kind():
         src.partial_dependence(["f0"], kind="not_a_kind")
 
 
-def test_partial_dependence_individual_not_implemented():
-    """ICE/both require the deferred 'detail' channel."""
+def test_partial_dependence_individual_returns_per_sample_rows():
+    """ICE/both emit per-sample rows; sample_id ranges [0, n_samples)."""
     model, X, y = _rf_xy()
     src = ferrum.ModelSource(model, X, y)
-    with pytest.raises(NotImplementedError, match="detail"):
-        src.partial_dependence(["f0"], kind="individual")
-    with pytest.raises(NotImplementedError, match="detail"):
-        src.partial_dependence(["f0"], kind="both")
+    ice = src.partial_dependence(["f0"], kind="individual", grid_resolution=10)
+    sample_ids = set(ice["sample_id"].to_list())
+    # No average row in the individual variant.
+    assert -1 not in sample_ids
+    assert max(sample_ids) == X.height - 1
+    assert ice.height == X.height * 10
+
+    both = src.partial_dependence(["f0"], kind="both", grid_resolution=10)
+    both_ids = set(both["sample_id"].to_list())
+    # Both variant carries the average rows (-1) AND the per-sample rows.
+    assert -1 in both_ids
+    assert max(both_ids) == X.height - 1
+    assert both.height == (X.height + 1) * 10
 
 
 # --- pdp_chart figure function -----------------------------------------
@@ -350,20 +359,53 @@ def test_pdp_chart_requires_features():
         ferrum.pdp_chart(model, X, y)
 
 
-def test_mark_pdp_individual_not_implemented():
-    """mark_pdp(kind='individual') raises with detail-channel reference."""
-    df = pl.DataFrame({
-        "feature": ["a"], "feature_value": [0.0], "pd_value": [0.0],
-        "sample_id": [-1],
-    })
-    with pytest.raises(NotImplementedError, match="detail"):
-        ferrum.Chart(df).mark_pdp(kind="individual").show_svg()
+def test_pdp_chart_individual_renders_ice_per_sample():
+    """kind='individual' produces one polyline per training sample
+    per feature panel via mark_style.detail routing on sample_id."""
+    model, X, y = _rf_xy()
+    chart = ferrum.pdp_chart(
+        model, X, y, features=["f0"], grid_resolution=10, kind="individual",
+    )
+    svg = chart.show_svg()
+    # n_samples polylines for the single feature panel.
+    assert svg.count("<polyline ") == X.height
 
 
-def test_mark_pdp_center_not_implemented():
-    df = pl.DataFrame({
-        "feature": ["a"], "feature_value": [0.0], "pd_value": [0.0],
-        "sample_id": [-1],
-    })
-    with pytest.raises(NotImplementedError, match="center"):
-        ferrum.Chart(df).mark_pdp(center=True).show_svg()
+def test_pdp_chart_both_renders_ice_plus_average():
+    """kind='both' overlays one thicker average polyline per feature
+    on top of the per-sample ICE bundle."""
+    model, X, y = _rf_xy()
+    chart = ferrum.pdp_chart(
+        model, X, y, features=["f0", "f1"], grid_resolution=10, kind="both",
+    )
+    svg = chart.show_svg()
+    # 2 features * (n_samples ICE + 1 average) polylines.
+    assert svg.count("<polyline ") == 2 * (X.height + 1)
+
+
+def test_pdp_chart_center_starts_at_zero():
+    """center=True subtracts the value at min(feature_value) per
+    (feature, sample_id) so every polyline starts at 0 at the left."""
+    import numpy as np
+    model, X, y = _rf_xy()
+    from ferrum._diagnostics.charts import _pdp_chart_from_source
+    source = ferrum.ModelSource(model, X, y)
+    chart = _pdp_chart_from_source(
+        source, features=["f0"], grid_resolution=10,
+        kind="individual", center=True,
+    )
+    # Pull the underlying data and assert all per-sample first values are 0.
+    df = chart._data
+    first = (
+        df.group_by(["feature", "sample_id"])
+          .agg(pl.col("pd_value").first().alias("first"))
+    )
+    assert np.allclose(first["first"].to_numpy(), 0.0)
+
+
+def test_pdp_chart_kind_invalid_raises():
+    model, X, y = _rf_xy()
+    with pytest.raises(ValueError, match="'average', 'individual', or 'both'"):
+        ferrum.pdp_chart(
+            model, X, y, features=["f0"], kind="not_a_kind",
+        )

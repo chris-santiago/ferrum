@@ -781,20 +781,81 @@ def _pdp_chart_from_source(
 
     Each feature occupies its own facet panel because PDP curves for
     different features span unrelated x-axis ranges and units — sharing
-    a single x axis (the pre-Phase-10f behavior) collapsed every curve
-    onto the union range and obscured the per-feature shape. The
-    column-wrap facet gives each feature its own x scale via
-    ferrum.Chart.facet.
+    a single x axis collapses every curve onto the union range.
+
+    For ``kind="individual"``: injects ``_sample_id_str`` (Utf8 cast of
+    ``sample_id``) so ``mark_line``'s ``mark_style.detail`` grouping
+    can produce one polyline per sample.
+
+    For ``kind="both"``: injects two y-source columns —
+    ``_pd_ice_value`` (per-sample value on ICE rows, null on the average
+    row) and ``_pd_avg_value`` (the average curve broadcast to every
+    row; non-null on ICE rows too so the average overlay renders the
+    full grid). Each layer reads its own y column.
+
+    When ``center=True``: subtracts the value at the smallest
+    ``feature_value`` per ``(feature, sample_id)`` group so every
+    polyline starts at 0.
     """
     import ferrum
 
     df = source.partial_dependence(
         features, grid_resolution=grid_resolution, kind=kind,
     )
-    # Pre-sort ascending by feature_value within each feature so the line
-    # layer renders monotonically (line.rs groups rows by color in batch
-    # order, so the sort order matters).
-    df = df.sort(["feature", "feature_value"])
+    # Sort by (feature, sample_id, feature_value) so each polyline's
+    # rows are contiguous and monotonic in feature_value within its
+    # group — line.rs renders rows in batch order within each detail /
+    # color group.
+    df = df.sort(["feature", "sample_id", "feature_value"])
+
+    if center:
+        # Subtract the value at the smallest feature_value per group
+        # so every curve starts at zero. group_by(feature, sample_id)
+        # because each (feature, sample) has its own grid; the
+        # smallest grid value is the anchor.
+        anchor = (
+            df.group_by(["feature", "sample_id"], maintain_order=True)
+              .agg(pl.col("pd_value").first().alias("_pd_anchor"))
+        )
+        df = df.join(anchor, on=["feature", "sample_id"], how="left")
+        df = df.with_columns(
+            (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
+        ).drop("_pd_anchor")
+
+    if kind in ("individual", "both"):
+        # mark_line reads mark_style.detail as a Utf8 column name. Cast
+        # sample_id to Utf8 so the detail grouping works.
+        df = df.with_columns(
+            pl.col("sample_id").cast(pl.Utf8).alias("_sample_id_str"),
+        )
+
+    if kind == "both":
+        # Split pd_value into two layer-specific columns:
+        # _pd_ice_value: per-sample value on ICE rows (sample_id >= 0),
+        #                null on the average row so the ICE line layer
+        #                skips it.
+        # _pd_avg_value: the average curve broadcast to every row (joined
+        #                from the sample_id=-1 rows by feature,
+        #                feature_value). The average layer reads this on
+        #                ALL rows but mark_line groups by color (feature)
+        #                so duplicated rows merge into one polyline.
+        avg_only = (
+            df.filter(pl.col("sample_id") == -1)
+              .select(["feature", "feature_value", "pd_value"])
+              .rename({"pd_value": "_pd_avg_value"})
+        )
+        df = df.with_columns(
+            pl.when(pl.col("sample_id") >= 0)
+              .then(pl.col("pd_value"))
+              .otherwise(None)
+              .alias("_pd_ice_value"),
+        )
+        df = df.join(avg_only, on=["feature", "feature_value"], how="left")
+        # Drop the original average rows so the duplicate-avg polyline
+        # collapses to one rendering. (The _pd_avg_value on the ICE
+        # rows already carries the full average curve.)
+        df = df.filter(pl.col("sample_id") >= 0)
+
     chart = (
         ferrum.Chart(df)
         .mark_pdp(
