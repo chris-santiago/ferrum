@@ -45,6 +45,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 - **No global mutable state.** No module-level config objects, no module-level theme rebinding. Themes are values passed to `Chart`; per-chart `.theme()` always wins. The single documented exception is `ferrum.set_default_theme()` (phase 8a+), which mutates a per-thread `contextvars.ContextVar` — scope-bounded, automatic-revert when used as a context manager, and overridden by per-chart `.theme()` at render time. Do not introduce other process-scoped mutators.
 - **`ferrum-spec.md` is the API contract.** If implementation diverges, update the spec with a dated note. Never silently drift.
 - **`cargo test` must pass** before any phase (2+) is marked done. Phase 1 is the only exception.
+- **Goldens are not blessed until visually inspected.** SVG byte-equality is necessary but not sufficient — historically goldens were committed that rendered with missing elements, blank panels, or mis-stacked bars, and the byte-diff tests still passed because the implementation matched the *broken* golden. Whenever you add or regenerate any `tests/goldens/**/*.svg` (or `tests/test_phase_9_e2e/goldens/*.svg`), you must rasterize it to PNG via `python scripts/snapshot-goldens.py <name>` (or `python scripts/snapshot-goldens.py` for all), `Read` each resulting PNG, and confirm the chart renders correctly **before committing**. The helpers live in `tests/_snapshots.py` (`snapshot_golden()`, `rasterize_svg()`, `find_goldens()`) for direct use in custom regen / verification scripts. `resvg-py` (in the dev dependency group) is the rasterizer.
 - **Do not `git push`** unless the user explicitly asks.
 - **Confirm before committing to `main`** on non-trivial work. Phase 1 commits directly to main by user decision (greenfield); subsequent phases use feature branches unless the user says otherwise.
 
@@ -76,6 +77,7 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 | Python package source | `src/ferrum/` |
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
+| Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
 
 ---
 
