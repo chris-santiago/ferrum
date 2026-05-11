@@ -375,7 +375,7 @@ class JointChart:
         except ImportError as e:
             raise NotImplementedError(
                 "JointChart.show_svg() requires compose_svg_grid; "
-                "wire-up lands in Phase 9a Task 12"
+                "compose_svg_grid not available in this build"
             ) from e
         # The grid compositor uses each cell's actual rendered size, ignoring
         # row_ratios/col_ratios — so we must resize the marginals here. Without
@@ -411,9 +411,9 @@ class JointChart:
         Raises
         ------
         NotImplementedError
-            Always raised; PNG output is a Phase 9 follow-up.
+            Always raised; PNG output is not yet implemented.
         """
-        raise NotImplementedError("JointChart.show_png — Phase 9 follow-up")
+        raise NotImplementedError("JointChart.show_png — not yet implemented")
 
     def save(self, path: str, *, format=None, **kwargs):
         """Save the joint chart to a file.
@@ -437,7 +437,7 @@ class JointChart:
         if fmt == "svg":
             path.write_text(self.show_svg())
         else:
-            raise NotImplementedError(f"JointChart.save({fmt!r}) not yet supported in Phase 9")
+            raise NotImplementedError(f"JointChart.save({fmt!r}) not yet supported")
 
     def show(self):
         """Print the SVG markup to stdout."""
@@ -679,7 +679,7 @@ class RepeatChart:
         except ImportError as e:
             raise NotImplementedError(
                 "RepeatChart.show_svg() requires compose_svg_grid; "
-                "wire-up lands in Phase 9a Task 12"
+                "compose_svg_grid not available in this build"
             ) from e
         cells = self.expand()
         rows = self.row or []
@@ -705,9 +705,9 @@ class RepeatChart:
         Raises
         ------
         NotImplementedError
-            Always raised; PNG output is a Phase 9 follow-up.
+            Always raised; PNG output is not yet implemented.
         """
-        raise NotImplementedError("RepeatChart.show_png — Phase 9 follow-up")
+        raise NotImplementedError("RepeatChart.show_png — not yet implemented")
 
     def save(self, path: str, *, format=None, **kwargs):
         """Save the repeated grid to a file.
@@ -874,7 +874,7 @@ class ClusterMapChart:
         except ImportError as e:
             raise NotImplementedError(
                 "ClusterMapChart.show_svg() requires compose_svg_grid; "
-                "wire-up lands in Phase 9a Task 12"
+                "compose_svg_grid not available in this build"
             ) from e
         d = self.dendrogram_ratio
         h = 1.0 - d
@@ -909,9 +909,9 @@ class ClusterMapChart:
         Raises
         ------
         NotImplementedError
-            Always raised; PNG output is a Phase 9 follow-up.
+            Always raised; PNG output is not yet implemented.
         """
-        raise NotImplementedError("ClusterMapChart.show_png — Phase 9 follow-up")
+        raise NotImplementedError("ClusterMapChart.show_png — not yet implemented")
 
     def save(self, path: str, *, format=None, **kwargs):
         """Save the cluster map to a file.

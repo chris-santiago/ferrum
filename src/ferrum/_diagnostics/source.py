@@ -224,6 +224,16 @@ class ModelSource:
         >>> cms.model_names
         ['ridge', 'lasso']
         """
+        _ACCEPTED_COMPARE_KWARGS: frozenset[str] = frozenset(
+            {"random_state", "feature_names", "class_names", "sample_weight"}
+        )
+        unknown = set(kwargs) - _ACCEPTED_COMPARE_KWARGS
+        if unknown:
+            raise TypeError(
+                f"ModelSource.compare() received unexpected keyword argument(s): "
+                f"{sorted(unknown)}. "
+                f"Accepted kwargs: {sorted(_ACCEPTED_COMPARE_KWARGS)}"
+            )
         sources = {
             name: cls(model, X, y, **kwargs) for name, model in models.items()
         }
@@ -1761,7 +1771,7 @@ class ComparedModelSource:
         if name in _COMPARED_METHODS:
             method = name
             return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
-        if name in ("_X", "_y", "_feature_names", "_class_names"):
+        if name in ("_X", "_y", "_feature_names", "_class_names", "_capabilities"):
             return getattr(next(iter(self._sources.values())), name)
         if name == "_model":
             raise AttributeError(

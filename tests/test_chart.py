@@ -133,3 +133,64 @@ def test_chart_immutability_chain_independence():
     assert cb._encoding["x"].field == "b"
     # base unaffected
     assert base._encoding == {}
+
+
+# ---- BUG-1: to_json(indent=) regression ----
+
+def test_to_json_indent_none_is_compact():
+    df = pl.DataFrame({"x": [1], "y": [2]})
+    j = Chart(df).mark_point().encode(x="x", y="y").to_json()
+    assert "\n" not in j
+
+
+def test_to_json_indent_produces_multiline():
+    df = pl.DataFrame({"x": [1], "y": [2]})
+    j = Chart(df).mark_point().encode(x="x", y="y").to_json(indent=2)
+    assert "\n" in j
+    assert "  " in j  # indentation present
+
+
+# ---- BUG-3: __add__ warning message regression ----
+
+def test_add_differing_data_warns_with_actionable_message():
+    import warnings
+    df1 = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+    df2 = pl.DataFrame({"x": [5, 6], "y": [7, 8]})
+    c1 = Chart(df1).mark_point().encode(x="x", y="y")
+    c2 = Chart(df2).mark_line().encode(x="x", y="y")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = c1 + c2
+    assert len(w) == 1
+    msg = str(w[0].message)
+    assert "null padding" in msg
+    assert "decision_boundary_chart" in msg
+    # falls back to HConcatChart
+    from ferrum.composition import HConcatChart
+    assert isinstance(result, HConcatChart)
+
+
+# ---- BUG-4: mark_shap_waterfall(sample_idx=-1) sentinel regression ----
+
+def test_mark_shap_waterfall_default_raises_immediately():
+    df = pl.DataFrame({"x": [1], "y": [2]})
+    with pytest.raises(ValueError, match="sample_idx"):
+        Chart(df).mark_shap_waterfall()
+
+
+def test_mark_shap_waterfall_explicit_idx_does_not_raise():
+    df = pl.DataFrame({"x": [1], "y": [2]})
+    # Should not raise at mark time; error would only come at render time
+    c = Chart(df).mark_shap_waterfall(sample_idx=0)
+    assert c._pending_stat_mark is not None
+
+
+# ---- BUG-5: mark_segment redundant _position assignment regression ----
+
+def test_mark_segment_position_set_once():
+    """_set_mark handles position; mark_segment must not double-assign."""
+    from ferrum.position import Identity
+    df = pl.DataFrame({"x": [1], "y": [2], "x2": [3], "y2": [4]})
+    pos = Identity()
+    c = Chart(df).mark_segment(position=pos)
+    assert c._position is pos

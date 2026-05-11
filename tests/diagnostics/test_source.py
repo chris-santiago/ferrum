@@ -339,3 +339,37 @@ def test_alpha_selection_schema_and_alphas():
     assert set(al["alpha"].unique().to_list()) == {0.1, 1.0, 10.0}
     # 3 alphas × 3 folds = 9 rows.
     assert al.height == 9
+
+
+# ---------------------------------------------------------------------------
+# Issue-4 regression: ModelSource.compare unknown kwargs validation
+# ---------------------------------------------------------------------------
+
+
+def test_compare_unknown_kwarg_raises_type_error():
+    """compare() must reject unknown kwargs with an informative TypeError."""
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    source = ferrum.ModelSource(_DuckModel(), df, y=[0, 1])
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        ferrum.ModelSource.compare(
+            {"m": _DuckModel()}, df, [0, 1], unknown_param=42
+        )
+
+
+def test_compare_unknown_kwarg_message_lists_accepted():
+    """TypeError message must name accepted kwargs."""
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    with pytest.raises(TypeError, match="random_state"):
+        ferrum.ModelSource.compare(
+            {"m": _DuckModel()}, df, [0, 1], bad_kwarg="x"
+        )
+
+
+def test_compare_accepted_kwargs_do_not_raise():
+    """All documented kwargs must pass through without error."""
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    # No assertion needed beyond not raising.
+    ferrum.ModelSource.compare(
+        {"m": _DuckModel()}, df, [0, 1],
+        random_state=0, feature_names=["a"],
+    )

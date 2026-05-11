@@ -233,12 +233,13 @@ def test_shap_chart_invalid_kind():
 
 
 def test_mark_shap_waterfall_requires_sample_idx():
-    """The desugar guards against the -1 sentinel — calling
-    mark_shap_waterfall without sample_idx raises TypeError."""
+    """Calling mark_shap_waterfall without sample_idx (left at -1 sentinel)
+    raises ValueError — the guard lives in Chart.mark_shap_waterfall before
+    the desugar is invoked."""
     df = pl.DataFrame({
         "feature": ["a"], "x0": [0.0], "x1": [1.0], "shap_sign": ["positive"],
     })
-    with pytest.raises(TypeError, match="sample_idx"):
+    with pytest.raises(ValueError, match="sample_idx"):
         ferrum.Chart(df).mark_shap_waterfall().show_svg()
 
 
@@ -488,3 +489,40 @@ def test_pdp_chart_kind_invalid_raises():
         ferrum.pdp_chart(
             model, X, y, features=["f0"], kind="not_a_kind",
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue-1 regression: _shap_order_features ValueError for unknown order
+# ---------------------------------------------------------------------------
+
+
+def test_shap_order_features_unknown_order_raises():
+    """_shap_order_features must raise ValueError for unknown order strings."""
+    from ferrum._diagnostics.charts import _shap_order_features
+
+    sv = pl.DataFrame({
+        "feature": ["a", "a", "b", "b"],
+        "shap_value": [0.1, -0.2, 0.3, 0.4],
+        "feature_value": [1.0, 2.0, 3.0, 4.0],
+        "sample": [0, 1, 0, 1],
+    })
+    with pytest.raises(ValueError, match="abs_max"):
+        _shap_order_features(sv, order="abs_max", max_display=5)
+    with pytest.raises(ValueError, match="Accepted values"):
+        _shap_order_features(sv, order="unknown", max_display=5)
+
+
+def test_shap_order_features_accepted_orders_work():
+    """Accepted order values must not raise."""
+    from ferrum._diagnostics.charts import _shap_order_features
+
+    sv = pl.DataFrame({
+        "feature": ["a", "a", "b", "b"],
+        "shap_value": [0.1, -0.2, 0.3, 0.4],
+        "feature_value": [1.0, 2.0, 3.0, 4.0],
+        "sample": [0, 1, 0, 1],
+    })
+    result_mean = _shap_order_features(sv, order="abs_mean", max_display=5)
+    result_max = _shap_order_features(sv, order="max", max_display=5)
+    assert set(result_mean) == {"a", "b"}
+    assert set(result_max) == {"a", "b"}

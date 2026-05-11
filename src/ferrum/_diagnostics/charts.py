@@ -703,10 +703,18 @@ def _importance_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
+_SHAP_ORDER_VALUES: frozenset[str] = frozenset({"abs_mean", "max"})
+
+
 def _shap_order_features(
     sv: pl.DataFrame, *, order: str, max_display: int,
 ) -> list[str]:
     """Return the top-`max_display` feature names ordered by `order`."""
+    if order not in _SHAP_ORDER_VALUES:
+        raise ValueError(
+            f"Unknown order {order!r}. "
+            f"Accepted values: {sorted(_SHAP_ORDER_VALUES)}"
+        )
     expr = pl.col("shap_value").abs()
     agg = expr.mean() if order == "abs_mean" else expr.max()
     ranked = (
@@ -763,6 +771,11 @@ def _shap_bar_chart_from_source(
     The output column is named ``abs_mean_shap`` regardless of the
     aggregation so the downstream mark's data contract stays stable.
     """
+    if order not in _SHAP_ORDER_VALUES:
+        raise ValueError(
+            f"Unknown order {order!r}. "
+            f"Accepted values: {sorted(_SHAP_ORDER_VALUES)}"
+        )
     import ferrum
 
     expr = pl.col("shap_value").abs()

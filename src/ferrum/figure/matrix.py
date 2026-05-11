@@ -386,8 +386,9 @@ def clustermap(
         Distance metric forwarded to ``Linkage`` (e.g. ``"euclidean"``,
         ``"cosine"``, ``"correlation"``).
     cmap : str, default "viridis"
-        Reserved for future use (no-op today). When wired, will select the
-        colormap for the center heatmap.
+        Color scheme name for the center heatmap (e.g. ``"viridis"``,
+        ``"rdbu"``, ``"blues"``).  Forwarded to the ``Color`` encoding's
+        ``scheme`` scale option.
     z_score : {0, 1, None}, optional
         Standardise data along rows (``0``) or columns (``1``) before
         clustering; forwarded to ``Linkage``.
@@ -476,6 +477,8 @@ def clustermap(
     # the resulting unpivoted long-form preserves the visually-clustered order.
     # `drop_index=False` keeps the data columns intact (we're not dropping a
     # column from the chained batch — the index column lives in `from=` only).
+    from ferrum.encoding import Color as _Color
+    _color_enc = _Color("value", scheme=cmap)
     center = (
         Chart(data)
         .transform(row_link, col_link,
@@ -485,7 +488,7 @@ def clustermap(
         .encode(
             x="column",
             y=(id_col if id_col else "_row_id"),
-            color="value",
+            color=_color_enc,
         )
     )
 
@@ -516,10 +519,18 @@ def clustermap(
     row_dendro._layers = [row_dendro_layer]
     row_dendro = row_dendro.coord(CoordFlip())
 
+    # Dendrogram panels should not show gridlines behind the tree branches.
+    # Build a no-grid base theme; if the user supplied a theme, merge on top.
+    from ferrum.themes import Theme as _Theme
+    _dendro_base = _Theme(grid=False)
     if theme is not None:
         center = center.theme(theme)
-        col_dendro = col_dendro.theme(theme)
-        row_dendro = row_dendro.theme(theme)
+        _dendro_theme = _dendro_base.update(**theme._props)
+        col_dendro = col_dendro.theme(_dendro_theme)
+        row_dendro = row_dendro.theme(_dendro_theme)
+    else:
+        col_dendro = col_dendro.theme(_dendro_base)
+        row_dendro = row_dendro.theme(_dendro_base)
 
     cm = ClusterMapChart(
         center,

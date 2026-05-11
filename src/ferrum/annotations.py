@@ -96,24 +96,16 @@ def annotate_rect(x1: float, x2: float, y1: float, y2: float, *,
     composition; for true overlay/layer, use ``+`` with a chart that shares
     the same DataFrame.
 
-    .. note::
-       ``x2`` and ``y2`` are accepted and stored in the underlying DataFrame
-       but are not currently bound to X2/Y2 encoding channels — the renderer
-       anchors the rect at ``(x1, y1)`` only. Full X2/Y2 encoding is planned
-       for Phase 11+.
-
     Parameters
     ----------
     x1 : float
         Left x boundary in data coordinates.
     x2 : float
-        Right x boundary in data coordinates. Reserved for future use
-        (no-op today — see note above).
+        Right x boundary in data coordinates.
     y1 : float
         Bottom y boundary in data coordinates.
     y2 : float
-        Top y boundary in data coordinates. Reserved for future use
-        (no-op today).
+        Top y boundary in data coordinates.
     fill : str, optional
         Fill color as a CSS color string.
     opacity : float, default 0.1
@@ -137,7 +129,7 @@ def annotate_rect(x1: float, x2: float, y1: float, y2: float, *,
     kwargs: dict = {"opacity": opacity}
     if fill is not None:
         kwargs["fill"] = fill
-    return Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1")
+    return Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
 
 
 def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0,
@@ -149,12 +141,6 @@ def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0
     Returns a ``mark_text`` chart for ``|`` / ``&`` concatenation composition;
     for true overlay/layer, use ``+`` with a chart that shares the same
     DataFrame.
-
-    .. note::
-       Text content is not rendered today; the ``text`` argument is stored
-       in a ``_text`` column but that column is never bound to an encoding
-       channel, so the mark renders as a positioned but empty text element.
-       Full Text channel wiring is planned for Phase 11+.
 
     Parameters
     ----------
@@ -200,4 +186,4 @@ def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0
         kwargs["fill"] = color
     if angle is not None:
         kwargs["angle"] = angle
-    return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y")
+    return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")

@@ -25,6 +25,21 @@ def test_annotate_text_returns_chart_with_text_mark():
     assert t._mark == "text"
 
 
+def test_annotate_rect_encodes_x2_y2():
+    """BUG-2 regression: annotate_rect must encode x2 and y2 channels."""
+    r = annotate_rect(1.0, 3.0, 2.0, 4.0)
+    enc = r._encoding
+    assert "x2" in enc, "annotate_rect must encode x2"
+    assert "y2" in enc, "annotate_rect must encode y2"
+
+
+def test_annotate_text_encodes_text_channel():
+    """BUG-3 regression: annotate_text must encode the text channel."""
+    t = annotate_text(1.0, 2.0, "hello")
+    enc = t._encoding
+    assert "text" in enc, "annotate_text must encode the text channel"
+
+
 def test_annotate_hline_can_be_added_to_scatter():
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     scatter = Chart(df).mark_point().encode(x="a", y="b")

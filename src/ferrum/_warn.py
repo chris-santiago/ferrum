@@ -37,8 +37,8 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
         return
     _seen.add(key)
     msg = message or (
-        f"{channel}({kwarg}=...) is accepted but not honored in Phase 8a; "
-        f"planned for Phase 9."
+        f"{channel}({kwarg}=...) is accepted but not yet honored; "
+        f"planned for a future Phase."
     )
     warnings.warn(msg, UserWarning, stacklevel=3)
 

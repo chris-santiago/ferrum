@@ -2271,8 +2271,12 @@ class Chart:
             Whether to draw error bars from ``imp_lower``/``imp_upper``.
             Default is ``True``.
         top_k : int or None, optional
-            Reserved for future use (no-op today — truncation is the chart
-            builder's responsibility before calling this method).
+            Limit results to the top-*k* features by importance.  Truncation
+            is applied by the figure-level chart builder
+            (``importance_chart``); when ``mark_importance`` is called
+            directly this parameter is forwarded to the desugar function but
+            the desugar layer treats it as informational — actual filtering
+            must be done on the DataFrame before passing it to ``Chart``.
         color_field : str or None, optional
             Column name to drive per-feature colour.
         position : Position, optional
@@ -2509,9 +2513,10 @@ class Chart:
         Parameters
         ----------
         sample_idx : int
-            Row index of the sample to explain.  The default ``-1`` is a
-            sentinel that causes a ``TypeError`` at desugar time — callers
-            must pass an explicit index.
+            Row index of the sample to explain.  Must be provided explicitly;
+            the default ``-1`` is a guard sentinel that raises ``ValueError``
+            immediately so callers get a clear error at call time rather than
+            at render time.
         max_display : int, optional
             Maximum number of features to show (smallest-magnitude features
             are collapsed into an ``"other"`` row).  Default is ``20``.
@@ -2527,8 +2532,8 @@ class Chart:
 
         Raises
         ------
-        TypeError
-            If ``sample_idx`` is left at its default value of ``-1``.
+        ValueError
+            If ``sample_idx`` is not provided (left at its default of ``-1``).
 
         Examples
         --------
@@ -2537,6 +2542,11 @@ class Chart:
         >>> fm.Chart(src.shap_values()).mark_shap_waterfall(sample_idx=0)
         Chart(mark='point', encoding=[])
         """
+        if sample_idx == -1:
+            raise ValueError(
+                "mark_shap_waterfall requires sample_idx=<int>; "
+                "pass an integer index (e.g. sample_idx=0) to select the sample to explain."
+            )
         if position is not None:
             from ferrum.position import validate_position_eligibility
             validate_position_eligibility("shap_waterfall", position)
@@ -3389,12 +3399,7 @@ class Chart:
         Distinct from ``mark_rule`` (axis-aligned only); segments may take any
         direction. Requires ``x``, ``y``, ``x2``, ``y2`` on the encoding.
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("segment", position)
-        new = self._set_mark("segment", **kwargs)
-        new._position = position
-        return new
+        return self._set_mark("segment", position=position, **kwargs)
     def mark_label(self, **kwargs):
         """Render smart text labels with automatic collision avoidance.
 
@@ -3588,7 +3593,8 @@ class Chart:
             import warnings
             warnings.warn(
                 "Layered charts with differing data render as horizontal concatenation. "
-                "Use a shared DataFrame for true overlay.",
+                "Combine the two DataFrames into one with null padding "
+                "(see decision_boundary_chart for an example) to get a true overlay.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -4078,14 +4084,15 @@ class Chart:
         """Serialise the chart specification to a JSON string.
 
         Calls ``to_spec()`` to build the ``ChartSpec`` and then serialises it
-        via the Rust ``serde_json`` encoder.  The ``indent`` parameter is
-        accepted for API compatibility but is currently a no-op — the Rust
-        encoder produces compact JSON.
+        via the Rust ``serde_json`` encoder.  When ``indent`` is given the
+        compact JSON is reformatted via ``json.loads`` / ``json.dumps`` on the
+        Python side (the Rust encoder always produces compact output).
 
         Parameters
         ----------
         indent : int or None, optional
-            Reserved for future use (no-op today).  Pass ``None`` (default).
+            Number of spaces to use for pretty-printing.  ``None`` (default)
+            returns compact single-line JSON.
 
         Returns
         -------
@@ -4101,8 +4108,12 @@ class Chart:
         >>> '"mark"' in spec_json
         True
         """
+        import json as _json
         spec = self.to_spec()
-        return spec.to_json()
+        compact = spec.to_json()
+        if indent is None:
+            return compact
+        return _json.dumps(_json.loads(compact), indent=indent)
 
     def show_svg(self) -> str:
         """Render the chart to an SVG string.

@@ -498,6 +498,38 @@ class TestClustermap:
         assert link_t.get("method") == "average"
         assert link_t.get("metric") == "cosine"
 
+    def test_cmap_forwarded_to_color_encoding(self, cluster_data):
+        """BUG-4 regression: cmap must be forwarded to the center heatmap color scheme."""
+        cm = fe.clustermap(cluster_data, cmap="rdbu")
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        color_enc = d.get("encoding", {}).get("color", {})
+        assert color_enc.get("scheme") == "rdbu", (
+            "cmap='rdbu' must be forwarded to the color encoding scheme"
+        )
+
+    def test_cmap_viridis_default(self, cluster_data):
+        """clustermap default cmap is viridis."""
+        cm = fe.clustermap(cluster_data)
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        color_enc = d.get("encoding", {}).get("color", {})
+        assert color_enc.get("scheme") == "viridis"
+
+    def test_dendrogram_panels_have_grid_disabled(self, cluster_data):
+        """BUG-5 regression: dendrogram panels must have grid=False to suppress gridlines."""
+        cm = fe.clustermap(cluster_data)
+        assert cm.col_dendrogram._theme is not None, "col_dendrogram must have a theme"
+        assert cm.row_dendrogram._theme is not None, "row_dendrogram must have a theme"
+        assert cm.col_dendrogram._theme._props.get("grid") is False
+        assert cm.row_dendrogram._theme._props.get("grid") is False
+
+    def test_dendrogram_grid_false_preserved_with_user_theme(self, cluster_data):
+        """User-supplied theme is merged with grid=False for dendrogram panels."""
+        from ferrum.themes import Theme
+        user_theme = Theme(mark_color="#ff0000")
+        cm = fe.clustermap(cluster_data, theme=user_theme)
+        assert cm.col_dendrogram._theme._props.get("grid") is False
+        assert cm.col_dendrogram._theme._props.get("mark_color") == "#ff0000"
+
 
 # ---------------------------------------------------------------------------
 # Task 35 — jointplot

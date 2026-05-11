@@ -25,7 +25,8 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
 def test_deferred_mark_error_for_9_plus_mark():
     from ferrum.marks import deferred_mark_error
     e = deferred_mark_error("arc")
-    assert "Phase 9+" in str(e)
+    # Phase 9 is closed; these marks are now planned for Phase 11+.
+    assert "Phase 11+" in str(e)
 
 
 def test_phase_8b_marks_set_is_empty_after_subbatch_f():
@@ -80,10 +81,10 @@ def test_desugar_smooth_with_ci_returns_layered_tuple():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("method,phase,extra_args", [
-    # Phase 8b marks (violin/qq/function) shipped in Sub-batch F. Only Phase 9+ remain deferred.
-    ("mark_arc", "9", ()),
-    ("mark_geoshape", "9", ()),
-    ("mark_label", "9", ()),
+    # Phase 9 closed. arc/geoshape/label remain deferred to Phase 11+.
+    ("mark_arc", "11", ()),
+    ("mark_geoshape", "11", ()),
+    ("mark_label", "11", ()),
 ])
 def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):
     df = pl.DataFrame({"a": [1]})

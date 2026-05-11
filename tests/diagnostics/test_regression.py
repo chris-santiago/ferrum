@@ -282,3 +282,29 @@ def test_mark_prediction_error_ci_out_of_range_raises():
     viz = ferrum.PredictionErrorVisualizer(source._model, ci=1.5)
     with pytest.raises(ValueError, match="0, 1"):
         viz.fit(source._X, source._y)
+
+
+# ---------------------------------------------------------------------------
+# Issue-3 regression: has_score sentinel on FerrumVisualizer
+# ---------------------------------------------------------------------------
+
+
+def test_has_score_false_on_base():
+    """FerrumVisualizer base class must have has_score = False."""
+    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    assert FerrumVisualizer.has_score is False
+
+
+def test_has_score_true_on_residuals_visualizer():
+    """ResidualsVisualizer.score() is real; sentinel must be True."""
+    assert ferrum.ResidualsVisualizer.has_score is True
+
+
+def test_has_score_true_on_prediction_error_visualizer():
+    """PredictionErrorVisualizer.score() is real; sentinel must be True."""
+    assert ferrum.PredictionErrorVisualizer.has_score is True
+
+
+def test_has_score_false_on_unsupervised_visualizer():
+    """CooksDistanceVisualizer has no score(); sentinel must be False."""
+    assert ferrum.CooksDistanceVisualizer.has_score is False

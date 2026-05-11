@@ -39,6 +39,8 @@ class FerrumVisualizer:
     >>> viz._metrics              # headline metric(s)
     """
 
+    has_score: bool = False
+
     def __init__(
         self,
         model: Any = None,

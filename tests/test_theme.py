@@ -40,9 +40,11 @@ def test_theme_eq_when_props_match():
 
 
 def test_theme_to_theme_inputs_dict_passes_through_props():
+    # "background" is normalised to "background_color" for the Rust binding.
     t = Theme(background="#1a1a2e", font_color="#e6e6e6")
     d = t.to_theme_inputs_dict()
-    assert d["background"] == "#1a1a2e"
+    assert d["background_color"] == "#1a1a2e", "background must be renamed to background_color"
+    assert "background" not in d, "raw 'background' key must not remain after normalisation"
     assert d["font_color"] == "#e6e6e6"
 
 
@@ -126,3 +128,18 @@ def test_chart_theme_per_chart_overrides_default():
         # When show_svg is called, c's theme (minimal) is used, not dark.
         assert c._theme is minimal
         assert get_default_theme() is dark
+
+
+def test_theme_background_appears_in_rendered_svg():
+    """BUG-1 regression: Theme.background must not be silently dropped by Rust."""
+    import polars as pl
+    from ferrum import Chart
+    from ferrum.themes import Theme
+
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    bg_color = "#1a1a2e"
+    svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(background=bg_color)).show_svg()
+    assert bg_color in svg, (
+        f"Expected background color {bg_color!r} in SVG but it was not found. "
+        "Theme.background is being silently dropped by the Rust renderer."
+    )

@@ -87,7 +87,12 @@ class Theme:
 
     def to_theme_inputs_dict(self) -> dict:
         """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``."""
-        return dict(self._props)
+        d = dict(self._props)
+        # Rust binding reads "background_color"; normalise the public Python
+        # key "background" to the Rust key so built-in themes work correctly.
+        if "background" in d:
+            d["background_color"] = d.pop("background")
+        return d
 
     def __eq__(self, other: object) -> bool:
         """Return True if *other* is a ``Theme`` with identical properties."""

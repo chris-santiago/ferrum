@@ -123,3 +123,26 @@ def test_compared_source_passthrough_via_figure():
     cms = ferrum.ModelSource.compare({"a": m, "b": m}, X, y)
     chart = ferrum.roc_chart(cms)
     assert "<svg" in chart.show_svg()
+
+
+# ---------------------------------------------------------------------------
+# Issue-2 regression: ComparedModelSource proxies _capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_compare_capabilities_proxied_from_first_source():
+    """_capabilities must resolve to the first wrapped source's frozenset."""
+    X, y, m = _binary_setup()
+    cms = ferrum.ModelSource.compare({"a": m, "b": m}, X, y)
+    caps = cms._capabilities
+    assert isinstance(caps, frozenset)
+    # The binary_logistic fixture exposes predict_proba.
+    assert "predict_proba" in caps
+
+
+def test_compare_capabilities_not_attribute_error():
+    """Accessing _capabilities must not raise AttributeError."""
+    X, y, m = _binary_setup()
+    cms = ferrum.ModelSource.compare({"a": m}, X, y)
+    # Must not raise
+    _ = cms._capabilities

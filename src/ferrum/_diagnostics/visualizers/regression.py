@@ -54,6 +54,8 @@ class ResidualsVisualizer(FerrumVisualizer):
         super().__init__(model, random_state=random_state, theme=theme)
         self.kind = kind
 
+    has_score: bool = True
+
     def _materialize(self) -> None:
         df = self._source.predictions()
         resid = df["residual"].to_numpy()
@@ -113,6 +115,8 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         self.identity_line = identity_line
         self.ci = ci
         self.reference_band = reference_band
+
+    has_score: bool = True
 
     def _materialize(self) -> None:
         df = self._source.predictions()

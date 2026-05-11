@@ -581,7 +581,7 @@ def desugar_shap_waterfall(
     """
     del x_field, y_field, max_display
     if sample_idx < 0:
-        raise TypeError(
+        raise ValueError(
             "mark_shap_waterfall(sample_idx=...) is required. Pass an "
             "explicit non-negative sample index."
         )
