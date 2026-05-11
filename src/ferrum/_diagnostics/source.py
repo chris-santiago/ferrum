@@ -220,7 +220,10 @@ class ModelSource:
         n_classes = len(classes)
 
         rows: list[dict] = []
-        if n_classes == 2 and average is None:
+        # Binary: a single curve is the only meaningful output. ``average`` is
+        # accepted for API symmetry with the multiclass path but treated as a
+        # no-op (there is only one class to average over).
+        if n_classes == 2:
             y_score = proba_df[proba_cols[1]].to_numpy()
             fpr, tpr, thr = _sk_roc_curve(
                 y_true, y_score, drop_intermediate=drop_intermediate,

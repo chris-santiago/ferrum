@@ -157,3 +157,72 @@ def test_discrimination_threshold_chart_figure_function(binary_source):
         binary_source, n_thresholds=20,
     ).show_svg()
     assert "<svg" in svg
+
+
+# --- Visualizer tests (Task 17) --------------------------------------
+
+
+def test_roc_visualizer():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.ROCVisualizer(model).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "auc_mean=" in repr(viz)
+    assert 0.0 <= viz._metrics["auc_mean"] <= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_roc_visualizer_score():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    viz = ferrum.ROCVisualizer(model).fit(X, df["y"])
+    auc = viz.score(X.to_numpy(), df["y"].to_numpy())
+    assert 0.0 <= auc <= 1.0
+
+
+def test_pr_visualizer():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.PRVisualizer(model).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "ap_mean=" in repr(viz)
+    assert 0.0 <= viz._metrics["ap_mean"] <= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_calibration_visualizer():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.CalibrationVisualizer(model, n_bins=5).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "calibration_error=" in repr(viz)
+    assert viz._metrics["calibration_error"] >= 0.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_calibration_visualizer_multi_model_rejected():
+    model = load_fixture("binary_logistic")
+    with pytest.raises(NotImplementedError, match="Multi-model"):
+        ferrum.CalibrationVisualizer(model, model, n_bins=5)
+
+
+def test_discrimination_threshold_visualizer():
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.DiscriminationThresholdVisualizer(
+        model, n_thresholds=20,
+    ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
+    assert "best_threshold=" in repr(viz)
+    assert 0.0 <= viz._metrics["best_threshold"] <= 1.0
+    assert 0.0 <= viz._metrics["best_f1"] <= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_visualizer_unfit_repr():
+    model = load_fixture("binary_logistic")
+    viz = ferrum.ROCVisualizer(model)
+    assert repr(viz) == "ROCVisualizer(unfit)"

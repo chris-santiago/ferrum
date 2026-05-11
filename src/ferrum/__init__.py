@@ -63,10 +63,14 @@ from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, an
 # Phase 10 — model diagnostics
 from ferrum._diagnostics import ModelSource
 from ferrum._diagnostics.visualizers import (
+    CalibrationVisualizer,
     CooksDistanceVisualizer,
+    DiscriminationThresholdVisualizer,
     FerrumVisualizer,
+    PRVisualizer,
     PredictionErrorVisualizer,
     ResidualsVisualizer,
+    ROCVisualizer,
 )
 from ferrum.figures import (
     residuals_chart,
@@ -129,6 +133,8 @@ __all__ = [
     "ModelSource",
     "FerrumVisualizer",
     "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
+    "ROCVisualizer", "PRVisualizer", "CalibrationVisualizer",
+    "DiscriminationThresholdVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
