@@ -591,6 +591,23 @@ Scales map data domain values to visual range values. Attached to encoding chann
 
 **Cyclical:** `rainbow`, `sinebow`
 
+> **Implementation note (2026-05-11, themes-T3):** The 7 categorical schemes
+> ship as a const palette registry in `crates/ferrum-core/src/render/palette.rs`
+> (`CATEGORICAL_SCHEMES`, `SEQUENTIAL_SCHEMES`, `is_categorical_scheme`,
+> `is_sequential_scheme`). `Theme(color_scheme=...)` validates the name
+> eagerly at render entry — unknown values raise `ValueError`. Categorical
+> color resolution precedence is now `encoding.scheme` (per-encoding override,
+> e.g. `mark_heatmap`'s `cmap=`) → `theme.color_scheme` (Theme default) →
+> `OKABE_ITO` fallback. Sequential scheme names (`viridis` etc.) used on a
+> nominal encoding substitute `tableau10` rather than collapsing silently to
+> the categorical default. Gridlines now render on every quantitative axis
+> as `<line>` elements drawn behind axis lines and marks, honoring
+> `theme.grid` / `grid_color` / `grid_width` / `grid_dash` / `grid_opacity`.
+> Cyclical, `tealblues`, and the brewer-extended sequential names beyond
+> `viridis/plasma/magma/inferno/cividis` are reserved spec surface — not yet
+> implemented and currently rejected by theme-level validation. T4 will flip
+> the default to `tableau10`.
+
 ---
 
 ### 3.7 Axes and Legends
