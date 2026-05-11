@@ -22,6 +22,8 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
         font_size: theme.label_font_size,
         anchor: TextAnchor::Middle,
         angle: 0.0,
+        font_family: &theme.label_font_family,
+        font_weight: None,
     };
     for tick in &axis.ticks {
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
@@ -47,7 +49,7 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
             ),
         };
         out.line(tx1, ty1, tx2, ty2, &tick_style);
-        let mut style = label_style_base;
+        let mut style = label_style_base.clone();
         style.anchor = anchor;
         style.angle = angle;
         out.text(label_x, label_y, &tick.label, &style);
@@ -59,6 +61,8 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
             font_size: theme.title_font_size,
             anchor: TextAnchor::Middle,
             angle: t.angle,
+            font_family: &theme.font_family,
+            font_weight: None,
         };
         out.text(t.anchor_x, t.anchor_y, &t.text, &title_style);
     }

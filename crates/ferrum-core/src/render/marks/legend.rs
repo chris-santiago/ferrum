@@ -15,6 +15,8 @@ pub fn draw(
         font_size: theme.label_font_size,
         anchor: TextAnchor::Start,
         angle: 0.0,
+        font_family: &theme.label_font_family,
+        font_weight: None,
     };
 
     for entry in &legend.entries {

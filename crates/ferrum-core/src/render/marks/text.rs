@@ -93,6 +93,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         font_size: ctx.theme.label_font_size,
         anchor: TextAnchor::Middle,
         angle: 0.0,
+        font_family: &ctx.theme.font_family,
+        font_weight: None,
     };
 
     for i in 0..n_x {

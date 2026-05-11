@@ -25,12 +25,14 @@ pub struct Stroke {
     pub stroke_dash: Option<Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TextStyle {
+#[derive(Debug, Clone)]
+pub struct TextStyle<'a> {
     pub fill: Color,
     pub font_size: f64,
     pub anchor: TextAnchor,
     pub angle: f64,
+    pub font_family: &'a str,
+    pub font_weight: Option<&'a str>,
 }
 
 impl SvgBuffer {
@@ -124,8 +126,11 @@ impl SvgBuffer {
         push_attr(&mut self.buf, "x", &fmt_f(x));
         push_attr(&mut self.buf, "y", &fmt_f(y));
         push_attr(&mut self.buf, "fill", &fmt_svg(style.fill));
-        push_attr(&mut self.buf, "font-family", super::INTER_FONT_FAMILY);
+        push_attr(&mut self.buf, "font-family", style.font_family);
         push_attr(&mut self.buf, "font-size", &fmt_f(style.font_size));
+        if let Some(fw) = style.font_weight {
+            push_attr(&mut self.buf, "font-weight", fw);
+        }
         push_attr(&mut self.buf, "text-anchor", anchor_str(style.anchor));
         if style.angle != 0.0 {
             let t = format!("rotate({} {} {})", fmt_f(style.angle), fmt_f(x), fmt_f(y));
@@ -324,7 +329,7 @@ mod tests {
     #[test]
     fn text_escapes_lt_gt_amp() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0 };
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None };
         buf.text(0.0, 0.0, "Price > 0 & < 1", &style);
         let out = buf.finish();
         assert!(out.contains("Price &gt; 0 &amp; &lt; 1"), "got: {out}");
