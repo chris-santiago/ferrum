@@ -286,6 +286,21 @@ def test_discrimination_threshold_visualizer():
     assert "<svg" in viz.show().show_svg()
 
 
+def test_discrimination_threshold_visualizer_threshold_line():
+    """threshold_line=True on the visualizer should render the same
+    vertical F1-best rule as the figure-level function. Without this
+    kwarg sklearn-protocol users could not get the rule at all.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.DiscriminationThresholdVisualizer(
+        model, n_thresholds=20, threshold_line=True,
+    ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
+    svg = viz.show().show_svg()
+    # mark_rule emits an SVG <line> for the vertical span.
+    assert "<line " in svg
+
+
 def test_visualizer_unfit_repr():
     model = load_fixture("binary_logistic")
     viz = ferrum.ROCVisualizer(model)

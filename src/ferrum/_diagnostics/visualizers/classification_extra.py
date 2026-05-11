@@ -41,6 +41,10 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
     cv : Any, optional
         Cross-validation strategy forwarded to ``ModelSource.discrimination_threshold``.
         ``None`` uses the model as-is (no CV averaging).
+    threshold_line : bool, default False
+        When ``True``, overlays a vertical rule at the F1-maximising
+        threshold (matches the figure-level
+        ``discrimination_threshold_chart(threshold_line=True)``).
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for any randomness in CV splits.
     theme : Theme, optional
@@ -61,6 +65,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         n_thresholds: int = 50,
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
         cv: Any = None,
+        threshold_line: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -68,6 +73,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         self.n_thresholds = n_thresholds
         self.metrics = metrics
         self.cv = cv
+        self.threshold_line = threshold_line
 
     def _materialize(self) -> None:
         dt = self._source.discrimination_threshold(
@@ -84,6 +90,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
             n_thresholds=self.n_thresholds,
             metrics=self.metrics,
             cv=self.cv,
+            threshold_line=self.threshold_line,
             theme=self.theme,
         )
 
