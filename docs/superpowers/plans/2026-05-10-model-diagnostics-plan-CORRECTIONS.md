@@ -119,6 +119,69 @@ The corrections do **not** change Phase 10's user-facing surface (marks, methods
 
 ---
 
+## Correction §5: Literal-scalar encoding values are not honored — reference lines need the null-trick
+
+**Plan claim:** Tasks 8, 15, and several later mark desugars emit rule
+layers like `{"mark": "rule", "encoding": {"y": 0.0}}` to draw a fixed-y
+reference line.
+
+**Actual codebase state:** `Chart._build_layers_list` (chart.py:920-941)
+only honors string field names or `ChannelBase` subclasses for each
+encoding axis. A literal float silently drops the channel, leaving the
+rule with an empty encoding — no line renders. The renderer
+(`crates/ferrum-core/src/render/marks/rule.rs:18-27`) further iterates
+one `<line>` per data row, so even a real field of zeros would produce N
+overdrawn lines, not one.
+
+**Correction (applied in Task 8, generalizes to 10b–10h):**
+- The mark's `Chart.mark_<name>` method injects a sentinel column into
+  the chart's data via `ferrum._diagnostics.charts._inject_constant`:
+  one non-null row at the reference value, the remaining N-1 rows null.
+  Rust's `rule.rs` skips non-finite values, so the rule layer renders
+  exactly one line.
+- The desugar's rule layer references that column by name
+  (`{"y": "_ref_zero"}`, `{"y": "_ref_diag"}`, etc.) rather than a
+  literal scalar.
+- For diagonal lines (identity / `y=x`), pre-sort the data ascending by
+  the diagonal-axis column (`_diagnostics.charts._sort_by`) so the
+  connecting `mark_line` draws a monotonic polyline rather than a
+  zigzag.
+
+**Marks affected:**
+- §6.1 `mark_residuals` — y=0 rule (Task 8, done).
+- §6.1 `mark_prediction_error` — identity diagonal (Task 8, done via
+  sort).
+- §6.2 `mark_roc` — diagonal y=x reference (Task 15 will apply same).
+- §6.2 `mark_calibration` — perfect-calibration diagonal (Task 15).
+- Any future mark with a fixed-position reference line.
+
+**Task 41 drift note:** the ferrum-spec `RuleEncoding` accepts scalar
+literal values in the user-facing surface description, but the
+implementation requires column references. Either tighten the spec to
+match implementation, or add scalar-literal-encoding support in the
+spec-builder + Rust pipeline as a follow-up. The current path is
+internally consistent and produces correct output; the gap is
+documentation only.
+
+## Correction §6: Deferred kwargs raise NotImplementedError, not silently ignore
+
+**Plan claim:** Several Phase 10a marks accept kwargs that the design
+defers to 10h (`cook_threshold` for `mark_residuals`, `ci` and
+`reference_band` for `mark_prediction_error`). The plan's desugar code
+accepts them and uses them only conditionally.
+
+**Actual implementation (Task 8):** initially the desugars did `del
+cook_threshold` etc. to satisfy the linter — silently accepting any
+value. This violates `feedback_no_defer_phase_9_plus.md` (no
+warn-fallback for deferred parameters).
+
+**Correction:** the desugars raise `NotImplementedError` with an explicit
+Phase 10h reference when these kwargs receive a non-default value.
+Default-valued calls flow through unchanged. The same pattern applies to
+any future mark whose plan defers behavior to a later sub-batch.
+
+---
+
 ## What works as-of `fa26114`
 
 - `feat/phase-10` branch created from `main` at `2d6f994`.

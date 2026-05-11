@@ -42,9 +42,14 @@ def desugar_residuals(
     method takes care of this).
 
     ``cook_threshold`` is reserved for the multi-panel residuals_chart in
-    Phase 10h; the single-panel residuals mark currently ignores it.
+    Phase 10h; passing a non-default value raises ``NotImplementedError``
+    rather than silently ignoring it (per the Phase 9+ no-defer principle).
     """
-    del cook_threshold  # consumed by the figure-level builder, not the mark
+    if cook_threshold is not None:
+        raise NotImplementedError(
+            "mark_residuals(cook_threshold=...) lands in Phase 10h alongside "
+            "the leverage-aware Cook's D path."
+        )
     y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     point_enc: dict[str, Any] = {"x": "y_pred", "y": y_col}
     if color_field is not None:
@@ -76,10 +81,18 @@ def desugar_prediction_error(
     the line layer renders as a clean y=x diagonal (handled by
     ``Chart.mark_prediction_error``).
 
-    ``ci`` and ``reference_band`` are reserved for Phase 10h; this mark draws
-    only the identity line for now.
+    ``ci`` and ``reference_band`` are reserved for Phase 10h; passing
+    non-default values raises ``NotImplementedError`` (per the Phase 9+
+    no-defer principle).
     """
-    del ci, reference_band  # reserved for 10h
+    if ci is not None:
+        raise NotImplementedError(
+            "mark_prediction_error(ci=...) lands in Phase 10h."
+        )
+    if reference_band:
+        raise NotImplementedError(
+            "mark_prediction_error(reference_band=True) lands in Phase 10h."
+        )
     point_enc: dict[str, Any] = {"x": "y_true", "y": "y_pred"}
     if color_field is not None:
         point_enc["color"] = color_field

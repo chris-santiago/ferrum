@@ -166,3 +166,33 @@ def test_visualizer_show_before_fit_errors():
     viz = ferrum.ResidualsVisualizer(model=None)
     with pytest.raises(RuntimeError, match="must be fit"):
         viz.show()
+
+
+# --- Phase 9+ no-defer guards: deferred kwargs must raise -------------------
+
+
+def test_mark_residuals_cook_threshold_raises():
+    import pytest
+    source, _ = _ridge_source()
+    pred = source.predictions()
+    chart = ferrum.Chart(pred).mark_residuals(cook_threshold=4.0)
+    with pytest.raises(NotImplementedError, match="cook_threshold"):
+        chart.show_svg()
+
+
+def test_mark_prediction_error_ci_raises():
+    import pytest
+    source, _ = _ridge_source()
+    pred = source.predictions()
+    chart = ferrum.Chart(pred).mark_prediction_error(ci=0.95)
+    with pytest.raises(NotImplementedError, match="ci="):
+        chart.show_svg()
+
+
+def test_mark_prediction_error_reference_band_raises():
+    import pytest
+    source, _ = _ridge_source()
+    pred = source.predictions()
+    chart = ferrum.Chart(pred).mark_prediction_error(reference_band=True)
+    with pytest.raises(NotImplementedError, match="reference_band"):
+        chart.show_svg()
