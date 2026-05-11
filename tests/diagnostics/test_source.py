@@ -237,3 +237,67 @@ def test_discrimination_threshold_cv_averaging():
     # Sort order is ascending by threshold.
     thresholds = dt["threshold"].to_list()
     assert thresholds == sorted(thresholds)
+
+
+# --- Phase 10e: model-selection methods ---------------------------------
+
+
+def test_learning_curve_schema_and_splits():
+    from sklearn.linear_model import Ridge
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+    lc = source.learning_curve(cv=3)
+    assert set(lc.columns) == {
+        "train_size", "split", "score",
+        "mean_score", "std_score", "lower", "upper",
+    }
+    assert set(lc["split"].unique().to_list()) == {"train", "test"}
+    # 5 default train sizes × 2 splits × 3 folds = 30 rows.
+    assert lc.height == 30
+    # Per-(train_size, split) mean_score is constant across folds.
+    agg = lc.group_by(["train_size", "split"]).agg(
+        pl.col("mean_score").n_unique().alias("n_unique"),
+    )
+    assert (agg["n_unique"] == 1).all()
+
+
+def test_validation_curve_schema_and_values():
+    from sklearn.linear_model import Ridge
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+    vc = source.validation_curve("alpha", [0.1, 1.0, 10.0], cv=3)
+    assert set(vc.columns) == {
+        "param_value", "split", "score",
+        "mean_score", "std_score", "lower", "upper",
+    }
+    assert set(vc["param_value"].unique().to_list()) == {0.1, 1.0, 10.0}
+    # 3 alphas × 2 splits × 3 folds = 18 rows.
+    assert vc.height == 18
+
+
+def test_cv_scores_schema_and_count():
+    from sklearn.linear_model import Ridge
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+    cvs = source.cv_scores(cv=3)
+    assert set(cvs.columns) == {"fold", "split", "score"}
+    assert set(cvs["split"].unique().to_list()) == {"train", "test"}
+    # 3 folds × 2 splits = 6 rows.
+    assert cvs.height == 6
+
+
+def test_alpha_selection_schema_and_alphas():
+    from sklearn.linear_model import Ridge
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+    al = source.alpha_selection([0.1, 1.0, 10.0], cv=3)
+    assert set(al.columns) == {
+        "alpha", "fold", "score", "mean_score", "std_score",
+    }
+    assert set(al["alpha"].unique().to_list()) == {0.1, 1.0, 10.0}
+    # 3 alphas × 3 folds = 9 rows.
+    assert al.height == 9

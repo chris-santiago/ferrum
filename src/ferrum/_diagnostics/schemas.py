@@ -100,3 +100,42 @@ SCHEMA_SHAP_VALUES = pl.Schema({
     "feature_value": pl.Float64,
     "feature_value_normalized": pl.Float64,
 })
+
+# Phase 10e — model selection / CV curves
+SCHEMA_LEARNING_CURVE = pl.Schema({
+    "train_size": pl.Int64,
+    "split": pl.Utf8,        # "train" | "test"
+    "score": pl.Float64,
+    "mean_score": pl.Float64,
+    "std_score": pl.Float64,
+    "lower": pl.Float64,
+    "upper": pl.Float64,
+    # "model": pl.Utf8 (optional)
+})
+
+SCHEMA_VALIDATION_CURVE = pl.Schema({
+    "param_value": pl.Float64,
+    "split": pl.Utf8,
+    "score": pl.Float64,
+    "mean_score": pl.Float64,
+    "std_score": pl.Float64,
+    "lower": pl.Float64,
+    "upper": pl.Float64,
+    # "model": pl.Utf8 (optional)
+})
+
+SCHEMA_CV_SCORES = pl.Schema({
+    "fold": pl.Int64,
+    "split": pl.Utf8,        # "train" | "test"
+    "score": pl.Float64,
+    # "model": pl.Utf8 (optional)
+})
+
+SCHEMA_ALPHA_SELECTION = pl.Schema({
+    "alpha": pl.Float64,
+    "fold": pl.Int64,
+    "score": pl.Float64,
+    "mean_score": pl.Float64,
+    "std_score": pl.Float64,
+    # "model": pl.Utf8 (optional)
+})
