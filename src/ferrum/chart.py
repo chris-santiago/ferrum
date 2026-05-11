@@ -1390,7 +1390,7 @@ class Chart:
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": resolved._mark or "point", "data": "default"}
         from ferrum.repeat import _RepeatPlaceholder
-        for axis in ("x", "y", "color", "size", "shape", "opacity", "text"):
+        for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
             if axis in resolved._encoding:
                 ch = resolved._encoding[axis]
                 if ch.field is None:
