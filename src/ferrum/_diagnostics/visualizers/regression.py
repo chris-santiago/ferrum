@@ -148,14 +148,14 @@ class CooksDistanceVisualizer(FerrumVisualizer):
     model : Any
         Fitted regression estimator (must expose ``coef_`` for the
         leverage-aware Cook's distance).
-    threshold : float, optional
-        Reserved — currently a no-op because this visualizer renders the
-        residuals_vs_leverage panel (``mark_point``) which doesn't
-        consume Cook's-outlier columns. Wiring requires either routing
-        through ``mark_residuals`` with the outlier overlay (which
-        changes the default visual to residuals_vs_fitted) or adding
-        outlier rendering to the leverage panel. Tracked outside the
-        post-merge inconsistency sweep.
+    threshold : float or "auto", optional
+        Cook's-distance threshold for highlighting outliers on the
+        residuals-vs-leverage panel. Forwarded to
+        ``_residuals_chart_from_source(cook_threshold=...)``, which
+        injects ``_cook_outlier_x`` / ``_cook_outlier_y`` columns
+        (keyed on leverage and the studentized residual) and the
+        leverage panel renders them as a red-filled overlay layer.
+        ``"auto"`` uses the conventional ``4 / n`` rule (Hair et al.).
     random_state : int, optional
     theme : Theme, optional
 
@@ -171,7 +171,7 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         self,
         model: Any,
         *,
-        threshold: float | None = None,
+        threshold: float | str | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -187,6 +187,7 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         return _residuals_chart_from_source(
             self._source,
             kind="studentized",
+            cook_threshold=self.threshold,
             panels=["residuals_vs_leverage"],
             theme=self.theme,
         )

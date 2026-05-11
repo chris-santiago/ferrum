@@ -182,7 +182,13 @@ class ModelSource:
     # --- 10a: predictions, probabilities ---------------------------------
 
     def predictions(self) -> pl.DataFrame:
-        """Return y_true, y_pred, residual, studentized_residual."""
+        """Return y_true, y_pred, residual, studentized_residual, cooks_distance, leverage.
+
+        ``leverage`` is the diagonal of the hat matrix
+        ``H = X (XᵀX)⁻¹ Xᵀ`` for linear estimators (those exposing
+        ``coef_``); NaN otherwise. Used by the residuals-vs-leverage
+        panel of multi-panel residuals charts.
+        """
         key = self._cache_key("predictions")
         if key in self._cache:
             return self._cache[key]
@@ -197,18 +203,28 @@ class ModelSource:
         )
         residual = y_true - y_pred
 
-        # Studentized residual + Cook's distance: leverage-aware variants
-        # require the design matrix. Linear-estimator path uses `coef_` as
-        # the gate; non-linear estimators fall back to the no-X studentized
-        # residual and report NaN for Cook's D (it's undefined without a
-        # hat matrix).
+        # Studentized residual + Cook's distance + leverage: hat-matrix
+        # quantities require the design matrix. Linear-estimator path
+        # uses `coef_` as the gate; non-linear estimators fall back to
+        # the no-X studentized residual and report NaN for Cook's D and
+        # leverage (both undefined without a hat matrix).
         if "coef_" in self._capabilities and self._y is not None:
             X_with_intercept = np.column_stack([np.ones(len(X_np)), X_np])
             stud = studentized_residual(y_true, y_pred, X_with_intercept)
             cooks = cooks_distance(y_true, y_pred, X_with_intercept)
+            # leverage h_ii = diag(X (XᵀX)⁻¹ Xᵀ). Recomputed here rather
+            # than threaded out of studentized_residual/cooks_distance to
+            # keep those helpers single-output; the redundant pinv() per
+            # call is O(p³) at most and negligible for typical p.
+            XtX_inv = np.linalg.pinv(X_with_intercept.T @ X_with_intercept)
+            lev = np.einsum(
+                "ij,jk,ik->i", X_with_intercept, XtX_inv, X_with_intercept,
+            )
+            lev = np.clip(lev, 0.0, 1.0 - 1e-12)
         else:
             stud = studentized_residual(y_true, y_pred, X=None)
             cooks = np.full_like(y_pred, np.nan)
+            lev = np.full_like(y_pred, np.nan)
 
         df = pl.DataFrame({
             "y_true": y_true,
@@ -216,6 +232,7 @@ class ModelSource:
             "residual": residual,
             "studentized_residual": stud,
             "cooks_distance": cooks,
+            "leverage": lev,
         })
         self._cache[key] = df
         return df

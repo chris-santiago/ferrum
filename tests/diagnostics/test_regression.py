@@ -161,6 +161,39 @@ def test_cooks_distance_visualizer():
     assert "max_studentized=" in repr(viz)
 
 
+def test_cooks_distance_visualizer_threshold_overlays_outliers():
+    """When threshold='auto' (4/n rule) is set, the residuals-vs-leverage
+    panel should render an outlier-highlight overlay layer in tableau
+    red — the same color mark_residuals uses for its built-in overlay.
+    """
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    viz = ferrum.CooksDistanceVisualizer(model, threshold="auto").fit(
+        X, df["y"],
+    )
+    svg = viz.show().show_svg()
+    assert "<svg" in svg
+    # The outlier-overlay layer renders red-filled points; the tableau-red
+    # fill color appears in the SVG.
+    assert "#e15759" in svg
+
+
+def test_cooks_distance_visualizer_explicit_threshold():
+    """An explicit numeric threshold also wires through (covers the
+    non-auto branch of the `4/n` rule)."""
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    viz = ferrum.CooksDistanceVisualizer(model, threshold=0.01).fit(
+        X, df["y"],
+    )
+    svg = viz.show().show_svg()
+    assert "<svg" in svg
+
+
 def test_visualizer_show_before_fit_errors():
     import pytest
     viz = ferrum.ResidualsVisualizer(model=None)

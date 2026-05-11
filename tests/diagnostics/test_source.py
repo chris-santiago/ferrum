@@ -53,9 +53,16 @@ def test_predictions_against_ridge_fixture():
     pred = source.predictions()
     assert pred.columns == [
         "y_true", "y_pred", "residual", "studentized_residual",
-        "cooks_distance",
+        "cooks_distance", "leverage",
     ]
-    assert pred.shape == (df.height, 5)
+    assert pred.shape == (df.height, 6)
+    # Leverage for a linear estimator is in (0, 1) and sums to p (the
+    # column count of X-with-intercept) by the hat-matrix trace identity.
+    leverage = pred["leverage"].to_numpy()
+    assert np.all(leverage >= 0.0)
+    assert np.all(leverage < 1.0)
+    # 5 features + intercept = 6, so sum(h_ii) == 6 up to numerical error.
+    np.testing.assert_allclose(leverage.sum(), 6.0, rtol=1e-6)
     np.testing.assert_allclose(
         pred["residual"].to_numpy(),
         pred["y_true"].to_numpy() - pred["y_pred"].to_numpy(),

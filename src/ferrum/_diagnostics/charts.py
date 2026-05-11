@@ -37,13 +37,16 @@ def _inject_cook_outliers(
     *,
     kind: str = "studentized",
     threshold: float | str = "auto",
+    x_col: str = "y_pred",
 ) -> pl.DataFrame:
     """Inject ``_cook_outlier_x`` / ``_cook_outlier_y`` columns.
 
     For each row whose ``cooks_distance`` exceeds ``threshold``, the
-    outlier-coordinate columns hold the (y_pred, residual) pair; all
+    outlier-coordinate columns hold the ``(x_col, y_col)`` pair; all
     other rows are null so the residual mark's outlier-overlay layer
-    skips them.
+    skips them. ``x_col`` defaults to ``"y_pred"`` (the residuals-vs-
+    fitted view); passing ``"leverage"`` produces an outlier overlay
+    keyed on the leverage panel's x axis.
 
     ``threshold`` accepts:
     - a float — use that value directly.
@@ -66,7 +69,7 @@ def _inject_cook_outliers(
         & (pl.col("cooks_distance") > thr)
     )
     return df.with_columns(
-        pl.when(is_outlier).then(pl.col("y_pred")).otherwise(None).alias("_cook_outlier_x"),
+        pl.when(is_outlier).then(pl.col(x_col)).otherwise(None).alias("_cook_outlier_x"),
         pl.when(is_outlier).then(pl.col(y_col)).otherwise(None).alias("_cook_outlier_y"),
     )
 
@@ -107,9 +110,11 @@ def _residuals_chart_from_source(
     """
     import ferrum
     df = source.predictions()
-    if cook_threshold is not None:
-        df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
     if panels in (None, "single"):
+        if cook_threshold is not None:
+            # Single-panel path uses mark_residuals' built-in overlay
+            # layer keyed on the y_pred-based outlier columns.
+            df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
         chart = ferrum.Chart(df).mark_residuals(
             kind=kind, cook_threshold=cook_threshold,
         )
@@ -117,28 +122,72 @@ def _residuals_chart_from_source(
             chart = chart.theme(theme)
         return chart
 
+    # Multi-panel path: each panel injects its own outlier columns with
+    # the right x-axis encoding for that panel's coordinate system.
     panel_list = panels if isinstance(panels, list) else ["residuals_vs_fitted"]
-    charts = [_residuals_panel(df, name) for name in panel_list]
+    charts = [
+        _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold)
+        for name in panel_list
+    ]
     return _grid_panels(charts, theme=theme)
 
 
-def _residuals_panel(df: pl.DataFrame, name: str):
-    """One sub-panel of a multi-panel residuals chart. 10a ships only the
-    canonical residuals_vs_fitted; the rest land in 10h alongside the
-    leverage-aware Cook's distance path.
+def _residuals_panel(
+    df: pl.DataFrame,
+    name: str,
+    *,
+    kind: str = "studentized",
+    cook_threshold: float | str | None = None,
+):
+    """One sub-panel of a multi-panel residuals chart.
+
+    When ``cook_threshold`` is set, the residuals_vs_fitted and
+    residuals_vs_leverage panels overlay an outlier-highlight layer
+    keyed on each panel's own x axis (y_pred for residuals_vs_fitted,
+    leverage for residuals_vs_leverage).
     """
     import ferrum
+
+    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
+
     if name == "residuals_vs_fitted":
-        return ferrum.Chart(df).mark_residuals()
+        if cook_threshold is not None:
+            df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
+            return ferrum.Chart(df).mark_residuals(
+                kind=kind, cook_threshold=cook_threshold,
+            )
+        return ferrum.Chart(df).mark_residuals(kind=kind)
+
     if name == "qq":
         return ferrum.Chart(df).mark_qq().encode(x="studentized_residual")
+
     if name == "scale_location":
         d2 = df.with_columns(
             pl.col("studentized_residual").abs().sqrt().alias("sqrt_abs_resid")
         )
         return ferrum.Chart(d2).mark_point().encode(x="y_pred", y="sqrt_abs_resid")
+
     if name == "residuals_vs_leverage":
-        return ferrum.Chart(df).mark_point().encode(x="y_pred", y="residual")
+        # Inject outlier columns BEFORE constructing the base chart so
+        # base and overlay layers share the same DataFrame identity
+        # (Chart.__add__ falls back to HConcat when data objects
+        # differ). x_col="leverage" so the overlay sits at the right
+        # x coordinate for this panel.
+        if cook_threshold is not None:
+            df = _inject_cook_outliers(
+                df, kind=kind, threshold=cook_threshold, x_col="leverage",
+            )
+        base = ferrum.Chart(df).mark_point().encode(x="leverage", y=y_col)
+        if cook_threshold is not None and "_cook_outlier_x" in df.columns:
+            overlay = ferrum.Chart(df).mark_point(
+                fill="#e15759",  # tableau red, matches mark_residuals overlay
+                stroke="#000000",
+                stroke_width=1.0,
+                size=80.0,
+            ).encode(x="_cook_outlier_x", y="_cook_outlier_y")
+            return base + overlay
+        return base
+
     raise ValueError(f"unknown residuals panel: {name!r}")
 
 
