@@ -17,6 +17,26 @@ class FerrumVisualizer:
     supplied ``model``, ``X``, ``y`` and dispatches both hooks; pass
     ``model=None`` for no-model variants like ``Rank1DVisualizer`` /
     ``ParallelCoordinatesVisualizer`` and override ``fit`` directly.
+
+    Parameters
+    ----------
+    model : Any, optional
+        Fitted estimator that will be wrapped in a ``ModelSource`` at
+        ``fit`` time. Pass ``None`` for no-model visualizers (rank /
+        parallel coordinates).
+    random_state : int, optional
+        Seed forwarded to the underlying ``ModelSource``. Ignored when
+        the wrapped derived-data compute is deterministic.
+    theme : Theme, optional
+        Per-chart theme override. Falls back to the global default
+        when ``None``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ROCVisualizer(model, random_state=0).fit(X, y)
+    >>> viz.show()                # returns a Chart
+    >>> viz._metrics              # headline metric(s)
     """
 
     def __init__(

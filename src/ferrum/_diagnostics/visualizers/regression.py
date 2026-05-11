@@ -19,8 +19,28 @@ class ResidualsVisualizer(FerrumVisualizer):
 
     Wraps ``ModelSource.predictions()``. Records ``rmse`` and ``mae`` as
     headline metrics; the chart shows ``y_pred`` on x and the chosen
-    residual variant (``"raw"``, ``"studentized"``, ``"scaled"``) on y
-    with a horizontal reference line at zero.
+    residual variant on y with a horizontal reference line at zero.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted regression estimator (must implement ``predict``).
+    kind : {"studentized", "raw", "scaled"}, default "studentized"
+        Which residual variant to plot. ``"studentized"`` uses the
+        leverage-aware hat-matrix form when ``model`` exposes
+        ``coef_``; otherwise falls back to internally-studentized
+        (residual / std).
+    random_state : int, optional
+        Forwarded to the underlying ``ModelSource``.
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.ResidualsVisualizer(model).fit(X, y)
+    >>> viz._metrics["rmse"]
+    1.234
+    >>> viz.show()
     """
 
     def __init__(
@@ -54,11 +74,29 @@ class PredictionErrorVisualizer(FerrumVisualizer):
 
     Wraps ``ModelSource.predictions()``. Records ``rmse`` as the headline
     metric; the chart shows ``y_true`` on x and ``y_pred`` on y with an
-    optional identity line (``y = x``) overlay.
+    optional identity line and CI / reference band overlays.
 
-    ``ci`` (float in (0, 1)) draws a residual-quantile ribbon at the
-    central ``ci`` fraction of residuals around the identity line.
-    ``reference_band=True`` (without ``ci``) draws ±1 RMSE.
+    Parameters
+    ----------
+    model : Any
+        Fitted regression estimator.
+    identity_line : bool, default True
+        Overlay the dashed ``y = x`` diagonal.
+    ci : float, optional
+        Confidence level in ``(0, 1)``. When set, overlays a ribbon
+        spanning the central ``ci`` fraction of residuals around the
+        identity line. Raises ``ValueError`` if not in ``(0, 1)``.
+    reference_band : bool, default False
+        When ``True`` (and ``ci`` is None), overlays a ±1 RMSE ribbon
+        around the identity line.
+    random_state : int, optional
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.PredictionErrorVisualizer(model, ci=0.95).fit(X, y)
+    >>> viz.show()
     """
 
     def __init__(
@@ -95,10 +133,33 @@ class PredictionErrorVisualizer(FerrumVisualizer):
 
 
 class CooksDistanceVisualizer(FerrumVisualizer):
-    """Cook's distance via studentized residuals. The leverage-aware variant
-    (true Cook's D = stud^2 * h_ii / (p * (1 - h_ii))) lands in 10h alongside
-    the multi-panel residuals_chart; the 10a build surfaces max-|studentized|
-    as a proxy metric.
+    """Cook's distance diagnostic for a regression estimator.
+
+    Surfaces ``max_studentized`` (the largest absolute studentized
+    residual) as a quick proxy for influential observations; the
+    leverage-aware Cook's D itself is materialized by
+    ``ModelSource.predictions().cooks_distance`` for linear estimators
+    and is rendered by ``mark_residuals(cook_threshold=...)``. This
+    visualizer plots the residuals chart with the leverage panel
+    enabled.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted regression estimator (must expose ``coef_`` for the
+        leverage-aware Cook's distance).
+    threshold : float, optional
+        Reserved for future use (no-op today). Will route to
+        ``mark_residuals(cook_threshold=...)`` in a follow-up commit.
+    random_state : int, optional
+    theme : Theme, optional
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.CooksDistanceVisualizer(linear_model).fit(X, y)
+    >>> viz._metrics["max_studentized"]
+    3.42
     """
 
     def __init__(
