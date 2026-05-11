@@ -35,6 +35,9 @@ the TODO.md as the recipe.
 | 11_correlation_heatmap | Heatmap | **WIRED** | 3 panels rendering (yellowbrick uses Bunch.data, not as_frame). |
 | 12_bar_with_error | Bar + error | **WIRED** | 2 panels rendering; expect default-CI gap finding. |
 | 13_pdp | Partial dependence | **WIRED** | 2 panels rendering (ferrum + sklearn — no yellowbrick/scikit-plot equivalent). Added after Task 23 (`ferrum.pdp_chart`, commit `4679e86`). |
+| 14_validation_curve | Validation curve | **WIRED** | 3 panels rendering. Added after Task 28 (`ferrum.validation_curve_chart`, commit `cf6858a`). |
+| 15_cv_scores | Per-fold CV scores | **WIRED** | 2 panels (ferrum + yellowbrick — no sklearn equivalent). Added after Task 28 (`ferrum.cv_scores_chart`). |
+| 16_alpha_selection | Alpha selection | **WIRED** | 2 panels (ferrum + yellowbrick using RidgeCV; no sklearn equivalent). Added after Task 28 (`ferrum.alpha_selection_chart`). |
 
 ## Resume protocol
 

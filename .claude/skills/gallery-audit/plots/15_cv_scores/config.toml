@@ -1,0 +1,7 @@
+plot_type = "Per-fold CV scores (box)"
+dataset = "load_diabetes, Ridge regression, 5-fold CV"
+width = 640
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.cv_scores_chart available (Task 28, commit cf6858a). Defaults: cv=5, kind='box', split='both'. No sklearn comparator (no built-in CV scores display)."
