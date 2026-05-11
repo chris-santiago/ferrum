@@ -70,4 +70,13 @@ def test_allowlist_covers_all_public_api_after_sweep() -> None:
     """The allowlist must guard every entry in ferrum.__all__ except namespaces."""
     expected = set(ferrum.__all__) - _NAMESPACE_EXEMPT
     missing = expected - _DOC_ALLOWLIST
-    assert not missing, f"Allowlist missing public API entries: {sorted(missing)}"
+    assert not missing, (
+        f"Undocumented public API symbols: {sorted(missing)}\n\n"
+        "TO FIX: Run the ferrum-docstrings skill for each missing symbol, then add it\n"
+        "to _DOC_ALLOWLIST in this file.\n\n"
+        "  Skill path: .claude/skills/ferrum-docstrings/SKILL.md\n"
+        "  Invoke via: /ferrum-docstrings\n\n"
+        "The skill enforces NumPy-style conventions, stub-param honesty, and accurate\n"
+        "output column names for Rust transforms. Do not add symbols to _DOC_ALLOWLIST\n"
+        "unless their docstrings have actually landed."
+    )
