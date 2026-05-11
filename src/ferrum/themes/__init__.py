@@ -134,9 +134,25 @@ area_opacity, opacity : optional
                 merged[k] = v
         return Theme(**merged)
 
+    _FALLBACKS: dict[str, str] = {
+        "title_color": "font_color",
+        "label_color": "font_color",
+        "title_font_family": "font_family",
+        "label_font_family": "font_family",
+    }
+
     def to_theme_inputs_dict(self) -> dict:
-        """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``."""
-        return dict(self._props)
+        """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``.
+
+        Resolves spec-defined fallbacks (e.g. ``title_color`` falls back to
+        ``font_color`` if unset). Rust sees a fully-resolved dict; no Option
+        fallback chains in the binding.
+        """
+        d = dict(self._props)
+        for derived, source in self._FALLBACKS.items():
+            if derived not in d and source in d:
+                d[derived] = d[source]
+        return d
 
     def __eq__(self, other: object) -> bool:
         """Return True if *other* is a ``Theme`` with identical properties."""
