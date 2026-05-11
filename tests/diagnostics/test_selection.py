@@ -189,6 +189,53 @@ def test_alpha_selection_visualizer_records_best_alpha():
     assert "best_alpha=" in r
 
 
+def test_validation_curve_visualizer_best_param_matches_max_mean_score():
+    """Regression for the dedupe fix: the headline metric must point at
+    the row with the maximum mean test score after collapsing the
+    per-fold rows down to one row per param_value.
+    """
+    model, X, y = _ridge_xy()
+    values = [0.01, 0.1, 1.0, 10.0, 100.0]
+    viz = ferrum.ValidationCurveVisualizer(
+        model, "alpha", values, cv=3, random_state=0,
+    ).fit(X, y)
+    df = viz._source.validation_curve(
+        "alpha", values, cv=3, scoring=None,
+    )
+    test_rows = (
+        df.filter(pl.col("split") == "test")
+        .unique(subset=["param_value"], keep="first", maintain_order=True)
+    )
+    expected_best_score = float(test_rows["mean_score"].max())
+    expected_best_param = float(
+        test_rows.filter(
+            pl.col("mean_score") == expected_best_score,
+        )["param_value"][0]
+    )
+    assert viz._metrics["best_test_score"] == pytest.approx(expected_best_score)
+    assert viz._metrics["best_param"] == pytest.approx(expected_best_param)
+
+
+def test_alpha_selection_visualizer_best_alpha_matches_max_mean_score():
+    """Regression for the dedupe fix: the headline metric must point at
+    the alpha with the maximum mean test score after collapsing per-fold
+    rows down to one row per alpha.
+    """
+    model, X, y = _ridge_xy()
+    alphas = [0.01, 0.1, 1.0, 10.0, 100.0]
+    viz = ferrum.AlphaSelectionVisualizer(
+        model, alphas, cv=3, random_state=0,
+    ).fit(X, y)
+    df = viz._source.alpha_selection(alphas, cv=3, scoring=None)
+    agg = df.unique(subset=["alpha"], keep="first", maintain_order=True)
+    expected_best_score = float(agg["mean_score"].max())
+    expected_best_alpha = float(
+        agg.filter(pl.col("mean_score") == expected_best_score)["alpha"][0]
+    )
+    assert viz._metrics["best_score"] == pytest.approx(expected_best_score)
+    assert viz._metrics["best_alpha"] == pytest.approx(expected_best_alpha)
+
+
 def test_visualizer_show_returns_chart():
     model, X, y = _ridge_xy()
     viz = ferrum.LearningCurveVisualizer(model, cv=3, random_state=0).fit(X, y)

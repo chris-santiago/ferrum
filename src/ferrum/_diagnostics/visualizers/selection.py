@@ -180,10 +180,11 @@ class ValidationCurveVisualizer(FerrumVisualizer):
         df = self._source.validation_curve(
             self.param, self.values, cv=self.cv, scoring=self.scoring,
         )
+        # The source emits one (split, param_value) row per combination;
+        # dedupe explicitly on param_value to guard against schema changes.
         test_rows = (
             df.filter(pl.col("split") == "test")
-            .group_by("param_value")
-            .agg(pl.col("mean_score").first())
+            .unique(subset=["param_value"], keep="first", maintain_order=True)
             .sort("param_value")
         )
         if test_rows.height:
@@ -361,9 +362,10 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
         df = self._source.alpha_selection(
             self.alphas, cv=self.cv, scoring=self.scoring,
         )
+        # The source emits one row per alpha; dedupe explicitly to guard
+        # against schema changes that might add a (split, alpha) breakdown.
         agg = (
-            df.group_by("alpha")
-            .agg(pl.col("mean_score").first())
+            df.unique(subset=["alpha"], keep="first", maintain_order=True)
             .sort("alpha")
         )
         if agg.height:
