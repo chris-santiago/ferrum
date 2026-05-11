@@ -213,6 +213,29 @@ def confusion_matrix_chart(
     )
 
 
+def class_prediction_error_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    normalize: bool = False,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Class prediction-error stacked bar — see ferrum-spec.md §3.14.
+
+    One bar per predicted class, segments stacked by actual class. Pass
+    ``normalize=True`` for a per-bar 100% stack (relative composition).
+    """
+    from ferrum._diagnostics.charts import (
+        _class_prediction_error_chart_from_source,
+    )
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _class_prediction_error_chart_from_source(
+        source, normalize=normalize, theme=theme,
+    )
+
+
 def discrimination_threshold_chart(
     model_or_source: Any,
     X: Any = None,

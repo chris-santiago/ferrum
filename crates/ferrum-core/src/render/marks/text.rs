@@ -12,6 +12,27 @@ use crate::render::format::format_numeric;
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::svg::{SvgBuffer, TextStyle};
 
+/// Format a numeric value per a tiny subset of d3-format specs. The full grammar
+/// is deliberately out of scope; we honor only ".Nf" (fixed N decimals) and
+/// ".Ne" (scientific N digits) — the patterns Phase 9 `heatmap(annot=True)`
+/// uses (".2f") and a couple of common variants. Falls back to format_numeric.
+fn format_with_spec(v: f64, spec: Option<&str>) -> String {
+    let Some(s) = spec else { return format_numeric(v) };
+    let trimmed = s.strip_prefix('.').unwrap_or(s);
+    // Match the trailing format character.
+    let (digits_part, fmt_char) = match trimmed.chars().last() {
+        Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
+        _ => return format_numeric(v),
+    };
+    let n: usize = digits_part.parse().unwrap_or(2);
+    match fmt_char {
+        'f' => format!("{v:.*}", n),
+        'e' => format!("{v:.*e}", n),
+        'g' => format_numeric(v),
+        _ => format_numeric(v),
+    }
+}
+
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -42,10 +63,30 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     if n_x != n_y { return; }
 
-    // Explicit text channel — Utf8 column of labels. Absent → format_numeric(y).
-    let text_field = spec.encoding.text.as_ref().map(|e| e.field.as_str());
-    let texts: Option<Vec<Option<String>>> =
-        text_field.and_then(|f| col_as_str(ctx.batch, f).ok());
+    // Explicit text channel: Utf8 column of labels, or numeric column whose
+    // values are formatted via format_numeric (heatmap-annot path). When the
+    // EncodingSpec carries a `format` string (e.g. ".2f"), it is honored for
+    // numeric columns. Absent text channel → format_numeric(y) (legacy).
+    let text_enc = spec.encoding.text.as_ref();
+    let text_field = text_enc.map(|e| e.field.as_str());
+    let text_format = text_enc.and_then(|e| e.format.as_deref());
+    let texts: Option<Vec<Option<String>>> = match text_field {
+        None => None,
+        Some(f) => col_as_str(ctx.batch, f).ok().or_else(|| {
+            col_as_f64(ctx.batch, f).ok().map(|nums| {
+                nums.into_iter()
+                    .map(|opt_v| {
+                        opt_v.and_then(|v| {
+                            if !v.is_finite() {
+                                return None;
+                            }
+                            Some(format_with_spec(v, text_format))
+                        })
+                    })
+                    .collect()
+            })
+        }),
+    };
 
     let style = TextStyle {
         fill: ctx.theme.font_color,

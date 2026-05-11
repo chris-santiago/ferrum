@@ -243,6 +243,25 @@ def _confusion_chart_from_source(
     return chart
 
 
+def _class_prediction_error_chart_from_source(
+    source: Any,
+    *,
+    normalize: bool = False,
+    theme: Any = None,
+):
+    """Build a stacked-bar class-prediction-error chart from a ModelSource.
+
+    Reuses the unnormalized confusion-matrix output as the underlying
+    long-form data.
+    """
+    import ferrum
+    df = source.confusion_matrix(normalize=None)
+    chart = ferrum.Chart(df).mark_class_prediction_error(normalize=normalize)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,

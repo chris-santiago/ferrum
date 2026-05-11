@@ -291,3 +291,31 @@ def test_confusion_matrix_chart_multiclass():
         normalize="true",
     )
     assert "<svg" in chart.show_svg()
+
+
+# --- 10c: class prediction error (Task 19) ----------------------------
+
+
+def test_mark_class_prediction_error_renders(multi_source):
+    cm = multi_source.confusion_matrix(normalize=None)
+    svg = ferrum.Chart(cm).mark_class_prediction_error().show_svg()
+    assert "<svg" in svg
+
+
+def test_class_prediction_error_chart_multiclass():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.class_prediction_error_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "<svg" in chart.show_svg()
+
+
+def test_class_prediction_error_chart_normalized():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.class_prediction_error_chart(
+        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        normalize=True,
+    )
+    assert "<svg" in chart.show_svg()

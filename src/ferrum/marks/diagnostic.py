@@ -333,3 +333,31 @@ def desugar_confusion(
             "encoding": {"x": "predicted", "y": "actual", "text": "value_fmt"},
         })
     return ("__layered__", [], None, None, layers)
+
+
+def desugar_class_prediction_error(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    normalize: bool = False,
+    color_field: str = "actual",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Stacked-bar diagnostic of predicted-class composition.
+
+    Data contract: ``actual``, ``predicted``, ``value`` (same shape as
+    ``ModelSource.confusion_matrix(normalize=None)``). One bar per
+    ``predicted`` value, segments colored by ``actual``. ``normalize=True``
+    switches to a per-bar 100% stack via the Stack position adjustment.
+    """
+    del x_field, y_field
+    from ferrum.position import Stack
+
+    stack = Stack(by=color_field, offset="normalize" if normalize else "zero")
+    return ("__layered__", [], None, None, [
+        {
+            "mark": "bar",
+            "encoding": {"x": "predicted", "y": "value", "color": color_field},
+            "position": stack,
+        },
+    ])

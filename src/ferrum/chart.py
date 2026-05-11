@@ -1045,6 +1045,39 @@ class Chart:
         new._position = position
         return new
 
+    def mark_class_prediction_error(
+        self,
+        *,
+        normalize: bool = False,
+        color_field: str = "actual",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Class prediction error mark — see ferrum-spec.md §3.3.
+
+        Expects long-form data ``(actual, predicted, value)`` (same shape
+        as ``ModelSource.confusion_matrix(normalize=None)``). Renders one
+        bar per ``predicted`` value with segments stacked by ``actual``.
+        Per-bar 100% stack via ``normalize=True``.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("class_prediction_error", position)
+        from ferrum.marks.diagnostic import desugar_class_prediction_error
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "class_prediction_error",
+            {
+                "normalize": normalize,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_class_prediction_error,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")
@@ -1285,7 +1318,7 @@ class Chart:
                     enc_json_dict: dict = {"field": field}
                     if d.get("type"):
                         enc_json_dict["type_"] = d["type"]
-                    for opt_key in ("title", "aggregate", "scheme"):
+                    for opt_key in ("title", "aggregate", "scheme", "format", "formatType"):
                         if d.get(opt_key):
                             enc_json_dict[opt_key] = d[opt_key]
                     encoding_dict[axis] = enc_json_dict
