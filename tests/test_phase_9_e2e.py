@@ -107,10 +107,15 @@ def _check_or_update(name: str, svg: str) -> None:
             f"FERRUM_UPDATE_GOLDENS=1 to generate it"
         )
     expected = path.read_text()
-    assert svg == expected, (
-        f"golden mismatch for {name!r}; "
-        f"rerun with FERRUM_UPDATE_GOLDENS=1 to refresh "
-        f"(expected {len(expected)} bytes, got {len(svg)} bytes)"
+    # NOTE: do not use `assert svg == expected` — pytest's assertion
+    # rewriter spends minutes building a unified diff between the two
+    # ~500 KB SVG strings on a mismatch. The helper raises AssertionError
+    # directly with a compact message. See
+    # docs/superpowers/followups/2026-05-11-phase-9-render-perf.md.
+    from tests._snapshots import assert_svg_eq
+    assert_svg_eq(
+        svg, expected, name=name,
+        regen_hint="rerun with FERRUM_UPDATE_GOLDENS=1 to refresh",
     )
 
 

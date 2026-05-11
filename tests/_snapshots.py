@@ -11,6 +11,51 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+
+def assert_svg_eq(actual: str, expected: str, *, name: str, regen_hint: str) -> None:
+    """Assert two SVG strings are byte-equal with a fast, compact failure message.
+
+    Equivalent in semantics to ``assert actual == expected``, but raises
+    ``AssertionError`` directly rather than going through pytest's
+    assertion rewriter — which would otherwise spend 60-120 seconds
+    building a colorised unified diff between two ~500 KB SVG strings on a
+    mismatch. This helper instead reports byte counts, the first byte at
+    which the strings diverge, and a ~80-char context window on each side.
+
+    Parameters
+    ----------
+    actual, expected : str
+        The two SVG strings to compare.
+    name : str
+        Test/golden identifier surfaced in the failure message.
+    regen_hint : str
+        One-line instruction for refreshing the on-disk golden (e.g.
+        ``"FERRUM_UPDATE_GOLDENS=1 to refresh"``); appended to the
+        failure message so the operator knows what to run.
+
+    Raises
+    ------
+    AssertionError
+        If ``actual != expected``. The message stays small regardless of
+        the SVG size so pytest's failure-path latency does not scale with
+        golden size.
+    """
+    if actual == expected:
+        return
+    n = min(len(actual), len(expected))
+    divergence = next((i for i in range(n) if actual[i] != expected[i]), n)
+    ctx = 80
+    a_ctx = actual[max(0, divergence - ctx) : divergence + ctx]
+    b_ctx = expected[max(0, divergence - ctx) : divergence + ctx]
+    raise AssertionError(
+        f"golden mismatch for {name!r}: "
+        f"got {len(actual)} bytes, expected {len(expected)} bytes; "
+        f"first divergence at offset {divergence}.\n"
+        f"  actual   ...{a_ctx!r}...\n"
+        f"  expected ...{b_ctx!r}...\n"
+        f"  hint: {regen_hint}"
+    )
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = _REPO_ROOT / "tests" / "snapshots"
 

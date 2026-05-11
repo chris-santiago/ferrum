@@ -31,9 +31,15 @@ def _check_golden(svg: str, name: str) -> None:
             pytest.skip(f"created new golden at {path}; rerun to verify")
         return
     expected = path.read_text()
-    assert svg == expected, (
-        f"Golden mismatch for {name!r}. "
-        f"Set FERRUM_REGENERATE_GOLDENS=1 to regenerate after intentional changes."
+    # NOTE: do not use `assert svg == expected` — pytest's assertion
+    # rewriter spends minutes building a unified diff between the two
+    # ~500 KB SVG strings on a mismatch. The helper raises AssertionError
+    # directly with a compact message. See
+    # docs/superpowers/followups/2026-05-11-phase-9-render-perf.md.
+    from tests._snapshots import assert_svg_eq
+    assert_svg_eq(
+        svg, expected, name=name,
+        regen_hint="set FERRUM_REGENERATE_GOLDENS=1 to refresh after intentional changes",
     )
 
 
