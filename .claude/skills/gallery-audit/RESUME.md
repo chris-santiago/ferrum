@@ -28,12 +28,13 @@ the TODO.md as the recipe.
 | 04_calibration | Calibration | **WIRED (PARTIAL)** | 2/3 panels render; ferrum.calibration_chart raises `NotImplementedError` in single-model mode (reserved for Phase 10h). Audit flags this. |
 | 05_learning_curve | Learning curve | **BLOCKED** | No `ferrum.learning_curve_chart` — see plots/05_learning_curve/TODO.md |
 | 06_residuals | Residuals | **WIRED** | 4 panels rendering on load_diabetes. |
-| 07_feature_importance | Feature importance | **BLOCKED** | No `ferrum.feature_importance_chart` — see TODO.md |
+| 07_feature_importance | Feature importance | **WIRED** | 3 panels rendering. Unblocked by Task 21 (`ferrum.importance_chart`, commit `bcaeb65`). |
 | 08_histogram | Histogram + KDE | **WIRED** | 2 panels rendering (ferrum, seaborn). |
 | 09_boxplot | Boxplot | **WIRED** | 2 panels rendering. |
 | 10_regression_scatter | Scatter + reg | **WIRED** | 2 panels rendering. |
 | 11_correlation_heatmap | Heatmap | **WIRED** | 3 panels rendering (yellowbrick uses Bunch.data, not as_frame). |
 | 12_bar_with_error | Bar + error | **WIRED** | 2 panels rendering; expect default-CI gap finding. |
+| 13_pdp | Partial dependence | **WIRED** | 2 panels rendering (ferrum + sklearn — no yellowbrick/scikit-plot equivalent). Added after Task 23 (`ferrum.pdp_chart`, commit `4679e86`). |
 
 ## Resume protocol
 

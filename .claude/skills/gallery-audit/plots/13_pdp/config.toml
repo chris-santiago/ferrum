@@ -1,0 +1,7 @@
+plot_type = "Partial dependence plot"
+dataset = "load_breast_cancer, RandomForestClassifier(n_estimators=100, random_state=0), features=[0,1,2,3]"
+width = 800
+height = 600
+panels = ["ferrum", "sklearn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.pdp_chart available (Task 23, commit 4679e86). `features=` is a required arg — both panels pass the same list."
