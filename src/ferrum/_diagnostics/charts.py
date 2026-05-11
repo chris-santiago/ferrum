@@ -262,6 +262,79 @@ def _class_prediction_error_chart_from_source(
     return chart
 
 
+def _classification_report_chart(source: Any, *, theme: Any = None):
+    """Heatmap of per-class precision/recall/F1 (rect + text overlay).
+
+    Long-form data: one row per (class, metric) cell with ``value`` and
+    ``value_fmt``. Renders via the same rect-plus-text pattern as
+    ``mark_confusion``.
+    """
+    from .deps import require_sklearn
+    require_sklearn("ClassificationReportVisualizer")
+    from sklearn.metrics import classification_report
+
+    import ferrum
+
+    y_true = source._y.to_numpy()
+    y_pred = source._model.predict(source._X.to_numpy())
+    report = classification_report(
+        y_true, y_pred, output_dict=True, zero_division=0,
+    )
+
+    rows: list[dict] = []
+    for cls_label, metrics in report.items():
+        if cls_label in {"accuracy", "macro avg", "weighted avg"}:
+            continue
+        if not isinstance(metrics, dict):
+            continue
+        for m_name in ("precision", "recall", "f1-score"):
+            val = float(metrics[m_name])
+            rows.append({
+                "class": str(cls_label),
+                "metric": m_name,
+                "value": val,
+                "value_fmt": f"{val:.2f}",
+            })
+    df = pl.DataFrame(rows)
+
+    heatmap = ferrum.Chart(df).mark_rect().encode(
+        x="metric", y="class", color="value",
+    )
+    text = ferrum.Chart(df).mark_text().encode(
+        x="metric", y="class", text="value_fmt",
+    )
+    chart = heatmap + text
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _class_balance_chart_from_dataframe(y_series: Any, *, theme: Any = None):
+    """Bar chart of class counts.
+
+    Operates on ``y`` alone (no model required). Computes per-class
+    counts via polars ``group_by``.
+    """
+    import ferrum
+
+    if isinstance(y_series, pl.Series):
+        series = y_series
+    else:
+        series = pl.Series(list(y_series))
+
+    counts = (
+        pl.DataFrame({"y": series.cast(pl.Utf8, strict=False).to_list()})
+        .group_by("y")
+        .len()
+        .rename({"len": "count"})
+        .sort("y")
+    )
+    chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count")
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,

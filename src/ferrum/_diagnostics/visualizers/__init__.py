@@ -4,10 +4,16 @@ from __future__ import annotations
 from .base import FerrumVisualizer
 from .classification import (
     CalibrationVisualizer,
+    ClassificationReportVisualizer,
+    ConfusionMatrixVisualizer,
     PRVisualizer,
     ROCVisualizer,
 )
-from .classification_extra import DiscriminationThresholdVisualizer
+from .classification_extra import (
+    ClassBalanceVisualizer,
+    ClassPredictionErrorVisualizer,
+    DiscriminationThresholdVisualizer,
+)
 from .regression import (
     CooksDistanceVisualizer,
     PredictionErrorVisualizer,
@@ -23,4 +29,8 @@ __all__ = [
     "PRVisualizer",
     "CalibrationVisualizer",
     "DiscriminationThresholdVisualizer",
+    "ConfusionMatrixVisualizer",
+    "ClassificationReportVisualizer",
+    "ClassPredictionErrorVisualizer",
+    "ClassBalanceVisualizer",
 ]

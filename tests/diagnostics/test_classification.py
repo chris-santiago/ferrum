@@ -319,3 +319,56 @@ def test_class_prediction_error_chart_normalized():
         normalize=True,
     )
     assert "<svg" in chart.show_svg()
+
+
+# --- 10c: visualizers (Task 20) ---------------------------------------
+
+
+def test_confusion_matrix_visualizer():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    viz = ferrum.ConfusionMatrixVisualizer(model).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "accuracy=" in repr(viz)
+    assert 0.0 <= viz._metrics["accuracy"] <= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_classification_report_visualizer():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    viz = ferrum.ClassificationReportVisualizer(model).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "f1_macro=" in repr(viz)
+    assert 0.0 <= viz._metrics["f1_macro"] <= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_class_prediction_error_visualizer():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    viz = ferrum.ClassPredictionErrorVisualizer(model).fit(
+        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+    )
+    assert "accuracy=" in repr(viz)
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_class_balance_visualizer_y_only():
+    df = load_dataset("multiclass_classification")
+    viz = ferrum.ClassBalanceVisualizer().fit(df["y"])
+    assert "n_classes=" in repr(viz)
+    assert "imbalance_ratio=" in repr(viz)
+    assert viz._metrics["n_classes"] >= 2.0
+    assert viz._metrics["imbalance_ratio"] >= 1.0
+    assert "<svg" in viz.show().show_svg()
+
+
+def test_class_balance_visualizer_xy_signature():
+    df = load_dataset("multiclass_classification")
+    # sklearn-shape .fit(X, y) should also work; X is ignored.
+    X = df.select(["f0", "f1", "f2", "f3"])
+    viz = ferrum.ClassBalanceVisualizer().fit(X, df["y"])
+    assert "<svg" in viz.show().show_svg()

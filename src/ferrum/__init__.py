@@ -64,6 +64,10 @@ from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, an
 from ferrum._diagnostics import ModelSource
 from ferrum._diagnostics.visualizers import (
     CalibrationVisualizer,
+    ClassBalanceVisualizer,
+    ClassificationReportVisualizer,
+    ClassPredictionErrorVisualizer,
+    ConfusionMatrixVisualizer,
     CooksDistanceVisualizer,
     DiscriminationThresholdVisualizer,
     FerrumVisualizer,
@@ -137,6 +141,8 @@ __all__ = [
     "ResidualsVisualizer", "PredictionErrorVisualizer", "CooksDistanceVisualizer",
     "ROCVisualizer", "PRVisualizer", "CalibrationVisualizer",
     "DiscriminationThresholdVisualizer",
+    "ConfusionMatrixVisualizer", "ClassificationReportVisualizer",
+    "ClassPredictionErrorVisualizer", "ClassBalanceVisualizer",
     "residuals_chart",
     "roc_chart", "pr_chart", "calibration_chart",
     "gain_chart", "lift_chart", "discrimination_threshold_chart",
