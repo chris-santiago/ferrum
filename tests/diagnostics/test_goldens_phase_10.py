@@ -245,3 +245,22 @@ def test_golden_alpha_selection_ridge():
         model, X, y, alphas=[0.01, 0.1, 1.0, 10.0], cv=3,
     )
     _check_golden(chart.show_svg(), "alpha_selection_ridge")
+
+
+# --- 10f goldens (clustering / manifold / decision boundary) ---
+
+
+def test_golden_silhouette_kmeans():
+    from ferrum._diagnostics.charts import _silhouette_chart_from_source
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    source = ferrum.ModelSource(model, df)
+    chart = _silhouette_chart_from_source(source)
+    _check_golden(chart.show_svg(), "silhouette_kmeans_3cluster")
+
+
+def test_golden_pca_scree_4comp():
+    model = load_fixture("pca_4comp")
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.pca_scree_chart(model, df, threshold=0.95)
+    _check_golden(chart.show_svg(), "pca_scree_4comp")

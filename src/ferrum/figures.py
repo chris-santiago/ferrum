@@ -504,3 +504,144 @@ def alpha_selection_chart(
         cv=cv, scoring=scoring,
         log_scale=log_scale, highlight_best=highlight_best, theme=theme,
     )
+
+
+# --- 10f: clustering / manifold / decision boundary ------------------
+
+
+def pca_scree_chart(
+    model_or_source: Any,
+    X: Any = None,
+    *,
+    n_components: int | None = None,
+    cumulative_line: bool = True,
+    threshold: float | None = 0.95,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """PCA scree chart — see ferrum-spec.md §3.14.
+
+    ``threshold`` draws a horizontal reference at the named cumulative-
+    variance level (default 0.95). Pass ``threshold=None`` to omit.
+    """
+    from ferrum._diagnostics.charts import _pca_scree_chart_from_source
+    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    return _pca_scree_chart_from_source(
+        source,
+        n_components=n_components,
+        cumulative_line=cumulative_line,
+        threshold=threshold,
+        theme=theme,
+    )
+
+
+def cluster_diagnostics(
+    X: Any,
+    *,
+    ks: Any,
+    method: str = "kmeans",
+    n_init: int = 10,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Elbow + silhouette per k for a given clusterer — see ferrum-spec.md §3.14.
+
+    Fits one ``KMeans(n_clusters=k)`` per k and emits a side-by-side
+    HConcatChart: distortion (inertia) vs k, silhouette mean vs k.
+    Distinct from the other figure functions in that it sweeps the
+    model class itself rather than wrapping a single ``ModelSource``.
+    """
+    from ferrum._diagnostics.deps import require_sklearn
+    require_sklearn("cluster_diagnostics")
+    if method != "kmeans":
+        raise NotImplementedError(
+            f"cluster_diagnostics(method={method!r}) — Phase 10f ships "
+            "'kmeans' only; other estimators land in 10h."
+        )
+    import polars as pl
+    import numpy as np
+    import ferrum
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    seed = 0 if random_state is None else int(random_state)
+    rows = []
+    for k in ks:
+        m = KMeans(
+            n_clusters=int(k), n_init=int(n_init), random_state=seed,
+        ).fit(X_np)
+        rows.append({
+            "k": int(k),
+            "inertia": float(m.inertia_),
+            "silhouette": float(silhouette_score(X_np, m.labels_)),
+        })
+    df = pl.DataFrame(rows)
+    elbow = ferrum.Chart(df).mark_line().encode(x="k", y="inertia")
+    sil = ferrum.Chart(df).mark_line().encode(x="k", y="silhouette")
+    chart = elbow | sil
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def intercluster_distance_chart(
+    model_or_source: Any,
+    X: Any = None,
+    *,
+    k: int | None = None,
+    method: str = "mds",
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Cluster-center 2D embedding — see ferrum-spec.md §3.14."""
+    from ferrum._diagnostics.charts import (
+        _intercluster_distance_chart_from_source,
+    )
+    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    if k is None:
+        if hasattr(source._model, "n_clusters"):
+            k = int(source._model.n_clusters)
+        elif hasattr(source._model, "cluster_centers_"):
+            k = int(source._model.cluster_centers_.shape[0])
+        else:
+            raise ValueError(
+                "intercluster_distance_chart(k=...) is required when the "
+                "wrapped model exposes neither n_clusters nor "
+                "cluster_centers_."
+            )
+    return _intercluster_distance_chart_from_source(
+        source, k=int(k), method=method, theme=theme,
+    )
+
+
+def decision_boundary_chart(
+    model: Any,
+    X: Any,
+    y: Any = None,
+    *,
+    features: tuple = (0, 1),
+    grid_resolution: int = 200,
+    proba: bool = False,
+    scatter: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Decision-boundary heatmap — see ferrum-spec.md §3.14.
+
+    Requires exactly 2 features (passed via ``features=(i, j)``); other
+    features are fixed at their column means while the grid sweeps the
+    two named columns. ``proba=True`` uses ``predict_proba[:, 1]`` when
+    available; otherwise ``predict`` returns the class index colored
+    discretely.
+    """
+    source = _resolve_source(model, X, y, random_state=random_state)
+    from ferrum._diagnostics.charts import _decision_boundary_chart_from_source
+    return _decision_boundary_chart_from_source(
+        source,
+        features=tuple(features),
+        grid_resolution=int(grid_resolution),
+        proba=bool(proba),
+        scatter=bool(scatter),
+        theme=theme,
+    )

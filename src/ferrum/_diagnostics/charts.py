@@ -688,3 +688,141 @@ def _alpha_selection_chart_from_source(
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+# ---------------------------------------------------------------------------
+# 10f builders — clustering / manifold / decision boundary
+# ---------------------------------------------------------------------------
+
+
+def _silhouette_chart_from_source(
+    source: Any,
+    *,
+    k: int | None = None,
+    theme: Any = None,
+):
+    """Silhouette chart from a ModelSource. The source method packs
+    samples into a 0..n-1 ``y_position`` stack order so the bars render
+    tightly per cluster.
+    """
+    import ferrum
+
+    df = source.silhouette(k=k)
+    chart = ferrum.Chart(df).mark_silhouette()
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _pca_scree_chart_from_source(
+    source: Any,
+    *,
+    n_components: int | None = None,
+    cumulative_line: bool = True,
+    threshold: float | None = 0.95,
+    theme: Any = None,
+):
+    """PCA scree chart with optional cumulative line + threshold rule."""
+    import ferrum
+
+    df = source.pca_variance(n_components=n_components)
+    chart = ferrum.Chart(df).mark_pca_scree(
+        cumulative_line=cumulative_line,
+        threshold_line=threshold,
+    )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _intercluster_distance_chart_from_source(
+    source: Any,
+    *,
+    k: int,
+    method: str = "mds",
+    theme: Any = None,
+):
+    """Cluster-center 2D scatter sized by cluster count."""
+    import ferrum
+
+    df = source.intercluster_distance(k, method=method)
+    chart = ferrum.Chart(df).mark_intercluster_distance()
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _decision_boundary_chart_from_source(
+    source: Any,
+    *,
+    features: tuple = (0, 1),
+    grid_resolution: int = 200,
+    proba: bool = False,
+    scatter: bool = True,
+    theme: Any = None,
+):
+    """Decision-boundary heatmap + optional scatter overlay of (X, y).
+
+    Pre-computes a grid_resolution × grid_resolution grid of x/x2/y/y2
+    cell bounds and the model's prediction (class index when
+    ``proba=False``, probability when ``proba=True``). The grid is fed to
+    ``mark_decision_boundary`` (rect-based); when ``scatter=True`` and
+    the source has ``y``, a ``mark_point`` layer is composed on top via
+    the multi-data ``+`` compositor.
+    """
+    import ferrum
+    import numpy as np
+
+    X_np = source._X.to_numpy()
+    feat_idx = tuple(
+        source._feature_names.index(f) if isinstance(f, str) else int(f)
+        for f in features
+    )
+    if len(feat_idx) != 2:
+        raise ValueError(
+            "decision_boundary_chart requires exactly 2 features; got "
+            f"{len(feat_idx)}."
+        )
+    x_col = X_np[:, feat_idx[0]].astype(np.float64)
+    y_col = X_np[:, feat_idx[1]].astype(np.float64)
+    pad_x = (x_col.max() - x_col.min()) * 0.05
+    pad_y = (y_col.max() - y_col.min()) * 0.05
+    xs = np.linspace(
+        x_col.min() - pad_x, x_col.max() + pad_x, int(grid_resolution),
+    )
+    ys = np.linspace(
+        y_col.min() - pad_y, y_col.max() + pad_y, int(grid_resolution),
+    )
+    dx = float(xs[1] - xs[0]) if len(xs) > 1 else 1.0
+    dy = float(ys[1] - ys[0]) if len(ys) > 1 else 1.0
+    xx, yy = np.meshgrid(xs, ys)
+    grid = np.tile(X_np.mean(axis=0), (xx.size, 1))
+    grid[:, feat_idx[0]] = xx.ravel()
+    grid[:, feat_idx[1]] = yy.ravel()
+    if proba and "predict_proba" in source._capabilities:
+        z = source._model.predict_proba(grid)[:, 1].astype(np.float64)
+    else:
+        z = np.asarray(source._model.predict(grid)).astype(np.float64)
+    flat_x = xx.ravel()
+    flat_y = yy.ravel()
+    grid_df = pl.DataFrame({
+        "x": [float(v) - dx / 2 for v in flat_x],
+        "x2": [float(v) + dx / 2 for v in flat_x],
+        "y": [float(v) - dy / 2 for v in flat_y],
+        "y2": [float(v) + dy / 2 for v in flat_y],
+        "z": [float(v) for v in z],
+    })
+    chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
+    if scatter and source._y is not None:
+        scatter_df = pl.DataFrame({
+            "x": [float(v) for v in x_col],
+            "y": [float(v) for v in y_col],
+            "label": source._y.to_numpy().tolist(),
+        })
+        overlay = ferrum.Chart(scatter_df).mark_point().encode(
+            x="x", y="y", color="label",
+        )
+        chart = chart + overlay
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart

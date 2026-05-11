@@ -139,3 +139,31 @@ SCHEMA_ALPHA_SELECTION = pl.Schema({
     "std_score": pl.Float64,
     # "model": pl.Utf8 (optional)
 })
+
+# Phase 10f — clustering / manifold
+# `y_position` is a sequential 0..n-1 stack-order index for the Rousseeuw
+# silhouette plot. `sample_id` preserves the original X index (debug-useful;
+# matches every other 10d-pre per-sample schema).
+SCHEMA_SILHOUETTE = pl.Schema({
+    "sample_id": pl.Int64,
+    "y_position": pl.Int64,
+    "cluster": pl.Utf8,
+    "silhouette_value": pl.Float64,
+})
+
+SCHEMA_PCA_VARIANCE = pl.Schema({
+    "component": pl.Int64,
+    "explained_variance_ratio": pl.Float64,
+    "cumulative_variance_ratio": pl.Float64,
+})
+
+# Embeddings: dim_0..dim_{k-1} + label (label is `y` from ModelSource when
+# provided, else zeros). The number of dim columns depends on n_components,
+# so we document the contract here rather than enumerating in a Schema.
+
+SCHEMA_INTERCLUSTER_DISTANCE = pl.Schema({
+    "cluster": pl.Int64,
+    "x": pl.Float64,
+    "y": pl.Float64,
+    "size": pl.Int64,
+})

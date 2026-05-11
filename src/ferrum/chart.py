@@ -1391,6 +1391,244 @@ class Chart:
         new._position = position
         return new
 
+    # ---- Marks (clustering / manifold — Phase 10f) ----
+
+    def mark_silhouette(
+        self,
+        *,
+        zero_line: bool = True,
+        color_field: str | None = "cluster",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Rousseeuw silhouette plot mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.silhouette()``:
+        ``sample_id``, ``y_position``, ``cluster``, ``silhouette_value``.
+        When ``zero_line=True`` a sentinel ``_ref_zero`` column (one row
+        at 0.0, rest null) is injected so the downstream ``mark_rule``
+        renders exactly one vertical line at x=0.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("silhouette", position)
+        from ferrum.marks.diagnostic import desugar_silhouette
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "rect"
+        if new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "y_position" in new._data.columns
+                    and "silhouette_value" in new._data.columns
+                ):
+                    new._data = new._data.with_columns([
+                        pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                        .alias("_silhouette_x_lo"),
+                        pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                        .alias("_silhouette_x_hi"),
+                        (pl.col("y_position").cast(pl.Float64) - 0.5)
+                        .alias("_silhouette_y_lo"),
+                        (pl.col("y_position").cast(pl.Float64) + 0.5)
+                        .alias("_silhouette_y_hi"),
+                    ])
+                    if zero_line:
+                        new._data = _inject_constant(new._data, "_ref_zero", 0.0)
+            except ImportError:
+                pass
+        new._pending_stat_mark = (
+            "silhouette",
+            {
+                "zero_line": zero_line,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_silhouette,
+        )
+        new._position = position
+        return new
+
+    def mark_pca_scree(
+        self,
+        *,
+        cumulative_line: bool = True,
+        threshold_line: float | None = None,
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """PCA scree plot mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by ``ModelSource.pca_variance()``:
+        ``component``, ``explained_variance_ratio``,
+        ``cumulative_variance_ratio``. When ``threshold_line`` is
+        non-None, a sentinel ``_threshold_line`` column (one row at the
+        threshold value, rest null) is injected so the downstream
+        ``mark_rule`` renders exactly one horizontal reference line.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("pca_scree", position)
+        from ferrum.marks.diagnostic import (
+            desugar_pca_scree,
+            desugar_pca_scree_with_threshold,
+        )
+        from ferrum._diagnostics.charts import _inject_constant
+        new = self._clone()
+        new._mark = "rect"
+        if new._data is not None:
+            try:
+                import polars as pl
+                if (
+                    isinstance(new._data, pl.DataFrame)
+                    and "component" in new._data.columns
+                    and "explained_variance_ratio" in new._data.columns
+                ):
+                    new._data = new._data.with_columns([
+                        (pl.col("component").cast(pl.Float64) - 0.4)
+                        .alias("_pca_bar_x_lo"),
+                        (pl.col("component").cast(pl.Float64) + 0.4)
+                        .alias("_pca_bar_x_hi"),
+                        pl.lit(0.0).alias("_pca_bar_y_lo"),
+                        pl.col("explained_variance_ratio")
+                        .alias("_pca_bar_y_hi"),
+                    ])
+                    # X-axis anchor: same scale-extension trick as
+                    # _y_axis_anchor — the bar rects sit at
+                    # component ± 0.4 but the line layer's x is the
+                    # bare component column. Without this, bars at
+                    # the first/last component get clipped by the
+                    # narrower x domain.
+                    n_anchor = new._data.height
+                    x_lo = float(new._data["_pca_bar_x_lo"].min() or 0.0)
+                    x_hi = float(new._data["_pca_bar_x_hi"].max() or 0.0)
+                    x_anchor_vals = [x_lo, x_hi] + [None] * max(
+                        0, n_anchor - 2,
+                    )
+                    new._data = new._data.with_columns(
+                        pl.Series(
+                            "_x_axis_anchor", x_anchor_vals[:n_anchor],
+                            dtype=pl.Float64,
+                        ),
+                    )
+                    # Scale-resolution anchor: render/prepare.rs:265
+                    # feeds layer-0's y+y2 into the y-axis domain
+                    # computation. Layer-0 here is the cumulative
+                    # line (y range ≈ [evr[0], sum(evr)]); the bar
+                    # baseline at 0 and any threshold rule (0.95
+                    # default) sit outside that range. Stash both
+                    # anchor values into a y2 column on layer-0 so
+                    # the scale union covers [0, threshold].
+                    anchor_hi = (
+                        max(
+                            float(threshold_line)
+                            if threshold_line is not None
+                            else 0.0,
+                            float(
+                                new._data["cumulative_variance_ratio"]
+                                .max() or 0.0
+                            ),
+                        )
+                    )
+                    n = new._data.height
+                    anchor_vals = [0.0, float(anchor_hi)] + [None] * max(
+                        0, n - 2,
+                    )
+                    new._data = new._data.with_columns(
+                        pl.Series(
+                            "_y_axis_anchor", anchor_vals[:n],
+                            dtype=pl.Float64,
+                        ),
+                    )
+                    if threshold_line is not None:
+                        new._data = _inject_constant(
+                            new._data, "_threshold_line",
+                            float(threshold_line),
+                        )
+            except ImportError:
+                pass
+        fn = (
+            desugar_pca_scree_with_threshold
+            if threshold_line is not None
+            else desugar_pca_scree
+        )
+        new._pending_stat_mark = (
+            "pca_scree",
+            {"cumulative_line": cumulative_line, **mark_kwargs},
+            fn,
+        )
+        new._position = position
+        return new
+
+    def mark_intercluster_distance(
+        self,
+        *,
+        label_clusters: bool = True,
+        color_field: str | None = "cluster",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Cluster-center 2D embedding mark — see ferrum-spec.md §3.3.
+
+        Expects the schema emitted by
+        ``ModelSource.intercluster_distance()``: ``cluster``, ``x``,
+        ``y``, ``size``. The ``size`` channel maps to point area; with
+        ``label_clusters=True`` a text overlay labels each point by
+        cluster id.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("intercluster_distance", position)
+        from ferrum.marks.diagnostic import desugar_intercluster_distance
+        new = self._clone()
+        new._mark = "point"
+        new._pending_stat_mark = (
+            "intercluster_distance",
+            {
+                "label_clusters": label_clusters,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_intercluster_distance,
+        )
+        new._position = position
+        return new
+
+    def mark_decision_boundary(
+        self,
+        *,
+        proba: bool = False,
+        color_field: str = "z",
+        position=None,
+        **mark_kwargs,
+    ) -> "Chart":
+        """Decision-boundary heatmap mark — see ferrum-spec.md §3.3.
+
+        Expects pre-computed grid columns ``x``, ``x2``, ``y``, ``y2``
+        (cell bounds) and ``z`` (the prediction value — class index for
+        ``proba=False`` or probability for ``proba=True``). The chart
+        builder ``_decision_boundary_chart_from_source`` produces these
+        columns.
+        """
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("decision_boundary", position)
+        from ferrum.marks.diagnostic import desugar_decision_boundary
+        new = self._clone()
+        new._mark = "rect"
+        new._pending_stat_mark = (
+            "decision_boundary",
+            {
+                "proba": proba,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
+            desugar_decision_boundary,
+        )
+        new._position = position
+        return new
+
     def mark_arc(self, **kwargs):           raise deferred_mark_error("arc")
     def mark_image(self, **kwargs):         raise deferred_mark_error("image")
     def mark_geoshape(self, **kwargs):      raise deferred_mark_error("geoshape")

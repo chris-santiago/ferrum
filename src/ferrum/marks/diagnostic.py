@@ -836,3 +836,225 @@ def desugar_class_prediction_error(
             "position": stack,
         },
     ])
+
+
+# --- 10f: clustering / manifold / decision boundary -------------------
+
+
+def desugar_silhouette(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    zero_line: bool = True,
+    color_field: str | None = "cluster",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Rousseeuw silhouette plot: one horizontal bar per sample.
+
+    Data contract: ``y_position`` (Int64 stack order, 0..n-1 — packed by
+    ``ModelSource.silhouette()``), ``silhouette_value`` (Float64),
+    ``cluster`` (Int64), plus the per-bar bound columns
+    ``_silhouette_x_lo``, ``_silhouette_x_hi``, ``_silhouette_y_lo``,
+    ``_silhouette_y_hi`` (Float64), and (when ``zero_line=True``)
+    ``_ref_zero``. The bound columns are computed by
+    ``Chart.mark_silhouette``: mark_bar has no quantitative-x /
+    quantitative-y rendering path, so mark_rect with explicit cell
+    bounds is the native primitive for the Rousseeuw layout.
+    """
+    del x_field, y_field
+    from ferrum.encoding import X, Y
+
+    user_kw = _validate("silhouette", mark_kwargs)
+    rect_enc: dict[str, Any] = {
+        "x": X("_silhouette_x_lo", title="silhouette coefficient"),
+        "x2": "_silhouette_x_hi",
+        "y": Y("_silhouette_y_lo", title="sample"),
+        "y2": "_silhouette_y_hi",
+    }
+    if color_field is not None:
+        rect_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "rect", "encoding": rect_enc}]
+    if zero_line:
+        layers.append({
+            "mark": "rule",
+            "encoding": {"x": "_ref_zero"},
+            "mark_kwargs": {"stroke_dash": [4, 4]},
+        })
+    return ("__layered__", [], None, None,
+            _apply(layers, user_kw))
+
+
+def desugar_pca_scree(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    cumulative_line: bool = True,
+    threshold_line: float | None = None,
+    **mark_kwargs: Any,
+) -> tuple:
+    """PCA scree plot: bar of per-component variance + optional cumulative
+    line and threshold rule.
+
+    Data contract: ``component`` (Int64), ``explained_variance_ratio``
+    (Float64), ``cumulative_variance_ratio`` (Float64) as emitted by
+    ``ModelSource.pca_variance()`` plus the injected bar-bound columns
+    ``_pca_bar_x_lo``, ``_pca_bar_x_hi``, ``_pca_bar_y_lo``,
+    ``_pca_bar_y_hi`` (Float64) computed by ``Chart.mark_pca_scree``.
+    mark_bar has no quant-x / quant-y path; mark_rect with explicit
+    bounds renders the bars while preserving quantitative axes for the
+    cumulative-line and threshold-rule layers.
+
+    When ``threshold_line`` is non-None the data also carries
+    ``_threshold_line`` (a sentinel single-non-null column for the
+    horizontal reference rule).
+    """
+    del x_field, y_field, threshold_line
+    from ferrum.encoding import X, Y
+
+    user_kw = _validate("pca_scree", mark_kwargs)
+    # Layer-0 drives axis-scale resolution (see render/prepare.rs:265 —
+    # only the first layer's encoding feeds resolve_scales). The
+    # cumulative line spans the widest y range, so emit it first so the
+    # y axis covers [0, max(cum)] rather than [0, max(evr)]. The rect
+    # bar layer follows and renders within the established axis.
+    if cumulative_line:
+        layers: list[dict] = [
+            {
+                "mark": "line",
+                "encoding": {
+                    "x": X("component", title="component"),
+                    "x2": "_x_axis_anchor",
+                    "y": Y("cumulative_variance_ratio",
+                           title="explained variance ratio"),
+                    # x2/y2 here are scale-resolution hints — mark_line
+                    # ignores both when drawing, but
+                    # scale_resolve::build_axis_scale unions the paired
+                    # channel's extent into the axis domain. The anchor
+                    # columns hold [bar_x_lo_min, bar_x_hi_max] and
+                    # [0, max(cum, threshold)] so the axes cover the
+                    # bar baselines, the first/last bar edges, and any
+                    # threshold rule introduced by sibling layers.
+                    "y2": "_y_axis_anchor",
+                },
+            },
+            {
+                "mark": "rect",
+                "encoding": {
+                    "x": "_pca_bar_x_lo",
+                    "x2": "_pca_bar_x_hi",
+                    "y": "_pca_bar_y_lo",
+                    "y2": "_pca_bar_y_hi",
+                },
+            },
+        ]
+    else:
+        # No cumulative line — the rect bar is the only y signal and
+        # leads the scale-resolution.
+        layers = [
+            {
+                "mark": "rect",
+                "encoding": {
+                    "x": X("_pca_bar_x_lo", title="component"),
+                    "x2": "_pca_bar_x_hi",
+                    "y": Y("_pca_bar_y_lo",
+                           title="explained variance ratio"),
+                    "y2": "_pca_bar_y_hi",
+                },
+            },
+        ]
+    return ("__layered__", [], None, None,
+            _apply(layers, user_kw))
+
+
+def desugar_pca_scree_with_threshold(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    cumulative_line: bool = True,
+    **mark_kwargs: Any,
+) -> tuple:
+    """Variant of ``desugar_pca_scree`` that appends a threshold rule.
+
+    Used by ``Chart.mark_pca_scree`` when ``threshold_line`` is non-None;
+    references the injected ``_threshold_line`` sentinel column.
+    """
+    # Validate kwargs here so the AST guardrail (test_mark_kwargs_no_silent_drop)
+    # sees a call to validate_user_mark_kwargs at this function level. The
+    # nested desugar_pca_scree call validates the same set independently, so
+    # the second validation is a no-op for well-formed inputs.
+    _validate("pca_scree", mark_kwargs)
+    prefix, transforms, _ig1, _ig2, layers = desugar_pca_scree(
+        x_field, y_field, cumulative_line=cumulative_line, **mark_kwargs,
+    )
+    layers = list(layers) + [{
+        "mark": "rule",
+        "encoding": {"y": "_threshold_line"},
+        "mark_kwargs": {"stroke_dash": [4, 4]},
+    }]
+    return (prefix, transforms, _ig1, _ig2, layers)
+
+
+def desugar_intercluster_distance(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    label_clusters: bool = True,
+    color_field: str | None = "cluster",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Cluster-center 2D embedding: one point per cluster, sized by count.
+
+    Data contract: ``cluster`` (Int64), ``x`` (Float64), ``y`` (Float64),
+    ``size`` (Int64). When ``label_clusters=True`` a text layer overlays
+    the cluster id at each point.
+    """
+    del x_field, y_field
+
+    user_kw = _validate("intercluster_distance", mark_kwargs)
+    point_enc: dict[str, Any] = {"x": "x", "y": "y", "size": "size"}
+    if color_field is not None:
+        point_enc["color"] = color_field
+    layers: list[dict] = [{"mark": "point", "encoding": point_enc}]
+    if label_clusters:
+        layers.append({
+            "mark": "text",
+            "encoding": {"x": "x", "y": "y", "text": "cluster"},
+        })
+    return ("__layered__", [], None, None,
+            _apply(layers, user_kw))
+
+
+def desugar_decision_boundary(
+    x_field: str | None,
+    y_field: str | None,
+    *,
+    proba: bool = False,
+    color_field: str = "z",
+    **mark_kwargs: Any,
+) -> tuple:
+    """Decision-boundary background heatmap: one rect per grid cell.
+
+    Data contract: pre-computed grid with columns ``x``, ``x2``, ``y``,
+    ``y2`` (cell bounds) and ``z`` (the prediction value — class index
+    when ``proba=False``, probability when ``proba=True``). The chart
+    builder produces these columns from a ``ModelSource``.
+
+    ``proba`` is informational at the mark layer — the chart builder
+    chooses the data and the renderer's continuous-color scale handles
+    both kinds of ``z`` identically. Recorded for future overrides.
+    """
+    del x_field, y_field, proba
+
+    user_kw = _validate("decision_boundary", mark_kwargs)
+    layers: list[dict] = [
+        {
+            "mark": "rect",
+            "encoding": {
+                "x": "x", "x2": "x2", "y": "y", "y2": "y2",
+                "color": color_field,
+            },
+            "mark_kwargs": {"opacity": 0.5},
+        },
+    ]
+    return ("__layered__", [], None, None,
+            _apply(layers, user_kw))

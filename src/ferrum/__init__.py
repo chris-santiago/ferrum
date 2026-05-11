@@ -99,6 +99,10 @@ from ferrum.figures import (
     validation_curve_chart,
     cv_scores_chart,
     alpha_selection_chart,
+    pca_scree_chart,
+    cluster_diagnostics,
+    intercluster_distance_chart,
+    decision_boundary_chart,
 )
 
 # Phase 9e — figure-level convenience functions
@@ -166,4 +170,6 @@ __all__ = [
     "importance_chart", "shap_chart", "pdp_chart",
     "learning_curve_chart", "validation_curve_chart",
     "cv_scores_chart", "alpha_selection_chart",
+    "pca_scree_chart", "cluster_diagnostics",
+    "intercluster_distance_chart", "decision_boundary_chart",
 ]
