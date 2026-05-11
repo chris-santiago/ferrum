@@ -1,6 +1,6 @@
 //! Per-panel draw context + mark dispatch. Spec §4.5 / §4.6.
 
-use arrow::array::{Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{PanelLayout, ThemeInputs};
@@ -218,6 +218,8 @@ pub fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<f64>>, 
     if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
         Ok(a.iter().collect())
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
+        Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+    } else if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
         Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
     } else if let Some(a) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
         Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())

@@ -1,7 +1,8 @@
-//! mark_rule: horizontal or vertical reference line per row. If only y is
-//! encoded → horizontal across panel; if only x encoded → vertical.
+//! mark_rule: reference lines. Three modes:
+//!   y only → horizontal span; x only → vertical span;
+//!   ordinal x + y + y2 → ranged vertical segment (boxplot whisker, Phase 10c-pre).
 
-use crate::render::draw::{col_as_f64, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::svg::{Stroke, SvgBuffer};
 
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
@@ -13,9 +14,33 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         stroke_dash: ctx.mark_style.stroke_dash.clone(),
     };
 
-    // Phase 9c — per-row pixel offsets from a position adjustment.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-    if let (Some(yf), None) = (y_field(ctx, spec), x_field(ctx, spec)) {
+    let xf_opt = x_field(ctx, spec);
+    let yf_opt = y_field(ctx, spec);
+    let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
+
+    // Ranged rule: ordinal x + quantitative y + y2 → vertical segment per row.
+    if let (Some(xf), Some(yf), Some(y2f)) = (xf_opt, yf_opt, y2f_opt) {
+        if let Ok(xs) = col_as_str(ctx.batch, xf) {
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
+            let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
+            for i in 0..xs.len() {
+                let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let px = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+                let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+                let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+                let px = px + x_offsets[i];
+                out.line(px, py + y_offsets[i], px, py2 + y_offsets[i], &style);
+            }
+            return;
+        }
+        // x column is not a string (quantitative x with y2) — fall through to spans below.
+    }
+
+    // Horizontal span: y only (no x).
+    if let (Some(yf), None) = (yf_opt, xf_opt) {
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
         for (i, yopt) in ys.iter().enumerate() {
             let yv = match yopt { Some(v) if v.is_finite() => *v, _ => continue };
@@ -25,7 +50,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         }
         return;
     }
-    if let (Some(xf), None) = (x_field(ctx, spec), y_field(ctx, spec)) {
+    // Vertical span: x only (no y).
+    if let (Some(xf), None) = (xf_opt, yf_opt) {
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
         for (i, xopt) in xs.iter().enumerate() {
             let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
@@ -46,9 +72,45 @@ mod tests {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
-    use arrow::array::Float64Array;
+    use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    #[test]
+    fn ranged_rule_emits_vertical_segments_for_ordinal_x() {
+        // Phase 10c-pre: ordinal x + y + y2 → vertical segment per row (boxplot whisker).
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rule,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", arrow::datatypes::DataType::Utf8, false),
+            Field::new("lo",  arrow::datatypes::DataType::Float64, false),
+            Field::new("hi",  arrow::datatypes::DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![5.0, 8.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let mut out = SvgBuffer::new(panel.plot_area, None, false);
+        super::draw(&ctx, &mut out);
+        let s = out.finish();
+        assert_eq!(s.matches("<line ").count(), 2, "expected 2 ranged rule lines");
+    }
 
     #[test]
     fn y_only_rule_emits_horizontal_lines() {
