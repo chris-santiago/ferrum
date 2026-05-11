@@ -2,6 +2,6 @@ plot_type = "Learning curve (train/val with band)"
 dataset = "load_breast_cancer (binary), LogisticRegression, 5-fold CV"
 width = 720
 height = 480
-panels = []
-ferrum_status = "BLOCKED"
-ferrum_notes = "No ferrum.learning_curve_chart yet — needs Phase 10c+ scope review"
+panels = ["ferrum", "sklearn", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.learning_curve_chart available (Task 28, commit cf6858a). Defaults: cv=5, ci_style='band'."
