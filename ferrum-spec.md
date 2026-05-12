@@ -1126,9 +1126,9 @@ ferrum.confusion_matrix_chart(model_or_source, X=None, y=None, *,
 ferrum.calibration_chart(*model_or_sources, X=None, y=None, *,
                           n_bins=10, theme=None)
 
-ferrum.gain_chart(model_or_source, X=None, y=None, *, theme=None)
+ferrum.gain_chart(model_or_source, X=None, y=None, *, compare=None, theme=None)
 
-ferrum.lift_chart(model_or_source, X=None, y=None, *, theme=None)
+ferrum.lift_chart(model_or_source, X=None, y=None, *, compare=None, theme=None)
 
 ferrum.residuals_chart(model_or_source, X=None, y=None, *,
                         kind="studentized", panels="auto",
@@ -1191,7 +1191,9 @@ ferrum.decision_boundary_chart(model, X, y, *,
 ferrum.discrimination_threshold_chart(model_or_source, X=None, y=None, *,
                                        n_thresholds=50,
                                        metrics=("precision", "recall", "f1", "queue_rate"),
-                                       highlight_best=True, theme=None)
+                                       highlight_best=True, compare=None, theme=None)
+# 2026-05-12: gain_chart, lift_chart, and discrimination_threshold_chart gain
+# compare=None for multi-model overlay, consistent with roc_chart / pr_chart.
 
 ferrum.parallel_coordinates_chart(data_or_source, X=None, y=None, *,
                                    features=None, hue=None,
