@@ -3,58 +3,27 @@
 Phase 10a: constructor, protocol detection, cache, .predictions(),
 .probabilities(). Other methods land in 10b-10g; `ComparedModelSource`
 in 10h.
+
+The constructor + capability infrastructure lives in
+``sources/_base.py``; this module hosts the seven per-domain method
+sets that the upcoming P3.1 follow-up commits will split into
+sibling mixin modules.  Keeping ``ModelSource`` at this path
+preserves ``from ferrum._diagnostics.source import ModelSource`` for
+every external caller.
 """
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import polars as pl
 
 from .deps import require_shap, require_sklearn, require_umap
+from .sources._base import BaseSource
 from .stats import cooks_distance, studentized_residual
 
 
-_PROTOCOL_ATTRS: tuple[str, ...] = (
-    "predict", "predict_proba", "decision_function", "transform",
-    "fit_transform", "fit_predict", "score",
-    "feature_importances_", "coef_", "explained_variance_ratio_",
-    "cluster_centers_", "labels_", "classes_",
-)
-
-
-def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, pl.Series | None]:
-    """Coerce X to polars.DataFrame and y to polars.Series (or None)."""
-    if isinstance(X, pl.DataFrame):
-        X_df = X
-    elif isinstance(X, np.ndarray):
-        if X.ndim != 2:
-            raise ValueError(f"X must be 2D; got shape {X.shape}")
-        X_df = pl.from_numpy(X, schema=[f"f{i}" for i in range(X.shape[1])])
-    else:
-        # Route through ferrum's existing input-normalization to a pyarrow Table,
-        # then convert to polars.
-        from ferrum._coerce import to_arrow_table
-        X_df = pl.from_arrow(to_arrow_table(X))
-        if not isinstance(X_df, pl.DataFrame):
-            raise TypeError(f"Could not coerce X to a polars DataFrame; got {type(X_df).__name__}")
-
-    y_ser: pl.Series | None = None
-    if y is not None:
-        if isinstance(y, pl.Series):
-            y_ser = y
-        elif isinstance(y, np.ndarray):
-            y_ser = pl.Series("y", y)
-        elif isinstance(y, pl.DataFrame):
-            if y.width != 1:
-                raise ValueError(f"y DataFrame must have exactly 1 column; got {y.width}")
-            y_ser = y.to_series()
-        else:
-            y_ser = pl.Series("y", list(y))
-    return X_df, y_ser
-
-
-class ModelSource:
+class ModelSource(BaseSource):
     """Wrap a fitted estimator + dataset and expose model-diagnostic
     derived data as polars DataFrames.
 
@@ -111,66 +80,8 @@ class ModelSource:
     >>> source.confusion_matrix(normalize="true")
     """
 
-    def __init__(
-        self,
-        model: Any,
-        X: Any,
-        y: Any = None,
-        *,
-        feature_names: Sequence[str] | None = None,
-        class_names: Sequence[str] | None = None,
-        sample_weight: Any = None,
-        random_state: int | None = None,
-    ):
-        self._model = model
-        self._X, self._y = _coerce_X_y(X, y)
-        self._feature_names: list[str] = (
-            list(feature_names) if feature_names is not None
-            else list(self._X.columns)
-        )
-        self._class_names: list[str] | None = (
-            list(class_names) if class_names is not None else None
-        )
-        self._sample_weight = sample_weight
-        self._random_state = random_state
-
-        self._capabilities = frozenset(
-            attr for attr in _PROTOCOL_ATTRS if hasattr(self._model, attr)
-        )
-        self._cache: dict[tuple, pl.DataFrame] = {}
-
-    @property
-    def feature_names(self) -> list[str]:
-        """Column labels for the feature matrix.
-
-        Returns the names supplied at construction time, or the DataFrame
-        column names when ``X`` was a DataFrame, or ``["f0", "f1", ...]``
-        for unlabeled array inputs.
-
-        Returns
-        -------
-        list[str]
-            Feature names in the same order as the columns of ``X``.
-        """
-        return list(self._feature_names)
-
-    @property
-    def capabilities(self) -> frozenset[str]:
-        """Protocol attributes present on the wrapped estimator.
-
-        A frozen subset of ``_PROTOCOL_ATTRS`` (``"predict"``,
-        ``"predict_proba"``, ``"coef_"``, ``"feature_importances_"``, …)
-        detected at construction time via ``hasattr``. Derived-data methods
-        gate on this set to pick the appropriate code path and raise
-        ``AttributeError`` with a clear message when a required attribute
-        is absent.
-
-        Returns
-        -------
-        frozenset[str]
-            Attribute names that are present on the wrapped model.
-        """
-        return self._capabilities
+    # __init__, feature_names, capabilities, _require_capability, and
+    # _cache_key are inherited from BaseSource — see sources/_base.py.
 
     @classmethod
     def compare(
@@ -238,17 +149,6 @@ class ModelSource:
             name: cls(model, X, y, **kwargs) for name, model in models.items()
         }
         return ComparedModelSource(sources)
-
-    def _require_capability(self, attr: str, method_name: str) -> None:
-        if attr not in self._capabilities:
-            raise AttributeError(
-                f"ModelSource.{method_name}() requires the wrapped model to "
-                f"implement '{attr}'. Got {type(self._model).__name__!r} which "
-                f"does not."
-            )
-
-    def _cache_key(self, method: str, **kwargs) -> tuple:
-        return (method, tuple(sorted(kwargs.items())))
 
     # --- 10a: predictions, probabilities ---------------------------------
 
