@@ -172,7 +172,7 @@ force spec changes:
 | D9a | INTENTIONAL (same schema) | P3.6 narrowed |
 | D9b | INTENTIONAL | P3.6 narrowed |
 | D9c | INTENTIONAL per spec, but upstream `shap` lib splits | P3.6 — user decision |
-| D10 | MIXED (3 obsolete post-F16, 2 still required) | P3.9 narrowed to 3 sites |
+| D10 | DOWNGRADED (2026-05-12) — pre-flight claim was inverted. See P3.9 note below. | P3.9 closed |
 | D14 | DRIFT (zero refs) | needs user decision |
 
 **Net scope change**: ~5 commits dropped, 3 small bug-fix commits added,
@@ -255,7 +255,7 @@ where flagged. Public-API changes are explicit in each tier.
 | P3.6 | D9 (SHAP) — Split into `SHAPBeeswarmVisualizer` / `SHAPBarVisualizer` / `SHAPWaterfallVisualizer`. **Public API addition; old `SHAPVisualizer(kind=...)` retained as shim.** | 1 |
 | P3.7 | D8 — Unify 3 inject-decorator-column helpers in charts.py. **DOWNGRADED 2026-05-12: no factorable unification — see note.** | 0 |
 | P3.8 | D7 — Split long methods. | 2 |
-| P3.9 | D10 — Drop Int64-as-Utf8 casts where F16 obviates them. **Possible behavior change.** | 1 |
+| P3.9 | D10 — Drop Int64-as-Utf8 casts where F16 obviates them. **DOWNGRADED 2026-05-12: F16 inverted the premise; casts are more necessary post-F16, not less. See note below.** | 0 |
 | P3.10 | D13 — Move `ManifoldVisualizer._cached_embedding` to `ModelSource._cache`. | 1 |
 | P3.11 | D15 — Multi-class SHAP overlay (Phase-10h stub). | 2 |
 | P3.12 | F10 — Multi-panel residuals (Phase-10h stub). | 1 |
@@ -273,6 +273,45 @@ where flagged. Public-API changes are explicit in each tier.
 | P4.6 | F7 — Extract `_require(name, value)`. | 1 |
 | P4.7 | F8 — Align `decision_boundary_chart` naming (if verification doesn't reveal a technical reason). | 1 |
 | P4.8 | F9 — Promote `intercluster_distance_chart`'s `source._model` access (folded with D12). | (folded) |
+
+---
+
+### P3.9 (D10) — disposition note (2026-05-12)
+
+Pre-flight verification claimed "3 obsolete post-F16, 2 still required."
+**Closer reading of primary sources contradicts the obsolescence claim.**
+
+Sources consulted:
+
+- `ferrum-spec.md:420` (F16 audit note): "continuous color is selected
+  when ... `type=` is `None` and the column dtype is numeric (any width:
+  Float32/64, Int8/16/32/64, UInt8/16/32/64) or temporal".
+- `crates/ferrum-core/src/render/scale_resolve.rs:701-721`: Pre-F16 the
+  continuous-vs-categorical decision was a narrow dtype check
+  (`matches!(dtype, Float64 | UInt64)`); every other numeric dtype
+  (including Int64) silently fell into the **categorical** branch. F16
+  widened this so **all** numeric dtypes — including Int64 — route to
+  **continuous** color when no explicit `type=` is set.
+- `src/ferrum/_diagnostics/schemas.py:149-152, 166-170`:
+  `SCHEMA_SILHOUETTE.cluster` and `SCHEMA_INTERCLUSTER_DISTANCE.cluster`
+  are documented as `pl.Utf8`.
+- `tests/diagnostics/test_clustering.py:30` enforces
+  `sil["cluster"].dtype == pl.Utf8`.
+
+Empirically: removing the three candidate Utf8 casts
+(`_clustering.py:64`, `_clustering.py:206`, `charts.py:1444`)
+immediately breaks `tests/diagnostics/test_clustering.py` because the
+documented schema is Utf8, and per F16 the underlying Int64 would route
+to continuous color (a 1-D viridis gradient over cluster IDs) — the
+opposite of what cluster diagnostics need.
+
+The other 2 cast sites in the chart builders
+(`charts.py:966`, `:1425`) are sample_id-for-`mark_style.detail`
+grouping, not color casts; `charts.py:1438` casts `feature` back to
+Utf8 after an `Enum` cast for ordinal x-scale ordering. None of these
+are defensive color casts.
+
+**Verdict:** downgrade. The casts must remain. No commit; D10 closed.
 
 ---
 
