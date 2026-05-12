@@ -33,6 +33,9 @@ _DOC_ALLOWLIST: set[str] = {
     "Identity", "Dodge", "Jitter", "Stack",
     "CoordFlip", "CoordCartesian", "CoordPolar", "CoordGeo", "CoordFixed",
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
+    # Schwabish SB1 (2026-05-11) annotation primitives + title class.
+    "annotate_arrow", "AUCLabel", "APLabel", "BrierLabel", "OutlierLabel",
+    "Title",
     "continuous_palette",
     # Task 7 — spec types (Rust)
     "ChartSpec", "EncodingSpec",

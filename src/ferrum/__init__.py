@@ -59,7 +59,11 @@ from ferrum.coord import (
 from ferrum.layer import Layer
 from ferrum.composition import HConcatChart, VConcatChart, JointChart, RepeatChart, ClusterMapChart
 from ferrum.repeat import Repeat
-from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
+from ferrum.annotations import (
+    annotate_hline, annotate_vline, annotate_rect, annotate_text,
+    annotate_arrow, AUCLabel, APLabel, BrierLabel, OutlierLabel,
+)
+from ferrum.title import Title
 
 # Phase 10 — model diagnostics
 from ferrum._diagnostics import ComparedModelSource, ModelSource
@@ -163,6 +167,8 @@ __all__ = [
     "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
     "Facet", "FacetRow", "FacetCol",
     "annotate_hline", "annotate_vline", "annotate_rect", "annotate_text",
+    "annotate_arrow", "AUCLabel", "APLabel", "BrierLabel", "OutlierLabel",
+    "Title",
     # Phase 8b
     "ContinuousScheme", "continuous_palette", "Gradient",
     # Phase 9c position adjustments

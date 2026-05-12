@@ -213,7 +213,9 @@ pub fn render_svg(
     let mut out = svg::SvgBuffer::new(layout.viewport, background, true);
 
     // Chart-level title (Themes-T2.5a). Emits at the position computed by
-    // compute_layout in the reserved top band.
+    // compute_layout in the reserved top band. Schwabish SB1 adds an
+    // optional subtitle drawn as a second line below the title at a
+    // smaller font size and theme label_color.
     if let Some(title) = &layout.chart_title {
         let style = svg::TextStyle {
             fill: theme.title_color,
@@ -228,6 +230,17 @@ pub fn render_svg(
             },
         };
         out.text(title.x, title.y, &title.text, &style);
+        if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
+            let sub_style = svg::TextStyle {
+                fill: theme.font_color,
+                font_size: theme.title_font_size * 0.85,
+                anchor: title.anchor,
+                angle: 0.0,
+                font_family: &theme.font_family,
+                font_weight: None,
+            };
+            out.text(title.x, sy, subtitle, &sub_style);
+        }
     }
 
     for (panel_idx, panel) in layout.panels.iter().enumerate() {

@@ -112,7 +112,8 @@ def test_chart_properties_sets_metadata():
     c = Chart(df).mark_point().properties(width=800, height=600, title="Hello")
     assert c._width == 800
     assert c._height == 600
-    assert c._title == "Hello"
+    # Schwabish SB1: Chart._title is normalized to a Title value class.
+    assert c._title.text == "Hello"
 
 
 def test_chart_with_pandas_dataframe():

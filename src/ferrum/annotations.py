@@ -187,3 +187,331 @@ def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0
     if angle is not None:
         kwargs["angle"] = angle
     return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
+
+
+# -------------------------------------------------------------------
+# Schwabish SB1 — metric labels + annotate_arrow
+# -------------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Literal  # noqa: E402
+
+
+def _resolve_field(enc_value: Any) -> Optional[str]:
+    """Extract the field name from an encoding value.
+
+    Encoding-dict values may be ``ChannelBase`` wrappers (with ``.field``)
+    or plain strings, mirroring the pattern in ``chart.py``.
+    """
+    if enc_value is None:
+        return None
+    field = getattr(enc_value, "field", None)
+    if field is not None:
+        return field
+    if isinstance(enc_value, str):
+        return enc_value
+    return None
+
+
+def _trapezoid_auc(x: np.ndarray, y: np.ndarray) -> float:
+    """Trapezoidal AUC for a curve. Sorts by x before integrating."""
+    order = np.argsort(x)
+    trap = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
+    return float(trap(y[order], x[order]))
+
+
+def _ap_step(x: np.ndarray, y: np.ndarray) -> float:
+    """Step-integrated average precision: sum((R_i - R_{i-1}) * P_i)."""
+    order = np.argsort(x)
+    xs, ys = x[order], y[order]
+    return float(np.sum(np.diff(np.concatenate([[0.0], xs])) * ys))
+
+
+def _brier_score(p: np.ndarray, obs: np.ndarray) -> float:
+    """Brier score as mean squared error between predicted prob and observed rate."""
+    return float(np.mean((p - obs) ** 2))
+
+
+def _apply_metric_label(
+    base: Chart,
+    label: "AUCLabel | APLabel | BrierLabel",
+    *,
+    metric_fn,
+    x_col_override: Optional[str] = None,
+    y_col_override: Optional[str] = None,
+    color_col_override: Optional[str] = None,
+) -> Chart:
+    """Compute a metric per series and emit a text-overlay layer on the
+    base chart's augmented data.
+
+    Mirrors the augmented-DataFrame idiom used by ``_inject_curve_annotation``
+    in the legacy ROC/PR paths: extend ``base._data`` with ``_label_text``
+    and ``_label_y`` columns (one non-null entry per series at the endpoint
+    along the y axis, staggered so multi-curve labels do not collide).
+    Adds a ``mark_text`` layer reading those columns via ``+``.
+
+    Schwabish SB3 (2026-05-11): accepts explicit field overrides so the
+    figure-level builders (which hide encoding behind ``_pending_stat_mark``
+    composites like ``mark_roc``) can compose metric labels without setting
+    a chart-level color encoding that would leak into adjacent layers
+    (e.g. the diagonal reference line of ``mark_roc``).
+    """
+    from ferrum._coerce import to_arrow_table
+
+    x_col = x_col_override or _resolve_field(base._encoding.get("x"))
+    y_col = y_col_override or _resolve_field(base._encoding.get("y"))
+    color_col = color_col_override or _resolve_field(
+        base._encoding.get("color")
+    )
+    if x_col is None or y_col is None:
+        raise ValueError(
+            f"{type(label).__name__} requires x and y encodings on the base chart"
+        )
+    tbl = to_arrow_table(base._data)
+    if x_col not in tbl.column_names or y_col not in tbl.column_names:
+        raise ValueError(
+            f"{type(label).__name__}: column {x_col!r} or {y_col!r} missing from data"
+        )
+    x_arr = np.asarray(tbl.column(x_col).to_pylist(), dtype=float)
+    y_arr = np.asarray(tbl.column(y_col).to_pylist(), dtype=float)
+    n = len(x_arr)
+    labels_col: list[Optional[str]] = [None] * n
+
+    y_range = (
+        float(np.nanmax(y_arr) - np.nanmin(y_arr)) if y_arr.size else 1.0
+    )
+    y_top = float(np.nanmax(y_arr)) if y_arr.size else 1.0
+    stagger_step = max(y_range * 0.06, 1e-9)
+    label_y_col: list[Optional[float]] = [None] * n
+
+    if color_col is not None and color_col in tbl.column_names:
+        color_vals = np.asarray(tbl.column(color_col).to_pylist())
+        unique_colors = sorted(set(color_vals.tolist()), key=str)
+        for stack_i, cls in enumerate(unique_colors):
+            mask = color_vals == cls
+            if not mask.any():
+                continue
+            metric = metric_fn(x_arr[mask], y_arr[mask])
+            text = f"{label.prefix}{metric:{label.format}}"
+            mask_idxs = np.where(mask)[0]
+            idx_in_mask = int(np.argmax(x_arr[mask]))
+            global_idx = int(mask_idxs[idx_in_mask])
+            labels_col[global_idx] = text
+            label_y_col[global_idx] = y_top - stack_i * stagger_step
+    else:
+        metric = metric_fn(x_arr, y_arr)
+        text = f"{label.prefix}{metric:{label.format}}"
+        global_idx = int(np.argmax(x_arr))
+        labels_col[global_idx] = text
+        label_y_col[global_idx] = y_top
+
+    base_pl = (
+        base._data
+        if isinstance(base._data, pl.DataFrame)
+        else pl.from_arrow(tbl)
+    )
+    augmented = base_pl.with_columns(
+        pl.Series("_label_text", labels_col, dtype=pl.Utf8),
+        pl.Series("_label_y", label_y_col, dtype=pl.Float64),
+    )
+    base_aug = base._clone()
+    base_aug._data = augmented
+    annot_layer = (
+        Chart(augmented)
+        .mark_text(align="right", dx=-4, dy=-2)
+        .encode(x=x_col, y="_label_y", text="_label_text")
+    )
+    return base_aug + annot_layer
+
+
+@dataclass(frozen=True)
+class AUCLabel:
+    """Auto-placed AUC annotation for ROC charts — spec §3.11.
+
+    ``chart + AUCLabel()`` reads the surrounding chart's line data
+    (``x`` = FPR, ``y`` = TPR), computes trapezoidal AUC per series
+    (grouped by ``color`` when present), and emits one text annotation
+    per series at the line endpoint.
+    """
+
+    position: Literal["end", "corner"] = "end"
+    format: str = ".3f"
+    prefix: str = "AUC = "
+
+    def __radd__(self, base: Chart) -> Chart:
+        if not isinstance(base, Chart):
+            return NotImplemented
+        return _apply_metric_label(base, self, metric_fn=_trapezoid_auc)
+
+
+@dataclass(frozen=True)
+class APLabel:
+    """Auto-placed Average Precision annotation for PR charts.
+
+    Sibling of :class:`AUCLabel` for precision-recall curves. ``x`` is
+    treated as recall and ``y`` as precision.
+    """
+
+    position: Literal["end", "corner"] = "end"
+    format: str = ".3f"
+    prefix: str = "AP = "
+
+    def __radd__(self, base: Chart) -> Chart:
+        if not isinstance(base, Chart):
+            return NotImplemented
+        return _apply_metric_label(base, self, metric_fn=_ap_step)
+
+
+@dataclass(frozen=True)
+class BrierLabel:
+    """Auto-placed Brier-score annotation for calibration charts.
+
+    ``x`` is treated as predicted probability and ``y`` as observed rate
+    per bin. Multi-series charts emit one Brier per series.
+    """
+
+    position: Literal["end", "corner"] = "corner"
+    format: str = ".3f"
+    prefix: str = "Brier = "
+
+    def __radd__(self, base: Chart) -> Chart:
+        if not isinstance(base, Chart):
+            return NotImplemented
+        return _apply_metric_label(base, self, metric_fn=_brier_score)
+
+
+@dataclass(frozen=True)
+class OutlierLabel:
+    """Auto-labeled high-leverage / high-residual points — spec §3.11."""
+
+    threshold: float = 3.0
+    field: Optional[str] = None
+    label_field: Optional[str] = None
+    max_labels: int = 10
+
+    def __radd__(self, base: Chart) -> Chart:
+        from ferrum._coerce import to_arrow_table
+        if not isinstance(base, Chart):
+            return NotImplemented
+        x_col = _resolve_field(base._encoding.get("x"))
+        y_col = _resolve_field(base._encoding.get("y"))
+        field = self.field or y_col
+        if x_col is None or y_col is None:
+            raise ValueError("OutlierLabel requires x and y encodings on the base chart")
+        tbl = to_arrow_table(base._data)
+        if field is None or field not in tbl.column_names:
+            raise ValueError(f"OutlierLabel: cannot locate field {field!r}")
+        values = np.asarray(tbl.column(field).to_pylist(), dtype=float)
+        mu = float(np.mean(values))
+        sigma = float(np.std(values, ddof=1)) or 1.0
+        z = np.abs((values - mu) / sigma)
+        mask = z > self.threshold
+        if not mask.any():
+            return base
+        candidate_idx = np.where(mask)[0]
+        ordered = candidate_idx[np.argsort(-z[candidate_idx])][: self.max_labels]
+        label_col_name = "_outlier_text"
+        labels_col: list[Optional[str]] = [None] * len(values)
+        label_lookup = (
+            tbl.column(self.label_field).to_pylist()
+            if self.label_field and self.label_field in tbl.column_names
+            else None
+        )
+        for i in ordered:
+            if label_lookup is not None:
+                labels_col[int(i)] = str(label_lookup[int(i)])
+            else:
+                labels_col[int(i)] = str(values[int(i)])
+        base_pl = (
+            base._data
+            if isinstance(base._data, pl.DataFrame)
+            else pl.from_arrow(tbl)
+        )
+        augmented = base_pl.with_columns(pl.Series(label_col_name, labels_col))
+        base_aug = base._clone()
+        base_aug._data = augmented
+        annot_layer = (
+            Chart(augmented)
+            .mark_text(align="left", dx=4, dy=-4)
+            .encode(x=x_col, y=y_col, text=label_col_name)
+        )
+        return base_aug + annot_layer
+
+
+def _apply_metric_label_explicit(
+    base: Chart,
+    label_kind: str,
+    *,
+    x_col: str,
+    y_col: str,
+    color_col: Optional[str] = None,
+    position: str = "end",
+    fmt: str = ".3f",
+    prefix: Optional[str] = None,
+) -> Chart:
+    """Apply a metric label to ``base`` with explicit field overrides.
+
+    Schwabish SB3 helper used by figure-level diagnostic builders that
+    compose ``AUCLabel`` / ``APLabel`` / ``BrierLabel`` onto charts whose
+    ``_pending_stat_mark`` composite hides the encoding.
+    """
+    metric_map = {
+        "auc": (_trapezoid_auc, "AUC = "),
+        "ap": (_ap_step, "AP = "),
+        "brier": (_brier_score, "Brier = "),
+    }
+    if label_kind not in metric_map:
+        raise ValueError(
+            f"_apply_metric_label_explicit(label_kind={label_kind!r}): "
+            f"expected one of {sorted(metric_map)}"
+        )
+    metric_fn, default_prefix = metric_map[label_kind]
+    pos_lit: Any = position
+    prefix_str = prefix if prefix is not None else default_prefix
+    if label_kind == "auc":
+        label_obj: Any = AUCLabel(position=pos_lit, format=fmt, prefix=prefix_str)
+    elif label_kind == "ap":
+        label_obj = APLabel(position=pos_lit, format=fmt, prefix=prefix_str)
+    else:
+        label_obj = BrierLabel(position=pos_lit, format=fmt, prefix=prefix_str)
+    return _apply_metric_label(
+        base, label_obj, metric_fn=metric_fn,
+        x_col_override=x_col,
+        y_col_override=y_col,
+        color_col_override=color_col,
+    )
+
+
+def annotate_arrow(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    label: Optional[str] = None,
+    label_side: str = "start",
+    stroke: Optional[str] = None,
+) -> Chart:
+    """Arrow from ``(x1, y1)`` to ``(x2, y2)`` with optional text label.
+
+    Composes a ``mark_segment`` with optional ``annotate_text`` at the
+    ``label_side`` endpoint.
+    """
+    # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
+    # not yet accept it; emit a plain segment for now.
+    df = pl.DataFrame({"_x1": [x1], "_y1": [y1], "_x2": [x2], "_y2": [y2]})
+    seg_kwargs: dict = {}
+    if stroke is not None:
+        seg_kwargs["stroke"] = stroke
+    arrow_chart = (
+        Chart(df).mark_segment(**seg_kwargs).encode(
+            x="_x1", y="_y1", x2="_x2", y2="_y2",
+        )
+    )
+    if label is None:
+        return arrow_chart
+    lx, ly = (x1, y1) if label_side == "start" else (x2, y2)
+    dx = -6 if label_side == "start" else 6
+    align = "right" if label_side == "start" else "left"
+    return arrow_chart & annotate_text(lx, ly, label, dx=dx, align=align)

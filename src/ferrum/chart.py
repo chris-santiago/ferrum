@@ -225,7 +225,7 @@ class Chart:
         *,
         width: Optional[Union[int, str]] = None,
         height: Optional[Union[int, str]] = None,
-        title: Optional[str] = None,
+        title: "Optional[Union[str, 'Title']]" = None,
         description: Optional[str] = None,
     ) -> None:
         self._data = data
@@ -239,7 +239,14 @@ class Chart:
         self._layers: Optional[list] = None
         self._width = width
         self._height = height
-        self._title = title
+        # Schwabish SB1 (2026-05-11): accept Title value class or plain str.
+        from ferrum.title import Title as _TitleCls
+        if title is None:
+            self._title = None
+        elif isinstance(title, _TitleCls):
+            self._title = title
+        else:
+            self._title = _TitleCls(text=str(title))
         self._description = description
         self._pending_stat_mark: Optional[_PendingMark] = None
         self._position = None
@@ -3934,7 +3941,13 @@ class Chart:
         new = self._clone()
         if width is not None: new._width = width
         if height is not None: new._height = height
-        if title is not None: new._title = title
+        if title is not None:
+            # Schwabish SB1: accept Title value class or plain str.
+            from ferrum.title import Title as _TitleCls
+            new._title = (
+                title if isinstance(title, _TitleCls)
+                else _TitleCls(text=str(title))
+            )
         if description is not None: new._description = description
         return new
 
@@ -4021,7 +4034,9 @@ class Chart:
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()
         if resolved._title is not None:
-            kw["title"] = resolved._title
+            # Schwabish SB1: Title.to_spec_dict() emits the JSON shape that
+            # Rust's ChartSpec accepts (subtitle, anchor, offset, font sizes).
+            kw["title"] = resolved._title.to_spec_dict()
         if resolved._axis_x is not None:
             kw["axis_x"] = resolved._axis_x
         if resolved._axis_y is not None:

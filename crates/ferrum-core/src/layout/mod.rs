@@ -54,8 +54,17 @@ pub struct LayoutResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartTitleLayout {
     pub text: String,
+    /// Schwabish SB1: optional subtitle drawn as a second line below the title.
+    /// When `Some`, the title band reserves an extra line height; when `None`,
+    /// layout is byte-identical to Themes-T2.5a.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
     pub x: f64,
     pub y: f64,
+    /// Schwabish SB1: y baseline for the subtitle line. Only meaningful when
+    /// `subtitle` is `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_y: Option<f64>,
     pub anchor: TextAnchor,
 }
 
@@ -298,23 +307,38 @@ pub fn compute_layout(
         });
     }
 
-    // 2b. Reserve chart-level title band (Themes-T2.5a) above plot region.
-    // Band height ≈ title_font_size * 1.4 + title_offset. Stored absolute x/y for render emission.
-    let (chart_title_layout, inner) = if let Some(title_text) = spec.title.as_ref() {
+    // 2b. Reserve chart-level title band (Themes-T2.5a; Schwabish SB1 adds subtitle).
+    // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
+    //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
+    let (chart_title_layout, inner) = if let Some(title_spec) = spec.title.as_ref() {
         let title_line_h = metrics.line_height(theme.title_font_size);
-        let band_h = title_line_h + theme.title_offset;
+        let subtitle_font_size = title_spec
+            .subtitle_font_size
+            .unwrap_or(theme.title_font_size * 0.85);
+        let subtitle_line_h = if title_spec.subtitle.is_some() {
+            metrics.line_height(subtitle_font_size)
+        } else {
+            0.0
+        };
+        let band_h = title_line_h + subtitle_line_h + theme.title_offset;
         let (band, rest) = inner.split_top(band_h);
-        // x position derived from anchor; y baseline lands at top of remaining inner (just above plot region)
         let x = match theme.title_anchor {
             TextAnchor::Start => band.x,
             TextAnchor::Middle => band.x + band.w / 2.0,
             TextAnchor::End => band.x + band.w,
         };
         let y = band.y + title_line_h;
+        let subtitle_y = if title_spec.subtitle.is_some() {
+            Some(y + subtitle_line_h)
+        } else {
+            None
+        };
         let chart_title = ChartTitleLayout {
-            text: title_text.clone(),
+            text: title_spec.text.clone(),
+            subtitle: title_spec.subtitle.clone(),
             x,
             y,
+            subtitle_y,
             anchor: theme.title_anchor,
         };
         (Some(chart_title), rest)

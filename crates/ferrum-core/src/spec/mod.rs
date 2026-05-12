@@ -10,3 +10,5 @@ pub mod mark_style;
 pub use mark_style::MarkKwargsSpec;
 pub mod position;
 pub use position::PositionAdjust;
+pub mod title;
+pub use title::TitleSpec;

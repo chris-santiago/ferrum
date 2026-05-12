@@ -69,7 +69,7 @@ pub struct ChartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<crate::spec::position::PositionAdjust>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<crate::spec::title::TitleSpec>,
     /// When `Some(false)`, the x axis (line, ticks, tick labels, title) is
     /// suppressed entirely — used by clustermap dendrogram panels and
     /// JointChart marginal panels to keep their cells label-free. `None` /
@@ -117,7 +117,7 @@ impl ChartSpec {
         facet: Option<&Bound<'_, PyAny>>,
         mark_style: Option<&Bound<'_, PyAny>>,
         position: Option<&Bound<'_, PyAny>>,
-        title: Option<String>,
+        title: Option<&Bound<'_, PyAny>>,
         axis_x: Option<bool>,
         axis_y: Option<bool>,
     ) -> PyResult<Self> {
@@ -170,6 +170,24 @@ impl ChartSpec {
         let position = position
             .map(|obj| crate::pyo3_serde::from_py(obj, "position"))
             .transpose()?;
+
+        // Schwabish SB1 (2026-05-11): accept ``title=`` as either a plain
+        // string (back-compat) or a dict shaped by ``Title.to_spec_dict()``.
+        // Strings widen to ``TitleSpec { text }`` with default anchor; dicts
+        // round-trip through ``pyo3_serde::from_py``.
+        let title = match title {
+            None => None,
+            Some(obj) => {
+                if let Ok(s) = obj.extract::<String>() {
+                    Some(crate::spec::title::TitleSpec {
+                        text: s,
+                        ..Default::default()
+                    })
+                } else {
+                    Some(crate::pyo3_serde::from_py(obj, "title")?)
+                }
+            }
+        };
 
         Ok(ChartSpec {
             data,
