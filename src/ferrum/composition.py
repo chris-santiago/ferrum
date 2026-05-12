@@ -4,23 +4,6 @@ from __future__ import annotations
 from typing import List, Optional
 
 
-# Matches axis decoration emitted by the renderer:
-#   <line ... stroke="#888888" .../>  axis lines + tick marks
-#   <text .../>                       tick labels + axis titles
-# Stripping these leaves only data marks (bars/lines/paths). Used by JointChart
-# and ClusterMapChart to clean up shrunken marginals/dendrograms where the
-# original axis labels would otherwise be tiny and overlap unreadably.
-## (Removed) `_strip_axis_decoration` post-rendering regex.
-##
-## Earlier JointChart / ClusterMapChart relied on a regex pass to remove
-## axis lines and `<text>` elements from marginal/dendrogram SVGs after
-## render. That approach was fragile (theme-color-hardcoded, would also
-## strip data labels) and is now replaced by spec-level suppression:
-## `Chart.axis(show=False)` sets `ChartSpec.axis_x = Some(false)` /
-## `axis_y = Some(false)`, and the Rust layout engine omits the axis
-## layouts entirely.
-
-
 class _CompositeBase:
     """Base for HConcat/VConcat. Holds a list of children + spacing."""
 
