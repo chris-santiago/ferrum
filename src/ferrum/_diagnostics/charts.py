@@ -706,6 +706,19 @@ def _importance_chart_from_source(
 _SHAP_ORDER_VALUES: frozenset[str] = frozenset({"abs_mean", "max"})
 
 
+def _shap_select_class(sv: pl.DataFrame, *, per_class: bool) -> pl.DataFrame:
+    """Either return all rows (``per_class=True``) or filter to the first
+    ``class_label`` group (``per_class=False``). On regression and binary
+    classifiers the single-group filter is a no-op."""
+    if per_class:
+        return sv
+    classes = sv["class_label"].unique(maintain_order=True)
+    if classes.len() <= 1:
+        return sv
+    first_class = classes[0]
+    return sv.filter(pl.col("class_label") == first_class)
+
+
 def _shap_order_features(
     sv: pl.DataFrame, *, order: str, max_display: int,
 ) -> list[str]:
@@ -732,12 +745,20 @@ def _shap_beeswarm_chart_from_source(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     theme: Any = None,
 ):
-    """Beeswarm chart: per-sample shap values colored by feature value."""
+    """Beeswarm chart: per-sample shap values colored by feature value.
+
+    ``per_class=True`` on a multi-class classifier returns a faceted chart
+    with one beeswarm panel per class; ``per_class=False`` (default)
+    renders a single panel using the first class_label group (the only
+    group on regression and binary classifiers).
+    """
     import ferrum
 
     sv = source.shap_values(background=background)
+    sv = _shap_select_class(sv, per_class=per_class)
     keep = _shap_order_features(sv, order=order, max_display=max_display)
     plot_df = sv.filter(pl.col("feature").is_in(keep))
 
@@ -749,6 +770,8 @@ def _shap_beeswarm_chart_from_source(
     chart = ferrum.Chart(plot_df).mark_shap_beeswarm(
         max_display=max_display, order=order, x_scale_domain=domain,
     )
+    if per_class and plot_df["class_label"].n_unique() > 1:
+        chart = chart.facet(col="class_label")
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -760,6 +783,7 @@ def _shap_bar_chart_from_source(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     theme: Any = None,
 ):
     """SHAP aggregated bar chart: mean(|shap_value|) per feature.
@@ -770,6 +794,11 @@ def _shap_bar_chart_from_source(
     ``max(|shap_value|)`` to emphasize features with high-impact outliers.
     The output column is named ``abs_mean_shap`` regardless of the
     aggregation so the downstream mark's data contract stays stable.
+
+    ``per_class=True`` on a multi-class classifier facets the chart by
+    ``class_label`` (one bar panel per class). ``per_class=False``
+    (default) renders a single panel using the first class_label group
+    (the only group on regression and binary classifiers).
     """
     if order not in _SHAP_ORDER_VALUES:
         raise ValueError(
@@ -781,17 +810,21 @@ def _shap_bar_chart_from_source(
     expr = pl.col("shap_value").abs()
     agg_expr = expr.mean() if order == "abs_mean" else expr.max()
     sv = source.shap_values(background=background)
+    sv = _shap_select_class(sv, per_class=per_class)
+    group_keys = ["class_label", "feature"] if per_class else ["feature"]
     agg = (
-        sv.group_by("feature")
+        sv.group_by(group_keys)
         .agg(agg_expr.alias("abs_mean_shap"))
         .sort("abs_mean_shap", descending=True)
-        .head(max_display)
+        .head(max_display * sv["class_label"].n_unique() if per_class else max_display)
     )
     x_max = float(agg["abs_mean_shap"].max())
     domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
     chart = ferrum.Chart(agg).mark_shap_bar(
         max_display=max_display, x_scale_domain=domain,
     )
+    if per_class and agg["class_label"].n_unique() > 1:
+        chart = chart.facet(col="class_label")
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -804,6 +837,7 @@ def _shap_waterfall_chart_from_source(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     theme: Any = None,
 ):
     """Waterfall chart for a single sample's SHAP contributions.
@@ -814,11 +848,17 @@ def _shap_waterfall_chart_from_source(
     ``"max"`` ranks by ``max(|shap_value|)``. The top ``max_display``
     features are kept and rendered in descending rank order; the
     waterfall's cumulative sum follows that same order.
+
+    ``per_class=True`` on a multi-class classifier facets the chart by
+    ``class_label`` (one waterfall panel per class for the same sample).
+    ``per_class=False`` (default) renders a single panel using the first
+    class_label group.
     """
     import ferrum
     import numpy as np
 
     sv = source.shap_values(background=background)
+    sv = _shap_select_class(sv, per_class=per_class)
     one = sv.filter(pl.col("sample_id") == sample_idx)
     if one.height == 0:
         raise ValueError(

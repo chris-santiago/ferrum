@@ -285,6 +285,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         max_display: int = 20,
         order: str = "abs_mean",
         background: Any = None,
+        per_class: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -292,6 +293,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.max_display = max_display
         self.order = order
         self.background = background
+        self.per_class = per_class
 
     def _materialize(self) -> None:
         sv = self._shap_dataframe()
@@ -308,6 +310,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             max_display=self.max_display,
             order=self.order,
             background=self.background,
+            per_class=self.per_class,
             theme=self.theme,
         )
 
@@ -326,6 +329,7 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         max_display: int = 20,
         order: str = "abs_mean",
         background: Any = None,
+        per_class: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -333,6 +337,7 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.max_display = max_display
         self.order = order
         self.background = background
+        self.per_class = per_class
 
     def _materialize(self) -> None:
         sv = self._shap_dataframe()
@@ -349,6 +354,7 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             max_display=self.max_display,
             order=self.order,
             background=self.background,
+            per_class=self.per_class,
             theme=self.theme,
         )
 
@@ -393,6 +399,7 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         max_display: int = 20,
         order: str = "abs_mean",
         background: Any = None,
+        per_class: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -405,6 +412,7 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.max_display = max_display
         self.order = order
         self.background = background
+        self.per_class = per_class
 
     def _materialize(self) -> None:
         sv = self._shap_dataframe()
@@ -420,5 +428,6 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             max_display=self.max_display,
             order=self.order,
             background=self.background,
+            per_class=self.per_class,
             theme=self.theme,
         )

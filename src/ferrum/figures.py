@@ -682,10 +682,15 @@ def shap_beeswarm_chart(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """SHAP beeswarm chart — per-sample SHAP scatter colored by z-scored value.
+
+    ``per_class=True`` on a multi-class classifier facets the chart by
+    class. ``per_class=False`` (default) renders a single panel using
+    the first class (the only group on regression and binary).
 
     See :func:`shap_chart` for shared parameter docstring (this function
     is the dedicated sibling for ``kind="beeswarm"``).
@@ -702,6 +707,7 @@ def shap_beeswarm_chart(
         max_display=max_display,
         order=order,
         background=background,
+        per_class=per_class,
         theme=theme,
     )
 
@@ -714,10 +720,15 @@ def shap_bar_chart(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """SHAP bar chart — mean absolute SHAP per feature.
+
+    ``per_class=True`` on a multi-class classifier facets the chart by
+    class. ``per_class=False`` (default) renders a single panel using
+    the first class.
 
     See :func:`shap_chart` for shared parameter docstring (this function
     is the dedicated sibling for ``kind="bar"``).
@@ -734,6 +745,7 @@ def shap_bar_chart(
         max_display=max_display,
         order=order,
         background=background,
+        per_class=per_class,
         theme=theme,
     )
 
@@ -747,10 +759,16 @@ def shap_waterfall_chart(
     max_display: int = 20,
     order: str = "abs_mean",
     background: Any = None,
+    per_class: bool = False,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """SHAP waterfall chart — cumulative per-feature contributions for one sample.
+
+    ``per_class=True`` on a multi-class classifier facets the chart by
+    class (one waterfall panel per class for the same sample).
+    ``per_class=False`` (default) renders a single panel using the first
+    class.
 
     See :func:`shap_chart` for shared parameter docstring (this function
     is the dedicated sibling for ``kind="waterfall"``).  ``sample_idx``
@@ -769,6 +787,7 @@ def shap_waterfall_chart(
         max_display=max_display,
         order=order,
         background=background,
+        per_class=per_class,
         theme=theme,
     )
 

@@ -248,6 +248,38 @@ def test_shap_chart_waterfall_bad_sample_idx():
         ferrum.shap_chart(source, kind="waterfall", sample_idx=999_999)
 
 
+def _multiclass_source():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return ferrum.ModelSource(model, X, df["y"], random_state=0)
+
+
+def test_shap_beeswarm_chart_per_class_multiclass():
+    """per_class=True on a multi-class classifier facets by class_label."""
+    source = _multiclass_source()
+    chart = ferrum.shap_beeswarm_chart(source, per_class=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # Per-class beeswarm renders one panel per class; n_circles equals
+    # n_samples * n_features * n_classes.
+    sv = source.shap_values()
+    expected = sv.height  # already n_samples * n_features * n_classes
+    assert svg.count("<circle ") == expected
+
+
+def test_shap_bar_chart_per_class_multiclass():
+    source = _multiclass_source()
+    chart = ferrum.shap_bar_chart(source, per_class=True)
+    assert "<svg" in chart.show_svg()
+
+
+def test_shap_waterfall_chart_per_class_multiclass():
+    source = _multiclass_source()
+    chart = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True)
+    assert "<svg" in chart.show_svg()
+
+
 def test_shap_chart_invalid_kind():
     source, _, _ = _ridge_source()
     with pytest.raises(ValueError, match="kind="):
