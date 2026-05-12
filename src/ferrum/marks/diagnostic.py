@@ -610,6 +610,7 @@ def desugar_shap_beeswarm(
 
         return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
 
+    from ferrum.encoding import Color
     from ferrum.position import Jitter
 
     layers: list = [
@@ -618,7 +619,7 @@ def desugar_shap_beeswarm(
             encoding={
                 "x": _x_channel("shap_value"),
                 "y": "feature",
-                "color": "feature_value_normalized",
+                "color": Color("feature_value_normalized", scheme="rdbu"),
             },
             position=Jitter(axis="y", width=0.6, seed=42),
         ),

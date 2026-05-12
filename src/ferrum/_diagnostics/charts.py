@@ -1231,6 +1231,12 @@ def _shap_beeswarm_chart_from_source(
     sv = _shap_select_class(sv, per_class=per_class)
     keep = _shap_order_features(sv, order=order, max_display=max_display)
     plot_df = sv.filter(pl.col("feature").is_in(keep))
+    # Sort rows so features appear in descending mean-|SHAP| order (keep[0]
+    # is most important). Rust's distinct_values_in_order uses encounter order
+    # to build the ordinal-y domain, so row order drives axis ordering.
+    plot_df = plot_df.with_columns(
+        pl.col("feature").cast(pl.Enum(keep)).alias("_feature_order")
+    ).sort("_feature_order").drop("_feature_order")
 
     is_faceted = per_class and plot_df["class_label"].n_unique() > 1
     x_min = float(plot_df["shap_value"].min())
