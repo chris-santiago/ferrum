@@ -12,9 +12,17 @@ _DODGE_ELIGIBLE = frozenset([
     "histogram", "density",
 ])
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])
-_STACK_ELIGIBLE = frozenset(["bar", "area", "ribbon",
-                              # composite marks
-                              "histogram", "density"])
+_STACK_ELIGIBLE = frozenset([
+    # Rect-style marks: y maps to segment TOP (renderer draws base→top).
+    "bar", "area", "ribbon",
+    # Annotation-style marks (Schwabish SB-followup 2026-05-12): y maps
+    # to segment MIDPOINT so a same-data overlay lands at the visual
+    # centre of each stacked-bar segment (e.g. per-segment count text
+    # on class_prediction_error_chart).
+    "text", "point", "rule", "tick",
+    # Composite marks that desugar to bar/area underneath:
+    "histogram", "density",
+])
 
 
 # ---- Valid-value sets --------------------------------------------------------

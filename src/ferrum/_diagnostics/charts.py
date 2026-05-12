@@ -846,80 +846,22 @@ def _class_prediction_error_chart_from_source(
     Reuses the unnormalized confusion-matrix output as the underlying
     long-form data.
 
-    Schwabish SB-followup (2026-05-12): ``show_counts=True`` overlays
-    per-segment count text at the vertical centre of each bar segment
-    (skipped for empty cells where ``value == 0``). The centre is
-    computed in Python as ``cumsum(value) - value/2`` per ``predicted``
-    bar, regardless of ``normalize``: the bar segment encodes the
-    proportion, the text annotation always encodes the raw count so
-    both pieces of information are legible.
+    Schwabish SB-followup (2026-05-12): ``show_counts=True`` (default)
+    routes through ``Chart.mark_class_prediction_error(show_counts=...)``
+    which owns both the ``_count_text`` sentinel column (via its
+    ``data_transform``) and the text layer emitted by
+    ``desugar_class_prediction_error``. The text layer carries the
+    same ``Stack`` position adjustment as the bar layer; the renderer
+    maps text-mark y values to segment MIDPOINTS so labels land
+    centred without any Python-side cumsum duplication. Chart-API
+    users get the same behaviour via
+    ``Chart(df).mark_class_prediction_error(show_counts=True)``.
     """
     import ferrum
     df = source.confusion_matrix(normalize=None)
-    chart = ferrum.Chart(df).mark_class_prediction_error(normalize=normalize)
-
-    if show_counts and df.height > 0:
-        # Compute per-predicted cumulative stack midpoints. For the
-        # ``normalize=False`` (count) path the y-axis is raw counts; for
-        # ``normalize=True`` (100% stack) the y-axis is the proportion
-        # within each bar — so the midpoint y must be computed against
-        # the same per-bar normalization the renderer applies.
-        sort_keys = ["predicted", "actual"]
-        plot_df = df.sort(sort_keys)
-        if normalize:
-            totals = plot_df.group_by("predicted").agg(
-                pl.col("value").sum().alias("_predicted_total"),
-            )
-            plot_df = plot_df.join(totals, on="predicted", how="left")
-            plot_df = plot_df.with_columns(
-                (pl.col("value") / pl.col("_predicted_total")).alias(
-                    "_count_prop",
-                ),
-            )
-            plot_df = plot_df.with_columns(
-                pl.col("_count_prop").cum_sum().over("predicted").alias(
-                    "_count_cumsum",
-                ),
-            )
-            plot_df = plot_df.with_columns(
-                (pl.col("_count_cumsum") - pl.col("_count_prop") / 2).alias(
-                    "_count_y",
-                ),
-            )
-        else:
-            plot_df = plot_df.with_columns(
-                pl.col("value").cum_sum().over("predicted").alias(
-                    "_count_cumsum",
-                ),
-            )
-            plot_df = plot_df.with_columns(
-                (pl.col("_count_cumsum") - pl.col("value") / 2).alias(
-                    "_count_y",
-                ),
-            )
-        # Render integer counts (no decimal noise on cell labels).
-        plot_df = plot_df.with_columns(
-            pl.when(pl.col("value") > 0)
-              .then(pl.col("value").cast(pl.Int64).cast(pl.Utf8))
-              .otherwise(None)
-              .alias("_count_text"),
-        )
-        # Rebuild the bar chart on the augmented frame so the text
-        # layer is a true same-data overlay (composes via ``+``).
-        chart = ferrum.Chart(plot_df).mark_class_prediction_error(
-            normalize=normalize,
-        )
-        text_layer = (
-            ferrum.Chart(plot_df)
-            .mark_text(align="center")
-            .encode(
-                x="predicted",
-                y="_count_y",
-                text="_count_text",
-            )
-        )
-        chart = chart + text_layer
-
+    chart = ferrum.Chart(df).mark_class_prediction_error(
+        normalize=normalize, show_counts=show_counts,
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart

@@ -204,10 +204,16 @@ class TestStack:
         with pytest.raises(ValueError, match="offset"):
             Stack(offset="bogus")
 
-    def test_eligibility_rejects_point(self):
-        df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-        with pytest.raises(TypeError, match="Stack"):
-            fe.Chart(df).mark_point(position=Stack())
+    def test_eligibility_accepts_annotation_marks(self):
+        # Schwabish SB-followup (2026-05-12): Stack now accepts the
+        # annotation-style marks (text, point, rule, tick); their y
+        # values map to per-segment midpoints so annotations land at
+        # the visual centre of each stacked-bar segment.
+        df = pl.DataFrame({"x": ["a", "b"], "y": [3.0, 4.0]})
+        fe.Chart(df).mark_text(position=Stack()).encode(x="x", y="y")
+        fe.Chart(df).mark_point(position=Stack()).encode(x="x", y="y")
+        fe.Chart(df).mark_rule(position=Stack()).encode(x="x", y="y")
+        fe.Chart(df).mark_tick(position=Stack()).encode(x="x", y="y")
 
     def test_eligibility_accepts_bar_area_ribbon(self):
         df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
@@ -257,18 +263,23 @@ class TestEligibilityMatrix:
             ("bar",       "Stack",    True),
             ("point",     "Dodge",    True),
             ("point",     "Jitter",   True),
-            ("point",     "Stack",    False),
+            # Schwabish SB-followup (2026-05-12): point/text/rule/tick
+            # accept Stack — y maps to segment midpoint for
+            # annotations on stacked bars.
+            ("point",     "Stack",    True),
             ("line",      "Dodge",    False),
             ("line",      "Jitter",   False),
             ("line",      "Stack",    False),
             ("rule",      "Dodge",    False),
             ("rule",      "Jitter",   False),
+            ("rule",      "Stack",    True),
             ("area",      "Stack",    True),
             ("area",      "Dodge",    False),
             ("ribbon",    "Stack",    True),
             ("ribbon",    "Dodge",    True),
             ("tick",      "Jitter",   True),
             ("tick",      "Dodge",    False),
+            ("tick",      "Stack",    True),
             ("swarm",     "Jitter",   True),
             ("swarm",     "Dodge",    True),
             ("violin",    "Dodge",    True),

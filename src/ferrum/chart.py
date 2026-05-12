@@ -2238,6 +2238,7 @@ class Chart:
         *,
         normalize: bool = False,
         color_field: str = "actual",
+        show_counts: bool = True,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -2255,6 +2256,10 @@ class Chart:
             Whether to normalise each bar to 100%.  Default is ``False``.
         color_field : str, optional
             Column driving the segment colour.  Default is ``"actual"``.
+        show_counts : bool, optional
+            Whether to overlay per-segment count text at the segment
+            centre.  Default is ``True`` (Schwabish SB-followup
+            2026-05-12).  Empty segments are skipped.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -2274,16 +2279,30 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_class_prediction_error
+
+        def _cpe_prep(df):
+            if not show_counts or "value" not in df.columns:
+                return df
+            import polars as pl
+            return df.with_columns(
+                pl.when(pl.col("value") > 0)
+                  .then(pl.col("value").cast(pl.Int64).cast(pl.Utf8))
+                  .otherwise(None)
+                  .alias("_count_text"),
+            )
+
         return self._set_composite_mark(
             "class_prediction_error",
             desugar_class_prediction_error,
             {
                 "normalize": normalize,
                 "color_field": color_field,
+                "show_counts": show_counts,
                 **mark_kwargs,
             },
             placeholder="point",
             position=position,
+            data_transform=_cpe_prep,
         )
 
     def mark_importance(

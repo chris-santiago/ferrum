@@ -43,10 +43,10 @@ pub(crate) fn axis_batch_for_y<'a>(
     y_field: &str,
     primary_batch: &'a RecordBatch,
 ) -> Cow<'a, RecordBatch> {
-    let Some((by, offset, layer_enc)) = find_stack_for_y(spec, y_field) else {
+    let Some((by, offset, layer_enc, mark)) = find_stack_for_y(spec, y_field) else {
         return Cow::Borrowed(primary_batch);
     };
-    match apply_stack(primary_batch, by, offset, layer_enc) {
+    match apply_stack(primary_batch, by, offset, layer_enc, mark) {
         Ok(b) => Cow::Owned(b),
         Err(_) => Cow::Borrowed(primary_batch),
     }
@@ -62,6 +62,7 @@ fn find_stack_for_y<'a>(
     Option<&'a str>,
     &'a StackOffset,
     &'a crate::spec::encoding::Encoding,
+    crate::spec::mark::Mark,
 )> {
     if let Some(layers) = spec.layers.as_ref() {
         for layer in layers {
@@ -77,14 +78,14 @@ fn find_stack_for_y<'a>(
             if let Some(PositionAdjust::Stack { by, offset }) =
                 layer.position.as_ref().or(spec.position.as_ref())
             {
-                return Some((by.as_deref(), offset, &layer.encoding));
+                return Some((by.as_deref(), offset, &layer.encoding, layer.mark));
             }
         }
     }
     if let Some(PositionAdjust::Stack { by, offset }) = spec.position.as_ref() {
         let spec_y = spec.encoding.y.as_ref().map(|e| e.field.as_str());
         if spec_y == Some(y_field) {
-            return Some((by.as_deref(), offset, &spec.encoding));
+            return Some((by.as_deref(), offset, &spec.encoding, spec.mark));
         }
     }
     None
@@ -101,6 +102,7 @@ pub(crate) fn apply_position(
     position: Option<&PositionAdjust>,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
+    mark: crate::spec::mark::Mark,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     let Some(p) = position else { return Ok(batch.clone()); };
     match p {
@@ -112,7 +114,7 @@ pub(crate) fn apply_position(
             apply_jitter(batch, axis, *width, *seed, scales, encoding)
         }
         PositionAdjust::Stack { by, offset } => {
-            apply_stack(batch, by.as_deref(), offset, encoding)
+            apply_stack(batch, by.as_deref(), offset, encoding, mark)
         }
     }
 }
@@ -375,11 +377,28 @@ fn apply_jitter(
 // Stack
 // ---------------------------------------------------------------------------
 
+/// Position-adjust a layer's batch for a stacked layout.
+///
+/// Computes per-row segment bounds within each x-bin and writes them
+/// back to the batch as the y column (top) plus a synthetic
+/// ``__stack_y_base__`` column. The y output depends on the calling
+/// ``mark``:
+///
+/// - ``Bar``, ``Area``, ``Ribbon``, ``Rect`` — y = top of segment, so
+///   the renderer draws a rect from ``__stack_y_base__`` to y.
+/// - ``Text``, ``Point``, ``Rule``, ``Tick`` — y = midpoint of segment
+///   (Schwabish SB-followup 2026-05-12), so an annotation lands at the
+///   visual centre of the stacked-bar segment for the same row. This
+///   is what enables ``mark_text`` segment labels on stacked bars (e.g.
+///   ``class_prediction_error_chart(show_counts=True)``) without
+///   duplicating the cumsum in Python.
+/// - Other marks — fall back to the segment-top output (unchanged).
 pub(crate) fn apply_stack(
     batch: &RecordBatch,
     by_field: Option<&str>,
     offset: &crate::spec::position::StackOffset,
     encoding: &crate::spec::encoding::Encoding,
+    mark: crate::spec::mark::Mark,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::StackOffset;
     use std::collections::BTreeMap;
@@ -504,8 +523,20 @@ pub(crate) fn apply_stack(
         }
     }
 
+    // Schwabish SB-followup (2026-05-12): annotation-style marks
+    // (text/point/rule/tick) on a stacked layer land at the visual
+    // CENTRE of each segment. Rect-style marks (bar/area/ribbon/rect)
+    // keep the segment-top semantics so they draw from base → top.
+    use crate::spec::mark::Mark;
+    let y_output: Vec<f64> = match mark {
+        Mark::Text | Mark::Point | Mark::Rule | Mark::Tick => (0..ya_len)
+            .map(|i| 0.5 * (new_y[i] + new_y_base[i]))
+            .collect(),
+        _ => new_y.clone(),
+    };
+
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    cols[yi] = Arc::new(Float64Array::from(new_y));
+    cols[yi] = Arc::new(Float64Array::from(y_output));
     // Rebuild schema with the y column promoted to Float64 (in case the
     // input was UInt64, e.g. Bin's `count` column).
     let mut new_fields: Vec<Field> = batch
@@ -588,7 +619,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
         assert_eq!(out.num_columns(), b.num_columns());
     }
@@ -598,7 +629,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, None, &s, &enc).unwrap();
+        let out = apply_position(&b, None, &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
     }
 
@@ -608,7 +639,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         // Two unique x values: 1.0, 2.0 → bandwidth = 1.0.
         // Two groups (a, b) → sub_band = 0.5; offsets a=-0.25, b=+0.25.
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -638,7 +669,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
         assert_eq!(xa.value(1), 2.0);
@@ -650,8 +681,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(42) };
-        let a = apply_position(&b, Some(&pos), &s, &enc).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -665,8 +696,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: None };
-        let a = apply_position(&b, Some(&pos), &s, &enc).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -680,7 +711,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Group order: a=0, b=1. At x=1: a=10 → 10, b=20 → 30. At x=2: a=30 → 30, b=40 → 70.
         assert_eq!(ya.value(0), 10.0);
@@ -698,7 +729,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Normalize,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // For each x bin the top of the highest stack should be 1.0.
         // x=1: top group (b) reaches 1.0 → row 1.
@@ -713,12 +744,38 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Center };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Bar).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30, mid=15. a row goes 0..10 → top at 10-15=-5.
         // b row goes 10..30 → top at 30-15=15.
         assert!((ya.value(0) + 5.0).abs() < 1e-9);
         assert!((ya.value(1) - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stack_text_emits_segment_midpoint_y() {
+        // Schwabish SB-followup (2026-05-12): annotation-style marks
+        // (text/point/rule/tick) on a stacked layer land at the
+        // visual centre of each segment instead of the top.
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero };
+        let out = apply_position(&b, Some(&pos), &s, &enc, crate::spec::mark::Mark::Text).unwrap();
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        // x=1: a segment 0..10 → mid 5;  b segment 10..30 → mid 20.
+        // x=2: a segment 0..30 → mid 15; b segment 30..70 → mid 50.
+        assert!((ya.value(0) - 5.0).abs()  < 1e-9, "row 0 mid={}", ya.value(0));
+        assert!((ya.value(1) - 20.0).abs() < 1e-9, "row 1 mid={}", ya.value(1));
+        assert!((ya.value(2) - 15.0).abs() < 1e-9, "row 2 mid={}", ya.value(2));
+        assert!((ya.value(3) - 50.0).abs() < 1e-9, "row 3 mid={}", ya.value(3));
+        // __stack_y_base__ still carries the segment bottoms unchanged.
+        let base = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(base).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ba.value(0), 0.0);
+        assert_eq!(ba.value(1), 10.0);
+        assert_eq!(ba.value(2), 0.0);
+        assert_eq!(ba.value(3), 30.0);
     }
 }
 

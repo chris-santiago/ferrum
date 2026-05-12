@@ -984,6 +984,7 @@ def desugar_class_prediction_error(
     *,
     normalize: bool = False,
     color_field: str = "actual",
+    show_counts: bool = True,
 ) -> tuple:
     """Stacked-bar diagnostic of predicted-class composition.
 
@@ -991,18 +992,34 @@ def desugar_class_prediction_error(
     ``ModelSource.confusion_matrix(normalize=None)``). One bar per
     ``predicted`` value, segments colored by ``actual``. ``normalize=True``
     switches to a per-bar 100% stack via the Stack position adjustment.
+
+    Schwabish SB-followup (2026-05-12): ``show_counts=True`` (default)
+    appends a same-data ``mark_text`` layer with the same Stack
+    adjustment. The renderer's Stack pass maps text-mark y values to
+    the segment MIDPOINT (versus the segment TOP for the bar layer),
+    so each count label lands at the visual centre of its stacked
+    segment without any Python-side cumsum duplication. Data must
+    carry a ``_count_text`` Utf8 column (the chart builder formats it
+    from ``value``; null on empty segments).
     """
     del x_field, y_field
     from ferrum.position import Stack
 
     stack = Stack(by=color_field, offset="normalize" if normalize else "zero")
-    return ("__layered__", [], None, None, [
+    layers: list = [
         _Layer(
             mark="bar",
             encoding={"x": "predicted", "y": "value", "color": color_field},
             position=stack,
         ),
-    ])
+    ]
+    if show_counts:
+        layers.append(_Layer(
+            mark="text",
+            encoding={"x": "predicted", "y": "value", "text": "_count_text"},
+            position=stack,
+        ))
+    return ("__layered__", [], None, None, layers)
 
 
 # --- 10f: clustering / manifold / decision boundary -------------------
