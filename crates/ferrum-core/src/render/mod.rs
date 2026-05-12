@@ -47,10 +47,13 @@ pub enum RenderError {
     /// A position-adjustment pass (Dodge/Jitter/Stack) rejected its inputs.
     /// `adjustment` names the adjustment; `reason` is the user-facing detail.
     PositionAdjustFailed { adjustment: &'static str, reason: String },
-    /// A column carried an Arrow dtype the renderer cannot interpret for
-    /// the given encoding channel. Display preserves the prior prose so
-    /// existing diagnostics remain searchable.
-    UnsupportedDtype { channel: String, dtype: String },
+    /// A column carried an Arrow dtype the renderer cannot interpret.
+    /// `field` is the column name; `context` is an optional channel /
+    /// scale tag (e.g. `"size"`, `"opacity"`, `"scale"`) used to
+    /// disambiguate when the same column feeds multiple resolution
+    /// passes. Display: `"column '<field>' has unsupported dtype: <dtype>"`
+    /// or `"<context>: column '<field>' has unsupported dtype: <dtype>"`.
+    UnsupportedDtype { field: String, dtype: String, context: Option<&'static str> },
     /// The unioned numeric/temporal extent for an axis or color channel
     /// produced no finite values (all rows null/NaN or empty after filter).
     EmptyDomain { channel: String, field: String },
@@ -79,8 +82,10 @@ impl std::fmt::Display for RenderError {
                 write!(f, "PNG rasterization failed: {s}"),
             Self::PositionAdjustFailed { adjustment, reason } =>
                 write!(f, "{adjustment}: {reason}"),
-            Self::UnsupportedDtype { channel, dtype } =>
-                write!(f, "column '{channel}' has unsupported dtype: {dtype}"),
+            Self::UnsupportedDtype { field, dtype, context } => match context {
+                Some(ctx) => write!(f, "{ctx}: column '{field}' has unsupported dtype: {dtype}"),
+                None => write!(f, "column '{field}' has unsupported dtype: {dtype}"),
+            },
             Self::EmptyDomain { channel, field } =>
                 write!(f, "{channel}: no usable values found for field '{field}'"),
         }

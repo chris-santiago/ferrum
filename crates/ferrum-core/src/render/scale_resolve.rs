@@ -512,8 +512,9 @@ fn numeric_domain_union(
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut accumulate = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
         let (a, b) = column_min_max_f64(c).map_err(|_| RenderError::UnsupportedDtype {
-            channel: source_field.to_string(),
+            field: source_field.to_string(),
             dtype: format!("{:?}", c.data_type()),
+            context: None,
         })?;
         if a < mn { mn = a; }
         if b > mx { mx = b; }
@@ -596,19 +597,19 @@ fn build_from_scale_spec(
 
     Ok(match scale_spec {
         ScaleSpec::Linear { domain, range, nice, clamp, padding, .. } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, *nice))
         }
         ScaleSpec::Log { base, domain, range, nice, clamp, padding } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Log(LogScale::new_internal(d, r, *base, *clamp, *nice))
         }
         ScaleSpec::Time { domain, range, nice, clamp, padding } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, *clamp, *nice))
         }
         ScaleSpec::Symlog { constant, domain, range, nice, clamp, padding } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, *clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -640,14 +641,16 @@ fn resolve_continuous_domain_and_range(
     range: &Option<Vec<f64>>,
     padding: Option<f64>,
     col: &dyn Array,
+    field: &str,
     pr: (f64, f64),
 ) -> Result<(Vec<f64>, Vec<f64>), RenderError> {
     let d = match domain {
         Some(d) => d.clone(),
         None => {
             let (mn, mx) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-                channel: "scale".to_string(),
+                field: field.to_string(),
                 dtype: format!("{:?}", col.data_type()),
+                context: Some("scale"),
             })?;
             vec![mn, mx]
         }
@@ -769,8 +772,9 @@ pub fn build_size_scale(
         .column_by_name(&size_enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: size_enc.field.clone() })?;
     let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-        channel: format!("size:{}", size_enc.field),
+        field: size_enc.field.clone(),
         dtype: format!("{:?}", col.data_type()),
+        context: Some("size"),
     })?;
     let (lo, hi) = if let Some(crate::spec::encoding::ScaleSpec::Linear { range, .. })
         = &size_enc.scale
@@ -833,8 +837,9 @@ pub fn build_opacity_scale(
         .column_by_name(&op_enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: op_enc.field.clone() })?;
     let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
-        channel: format!("opacity:{}", op_enc.field),
+        field: op_enc.field.clone(),
         dtype: format!("{:?}", col.data_type()),
+        context: Some("opacity"),
     })?;
     let inner = ScaleKind::Linear(LinearScale::new_internal(
         vec![min, max],

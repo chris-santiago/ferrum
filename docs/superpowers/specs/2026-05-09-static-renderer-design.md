@@ -548,9 +548,21 @@ pub enum RenderError {
     InvalidColor(String),
     EncodingTypeMismatch { channel: &'static str, expected: &'static str, got: String },
     TransformFailed(String),       // wraps Phase 5 errors
-    ScaleResolutionFailed(String), // wraps Phase 4 errors
+    ScaleResolutionFailed(String), // wraps Phase 4 errors (catch-all for facet-filter / transform-output)
     LayoutFailed(String),          // wraps Phase 6 errors
     ResvgFailed(String),           // PNG path only
+    // Phase 9 coherence-pass additions (F5, 2026-05-11): typed variants
+    // that replaced `Other(String)` and several `ScaleResolutionFailed`
+    // sites. `Other` was retired.
+    PositionAdjustFailed { adjustment: &'static str, reason: String },
+    // F5 residual cleanup (2026-05-12): renamed `channel` → `field`
+    // (the column name is what callers always pass), and added
+    // `context: Option<&'static str>` for sites that pre-F5 prefixed
+    // the prose with a scale tag ("size", "opacity", "scale"). Display:
+    // `"<context>: column '<field>' has unsupported dtype: <dtype>"`
+    // when context is set; otherwise `"column '<field>' has …"`.
+    UnsupportedDtype { field: String, dtype: String, context: Option<&'static str> },
+    EmptyDomain { channel: String, field: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
