@@ -618,6 +618,7 @@ def class_prediction_error_chart(
     y: Any = None,
     *,
     normalize: bool = False,
+    show_counts: bool = True,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -641,6 +642,10 @@ def class_prediction_error_chart(
     normalize : bool, default False
         When ``True``, each bar is normalized to 100% (relative
         composition). When ``False``, bars show raw sample counts.
+    show_counts : bool, default True
+        When ``True``, overlays per-segment count text at the vertical
+        centre of each bar segment (empty segments — ``value == 0`` —
+        are skipped). Raw counts are shown regardless of ``normalize``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -659,7 +664,10 @@ def class_prediction_error_chart(
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _class_prediction_error_chart_from_source(
-        source, normalize=normalize, theme=theme,
+        source,
+        normalize=normalize,
+        show_counts=show_counts,
+        theme=theme,
     )
 
 
