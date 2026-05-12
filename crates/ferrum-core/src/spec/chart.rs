@@ -393,108 +393,28 @@ fn coerce_layers(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Layer>> {
 
 fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::core::TransformSpec>> {
     use pyo3::types::PyList;
+    use crate::transform::core::for_each_transform;
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
     let mut out = Vec::with_capacity(list.len());
-    for (i, item) in list.iter().enumerate() {
-        if let Ok(b) = item.extract::<crate::transform::bin::PyBin>() {
-            out.push(b.0);
-            continue;
+    'next_item: for (i, item) in list.iter().enumerate() {
+        macro_rules! try_extract {
+            ($($V:ident => $m:ident : $py:ident,)*) => {{
+                $(
+                    if let Ok(w) = item.extract::<crate::transform::$m::$py>() {
+                        out.push(w.0);
+                        continue 'next_item;
+                    }
+                )*
+            }};
         }
-        if let Ok(b) = item.extract::<crate::transform::bin_2d::PyBin2D>() {
-            out.push(b.0);
-            continue;
-        }
-        if let Ok(k) = item.extract::<crate::transform::kde::PyKde>() {
-            out.push(k.0);
-            continue;
-        }
-        if let Ok(s) = item.extract::<crate::transform::smooth::PySmooth>() {
-            out.push(s.0);
-            continue;
-        }
-        if let Ok(a) = item.extract::<crate::transform::aggregate::PyAggregate>() {
-            out.push(a.0);
-            continue;
-        }
-        if let Ok(s) = item.extract::<crate::transform::summary::PySummary>() {
-            out.push(s.0);
-            continue;
-        }
-        if let Ok(o) = item.extract::<crate::transform::outliers::PyOutliers>() {
-            out.push(o.0);
-            continue;
-        }
-        if let Ok(e) = item.extract::<crate::transform::error_extent::PyErrorExtent>() {
-            out.push(e.0);
-            continue;
-        }
-        if let Ok(b) = item.extract::<crate::transform::box_stats::PyBoxStats>() {
-            out.push(b.0);
-            continue;
-        }
-        if let Ok(v) = item.extract::<crate::transform::violin::PyViolin>() {
-            out.push(v.0);
-            continue;
-        }
-        if let Ok(k) = item.extract::<crate::transform::kde_2d::PyKde2D>() {
-            out.push(k.0);
-            continue;
-        }
-        if let Ok(c) = item.extract::<crate::transform::contour::PyContour>() {
-            out.push(c.0);
-            continue;
-        }
-        if let Ok(q) = item.extract::<crate::transform::qq::PyQq>() {
-            out.push(q.0);
-            continue;
-        }
-        if let Ok(l) = item.extract::<crate::transform::linkage::PyLinkage>() {
-            out.push(l.0);
-            continue;
-        }
-        if let Ok(r) = item.extract::<crate::transform::raster::PyRaster>() {
-            out.push(r.0);
-            continue;
-        }
-        if let Ok(h) = item.extract::<crate::transform::hex::PyHex>() {
-            out.push(h.0);
-            continue;
-        }
-        if let Ok(sw) = item.extract::<crate::transform::swarm::PySwarm>() {
-            out.push(sw.0);
-            continue;
-        }
-        if let Ok(u) = item.extract::<crate::transform::unpivot::PyUnpivot>() {
-            out.push(u.0);
-            continue;
-        }
-        if let Ok(r) = item.extract::<crate::transform::reorder::PyReorder>() {
-            out.push(r.0);
-            continue;
-        }
-        if let Ok(r) = item.extract::<crate::transform::reference_line::PyReferenceLine>() {
-            out.push(r.0);
-            continue;
-        }
-        if let Ok(lv) = item.extract::<crate::transform::letter_value::PyLetterValue>() {
-            out.push(lv.0);
-            continue;
-        }
-        if let Ok(lg) = item.extract::<crate::transform::logistic::PyLogistic>() {
-            out.push(lg.0);
-            continue;
-        }
-        if let Ok(g) = item.extract::<crate::transform::glm::PyGlm>() {
-            out.push(g.0);
-            continue;
-        }
-        if let Ok(rb) = item.extract::<crate::transform::robust::PyRobust>() {
-            out.push(rb.0);
-            continue;
-        }
+        for_each_transform!(try_extract);
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | ReferenceLine | LetterValue | Logistic | Glm | Robust"
+            "transforms[{i}]: unrecognized transform; expected one of \
+             Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | \
+             ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | \
+             Raster | Hex | Swarm | Unpivot | Reorder | ReferenceLine | \
+             LetterValue | Logistic | Glm | Robust"
         )));
     }
     Ok(out)
