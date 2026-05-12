@@ -431,8 +431,13 @@ class RepeatChart(_ChartLike):
     columns : int, optional
         Maximum number of columns for a wrapped 1-D repeat layout (no-op
         for 2-D row/column repeat).
-    resolve : object, optional
-        Reserved for future scale-resolution overrides (no-op today).
+    resolve : dict, optional
+        Per-channel scale-sharing overrides — e.g.
+        ``resolve={"x": "shared", "y": "independent"}``.  ``"shared"``
+        computes the union domain across all cells (and across every
+        layer of layered cells) and injects an explicit scale on every
+        participating chart so the axis ticks match.  ``"independent"``
+        (the default for unlisted channels) keeps per-cell domains.
 
     Raises
     ------
@@ -477,6 +482,19 @@ class RepeatChart(_ChartLike):
             )
         if columns is not None and columns <= 0:
             raise ValueError(f"RepeatChart: columns must be > 0; got {columns}")
+        if resolve is not None:
+            if not isinstance(resolve, dict):
+                raise ValueError(
+                    "RepeatChart: resolve must be a dict mapping channel names "
+                    "to 'shared' or 'independent'; got "
+                    f"{type(resolve).__name__}"
+                )
+            for ch, mode in resolve.items():
+                if mode not in ("shared", "independent"):
+                    raise ValueError(
+                        f"RepeatChart: resolve[{ch!r}]={mode!r}; "
+                        "expected 'shared' or 'independent'"
+                    )
         self.template = template
         self.row = list(row) if row is not None else None
         self.column = list(column) if column is not None else None
@@ -541,10 +559,40 @@ class RepeatChart(_ChartLike):
             repeat), or if the template references a ``Repeat.*``
             placeholder for an axis that was not populated.
         """
-        return [
+        cells = [
             (row_field, col_field, self._make_cell(row_field, col_field))
             for row_field, col_field in self._cell_coordinates()
         ]
+        return self._apply_resolve(cells)
+
+    def _apply_resolve(self, cells: list) -> list:
+        """Inject shared scales onto every cell per ``self.resolve``.
+
+        For each channel marked ``"shared"``, walks every cell (and every
+        layer of layered cells), computes the union domain, and re-emits
+        each cell with an explicit ``scale=`` dict on that channel.
+        ``"independent"`` channels are no-ops.  When no cell binds a
+        shared channel the channel is silently skipped — sharing a
+        channel that nothing uses is harmless.
+        """
+        if not self.resolve:
+            return cells
+        from ferrum._scale_share import compute_union_domain, inject_scale
+
+        shared = [ch for ch, mode in self.resolve.items() if mode == "shared"]
+        if not shared:
+            return cells
+        result = list(cells)
+        for channel in shared:
+            charts = [chart for _, _, chart in result]
+            scale_dict = compute_union_domain(charts, channel)
+            if scale_dict is None:
+                continue
+            result = [
+                (row_field, col_field, inject_scale(chart, channel, scale_dict))
+                for row_field, col_field, chart in result
+            ]
+        return result
 
     def _cell_coordinates(self) -> list:
         """Compute ``(row_field, col_field)`` pairs for every cell.

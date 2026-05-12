@@ -828,6 +828,25 @@ JointChart(center, *, top=None, right=None, ratio=5, spacing=10.0)
 > bumped from `0.02` (effectively zero) to `10.0` to match
 > `HConcatChart` / `VConcatChart`. Affected goldens were re-blessed.
 
+> **2026-05-11 (Phase 9, P2.5):** `RepeatChart` now ships the previously
+> dormant `columns`, `layer`, and `resolve` kwargs:
+>
+> - `columns: int` — wrap width for 1-D repeats (only `row=` or only
+>   `column=` is set). Defaults to a single row for column-only repeats
+>   and a single column for row-only repeats.
+> - `layer: list[str]` — each cell stacks one resolved template copy
+>   per layer field, combined via the `Chart +` overlay operator.
+>   Diagonal cells (when `diagonal=` is set on a 2-D grid) skip layering.
+> - `resolve: dict[str, "shared" | "independent"]` — per-channel scale
+>   sharing. `"shared"` computes the union domain across every layer of
+>   every cell and injects an explicit `scale=` dict so the participating
+>   axes match. `"independent"` keeps per-cell domains (the default for
+>   unlisted channels).
+>
+> Asymmetric `diagonal=` (set with `row != column`) is now a `ValueError`
+> at `expand()` time — previously it emitted a `UserWarning` and silently
+> dropped the diagonal template.
+
 Most users construct `JointChart` via `ferrum.jointplot(...)`.
 
 All compound views accept `.theme()`, `.properties()`, `.save()`, `.show()`.

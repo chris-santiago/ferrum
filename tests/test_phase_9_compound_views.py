@@ -304,6 +304,87 @@ class TestRepeatChart:
         with pytest.raises(ValueError, match="Repeat.layer but layer="):
             rc.expand()
 
+    def test_resolve_must_be_dict(self, iris_like):
+        tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        with pytest.raises(ValueError, match="resolve must be a dict"):
+            fe.RepeatChart(tpl, column=["sepal_length"], resolve="shared")
+
+    def test_resolve_rejects_unknown_mode(self, iris_like):
+        tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+            fe.RepeatChart(tpl, column=["sepal_length"], resolve={"x": "smart"})
+
+    def test_resolve_independent_is_noop(self, iris_like):
+        tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        rc_a = fe.RepeatChart(tpl, column=["sepal_length", "sepal_width"])
+        rc_b = fe.RepeatChart(
+            tpl, column=["sepal_length", "sepal_width"],
+            resolve={"x": "independent"},
+        )
+        # The encodings of both cell sets must match — independent is the
+        # default behavior and resolve= should not have rewritten any scale.
+        cells_a = rc_a.expand()
+        cells_b = rc_b.expand()
+        for (_, _, ca), (_, _, cb) in zip(cells_a, cells_b):
+            assert ca._encoding["x"].field == cb._encoding["x"].field
+            assert ca._encoding["x"]._kwargs == cb._encoding["x"]._kwargs
+
+    def test_resolve_shared_x_injects_union_domain(self):
+        # Two columns with disjoint ranges; resolve={"x": "shared"} should
+        # inject a scale dict with the union domain on every cell.
+        df = pl.DataFrame({
+            "small": [0.0, 1.0, 2.0, 3.0, 4.0],
+            "big":   [10.0, 12.0, 14.0, 18.0, 20.0],
+            "y":     [1, 2, 3, 4, 5],
+        })
+        tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
+        rc = fe.RepeatChart(tpl, column=["small", "big"], resolve={"x": "shared"})
+        cells = rc.expand()
+        assert len(cells) == 2
+        for _, _, chart in cells:
+            scale = chart._encoding["x"]._kwargs.get("scale")
+            assert isinstance(scale, dict)
+            assert scale["type"] == "linear"
+            assert scale["domain"] == [0.0, 20.0]
+
+    def test_resolve_shared_y_with_layered_cells(self):
+        # Each cell stacks two layers, each binding a different field on y.
+        # The shared-y domain must span ALL layer fields, not just the
+        # first.
+        df = pl.DataFrame({
+            "x":  [1, 2, 3, 4, 5],
+            "y1": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y2": [50.0, 60.0, 70.0, 80.0, 90.0],
+        })
+        tpl = fe.Chart(df).mark_line().encode(x="x", y=Repeat.layer)
+        rc = fe.RepeatChart(tpl, layer=["y1", "y2"], resolve={"y": "shared"})
+        cells = rc.expand()
+        assert len(cells) == 1
+        _, _, chart = cells[0]
+        # Layered cell: each layer's y encoding must carry the union domain.
+        assert chart._layers is not None
+        for layer in chart._layers:
+            scale = layer.encoding["y"]._kwargs.get("scale")
+            assert isinstance(scale, dict)
+            assert scale["type"] == "linear"
+            assert scale["domain"] == [1.0, 90.0]
+
+    def test_resolve_shared_categorical_color(self):
+        df = pl.DataFrame({
+            "x": [1, 2, 3, 4],
+            "c1": ["a", "b", "a", "b"],
+            "c2": ["b", "c", "c", "a"],
+        })
+        tpl = fe.Chart(df).mark_point().encode(x="x", y="x", color=Repeat.column)
+        rc = fe.RepeatChart(tpl, column=["c1", "c2"], resolve={"color": "shared"})
+        cells = rc.expand()
+        for _, _, chart in cells:
+            scale = chart._encoding["color"]._kwargs.get("scale")
+            assert isinstance(scale, dict)
+            assert scale["type"] == "ordinal"
+            # Union of {"a","b"} and {"b","c"} → {"a","b","c"} preserving order
+            assert set(scale["domain"]) == {"a", "b", "c"}
+
 
 class TestClusterMapChart:
     @pytest.fixture
