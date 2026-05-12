@@ -14,7 +14,13 @@ from .classification_extra import (
     ClassPredictionErrorVisualizer,
     DiscriminationThresholdVisualizer,
 )
-from .explanation import FeatureImportancesVisualizer, SHAPVisualizer
+from .explanation import (
+    FeatureImportancesVisualizer,
+    SHAPBarVisualizer,
+    SHAPBeeswarmVisualizer,
+    SHAPVisualizer,
+    SHAPWaterfallVisualizer,
+)
 from .regression import (
     CooksDistanceVisualizer,
     PredictionErrorVisualizer,
@@ -54,6 +60,9 @@ __all__ = [
     "ClassBalanceVisualizer",
     "FeatureImportancesVisualizer",
     "SHAPVisualizer",
+    "SHAPBeeswarmVisualizer",
+    "SHAPBarVisualizer",
+    "SHAPWaterfallVisualizer",
     "LearningCurveVisualizer",
     "ValidationCurveVisualizer",
     "CVScoresVisualizer",

@@ -674,6 +674,105 @@ def importance_chart(
     )
 
 
+def shap_beeswarm_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    max_display: int = 20,
+    order: str = "abs_mean",
+    background: Any = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """SHAP beeswarm chart — per-sample SHAP scatter colored by z-scored value.
+
+    See :func:`shap_chart` for shared parameter docstring (this function
+    is the dedicated sibling for ``kind="beeswarm"``).
+
+    Returns
+    -------
+    Chart
+        SHAP beeswarm chart.
+    """
+    from ferrum._diagnostics.charts import _shap_beeswarm_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _shap_beeswarm_chart_from_source(
+        source,
+        max_display=max_display,
+        order=order,
+        background=background,
+        theme=theme,
+    )
+
+
+def shap_bar_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    max_display: int = 20,
+    order: str = "abs_mean",
+    background: Any = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """SHAP bar chart — mean absolute SHAP per feature.
+
+    See :func:`shap_chart` for shared parameter docstring (this function
+    is the dedicated sibling for ``kind="bar"``).
+
+    Returns
+    -------
+    Chart
+        SHAP bar chart.
+    """
+    from ferrum._diagnostics.charts import _shap_bar_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _shap_bar_chart_from_source(
+        source,
+        max_display=max_display,
+        order=order,
+        background=background,
+        theme=theme,
+    )
+
+
+def shap_waterfall_chart(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    sample_idx: int,
+    max_display: int = 20,
+    order: str = "abs_mean",
+    background: Any = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """SHAP waterfall chart — cumulative per-feature contributions for one sample.
+
+    See :func:`shap_chart` for shared parameter docstring (this function
+    is the dedicated sibling for ``kind="waterfall"``).  ``sample_idx``
+    is required.
+
+    Returns
+    -------
+    Chart
+        SHAP waterfall chart for the sample at ``sample_idx``.
+    """
+    from ferrum._diagnostics.charts import _shap_waterfall_chart_from_source
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _shap_waterfall_chart_from_source(
+        source,
+        sample_idx=sample_idx,
+        max_display=max_display,
+        order=order,
+        background=background,
+        theme=theme,
+    )
+
+
 def shap_chart(
     model_or_source: Any,
     X: Any = None,
@@ -753,6 +852,12 @@ def shap_chart(
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
+    import warnings
+    warnings.warn(
+        "shap_chart(kind=...) is deprecated; use shap_beeswarm_chart / "
+        "shap_bar_chart / shap_waterfall_chart instead.",
+        DeprecationWarning, stacklevel=2,
+    )
     from ferrum._diagnostics.charts import (
         _shap_bar_chart_from_source,
         _shap_beeswarm_chart_from_source,

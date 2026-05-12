@@ -1137,6 +1137,23 @@ ferrum.shap_chart(model_or_source, X=None, *,
                    kind="beeswarm",   # "beeswarm" | "bar" | "waterfall" | "force" | "heatmap"
                    max_display=20, sample_idx=None, theme=None)
 
+# 2026-05-12 (P3.6): `shap_chart(kind=...)` is now a deprecation
+# shim for three sibling functions — `shap_beeswarm_chart`,
+# `shap_bar_chart`, and `shap_waterfall_chart` — that each take
+# kind-specific keyword arguments without the `kind=` dispatcher.
+# The visualizer side splits the same way: `SHAPBeeswarmVisualizer`,
+# `SHAPBarVisualizer`, `SHAPWaterfallVisualizer`.  Old call sites
+# emit `DeprecationWarning` but keep working.
+ferrum.shap_beeswarm_chart(model_or_source, X=None, y=None, *,
+                            max_display=20, order="abs_mean",
+                            background=None, random_state=None, theme=None)
+ferrum.shap_bar_chart(model_or_source, X=None, y=None, *,
+                       max_display=20, order="abs_mean",
+                       background=None, random_state=None, theme=None)
+ferrum.shap_waterfall_chart(model_or_source, X=None, y=None, *,
+                             sample_idx, max_display=20, order="abs_mean",
+                             background=None, random_state=None, theme=None)
+
 ferrum.learning_curve_chart(model, X, y, *, cv=5, scoring=None,
                               train_sizes=None, ci_style="band",
                               n_jobs=None, theme=None)
@@ -1221,7 +1238,10 @@ class FerrumVisualizer:
 | `ManifoldVisualizer(model, *, method="umap", theme=None)` | Embedding projection |
 | `ClassBalanceVisualizer(*, theme=None)` | Class frequency bar chart |
 | `CooksDistanceVisualizer(model, *, threshold=None, theme=None)` | Cook's distance |
-| `SHAPVisualizer(model, *, kind="beeswarm", background=None, theme=None)` | SHAP chart |
+| `SHAPVisualizer(model, *, kind="beeswarm", background=None, theme=None)` | SHAP chart — **deprecated** since 2026-05-12 (P3.6); use the three sibling classes below. |
+| `SHAPBeeswarmVisualizer(model, *, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP beeswarm |
+| `SHAPBarVisualizer(model, *, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP mean-absolute bar |
+| `SHAPWaterfallVisualizer(model, *, sample_idx, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP single-sample waterfall |
 | `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, scoring=None, cv=None, theme=None)` | Discrimination threshold chart (binary classifiers only) |
 | `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts raw feature matrix. `hue` applied from `y` if provided. |
 | `ClassPredictionErrorVisualizer(model, *, normalize=False, theme=None)` | Class prediction error chart |

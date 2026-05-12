@@ -163,6 +163,13 @@ class SHAPVisualizer(FerrumVisualizer):
         random_state: int | None = None,
         theme: Any = None,
     ):
+        import warnings
+        warnings.warn(
+            "SHAPVisualizer(kind=...) is deprecated; use "
+            "SHAPBeeswarmVisualizer / SHAPBarVisualizer / "
+            "SHAPWaterfallVisualizer instead.",
+            DeprecationWarning, stacklevel=2,
+        )
         super().__init__(model, random_state=random_state, theme=theme)
         self.kind = kind
         self.max_display = max_display
@@ -230,4 +237,188 @@ class SHAPVisualizer(FerrumVisualizer):
         raise ValueError(
             f"SHAPVisualizer(kind={self.kind!r}) — expected "
             "'beeswarm', 'bar', or 'waterfall'."
+        )
+
+
+class _SHAPBaseMixin:
+    """Shared ``_materialize`` for the three SHAP sibling visualizers.
+
+    Computes ``shap_values`` once on the underlying ``ModelSource`` and
+    records ``top_abs_shap`` in ``self._metrics``.  Subclasses select
+    which subset of the SHAP frame drives the metric (whole-dataset
+    aggregation for beeswarm / bar, single-sample max for waterfall).
+    """
+
+    def _shap_dataframe(self) -> "pl.DataFrame":
+        return self._source.shap_values(background=self.background)
+
+
+class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
+    """Per-sample SHAP scatter colored by z-scored feature value.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted sklearn-compatible estimator supported by the ``shap``
+        library (e.g. tree ensembles, linear models).
+    max_display : int, default 20
+        Maximum number of features ranked by ``order``.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ranking criterion.  ``"abs_mean"`` ranks by mean
+        absolute SHAP; ``"max"`` by max absolute SHAP.
+    background : Any, optional
+        Background dataset passed to the SHAP explainer for kernel-
+        SHAP models.  Tree SHAP ignores this.
+    random_state, theme : forwarded to ``FerrumVisualizer``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.SHAPBeeswarmVisualizer(model, max_display=15).fit(X, y)
+    >>> viz.show()
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        max_display: int = 20,
+        order: str = "abs_mean",
+        background: Any = None,
+        random_state: int | None = None,
+        theme: Any = None,
+    ):
+        super().__init__(model, random_state=random_state, theme=theme)
+        self.max_display = max_display
+        self.order = order
+        self.background = background
+
+    def _materialize(self) -> None:
+        sv = self._shap_dataframe()
+        expr = pl.col("shap_value").abs()
+        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
+        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
+        self._metrics["top_abs_shap"] = (
+            float(agg["v"].max()) if agg.height else 0.0
+        )
+
+    def _build_chart(self) -> Any:
+        return _shap_beeswarm_chart_from_source(
+            self._source,
+            max_display=self.max_display,
+            order=self.order,
+            background=self.background,
+            theme=self.theme,
+        )
+
+
+class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
+    """Mean-absolute SHAP per feature as a horizontal bar chart.
+
+    Parameters mirror :class:`SHAPBeeswarmVisualizer`; see that class
+    for the full parameter list.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        max_display: int = 20,
+        order: str = "abs_mean",
+        background: Any = None,
+        random_state: int | None = None,
+        theme: Any = None,
+    ):
+        super().__init__(model, random_state=random_state, theme=theme)
+        self.max_display = max_display
+        self.order = order
+        self.background = background
+
+    def _materialize(self) -> None:
+        sv = self._shap_dataframe()
+        expr = pl.col("shap_value").abs()
+        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
+        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
+        self._metrics["top_abs_shap"] = (
+            float(agg["v"].max()) if agg.height else 0.0
+        )
+
+    def _build_chart(self) -> Any:
+        return _shap_bar_chart_from_source(
+            self._source,
+            max_display=self.max_display,
+            order=self.order,
+            background=self.background,
+            theme=self.theme,
+        )
+
+
+class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
+    """Cumulative per-feature SHAP contributions for one sample.
+
+    Parameters
+    ----------
+    model : Any
+        Fitted sklearn-compatible estimator supported by the ``shap``
+        library.
+    sample_idx : int
+        Row index (0-based) of the sample to explain.  Required.
+    max_display : int, default 20
+        Maximum number of features to include in the waterfall, ranked
+        by ``order``.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ranking criterion (drives both the top-``max_display``
+        selection and the bar order).
+    background : Any, optional
+        Background dataset passed to the SHAP explainer.
+    random_state, theme : forwarded to ``FerrumVisualizer``.
+
+    Raises
+    ------
+    ValueError
+        If ``sample_idx`` is missing at ``__init__`` time.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> viz = fm.SHAPWaterfallVisualizer(model, sample_idx=3).fit(X, y)
+    >>> viz.show()
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        *,
+        sample_idx: int,
+        max_display: int = 20,
+        order: str = "abs_mean",
+        background: Any = None,
+        random_state: int | None = None,
+        theme: Any = None,
+    ):
+        if sample_idx is None:
+            raise ValueError(
+                "SHAPWaterfallVisualizer requires sample_idx=<int>."
+            )
+        super().__init__(model, random_state=random_state, theme=theme)
+        self.sample_idx = int(sample_idx)
+        self.max_display = max_display
+        self.order = order
+        self.background = background
+
+    def _materialize(self) -> None:
+        sv = self._shap_dataframe()
+        one = sv.filter(pl.col("sample_id") == self.sample_idx)
+        self._metrics["top_abs_shap"] = (
+            float(one["shap_value"].abs().max()) if one.height else 0.0
+        )
+
+    def _build_chart(self) -> Any:
+        return _shap_waterfall_chart_from_source(
+            self._source,
+            sample_idx=self.sample_idx,
+            max_display=self.max_display,
+            order=self.order,
+            background=self.background,
+            theme=self.theme,
         )
