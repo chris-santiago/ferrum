@@ -28,6 +28,47 @@ from __future__ import annotations
 
 from typing import Any
 
+# Eager imports of the chart-builder layer. Historically these were
+# deferred inside each figure function out of import-cycle paranoia,
+# but by the time ferrum.figures is loaded, ferrum.Chart is already
+# in the package namespace (see ferrum/__init__.py order) and the
+# visualizer subpackage has already imported _diagnostics.charts at
+# module level. There is no cycle to defend against — 23 late imports
+# have collapsed to this block (P4.1, F1, 2026-05-12).
+from ferrum._diagnostics.charts import (
+    _alpha_selection_chart_from_source,
+    _calibration_chart_from_source,
+    _class_balance_chart_from_dataframe,
+    _class_prediction_error_chart_from_source,
+    _classification_report_chart,
+    _cluster_diagnostics_chart,
+    _confusion_chart_from_source,
+    _cv_scores_chart_from_source,
+    _decision_boundary_chart_from_source,
+    _discrimination_threshold_chart_from_source,
+    _gain_chart_from_source,
+    _importance_chart_from_source,
+    _intercluster_distance_chart_from_source,
+    _learning_curve_chart_from_source,
+    _lift_chart_from_source,
+    _parallel_coords_chart_from_dataframe,
+    _pca_scree_chart_from_source,
+    _pdp_chart_from_source,
+    _pr_chart_from_source,
+    _prediction_error_chart_from_source,
+    _rank1d_chart_from_dataframe,
+    _rank2d_chart_from_dataframe,
+    _residuals_chart_from_source,
+    _roc_chart_from_source,
+    _shap_bar_chart_from_source,
+    _shap_beeswarm_chart_from_source,
+    _shap_waterfall_chart_from_source,
+    _validation_curve_chart_from_source,
+)
+from ferrum._diagnostics.deps import require_sklearn
+from ferrum._diagnostics.source import ComparedModelSource
+from ferrum._diagnostics.stats import rank1d_compute, rank2d_compute
+
 
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
     """Raise ``ValueError`` when a required figure-function argument is ``None``.
@@ -64,7 +105,6 @@ def _resolve_source(
     - Otherwise wrap ``model_or_source`` in a fresh ``ModelSource``.
     """
     import ferrum
-    from ferrum._diagnostics.source import ComparedModelSource
 
     if isinstance(model_or_source, ComparedModelSource):
         return model_or_source
@@ -151,7 +191,6 @@ def residuals_chart(
     >>> from sklearn.linear_model import Ridge
     >>> fm.residuals_chart(Ridge().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _residuals_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     if panels in (None, "single"):
         panel_list: Any = None
@@ -236,7 +275,6 @@ def roc_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.roc_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _roc_chart_from_source
     source = _resolve_source(
         model_or_source, X, y, random_state=random_state, compare=compare,
     )
@@ -321,7 +359,6 @@ def pr_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.pr_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _pr_chart_from_source
     source = _resolve_source(
         model_or_source, X, y, random_state=random_state, compare=compare,
     )
@@ -397,7 +434,6 @@ def calibration_chart(
         raise TypeError(
             "calibration_chart requires at least one model or ModelSource"
         )
-    from ferrum._diagnostics.charts import _calibration_chart_from_source
     if len(model_or_sources) == 1:
         source = _resolve_source(
             model_or_sources[0], X, y, random_state=random_state,
@@ -469,7 +505,6 @@ def gain_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _gain_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _gain_chart_from_source(source, theme=theme)
 
@@ -515,7 +550,6 @@ def lift_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _lift_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _lift_chart_from_source(source, theme=theme)
 
@@ -574,7 +608,6 @@ def confusion_matrix_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.confusion_matrix_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _confusion_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _confusion_chart_from_source(
         source, normalize=normalize, annotate=annotate, theme=theme,
@@ -626,9 +659,6 @@ def class_prediction_error_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.class_prediction_error_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import (
-        _class_prediction_error_chart_from_source,
-    )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _class_prediction_error_chart_from_source(
         source, normalize=normalize, theme=theme,
@@ -699,7 +729,6 @@ def importance_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.importance_chart(RandomForestClassifier().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import _importance_chart_from_source
 
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _importance_chart_from_source(
@@ -739,7 +768,6 @@ def shap_beeswarm_chart(
     Chart
         SHAP beeswarm chart.
     """
-    from ferrum._diagnostics.charts import _shap_beeswarm_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_beeswarm_chart_from_source(
         source,
@@ -777,7 +805,6 @@ def shap_bar_chart(
     Chart
         SHAP bar chart.
     """
-    from ferrum._diagnostics.charts import _shap_bar_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_bar_chart_from_source(
         source,
@@ -818,7 +845,6 @@ def shap_waterfall_chart(
     Chart
         SHAP waterfall chart for the sample at ``sample_idx``.
     """
-    from ferrum._diagnostics.charts import _shap_waterfall_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_waterfall_chart_from_source(
         source,
@@ -915,11 +941,6 @@ def shap_chart(
         "shap_chart(kind=...) is deprecated; use shap_beeswarm_chart / "
         "shap_bar_chart / shap_waterfall_chart instead.",
         DeprecationWarning, stacklevel=2,
-    )
-    from ferrum._diagnostics.charts import (
-        _shap_bar_chart_from_source,
-        _shap_beeswarm_chart_from_source,
-        _shap_waterfall_chart_from_source,
     )
 
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
@@ -1027,7 +1048,6 @@ def pdp_chart(
     >>> from sklearn.ensemble import GradientBoostingRegressor
     >>> fm.pdp_chart(GradientBoostingRegressor().fit(X_train, y_train), X_test, features=["age", "income"])
     """
-    from ferrum._diagnostics.charts import _pdp_chart_from_source
 
     _require(
         "pdp_chart", "features", features,
@@ -1104,9 +1124,6 @@ def discrimination_threshold_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.discrimination_threshold_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    from ferrum._diagnostics.charts import (
-        _discrimination_threshold_chart_from_source,
-    )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _discrimination_threshold_chart_from_source(
         source,
@@ -1175,7 +1192,6 @@ def learning_curve_chart(
     >>> from sklearn.svm import SVC
     >>> fm.learning_curve_chart(SVC(), X_train, y_train, cv=5)
     """
-    from ferrum._diagnostics.charts import _learning_curve_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _learning_curve_chart_from_source(
         source,
@@ -1262,7 +1278,6 @@ def validation_curve_chart(
         "validation_curve_chart", "values", values,
         hint="pass an explicit list of values to sweep for the given param",
     )
-    from ferrum._diagnostics.charts import _validation_curve_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
         source, param, values,
@@ -1328,7 +1343,6 @@ def cv_scores_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.cv_scores_chart(RandomForestClassifier(), X_train, y_train, cv=10)
     """
-    from ferrum._diagnostics.charts import _cv_scores_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _cv_scores_chart_from_source(
         source, cv=cv, scoring=scoring,
@@ -1405,7 +1419,6 @@ def alpha_selection_chart(
         "alpha_selection_chart", "alphas", alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
     )
-    from ferrum._diagnostics.charts import _alpha_selection_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(
         source, alphas,
@@ -1469,7 +1482,6 @@ def pca_scree_chart(
     >>> from sklearn.decomposition import PCA
     >>> fm.pca_scree_chart(PCA(n_components=10).fit(X_train), threshold=0.90)
     """
-    from ferrum._diagnostics.charts import _pca_scree_chart_from_source
     source = _resolve_source(model_or_source, X, None, random_state=random_state)
     return _pca_scree_chart_from_source(
         source,
@@ -1556,7 +1568,6 @@ def cluster_diagnostics(
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11),
     ...                         method="hierarchical", scoring="silhouette")
     """
-    from ferrum._diagnostics.deps import require_sklearn
     require_sklearn("cluster_diagnostics")
     if method not in ("kmeans", "hierarchical"):
         raise ValueError(
@@ -1569,7 +1580,6 @@ def cluster_diagnostics(
             f"cluster_diagnostics(scoring={scoring!r}) — expected one of "
             "'elbow', 'silhouette', 'both'."
         )
-    from ferrum._diagnostics.charts import _cluster_diagnostics_chart
     return _cluster_diagnostics_chart(
         X, ks=ks, method=method, scoring=scoring,
         n_init=n_init, random_state=random_state, theme=theme,
@@ -1634,9 +1644,6 @@ def intercluster_distance_chart(
     >>> from sklearn.cluster import KMeans
     >>> fm.intercluster_distance_chart(KMeans(n_clusters=5).fit(X_train), X_train)
     """
-    from ferrum._diagnostics.charts import (
-        _intercluster_distance_chart_from_source,
-    )
     source = _resolve_source(model_or_source, X, None, random_state=random_state)
     if k is None:
         if hasattr(source.model, "n_clusters"):
@@ -1812,7 +1819,6 @@ def rank1d_chart(
         from ferrum._diagnostics.stats import rank1d_compute
         data = data_or_source if X is None else X
         df = rank1d_compute(data, algorithm=algo)
-    from ferrum._diagnostics.charts import _rank1d_chart_from_dataframe
     return _rank1d_chart_from_dataframe(
         df, algorithm=algo, orient=orient, top_k=top_k,
         color_field=color_field, theme=theme,
@@ -1861,7 +1867,6 @@ def rank2d_chart(
         from ferrum._diagnostics.stats import rank2d_compute
         data = data_or_source if X is None else X
         df = rank2d_compute(data, algorithm=algo)
-    from ferrum._diagnostics.charts import _rank2d_chart_from_dataframe
     return _rank2d_chart_from_dataframe(
         df, algorithm=algo, annot=annot, theme=theme,
     )
@@ -1923,7 +1928,6 @@ def parallel_coordinates_chart(
     >>> import ferrum as fm
     >>> fm.parallel_coordinates_chart(X_df, hue="species", rescale="minmax")
     """
-    from ferrum._diagnostics.charts import _parallel_coords_chart_from_dataframe
     return _parallel_coords_chart_from_dataframe(
         data, features=features, hue=hue, rescale=rescale,
         alpha=alpha, theme=theme,
@@ -2000,7 +2004,6 @@ def decision_boundary_chart(
     >>> fm.decision_boundary_chart(SVC().fit(X_train, y_train), X_train, y_train, features=(0, 1))
     """
     source = _resolve_source(model, X, y, random_state=random_state)
-    from ferrum._diagnostics.charts import _decision_boundary_chart_from_source
     return _decision_boundary_chart_from_source(
         source,
         features=tuple(features),
