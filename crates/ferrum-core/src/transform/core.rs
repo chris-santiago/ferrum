@@ -61,34 +61,57 @@ pub(crate) enum TransformSpec {
     Robust(RobustSpec),
 }
 
+/// Single source of truth for the 24 `TransformSpec` variants. Dispatchers
+/// across this module (and `spec/chart.rs`, `lib.rs` once F1c lands) define
+/// a local `arm!` macro and invoke `for_each_transform!(arm)`; the macro
+/// expands the table into per-variant arms. Adding a transform means one
+/// edit here plus the variant in the enum below — no more 5-site fan-out.
+///
+/// Table entries are `(Variant, module_ident)` pairs. The module is an
+/// `ident` (not a `path`) so it can be followed by `::apply` etc. at the
+/// call site without running into the path/follow-set restriction.
+macro_rules! for_each_transform {
+    ($mac:ident) => {
+        $mac! {
+            Bin           => bin,
+            Bin2D         => bin_2d,
+            Kde           => kde,
+            Smooth        => smooth,
+            Aggregate     => aggregate,
+            Summary       => summary,
+            Outliers      => outliers,
+            ErrorExtent   => error_extent,
+            BoxStats      => box_stats,
+            Violin        => violin,
+            Kde2D         => kde_2d,
+            Contour       => contour,
+            Qq            => qq,
+            Linkage       => linkage,
+            Raster        => raster,
+            Hex           => hex,
+            Swarm         => swarm,
+            Unpivot       => unpivot,
+            Reorder       => reorder,
+            ReferenceLine => reference_line,
+            LetterValue   => letter_value,
+            Logistic      => logistic,
+            Glm           => glm,
+            Robust        => robust,
+        }
+    };
+}
+pub(crate) use for_each_transform;
+
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
-        match self {
-            Self::Bin(s)       => bin::apply(s, batch),
-            Self::Bin2D(s)     => bin_2d::apply(s, batch),
-            Self::Kde(s)       => crate::transform::kde::apply(s, batch),
-            Self::Smooth(s)    => crate::transform::smooth::apply(s, batch),
-            Self::Aggregate(s) => crate::transform::aggregate::apply(s, batch),
-            Self::Summary(s)   => crate::transform::summary::apply(s, batch),
-            Self::Outliers(s)  => outliers::apply(s, batch),
-            Self::ErrorExtent(s) => error_extent::apply(s, batch),
-            Self::BoxStats(s)  => box_stats::apply(s, batch),
-            Self::Violin(s)    => violin::apply(s, batch),
-            Self::Kde2D(s)     => crate::transform::kde_2d::apply(s, batch),
-            Self::Contour(s)   => contour::apply(s, batch),
-            Self::Qq(s)        => qq::apply(s, batch),
-            Self::Linkage(s)   => linkage::apply(s, batch),
-            Self::Raster(s)    => raster::apply(s, batch),
-            Self::Hex(s)       => hex::apply(s, batch),
-            Self::Swarm(s)     => swarm::apply(s, batch),
-            Self::Unpivot(s)   => unpivot::apply(s, batch),
-            Self::Reorder(s)   => reorder::apply(s, batch),
-            Self::ReferenceLine(s) => reference_line::apply(s, batch),
-            Self::LetterValue(s) => letter_value::apply(s, batch),
-            Self::Logistic(s) => logistic::apply(s, batch),
-            Self::Glm(s)      => glm::apply(s, batch),
-            Self::Robust(s)   => robust::apply(s, batch),
+        macro_rules! arm {
+            ($($V:ident => $m:ident,)*) => {
+                match self {
+                    $( Self::$V(s) => crate::transform::$m::apply(s, batch), )*
+                }
+            };
         }
+        for_each_transform!(arm)
     }
 }
 
@@ -221,32 +244,14 @@ pub(crate) fn apply_transforms_named(
 }
 
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
-    match spec {
-        TransformSpec::Bin(s) => s.name.as_deref(),
-        TransformSpec::Bin2D(s) => s.name.as_deref(),
-        TransformSpec::Kde(s) => s.name.as_deref(),
-        TransformSpec::Smooth(s) => s.name.as_deref(),
-        TransformSpec::Aggregate(s) => s.name.as_deref(),
-        TransformSpec::Summary(s) => s.name.as_deref(),
-        TransformSpec::Outliers(s) => s.name.as_deref(),
-        TransformSpec::ErrorExtent(s) => s.name.as_deref(),
-        TransformSpec::BoxStats(s) => s.name.as_deref(),
-        TransformSpec::Violin(s) => s.name.as_deref(),
-        TransformSpec::Kde2D(s) => s.name.as_deref(),
-        TransformSpec::Contour(s) => s.name.as_deref(),
-        TransformSpec::Qq(s) => s.name.as_deref(),
-        TransformSpec::Linkage(s) => s.name.as_deref(),
-        TransformSpec::Raster(s) => s.name.as_deref(),
-        TransformSpec::Hex(s) => s.name.as_deref(),
-        TransformSpec::Swarm(s) => s.name.as_deref(),
-        TransformSpec::Unpivot(s) => s.name.as_deref(),
-        TransformSpec::Reorder(s) => s.name.as_deref(),
-        TransformSpec::ReferenceLine(s) => s.name.as_deref(),
-        TransformSpec::LetterValue(s) => s.name.as_deref(),
-        TransformSpec::Logistic(s) => s.name.as_deref(),
-        TransformSpec::Glm(s) => s.name.as_deref(),
-        TransformSpec::Robust(s) => s.name.as_deref(),
+    // The module column of the table is unused here; we keep it in the
+    // pattern so spec_name reads off the same source of truth.
+    macro_rules! arm {
+        ($($V:ident => $m:ident,)*) => {
+            match spec { $( TransformSpec::$V(s) => s.name.as_deref(), )* }
+        };
     }
+    for_each_transform!(arm)
 }
 
 #[cfg(test)]
