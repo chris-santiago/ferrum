@@ -6,6 +6,7 @@
 //! but BEFORE mark drawing. The adjusted RecordBatch is then passed to
 //! `draw::dispatch_mark` in place of the original.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,7 +14,81 @@ use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
-use crate::spec::position::PositionAdjust;
+use crate::spec::chart::ChartSpec;
+use crate::spec::position::{PositionAdjust, StackOffset};
+
+/// Return the batch the y-scale should resolve against, accounting for a
+/// Stack position adjustment.
+///
+/// When a layer (or the single-layer spec) carries a `Stack` adjustment
+/// whose encoded y matches `y_field`, the rendered y values are the
+/// *cumulative* values from `apply_stack`, not the original column.
+/// Resolving the y-scale from the raw batch would clip stacked tops
+/// outside the domain — `LinearScale` returns NaN for out-of-domain
+/// inputs and `bar.rs` drops every row whose top falls past it. Returning
+/// the post-stack batch here keeps stacked bars visible.
+///
+/// Borrowed `primary_batch` is returned when no Stack matches; the owned
+/// stacked batch is returned (boxed by `Cow`) otherwise. On a stack
+/// failure the caller's primary batch is returned — the scale resolves
+/// from raw data and the downstream `apply_stack` re-attempt during
+/// drawing will surface the same error to the user.
+///
+/// Pre-F15 this logic lived in `scale_resolve::resolve_scales_with_outputs`
+/// via a private `find_stack_for_y` helper. The Stack handling belongs
+/// alongside the other Stack code; scale resolution shouldn't have to
+/// know which specific position adjustment is in play.
+pub(crate) fn axis_batch_for_y<'a>(
+    spec: &'a ChartSpec,
+    y_field: &str,
+    primary_batch: &'a RecordBatch,
+) -> Cow<'a, RecordBatch> {
+    let Some((by, offset, layer_enc)) = find_stack_for_y(spec, y_field) else {
+        return Cow::Borrowed(primary_batch);
+    };
+    match apply_stack(primary_batch, by, offset, layer_enc) {
+        Ok(b) => Cow::Owned(b),
+        Err(_) => Cow::Borrowed(primary_batch),
+    }
+}
+
+/// Find the first Stack position adjustment in the spec whose layer (or
+/// the chart itself, in the single-layer case) encodes the given y-field.
+/// Multi-Stack layers are not merged here — the first match wins.
+fn find_stack_for_y<'a>(
+    spec: &'a ChartSpec,
+    y_field: &str,
+) -> Option<(
+    Option<&'a str>,
+    &'a StackOffset,
+    &'a crate::spec::encoding::Encoding,
+)> {
+    if let Some(layers) = spec.layers.as_ref() {
+        for layer in layers {
+            let layer_y = layer
+                .encoding
+                .y
+                .as_ref()
+                .map(|e| e.field.as_str())
+                .or_else(|| spec.encoding.y.as_ref().map(|e| e.field.as_str()));
+            if layer_y != Some(y_field) {
+                continue;
+            }
+            if let Some(PositionAdjust::Stack { by, offset }) =
+                layer.position.as_ref().or(spec.position.as_ref())
+            {
+                return Some((by.as_deref(), offset, &layer.encoding));
+            }
+        }
+    }
+    if let Some(PositionAdjust::Stack { by, offset }) = spec.position.as_ref() {
+        let spec_y = spec.encoding.y.as_ref().map(|e| e.field.as_str());
+        if spec_y == Some(y_field) {
+            return Some((by.as_deref(), offset, &spec.encoding));
+        }
+    }
+    None
+}
 
 /// Apply a position adjustment to a layer batch, returning a new batch with
 /// rewritten coordinate columns (or, for ordinal-x Dodge / Jitter into bands,
