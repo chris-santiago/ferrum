@@ -92,8 +92,7 @@ def _resolve_source(
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ``ModelSource`` or
-    ``ComparedModelSource``.
+    """Resolve a figure-function input into a ``ModelSource`` or ``ComparedModelSource``.
 
     Dispatch order:
     - If ``model_or_source`` is already a ``ComparedModelSource``, return it.
@@ -752,7 +751,6 @@ def importance_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.importance_chart(RandomForestClassifier().fit(X_train, y_train), X_test, y_test)
     """
-
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _importance_chart_from_source(
         source,
@@ -1086,7 +1084,6 @@ def pdp_chart(
     >>> from sklearn.ensemble import GradientBoostingRegressor
     >>> fm.pdp_chart(GradientBoostingRegressor().fit(X_train, y_train), X_test, features=["age", "income"])
     """
-
     _require(
         "pdp_chart", "features", features,
         hint="pass a list of column names or indices",
@@ -1269,7 +1266,7 @@ def validation_curve_chart(
     random_state: int | None = None,
     theme: Any = None,
 ):
-    """Validation curve chart: score vs. a single hyperparameter value.
+    """Plot score vs. a single hyperparameter value.
 
     Sweeps one hyperparameter over a supplied value range and plots
     cross-validated train and validation scores, revealing the bias-
