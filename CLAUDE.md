@@ -108,6 +108,33 @@ Before any session or subagent writes or modifies Python or Rust in this repo, i
 
 This is a read-only orientation step — do not invoke the full multi-phase review skill, just internalize the principles. The goal is to write code that would pass a review on the first pass, not to discover violations after the fact. The same rule applies to subagents dispatched to implement code: brief them with the relevant principles in their prompt, or instruct them to read the skill before they write.
 
+### Before committing code — run the lite-review gate
+
+Before any `git commit` that touches `*.py` or `*.rs`, the orchestrator must dispatch the matching lite-review agent on the staged diff and act on its verdict. This is the same protocol the `gallery-fixer` flow already uses; the rule generalizes it to all commits, not just post-fixer ones.
+
+- **Committing Python changes?** Stage the diff, dispatch `python-review-lite`, wait for the verdict.
+- **Committing Rust changes?** Stage the diff, dispatch `rust-review-lite`, wait for the verdict.
+- **Both languages touched?** Dispatch both lite agents in parallel in a single tool-call block.
+
+Act on the returned signal exactly as the gallery-fixer flow already does:
+
+- **clean** → proceed with the commit.
+- **block** → un-stage the offending files, address the verdict's findings, re-stage, re-dispatch. Three consecutive blocks on the same area escalates to the heavyweight skill (see next subsection).
+- **escalate** → surface the verdict to the user and halt; do not commit.
+
+The single sanctioned exception is documentation-only changes (`*.md`, `docs/**`, or comments-only diffs in source files) — those can commit without dispatch. When in doubt, dispatch.
+
+### When to escalate to heavyweight review
+
+The lite agents gate every commit; the heavyweight skills (`python-review` / `rust-review`) are subsystem-level audits that produce a six-section report and a refactor roadmap. They are deliberate interventions — not appropriate for every diff. The orchestrator should **offer the heavyweight skill proactively, without waiting for the user to type `/python-review` or `/rust-review`**, when any of these conditions hold:
+
+1. **A phase is about to be marked done.** Before transitioning a phase in `docs/superpowers/ferrum-phases.md` from in-progress to done, run the matching heavyweight skill on the subsystems that phase modified. The lite agent sees one commit at a time; the heavy skill sees how the subsystem hangs together after a phase's worth of accumulated work.
+2. **The lite agent has escalated 2+ times on the same module within the session.** Repeated escalation means the band-aid pattern is broken — lite is treating diff-level symptoms while the structural issue lives in the module. Escalate to a heavy review scoped to that module.
+3. **A new public-API surface is added to an existing family.** A new `*_chart` in `src/ferrum/figures.py`, a new mark in `src/ferrum/marks/`, a new transform in `crates/ferrum-core/src/transform/`, a new encoding channel, or a new visualizer subclass all warrant a heavy review of the whole family afterwards to catch sibling drift (signature mismatches, naming drift, inconsistent return shapes, parallel-API mismatch) before the new member becomes entrenched. The `calibration_chart` signature drift caught in May 2026 is the canonical example: it lived for a phase before anyone audited the family.
+4. **The user expresses a coherence smell in natural language.** "This feels off", "sibling drift", "X drifted from Y", "utility module sprawl", "inconsistent return shapes", "parallel-API mismatch", "this module feels overgrown" — the heavyweight skill descriptions already list these triggers. Offer the heavyweight review immediately rather than waiting for the slash command.
+
+Always announce the offer before running — e.g. "This feels like sibling drift across the figure-function family; want me to run `python-review` on `figures.py`?" — and wait for user approval. The user opts in before any architectural audit begins; heavy review is invasive and produces a roadmap the user has to act on.
+
 ### Review surfaces
 
 Ferrum has four code-review surfaces: two heavyweight interactive skills for human-invoked audits, and two lightweight autonomous agents for regression-gating fixes the orchestrator is about to commit. Pick the right one for the job.
@@ -116,8 +143,8 @@ Ferrum has four code-review surfaces: two heavyweight interactive skills for hum
 |---|---|---|---|---|
 | `python-review` | skill | human (`/python-review`) | whole package or named subsystem | yes, with approval |
 | `rust-review` | skill | human (`/rust-review`) | whole crate or named subsystem | yes, with approval |
-| `python-review-lite` | agent | orchestrator (post-`gallery-fixer`) | only staged `*.py` diff | **never** |
-| `rust-review-lite` | agent | orchestrator (post-`gallery-fixer`) | only staged `*.rs` diff | **never** |
+| `python-review-lite` | agent | orchestrator (before any `*.py` commit) | only staged `*.py` diff | **never** |
+| `rust-review-lite` | agent | orchestrator (before any `*.rs` commit) | only staged `*.rs` diff | **never** |
 
 ### Heavyweight skills (`.claude/skills/{python,rust}-review/`)
 
@@ -125,19 +152,19 @@ Multi-phase reviews (orient → diagnose → propose → execute → review) tha
 
 ### Lightweight agents (`.claude/agents/{python,rust}-review-lite.md`)
 
-Autonomous read-only quality gates that run **between `gallery-fixer`'s return and the orchestrator's commit**. They read only `git diff --cached`, apply a trimmed diff-level idiom checklist, run `ruff` / `cargo clippy -D warnings` on the affected files, and return one of three signals:
+Autonomous read-only quality gates that run **before any commit that touches Python or Rust source** — the gallery-fixer flow is one caller, but the gate now applies to every commit (see "Before committing code" above). They read only `git diff --cached`, apply a trimmed diff-level idiom checklist, run `ruff` / `cargo clippy -D warnings` on the affected files, and return one of three signals:
 
 - **clean** — no S3+ findings, linters pass → orchestrator commits
-- **block** — ≥1 S3 finding OR linter failed → orchestrator un-stages and returns the verdict to `gallery-fixer` to address; loop
-- **escalate** — ≥1 S4+ finding, OR 3 consecutive block cycles on the same row → orchestrator surfaces to user and halts
+- **block** — ≥1 S3 finding OR linter failed → orchestrator un-stages, the orchestrator (or the editing subagent, e.g. `gallery-fixer`) addresses the verdict, re-stages, re-dispatches
+- **escalate** — ≥1 S4+ finding, OR 3 consecutive block cycles on the same area → orchestrator surfaces to user and halts; consider escalating to the heavyweight skill (see "When to escalate to heavyweight review" above)
 
-Both lite agents are **read-only by design** — their `tools:` frontmatter restricts them to `Read`, `Grep`, `Glob`, `Bash`. They cannot modify code; only `gallery-fixer` (or the user) does. The lite agents never speculate refactors beyond a single-sentence "suggested fix" per finding.
+Both lite agents are **read-only by design** — their `tools:` frontmatter restricts them to `Read`, `Grep`, `Glob`, `Bash`. They cannot modify code; only the orchestrator (or an editing subagent like `gallery-fixer`) does. The lite agents never speculate refactors beyond a single-sentence "suggested fix" per finding.
 
-The orchestrator (parent Claude session) is responsible for: staging the gallery-fixer's changes, dispatching both lite agents in parallel when both languages were touched, tracking the cycle count across loops, and acting on the returned status.
+The orchestrator (parent Claude session) is responsible for: staging the changes, dispatching both lite agents in parallel when both languages were touched, tracking the cycle count across loops, and acting on the returned status.
 
 ### Audit trail
 
-Lite-agent verdicts land at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_{python,rust}.md`. Each verdict carries YAML frontmatter (`status`, `cycle`, `n_findings` by severity, `linters` state, `files_reviewed`) followed by per-finding prose. The directory is gitignored alongside the rest of `output/`; the verdicts exist for the orchestrator and for the human reviewing a multi-cycle session, not as permanent artifacts.
+Lite-agent verdicts land at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_{python,rust}.md` regardless of trigger — the path is historical (lite started life as a post-`gallery-fixer` gate) but the directory now serves as the canonical verdict log for *all* lite-agent runs, including the commit gate above. Each verdict carries YAML frontmatter (`status`, `cycle`, `n_findings` by severity, `linters` state, `files_reviewed`) followed by per-finding prose. The directory is gitignored alongside the rest of `output/`; the verdicts exist for the orchestrator and for the human reviewing a multi-cycle session, not as permanent artifacts.
 
 ### Severity rubric (shared across all four surfaces)
 
