@@ -1132,9 +1132,18 @@ ferrum.lift_chart(model_or_source, X=None, y=None, *, theme=None)
 
 ferrum.residuals_chart(model_or_source, X=None, y=None, *,
                         kind="studentized", panels="auto",
-                        # panels: "auto" | list of "residuals_vs_fitted" |
-                        #         "qq" | "scale_location" | "residuals_vs_leverage"
+                        # panels: "auto" | "single" | None | list of
+                        #         "residuals_vs_fitted" | "qq" |
+                        #         "scale_location" | "residuals_vs_leverage"
                         theme=None)
+# **2026-05-12 (P3.12, F10):** `panels="auto"` ships the canonical
+# 4-panel layout — `residuals_vs_fitted`, `qq`, `scale_location`,
+# `residuals_vs_leverage` — composed as a 2x2 grid. `panels=None` or
+# `panels="single"` returns just the residuals-vs-fitted panel
+# (the pre-P3.12 behavior). For non-linear estimators (no `coef_`),
+# `ModelSource.predictions()` emits all-NaN `leverage`; the chart
+# builder silently drops the leverage panel from the auto layout so
+# `panels="auto"` stays safe for RandomForest / GBM / etc.
 
 ferrum.importance_chart(model_or_source, X=None, y=None, *,
                          method="builtin", top_k=20, orient="horizontal",
