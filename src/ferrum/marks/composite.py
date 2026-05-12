@@ -240,7 +240,7 @@ def desugar_errorband(
 
     Layers emitted
     --------------
-    1. ``ribbon`` — ``y=lower``, ``y2=upper``, ``opacity=0.3`` (shaded band).
+    1. ``ribbon`` — ``y=lower``, ``y2=upper``, ``opacity=0.2, stroke="none"`` (shaded band).
     2. ``line``   — ``y=lower`` (bottom border).  When ``borders=True`` only.
     3. ``line``   — ``y=upper`` (top border).  When ``borders=True`` only.
 
@@ -282,7 +282,7 @@ def desugar_errorband(
         _Layer(
             mark="ribbon",
             encoding={"x": x_field, "y": "lower", "y2": "upper"},
-            mark_kwargs={"opacity": 0.3},
+            mark_kwargs={"opacity": 0.2, "stroke": "none"},
             data_source="err",
         ),
     ]
@@ -301,7 +301,7 @@ def desugar_ribbon(
     y_field: str | None,
     *,
     y2_field: str | None = None,
-    opacity: float = 0.3,
+    opacity: float = 0.2,
     interpolate: str = "linear",
 ) -> tuple:
     """Primitive ribbon (shaded band) mark desugar — no transform.
@@ -322,7 +322,7 @@ def desugar_ribbon(
     Layers emitted
     --------------
     1. ``ribbon`` — ``x=x_field``, ``y=y_field``, ``y2=y2_field``,
-       ``opacity=opacity``.
+       ``opacity=opacity``, ``stroke="none"``.
 
     Parameters
     ----------
@@ -333,7 +333,7 @@ def desugar_ribbon(
     y2_field : str or None, default None
         Upper-bound y field.  Required (must be supplied by the caller
         from the chart's encoding state).
-    opacity : float, default 0.3
+    opacity : float, default 0.2
         Ribbon fill opacity.
     interpolate : str, default "linear"
         Reserved for future use (no-op today — the renderer uses linear
@@ -365,7 +365,7 @@ def desugar_ribbon(
         _Layer(
             mark="ribbon",
             encoding={"x": x_field, "y": y_field, "y2": y2_field},
-            mark_kwargs={"opacity": opacity},
+            mark_kwargs={"opacity": opacity, "stroke": "none"},
         ),
     ]
     return ("__layered__", [], None, None, layers)
