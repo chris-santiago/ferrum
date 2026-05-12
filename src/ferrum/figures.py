@@ -373,41 +373,45 @@ def pr_chart(
 
 
 def calibration_chart(
-    *model_or_sources: Any,
+    model_or_source: Any,
     X: Any = None,
     y: Any = None,
+    *,
     n_bins: int = 10,
     strategy: str = "uniform",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """Calibration (reliability) curve for one or more classifiers.
 
     Plots mean predicted probability vs. fraction of positives in each
-    bin, following sklearn's ``calibration_curve`` convention. Accepts
-    one or more models; multi-model inputs are overlaid on a single
-    chart.
+    bin, following sklearn's ``calibration_curve`` convention. Supports
+    multi-model comparison via ``compare=``.
 
     Parameters
     ----------
-    *model_or_sources : estimator, ModelSource, or dict
-        One or more fitted classifiers or ``ModelSource`` objects. A
-        single dict positional argument is treated as a named-model map
-        (keys become model labels). Multiple positional arguments are
-        auto-named ``"model_0"``, ``"model_1"``, etc. At least one
-        positional argument is required.
+    model_or_source : estimator, ModelSource, or dict of str -> estimator
+        Fitted sklearn-compatible classifier, an explicit
+        ``ferrum.ModelSource``, or a dict of named estimators for
+        comparison. When a dict is passed, each estimator is evaluated
+        and curves are overlaid.
     X : array-like, optional
-        Feature matrix. Required when positional arguments are raw
-        estimators; ignored when they are ``ModelSource`` instances.
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator.
     y : array-like, optional
-        True binary labels. Required when positional arguments are raw
-        estimators.
+        True binary labels. Required when ``model_or_source`` is a raw
+        estimator.
     n_bins : int, default 10
         Number of probability bins for the reliability diagram.
     strategy : {"uniform", "quantile"}, default "uniform"
         Binning strategy forwarded to ``sklearn.calibration.calibration_curve``.
         ``"uniform"`` uses equally-spaced bins; ``"quantile"`` uses
         equal-frequency bins.
+    compare : dict of str -> estimator or None, default None
+        Additional estimators to overlay. Keys become model labels.
+        ``model_or_source`` is treated as the base model (label
+        ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -419,46 +423,15 @@ def calibration_chart(
         Reliability diagram with one curve per model plus a perfect-
         calibration diagonal reference.
 
-    Raises
-    ------
-    TypeError
-        If no positional arguments are provided.
-
     Examples
     --------
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
-    >>> fm.calibration_chart(LogisticRegression().fit(X_train, y_train), X=X_test, y=y_test)
+    >>> fm.calibration_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    if len(model_or_sources) == 0:
-        raise TypeError(
-            "calibration_chart requires at least one model or ModelSource"
-        )
-    if len(model_or_sources) == 1:
-        source = _resolve_source(
-            model_or_sources[0], X, y, random_state=random_state,
-        )
-    else:
-        # Multiple positional inputs → build a ComparedModelSource. When
-        # the inputs are already ModelSource instances, wrap them directly
-        # (X/y are already bound on each source). When they're raw fitted
-        # models, build new ModelSources sharing the supplied X/y via
-        # ModelSource.compare.
-        import ferrum
-        from ferrum._diagnostics.source import ComparedModelSource
-
-        if all(isinstance(m, ferrum.ModelSource) for m in model_or_sources):
-            sources = {
-                f"model_{i}": m for i, m in enumerate(model_or_sources)
-            }
-            source = ComparedModelSource(sources)
-        else:
-            models = {
-                f"model_{i}": m for i, m in enumerate(model_or_sources)
-            }
-            source = _resolve_source(
-                models, X, y, random_state=random_state,
-            )
+    source = _resolve_source(
+        model_or_source, X, y, random_state=random_state, compare=compare,
+    )
     return _calibration_chart_from_source(
         source, n_bins=n_bins, strategy=strategy, theme=theme,
     )

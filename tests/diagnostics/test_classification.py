@@ -186,16 +186,17 @@ def test_calibration_chart_figure_function(binary_source):
     assert "<svg" in svg
 
 
-def test_calibration_chart_multi_model_variadic_overlay():
-    """Multi-model calibration_chart (Phase 10h) routes through
-    ComparedModelSource, auto-naming each positional model 'model_0',
-    'model_1', etc., and overlays the resulting reliability curves.
+def test_calibration_chart_multi_model_compared_source_passthrough():
+    """calibration_chart accepts a pre-built ComparedModelSource as the
+    sole positional argument, mirroring the sibling figure-function
+    passthrough path (see test_compared_source_passthrough_via_figure in
+    test_compare.py).
     """
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
-    src = ferrum.ModelSource(model, X, df["y"])
-    chart = ferrum.calibration_chart(src, src)
+    cms = ferrum.ModelSource.compare({"a": model, "b": model}, X, df["y"])
+    chart = ferrum.calibration_chart(cms)
     assert "<svg" in chart.show_svg()
 
 

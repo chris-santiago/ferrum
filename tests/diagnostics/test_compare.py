@@ -107,9 +107,14 @@ def test_compare_invalid_kwarg_raises():
         ferrum.roc_chart(m, X, y, compare=["not", "a", "dict"])  # type: ignore[arg-type]
 
 
-def test_compare_calibration_variadic_positional():
+def test_compare_calibration_compare_kwarg():
+    """calibration_chart accepts the canonical compare= multi-model kwarg,
+    matching the rest of the figure-function family (roc_chart, pr_chart, ...).
+    The base positional model is labelled "base"; compare= keys supply the
+    additional model names.
+    """
     X, y, m = _binary_setup()
-    chart = ferrum.calibration_chart(m, m, X=X, y=y)
+    chart = ferrum.calibration_chart(m, X, y, compare={"alt": m})
     assert "<svg" in chart.show_svg()
 
 
