@@ -21,31 +21,18 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::ordinal::OrdinalScale>()?;
     m.add_class::<scale::threshold::ThresholdScale>()?;
     m.add_class::<scale::quantile::QuantileScale>()?;
-    m.add_class::<transform::bin::PyBin>()?;
-    m.add_class::<transform::bin_2d::PyBin2D>()?;
-    m.add_class::<transform::kde::PyKde>()?;
-    m.add_class::<transform::smooth::PySmooth>()?;
+    // Transform PyO3 wrappers, driven by the single-source-of-truth macro
+    // in transform/core.rs. Adding a new transform is one line there;
+    // registration happens automatically here.
+    macro_rules! register_transforms {
+        ($($V:ident => $mod:ident : $py:ident,)*) => {{
+            $( m.add_class::<crate::transform::$mod::$py>()?; )*
+        }};
+    }
+    crate::transform::core::for_each_transform!(register_transforms);
+    // PyAggregateOp is the op-spec helper class, not a TransformSpec
+    // variant — registered manually.
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
-    m.add_class::<transform::aggregate::PyAggregate>()?;
-    m.add_class::<transform::summary::PySummary>()?;
-    m.add_class::<transform::outliers::PyOutliers>()?;
-    m.add_class::<transform::error_extent::PyErrorExtent>()?;
-    m.add_class::<transform::box_stats::PyBoxStats>()?;
-    m.add_class::<transform::violin::PyViolin>()?;
-    m.add_class::<transform::kde_2d::PyKde2D>()?;
-    m.add_class::<transform::contour::PyContour>()?;
-    m.add_class::<transform::qq::PyQq>()?;
-    m.add_class::<transform::raster::PyRaster>()?;
-    m.add_class::<transform::hex::PyHex>()?;
-    m.add_class::<transform::swarm::PySwarm>()?;
-    m.add_class::<transform::unpivot::PyUnpivot>()?;
-    m.add_class::<transform::reorder::PyReorder>()?;
-    m.add_class::<transform::reference_line::PyReferenceLine>()?;
-    m.add_class::<transform::linkage::PyLinkage>()?;
-    m.add_class::<transform::letter_value::PyLetterValue>()?;
-    m.add_class::<transform::logistic::PyLogistic>()?;
-    m.add_class::<transform::glm::PyGlm>()?;
-    m.add_class::<transform::robust::PyRobust>()?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
