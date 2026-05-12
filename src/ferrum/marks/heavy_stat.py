@@ -11,6 +11,7 @@ from typing import Any, Optional
 from ferrum import (
     BoxStats, Contour, Hex, Kde2D, QQ, Raster, Swarm, Violin,
 )
+from ferrum._layer import _Layer
 
 
 def desugar_contour(
@@ -89,12 +90,12 @@ def desugar_contour(
         Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
-    layers = [{
-        "mark": "polygon",
-        "encoding": {"x": "contour_x", "y": "contour_y"},
-        "mark_kwargs": {"cmap": cmap, "detail": "level_id"},
-        "data_source": "contour",
-    }]
+    layers = [_Layer(
+        mark="polygon",
+        encoding={"x": "contour_x", "y": "contour_y"},
+        mark_kwargs={"cmap": cmap, "detail": "level_id"},
+        data_source="contour",
+    )]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -173,24 +174,28 @@ def desugar_violin(
         )
 
     transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
-    violin_layer = {
-        "mark": "polygon",
-        "encoding": {"x": x_field, "y": "violin_y"},
-        "mark_kwargs": {"detail": "group_id", "fill_opacity": 0.5},
-        "data_source": "violin",
-    }
+    violin_layer = _Layer(
+        mark="polygon",
+        encoding={"x": x_field, "y": "violin_y"},
+        mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
+        data_source="violin",
+    )
     if inner is None:
         return ("__layered__", transforms, None, None, [violin_layer])
     if inner == "point":
         return ("__layered__", transforms, None, None,
-                [violin_layer, {"mark": "point", "encoding": {"x": x_field, "y": y_field}}])
+                [violin_layer, _Layer(mark="point", encoding={"x": x_field, "y": y_field})])
     if inner == "quartile":
         transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
-            layers.append({"mark": "rule", "encoding": {"x": x_field, "y": col},
-                           "mark_kwargs": mk, "data_source": "quart"})
+            layers.append(_Layer(
+                mark="rule",
+                encoding={"x": x_field, "y": col},
+                mark_kwargs=mk if mk else None,
+                data_source="quart",
+            ))
         return ("__layered__", transforms, None, None, layers)
     # inner == "box"
     from ferrum.marks.composite import desugar_boxplot
@@ -253,7 +258,7 @@ def desugar_qq(
     Examples
     --------
     >>> result = desugar_qq("residuals")
-    >>> [l["mark"] for l in result[4]]
+    >>> [l.mark for l in result[4]]
     ['point', 'rule']
     """
     if distribution not in ("normal", "uniform", "exponential"):
@@ -262,13 +267,20 @@ def desugar_qq(
         )
     transforms = [QQ(field=field, distribution=distribution, dequantize=dequantize,
                      emit_line=line, name="qq_main")]
-    layers = [{"mark": "point", "encoding": {"x": "theoretical", "y": "sample"},
-               "data_source": "qq_main"}]
+    layers = [_Layer(
+        mark="point",
+        encoding={"x": "theoretical", "y": "sample"},
+        data_source="qq_main",
+    )]
     if line:
-        layers.append({"mark": "rule",
-                       "encoding": {"x": "qq_line_x_start", "y": "qq_line_y_start",
-                                    "x2": "qq_line_x_end", "y2": "qq_line_y_end"},
-                       "data_source": "qq_line"})
+        layers.append(_Layer(
+            mark="rule",
+            encoding={
+                "x": "qq_line_x_start", "y": "qq_line_y_start",
+                "x2": "qq_line_x_end", "y2": "qq_line_y_end",
+            },
+            data_source="qq_line",
+        ))
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -342,7 +354,7 @@ def desugar_raster(
     Examples
     --------
     >>> result = desugar_raster("x", "y")
-    >>> result[4][0]["mark"]
+    >>> result[4][0].mark
     'image'
     """
     if x_field is None or y_field is None:
@@ -357,12 +369,12 @@ def desugar_raster(
     transforms = [Raster(x=x_field, y=y_field, aggregate=aggregate, field=field,
                          resolution=resolution, min_count=min_count, log_scale=log_scale,
                          name="raster")]
-    layers = [{
-        "mark": "image",
-        "encoding": {"x": x_field, "y": y_field},
-        "mark_kwargs": {"cmap": cmap},
-        "data_source": "raster",
-    }]
+    layers = [_Layer(
+        mark="image",
+        encoding={"x": x_field, "y": y_field},
+        mark_kwargs={"cmap": cmap},
+        data_source="raster",
+    )]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -435,7 +447,7 @@ def desugar_hex(
     Examples
     --------
     >>> result = desugar_hex("x", "y")
-    >>> result[4][0]["mark"]
+    >>> result[4][0].mark
     'polygon'
     """
     if x_field is None or y_field is None:
@@ -449,12 +461,12 @@ def desugar_hex(
         aggregate = "count"
     transforms = [Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field,
                       name="hex")]
-    layers = [{
-        "mark": "polygon",
-        "encoding": {"x": "hex_x", "y": "hex_y"},
-        "mark_kwargs": {"cmap": cmap, "detail": "hex_id"},
-        "data_source": "hex",
-    }]
+    layers = [_Layer(
+        mark="polygon",
+        encoding={"x": "hex_x", "y": "hex_y"},
+        mark_kwargs={"cmap": cmap, "detail": "hex_id"},
+        data_source="hex",
+    )]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -525,7 +537,7 @@ def desugar_swarm(
     Examples
     --------
     >>> result = desugar_swarm("species", "petal_length")
-    >>> result[4][0]["mark"]
+    >>> result[4][0].mark
     'point'
     """
     if x_field is None or y_field is None:
@@ -544,22 +556,22 @@ def desugar_swarm(
         # also emits a `__pos_x_offset__` column (pixel offset on the cross axis)
         # which the renderer's standard position-offset path applies on top of
         # the category band center — same mechanism Dodge uses (Phase 9c).
-        layers = [{
-            "mark": "point",
-            "encoding": {"x": cat, "y": val},
-            "data_source": "swarm",
-        }]
+        layers = [_Layer(
+            mark="point",
+            encoding={"x": cat, "y": val},
+            data_source="swarm",
+        )]
     else:
         # TODO(phase-10g+): horizontal-orient swarm still uses the legacy
         # value-axis-data-unit encoding. Fixing it requires either threading
         # orient through the Rust transform so it emits __pos_y_offset__ instead,
         # or adding a column-rename step in the Python pipeline. Lightly tested
         # path; smoke render still produces an SVG.
-        layers = [{
-            "mark": "point",
-            "encoding": {"x": "swarm_x", "y": "swarm_y"},
-            "data_source": "swarm",
-        }]
+        layers = [_Layer(
+            mark="point",
+            encoding={"x": "swarm_x", "y": "swarm_y"},
+            data_source="swarm",
+        )]
     return ("__layered__", transforms, None, None, layers)
 
 

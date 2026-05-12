@@ -259,8 +259,8 @@ def _line_layer_mark_kwargs(chart, mark_name: str) -> dict:
     """
     resolved = chart._resolve_pending()
     for layer in resolved._layers or []:
-        if layer.get("mark") == "line":
-            return dict(layer.get("mark_kwargs") or {})
+        if layer.mark == "line":
+            return dict(layer.mark_kwargs or {})
     raise AssertionError(f"no line layer found in resolved {mark_name} chart")
 
 
@@ -301,8 +301,8 @@ def test_cv_scores_bar_forwards_mark_kwargs():
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="bar")
     chart = chart._clone().mark_cv_scores(kind="bar", opacity=0.5)
     resolved = chart._resolve_pending()
-    bar = next(L for L in (resolved._layers or []) if L.get("mark") == "bar")
-    assert (bar.get("mark_kwargs") or {}).get("opacity") == 0.5
+    bar = next(L for L in (resolved._layers or []) if L.mark == "bar")
+    assert (bar.mark_kwargs or {}).get("opacity") == 0.5
 
 
 def test_mark_kwargs_unknown_kwarg_raises():
@@ -320,5 +320,5 @@ def test_user_mark_kwargs_override_desugar_defaults():
     chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
     chart = chart._clone().mark_learning_curve(opacity=0.7)
     resolved = chart._resolve_pending()
-    ribbon = next(L for L in (resolved._layers or []) if L.get("mark") == "ribbon")
-    assert (ribbon.get("mark_kwargs") or {}).get("opacity") == 0.7
+    ribbon = next(L for L in (resolved._layers or []) if L.mark == "ribbon")
+    assert (ribbon.mark_kwargs or {}).get("opacity") == 0.7

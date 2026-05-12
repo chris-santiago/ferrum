@@ -73,7 +73,7 @@ def test_desugar_smooth_with_ci_returns_layered_tuple():
     assert isinstance(result, tuple) and len(result) == 5
     assert result[0] == "__layered__"
     layers = result[4]
-    assert [layer["mark"] for layer in layers] == ["ribbon", "line"]
+    assert [layer.mark for layer in layers] == ["ribbon", "line"]
 
 
 # ---------------------------------------------------------------------------

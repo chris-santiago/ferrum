@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin, Kde, Smooth
+from ferrum._layer import _Layer
 
 
 def desugar_density(
@@ -368,12 +369,16 @@ def desugar_smooth(
         smooth_kwargs["x_estimator"] = x_estimator
     transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
     layers = [
-        {"mark": "ribbon",
-         "encoding": {"x": "x", "y": "ci_lower", "y2": "ci_upper"},
-         "mark_kwargs": {"opacity": 0.3},
-         "data_source": "smooth"},
-        {"mark": "line",
-         "encoding": {"x": "x", "y": "y"},
-         "data_source": "smooth"},
+        _Layer(
+            mark="ribbon",
+            encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
+            mark_kwargs={"opacity": 0.3},
+            data_source="smooth",
+        ),
+        _Layer(
+            mark="line",
+            encoding={"x": "x", "y": "y"},
+            data_source="smooth",
+        ),
     ]
     return ("__layered__", transforms, None, None, layers)

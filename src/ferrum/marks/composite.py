@@ -3,13 +3,13 @@
 Each desugar_<name> returns a 5-tuple:
     ("__layered__", transforms: list, _ignored: None, _ignored: None, layers: list)
 
-Where `layers` is a list of dicts each of shape:
-    {"mark": str, "encoding": {channel: field}, "mark_kwargs": dict (opt), "data_source": str|None (opt)}
+Where `layers` is a list of ``ferrum._layer._Layer`` instances.
 """
 from __future__ import annotations
 from typing import Any, Optional
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
+from ferrum._layer import _Layer
 
 
 def desugar_boxplot(
@@ -114,12 +114,14 @@ def desugar_boxplot(
         return d
 
     layers = [
-        {"mark": "rule", "encoding": enc("lower_whisker", "upper_whisker"), "data_source": "box"},
-        {"mark": "rect", "encoding": enc("q1", "q3"), "mark_kwargs": {"width": band}, "data_source": "box"},
-        {"mark": "tick", "encoding": enc("median"), "mark_kwargs": {"band_size": band}, "data_source": "box"},
+        _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker"), data_source="box"),
+        _Layer(mark="rect", encoding=enc("q1", "q3"),
+               mark_kwargs={"width": band}, data_source="box"),
+        _Layer(mark="tick", encoding=enc("median"),
+               mark_kwargs={"band_size": band}, data_source="box"),
     ]
     if outliers:
-        layers.append({"mark": "point", "encoding": enc(val), "data_source": "outliers"})
+        layers.append(_Layer(mark="point", encoding=enc(val), data_source="outliers"))
 
     return ("__layered__", transforms, None, None, layers)
 
@@ -180,21 +182,25 @@ def desugar_errorbar(
     >>> result = desugar_errorbar("day", "tip")
     >>> result[0]
     '__layered__'
-    >>> [l["mark"] for l in result[4]]
+    >>> [l.mark for l in result[4]]
     ['rule', 'tick', 'tick']
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
     layers = [
-        {"mark": "rule", "encoding": {"x": x_field, "y": "lower", "y2": "upper"}, "data_source": "err"},
+        _Layer(
+            mark="rule",
+            encoding={"x": x_field, "y": "lower", "y2": "upper"},
+            data_source="err",
+        ),
     ]
     if ticks:
         layers.extend([
-            {"mark": "tick", "encoding": {"x": x_field, "y": "lower"},
-             "mark_kwargs": {"band_size": 6}, "data_source": "err"},
-            {"mark": "tick", "encoding": {"x": x_field, "y": "upper"},
-             "mark_kwargs": {"band_size": 6}, "data_source": "err"},
+            _Layer(mark="tick", encoding={"x": x_field, "y": "lower"},
+                   mark_kwargs={"band_size": 6}, data_source="err"),
+            _Layer(mark="tick", encoding={"x": x_field, "y": "upper"},
+                   mark_kwargs={"band_size": 6}, data_source="err"),
         ])
     return ("__layered__", transforms, None, None, layers)
 
@@ -253,20 +259,24 @@ def desugar_errorband(
     >>> result = desugar_errorband("x", "y")
     >>> result[0]
     '__layered__'
-    >>> result[4][0]["mark"]
+    >>> result[4][0].mark
     'ribbon'
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
     layers = [
-        {"mark": "ribbon", "encoding": {"x": x_field, "y": "lower", "y2": "upper"},
-         "mark_kwargs": {"opacity": 0.3}, "data_source": "err"},
+        _Layer(
+            mark="ribbon",
+            encoding={"x": x_field, "y": "lower", "y2": "upper"},
+            mark_kwargs={"opacity": 0.3},
+            data_source="err",
+        ),
     ]
     if borders:
         layers.extend([
-            {"mark": "line", "encoding": {"x": x_field, "y": "lower"}, "data_source": "err"},
-            {"mark": "line", "encoding": {"x": x_field, "y": "upper"}, "data_source": "err"},
+            _Layer(mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
+            _Layer(mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
         ])
     return ("__layered__", transforms, None, None, layers)
 
@@ -327,7 +337,7 @@ def desugar_ribbon(
     Examples
     --------
     >>> result = desugar_ribbon("x", "lower", y2_field="upper")
-    >>> result[4][0]["mark"]
+    >>> result[4][0].mark
     'ribbon'
     """
     if x_field is None or y_field is None:
@@ -335,8 +345,11 @@ def desugar_ribbon(
     if y2_field is None:
         raise ValueError("mark_ribbon() requires y2 in encoding (e.g. .encode(x=, y=lower, y2=upper))")
     layers = [
-        {"mark": "ribbon", "encoding": {"x": x_field, "y": y_field, "y2": y2_field},
-         "mark_kwargs": {"opacity": opacity}, "data_source": None},
+        _Layer(
+            mark="ribbon",
+            encoding={"x": x_field, "y": y_field, "y2": y2_field},
+            mark_kwargs={"opacity": opacity},
+        ),
     ]
     return ("__layered__", [], None, None, layers)
 
@@ -391,7 +404,7 @@ def desugar_boxen(
     # fewer effective depths, unused outputs are zero-row batches and render
     # nothing.
     K_MAX = 6
-    layers: list[dict] = []
+    layers: list = []
     for k in range(1, K_MAX + 1):
         opacity = 0.85 - (0.55 * (k - 1) / max(K_MAX - 1, 1))
         enc = (
@@ -399,31 +412,31 @@ def desugar_boxen(
             if horizontal
             else {"x": "group", "y": "lower", "y2": "upper"}
         )
-        layers.append({
-            "mark": "rect",
-            "encoding": enc,
-            "mark_kwargs": {"opacity": opacity},
-            "data_source": f"lv_depth_{k}",
-        })
+        layers.append(_Layer(
+            mark="rect",
+            encoding=enc,
+            mark_kwargs={"opacity": opacity},
+            data_source=f"lv_depth_{k}",
+        ))
 
     # Median rule: at depth=1, ``lower == upper == median``.
-    layers.append({
-        "mark": "rule",
-        "encoding": (
+    layers.append(_Layer(
+        mark="rule",
+        encoding=(
             {"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}
         ),
-        "data_source": "lv_depth_1",
-    })
+        data_source="lv_depth_1",
+    ))
 
     # Outliers: point layer reading from the dedicated outliers output. Schema:
     # [group, value, is_outlier].
-    layers.append({
-        "mark": "point",
-        "encoding": (
+    layers.append(_Layer(
+        mark="point",
+        encoding=(
             {"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}
         ),
-        "data_source": "lv_outliers",
-    })
+        data_source="lv_outliers",
+    ))
 
     return ("__layered__", transforms, None, None, layers)
 
