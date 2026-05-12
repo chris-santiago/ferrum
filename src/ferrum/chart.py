@@ -52,6 +52,51 @@ def _channel_class_for(name: str):
     return _channel_class_map().get(name)
 
 
+def _expand_layers(c: "Chart") -> tuple[list, list]:
+    """Return ``(layer_dicts, top_level_transforms)`` for one side of ``Chart + Chart``.
+
+    Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
+    ``None``) — splat their layers as-is and carry their top-level transforms
+    across.  Plain single-mark charts wrap into a one-element list with the
+    chart's own mark/encoding/etc.
+    """
+    if c._layers is not None:
+        return list(c._layers), list(c._transforms or [])
+    return [{
+        "mark": c._mark,
+        "encoding": dict(c._encoding),
+        "transforms": list(c._transforms),
+        "mark_style": dict(c._mark_kwargs),
+        "position": c._position,
+    }], []
+
+
+def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
+    # Merge RHS top-level transforms (e.g. composite-mark expansion produced
+    # them) into the combined chart's top-level pipeline, deduping by identity
+    # to avoid re-running a transform shared across layers.
+    existing_ids = {id(t) for t in (new._transforms or [])}
+    for t in rhs_top_xforms:
+        if id(t) not in existing_ids:
+            new._transforms = list(new._transforms or []) + [t]
+            existing_ids.add(id(t))
+
+
+def _warn_on_layer_conflicts(lhs: "Chart", rhs: "Chart") -> None:
+    if (
+        (rhs._theme is not None and rhs._theme != lhs._theme)
+        or rhs._facet != lhs._facet
+        or rhs._coord != lhs._coord
+    ):
+        import warnings
+        warnings.warn(
+            "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
+            "primary layer wins.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 class Chart:
     """Top-level chart value class.
 
@@ -3463,17 +3508,7 @@ class Chart:
         """
         if not isinstance(other, Chart):
             return NotImplemented
-
-        same_data = self._data is other._data
-        if not same_data:
-            try:
-                a = to_arrow_table(self._data)
-                b = to_arrow_table(other._data)
-                same_data = a.equals(b)
-            except Exception:
-                same_data = False
-
-        if not same_data:
+        if not self._shares_data_with(other):
             import warnings
             warnings.warn(
                 "Layered charts with differing data render as horizontal concatenation. "
@@ -3483,56 +3518,27 @@ class Chart:
                 stacklevel=2,
             )
             return self.__or__(other)
-
-        # Same data — build a multi-layer chart.
         # Resolve pending statistical marks before snapshotting encoding dicts.
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-
-        def _expand(c):
-            """Return (layer_dicts, top_level_transforms) for one side of `+`.
-
-            Composite-mark charts arrive pre-layered (c._layers is not None,
-            c._mark is None) — splat their layers as-is and carry their
-            top-level transforms across. Plain single-mark charts wrap into a
-            one-element list with the chart's own mark/encoding/etc.
-            """
-            if c._layers is not None:
-                return list(c._layers), list(c._transforms or [])
-            return [{
-                "mark": c._mark,
-                "encoding": dict(c._encoding),
-                "transforms": list(c._transforms),
-                "mark_style": dict(c._mark_kwargs),
-                "position": c._position,
-            }], []
-
-        lhs_layers, _ = _expand(lhs)  # lhs top-level xforms already in `new` via _clone()
-        rhs_layers, rhs_top_xforms = _expand(rhs)
+        lhs_layers, _ = _expand_layers(lhs)  # lhs top xforms already in `new` via _clone()
+        rhs_layers, rhs_top_xforms = _expand_layers(rhs)
         new._layers = lhs_layers + rhs_layers
-        # Merge RHS top-level transforms (e.g. composite-mark expansion produced
-        # them) into the combined chart's top-level pipeline, deduping by
-        # identity to avoid re-running a transform shared across layers.
-        existing_ids = {id(t) for t in (new._transforms or [])}
-        for t in rhs_top_xforms:
-            if id(t) not in existing_ids:
-                new._transforms = list(new._transforms or []) + [t]
-                existing_ids.add(id(t))
-        # Warn if secondary layer has conflicting theme/facet/coord
-        if (
-            (rhs._theme is not None and rhs._theme != lhs._theme)
-            or rhs._facet != lhs._facet
-            or rhs._coord != lhs._coord
-        ):
-            import warnings
-            warnings.warn(
-                "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
-                "primary layer wins.",
-                UserWarning,
-                stacklevel=2,
-            )
+        _merge_top_transforms(new, rhs_top_xforms)
+        _warn_on_layer_conflicts(lhs, rhs)
         return new
+
+    def _shares_data_with(self, other: "Chart") -> bool:
+        # Identity first (fast path), then Arrow value equality. Used by __add__
+        # to decide overlay-vs-concat without forcing a coerce when the python
+        # objects are the same DataFrame.
+        if self._data is other._data:
+            return True
+        try:
+            return to_arrow_table(self._data).equals(to_arrow_table(other._data))
+        except Exception:
+            return False
 
     def __or__(self, other: "Chart") -> "HConcatChart":
         """Place two charts side-by-side (horizontal concatenation).
