@@ -334,10 +334,10 @@ pub fn resolve_scales_with_outputs(
         // Detect whether the color column is numeric (Float64/UInt64/Int64),
         // in which case build a Continuous scale. Otherwise fall back to the
         // legacy Categorical path (Utf8 / Bool / Int64-as-ordinal).
-        let lookup_batch = locate_field_batch(&c_enc.field, primary_batch, transform_outputs)
+        let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
             .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
-        let col = lookup_batch.column_by_name(&c_enc.field)
-            .expect("locate_field_batch guarantees field presence");
+        let lookup_batch = located.batch;
+        let col = located.col;
         let is_continuous_color = matches!(col.data_type(),
             arrow::datatypes::DataType::Float64 | arrow::datatypes::DataType::UInt64);
         if is_continuous_color {
@@ -501,167 +501,156 @@ fn build_axis_scale(
     pixel_range: (f64, f64),
     spec: &ChartSpec,
 ) -> Result<ScaleKind, RenderError> {
-    // Phase 8b: composite-mark layers (boxplot/errorbar/errorband/etc.) read
-    // from named transform outputs whose schemas differ from `__final__`. The
-    // primary batch may not even contain `enc.field`. Prefer the primary batch
-    // when present (preserves single-batch behavior + back-compat goldens), but
-    // otherwise pick any named output that does carry the field. The dtype is
-    // inferred from whichever batch we ended up using to look up `enc.field`.
-    //
-    // For the numeric-extent computation below we additionally union across
-    // every named output that carries `enc.field`; for Utf8/categorical axes,
-    // the lookup batch is sufficient (composite marks preserve the categorical
-    // axis field in every named output, so the primary batch suffices).
-    let lookup_batch = locate_field_batch(&enc.field, primary_batch, transform_outputs)
+    // Phase 8b: composite-mark layers (boxplot/errorbar/etc.) read from named
+    // transform outputs whose schemas differ from `__final__`. The primary
+    // batch may not even contain `enc.field` — pick any batch that does.
+    let located = locate_field(&enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
-    let col = lookup_batch
-        .column_by_name(&enc.field)
-        .expect("locate_field_batch guarantees field presence");
-    let dtype = infer_spec_type(enc, col.data_type());
-    // Y-axis pixel range is inverted ONLY for quantitative/temporal scales —
-    // Cartesian convention: low data value → bottom of plot. Ordinal/nominal
-    // y-axes keep the natural top-down order (first domain value → top of
-    // plot, last → bottom) so heatmaps, confusion matrices, and any other
-    // chart with categorical rows render with the first row at the top,
-    // matching the y-axis label order printed by the tick generator.
-    let pr = if channel == "y"
-        && !matches!(dtype, SpecDataType::Ordinal | SpecDataType::Nominal)
-    {
-        (pixel_range.1, pixel_range.0)
-    } else {
-        pixel_range
-    };
+    let dtype = infer_spec_type(enc, located.col.data_type());
+    let pr = axis_pixel_range(channel, &dtype, pixel_range);
 
     // If an explicit ScaleSpec is present, honor it (Phase 8a).
     if let Some(scale_spec) = &enc.scale {
-        return build_from_scale_spec(scale_spec, enc, lookup_batch, pr);
+        return build_from_scale_spec(scale_spec, enc, located.batch, pr);
     }
 
-    // Numeric / temporal extent.
-    //
-    // Extent rule:
-    //   - If `primary_batch` contains the field, use it as the starting
-    //     extent (preserves single-batch / faceted-panel semantics —
-    //     `FINAL_OUTPUT_KEY` is NOT unioned, so per-panel scales remain
-    //     independent when nothing else references a named output).
-    //   - Additionally union the field's extent across every named output
-    //     that some layer references via `data_source`. Required when a
-    //     layer's `data_source` points at a named transform whose output
-    //     extends past the primary batch — e.g. `ReferenceLine` for the
-    //     y=x diagonal in `calibration_chart`, whose endpoints [0, 1] must
-    //     be reachable even when the primary calibration curve sits inside
-    //     (0.05, 0.95).
-    //   - When the field is absent from `primary_batch`, fall back to
-    //     unioning across all named outputs that contain it (Phase 8b
-    //     composite-mark rule — e.g. boxplot whisker fields living in the
-    //     `box` named output).
-    let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
-        Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
-        None => std::collections::HashSet::new(),
-    };
-    let combined_min_max = || -> Result<(f64, f64), String> {
-        let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
-        let mut accumulate = |c: &dyn Array| -> Result<(), String> {
-            let (a, b) = column_min_max_f64(c)?;
-            if a < mn {
-                mn = a;
-            }
-            if b > mx {
-                mx = b;
-            }
-            Ok(())
-        };
-
-        let primary_has = primary_batch.column_by_name(&enc.field).is_some();
-        if let Some(c) = primary_batch.column_by_name(&enc.field) {
-            accumulate(c.as_ref())?;
-        }
-        // Union across named outputs referenced by at least one layer's
-        // data_source. When primary lacks the field entirely, fall back to
-        // unioning across every named output that contains it (Phase 8b).
-        for (key, batch) in transform_outputs.iter() {
-            let key_is_referenced = layer_data_sources.contains(key.as_str());
-            if !primary_has || key_is_referenced {
-                if let Some(c) = batch.column_by_name(&enc.field) {
-                    accumulate(c.as_ref())?;
-                }
-            }
-        }
-        // Paired (x2/y2) field — same lookup discipline.
-        if let Some(p) = paired_enc {
-            let paired_primary_has = primary_batch.column_by_name(&p.field).is_some();
-            if let Some(c) = primary_batch.column_by_name(&p.field) {
-                accumulate(c.as_ref())?;
-            }
-            for (key, batch) in transform_outputs.iter() {
-                let key_is_referenced = layer_data_sources.contains(key.as_str());
-                if !paired_primary_has || key_is_referenced {
-                    if let Some(c) = batch.column_by_name(&p.field) {
-                        accumulate(c.as_ref())?;
-                    }
-                }
-            }
-        }
-
-        if !mn.is_finite() || !mx.is_finite() {
-            return Err(format!("no usable values found for field '{}'", enc.field));
-        }
-        Ok((mn, mx))
-    };
-
-    // No explicit scale spec → quantitative / temporal get the T4 default
-    // 5% inward padding (capped at 8px); ordinal / nominal use band-side
+    // No explicit scale spec → quantitative/temporal get the T4 default
+    // 5% inward padding (capped at 8px); ordinal/nominal use band-side
     // half-step padding internally and are unaffected here.
     let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
 
     match dtype {
         SpecDataType::Quantitative => {
-            let (min, max) = combined_min_max()
-                .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
+            let (min, max) = numeric_domain_union(
+                &enc.field, paired_enc.map(|p| p.field.as_str()),
+                primary_batch, transform_outputs, spec,
+            ).map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
-                vec![min, max],
-                vec![inset.0, inset.1],
-                false,
-                false,
+                vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let domain = distinct_values_in_order(lookup_batch, &enc.field)?;
+            let domain = distinct_values_in_order(located.batch, &enc.field)?;
             Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
-                domain,
-                vec![pr.0, pr.1],
-                0.0,
+                domain, vec![pr.0, pr.1], 0.0,
             )))
         }
         SpecDataType::Temporal => {
-            let (min, max) = combined_min_max()
-                .map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
+            let (min, max) = numeric_domain_union(
+                &enc.field, paired_enc.map(|p| p.field.as_str()),
+                primary_batch, transform_outputs, spec,
+            ).map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
-                vec![min, max],
-                vec![inset.0, inset.1],
-                false,
-                false,
+                vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
     }
 }
 
-/// Pick the batch whose schema contains `field`. Prefer `primary_batch` for
-/// back-compat single-batch behavior; fall back to any named output (iteration
-/// order is HashMap-undefined but only matters when the field appears in
-/// multiple named outputs and not in primary, which is unusual). Returns None
-/// if no batch contains the field.
-fn locate_field_batch<'a>(
+/// Y-axis pixel range is inverted ONLY for quantitative/temporal scales —
+/// Cartesian convention: low data value → bottom of plot. Ordinal/nominal
+/// y-axes keep the natural top-down order so heatmaps, confusion matrices,
+/// and other categorical-row charts render with first row at the top.
+fn axis_pixel_range(channel: &str, dtype: &SpecDataType, pixel_range: (f64, f64)) -> (f64, f64) {
+    if channel == "y" && !matches!(dtype, SpecDataType::Ordinal | SpecDataType::Nominal) {
+        (pixel_range.1, pixel_range.0)
+    } else {
+        pixel_range
+    }
+}
+
+/// Compute the unioned numeric/temporal extent for an axis field across
+/// the relevant batches.
+///
+/// Extent rule:
+///   - If `primary_batch` contains the field, use it as the starting
+///     extent (preserves single-batch / faceted-panel semantics —
+///     `FINAL_OUTPUT_KEY` is NOT unioned, so per-panel scales remain
+///     independent when nothing else references a named output).
+///   - Additionally union the field's extent across every named output
+///     that some layer references via `data_source`. Required when a
+///     layer's `data_source` points at a named transform whose output
+///     extends past the primary batch — e.g. `ReferenceLine` for the
+///     y=x diagonal in `calibration_chart`, whose endpoints [0, 1] must
+///     be reachable even when the primary calibration curve sits inside
+///     (0.05, 0.95).
+///   - When the field is absent from `primary_batch`, fall back to
+///     unioning across all named outputs that contain it (Phase 8b
+///     composite-mark rule — e.g. boxplot whisker fields living in the
+///     `box` named output).
+///   - The paired field (x2/y2) follows the same lookup discipline.
+fn numeric_domain_union(
+    field: &str,
+    paired_field: Option<&str>,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    spec: &ChartSpec,
+) -> Result<(f64, f64), String> {
+    let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
+        Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
+        None => std::collections::HashSet::new(),
+    };
+    let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut accumulate = |c: &dyn Array| -> Result<(), String> {
+        let (a, b) = column_min_max_f64(c)?;
+        if a < mn { mn = a; }
+        if b > mx { mx = b; }
+        Ok(())
+    };
+
+    let mut union_field = |f: &str| -> Result<(), String> {
+        let primary_has = primary_batch.column_by_name(f).is_some();
+        if let Some(c) = primary_batch.column_by_name(f) {
+            accumulate(c.as_ref())?;
+        }
+        for (key, batch) in transform_outputs.iter() {
+            let key_is_referenced = layer_data_sources.contains(key.as_str());
+            if !primary_has || key_is_referenced {
+                if let Some(c) = batch.column_by_name(f) {
+                    accumulate(c.as_ref())?;
+                }
+            }
+        }
+        Ok(())
+    };
+
+    union_field(field)?;
+    if let Some(p) = paired_field {
+        union_field(p)?;
+    }
+
+    if !mn.is_finite() || !mx.is_finite() {
+        return Err(format!("no usable values found for field '{}'", field));
+    }
+    Ok((mn, mx))
+}
+
+/// Result of looking up a field across the primary batch and named
+/// transform outputs. Carries both the source batch and the resolved
+/// column so callers don't have to re-`column_by_name(...).expect(...)`
+/// after the lookup — the "field is present in this batch" invariant
+/// lives in the type, not in a comment.
+pub(crate) struct LocatedColumn<'a> {
+    pub(crate) batch: &'a RecordBatch,
+    pub(crate) col: &'a dyn Array,
+}
+
+/// Pick the batch whose schema contains `field` and return both the batch
+/// and the resolved column. Prefer `primary_batch` for back-compat
+/// single-batch behavior; fall back to any named output (iteration order
+/// is HashMap-undefined but only matters when the field appears in
+/// multiple named outputs and not in primary, which is unusual).
+fn locate_field<'a>(
     field: &str,
     primary_batch: &'a RecordBatch,
     transform_outputs: &'a HashMap<String, RecordBatch>,
-) -> Option<&'a RecordBatch> {
-    if primary_batch.column_by_name(field).is_some() {
-        return Some(primary_batch);
+) -> Option<LocatedColumn<'a>> {
+    if let Some(c) = primary_batch.column_by_name(field) {
+        return Some(LocatedColumn { batch: primary_batch, col: c.as_ref() });
     }
     for batch in transform_outputs.values() {
-        if batch.column_by_name(field).is_some() {
-            return Some(batch);
+        if let Some(c) = batch.column_by_name(field) {
+            return Some(LocatedColumn { batch, col: c.as_ref() });
         }
     }
     None
