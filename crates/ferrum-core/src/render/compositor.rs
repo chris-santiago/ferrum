@@ -181,6 +181,12 @@ pub(crate) fn write_svg_open(out: &mut String, w: f64, h: f64) {
 /// Composers must pass `is_first = true` exactly once per output —
 /// either for the first cell when no holes precede it (1D composers)
 /// or for the first non-`None` cell (grid composer).
+///
+/// Use this when the cell's native dimensions match its allocated slot.
+/// For grid cells in slots that differ from native (ratio-weighted
+/// allocations smaller or larger than the cell's intrinsic size), use
+/// [`write_scaled_cell`] which wraps in a nested `<svg viewBox>` that
+/// stretches the body to fit.
 pub(crate) fn write_cell(out: &mut String, x: f64, y: f64, idx: usize, body: &str, is_first: bool) {
     out.push_str(&format!(
         r#"<g transform="translate({},{})">"#,
@@ -193,6 +199,41 @@ pub(crate) fn write_cell(out: &mut String, x: f64, y: f64, idx: usize, body: &st
     };
     out.push_str(&uniquify_clip_ids(&intermediate, idx));
     out.push_str("</g>");
+}
+
+/// Emit a per-cell wrapper that scales `body` from its native
+/// `(native_w, native_h)` into the allocated slot `(slot_w, slot_h)`.
+///
+/// Wraps the body in a nested `<svg x=... y=... width=... height=...
+/// viewBox="0 0 native_w native_h" preserveAspectRatio="none">…</svg>`.
+/// `preserveAspectRatio="none"` lets the cell stretch independently in
+/// X and Y so a JointChart marginal at native 600×400 fits a 600×80 slot
+/// by squishing the Y axis while leaving X aligned with the centre cell.
+pub(crate) fn write_scaled_cell(
+    out: &mut String,
+    x: f64,
+    y: f64,
+    slot_w: f64,
+    slot_h: f64,
+    native_w: f64,
+    native_h: f64,
+    idx: usize,
+    body: &str,
+    is_first: bool,
+) {
+    out.push_str(&format!(
+        r#"<svg x="{}" y="{}" width="{}" height="{}" viewBox="0 0 {} {}" preserveAspectRatio="none">"#,
+        fmt_f(x), fmt_f(y),
+        fmt_f(slot_w), fmt_f(slot_h),
+        fmt_f(native_w), fmt_f(native_h),
+    ));
+    let intermediate: std::borrow::Cow<'_, str> = if is_first {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(strip_font_defs(body))
+    };
+    out.push_str(&uniquify_clip_ids(&intermediate, idx));
+    out.push_str("</svg>");
 }
 
 // ---------------------------------------------------------------------------

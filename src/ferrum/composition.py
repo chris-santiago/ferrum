@@ -376,29 +376,15 @@ class JointChart:
                 "JointChart.show_svg() requires compose_svg_grid; "
                 "compose_svg_grid not available in this build"
             ) from e
-        # The grid compositor uses each cell's actual rendered size, ignoring
-        # row_ratios/col_ratios — so we must resize the marginals here. Without
-        # this, all charts render at 600x400 and the top-right corner becomes
-        # a huge empty rectangle the size of a full chart.
-        center_w = self.center._width or 600.0
-        center_h = self.center._height or 400.0
-        marg_h = center_h / self.ratio
-        marg_w = center_w / self.ratio
-        # Marginals share their data dimension with the centre cell; the
-        # marginal's own axis decoration is redundant and visually noisy at
-        # marginal size, so suppress it at the spec level via Chart.axis().
-        # Top marginal shares its x-axis with the centre; hide both its
-        # tick band (would duplicate the centre's x-axis labels) AND its
-        # marginal y-axis (count/density on a tiny strip is illegible).
-        # Right marginal shares its y-axis with the centre; same treatment.
-        top_chart = (
-            self.top.properties(width=center_w, height=marg_h).axis(show=False)
-            if self.top is not None else None
-        )
-        right_chart = (
-            self.right.properties(width=marg_w, height=center_h).axis(show=False)
-            if self.right is not None else None
-        )
+        # F20: the Rust grid compositor now honors row_ratios/col_ratios via
+        # viewBox-scaled per-cell wrappers, so marginals can be passed at
+        # their native size and the compositor handles proportional sizing.
+        # The marginals still suppress their own axis decoration — the
+        # data axis is redundant against the centre cell and the marginal-
+        # only axis (count/density on a thin strip) is illegible at marginal
+        # size.
+        top_chart = self.top.axis(show=False) if self.top is not None else None
+        right_chart = self.right.axis(show=False) if self.right is not None else None
         top_svg = top_chart.show_svg() if top_chart is not None else None
         right_svg = right_chart.show_svg() if right_chart is not None else None
         cells = [top_svg, None, self.center.show_svg(), right_svg]

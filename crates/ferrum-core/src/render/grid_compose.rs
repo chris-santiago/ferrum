@@ -6,7 +6,9 @@
 //! Chart.properties). Coordinate-system rebinding within the SVG body is out
 //! of scope for Phase 9.
 
-use crate::render::compositor::{parse_svg_root, write_cell, write_svg_open, CompositorError};
+use crate::render::compositor::{
+    parse_svg_root, write_cell, write_scaled_cell, write_svg_open, CompositorError,
+};
 #[cfg(test)]
 use crate::render::svg::fmt_f;
 
@@ -19,12 +21,23 @@ struct OwnedCell {
     body: String,
 }
 
-/// Compose a row-major grid of SVGs.
+/// Compose a row-major grid of SVGs with ratio-weighted row/col sizing.
 ///
 /// `cells[i*cols + j]` is row i, column j; `None` = empty (skipped) cell.
-/// `row_ratios` and `col_ratios` are accepted for forward-compatibility but
-/// are not used to scale cells in Phase 9 — instead each row/col takes the
-/// maximum size of its non-empty cells.
+///
+/// **Sizing rule (F20):** each col's allocated width is
+/// `K_w * col_ratios[c]`, where `K_w` is chosen so the largest native
+/// cell width in each col never exceeds its allocation. Same for rows.
+/// When the callers pre-resize cells so that native dimensions match
+/// the ratios exactly (Phase 9 JointChart/ClusterMapChart behavior pre-
+/// F20b), this is byte-identical to the prior "max-per-row/col" algorithm.
+/// When cells are at native size with non-matching ratios, the cell is
+/// scaled into its slot via a nested `<svg viewBox preserveAspectRatio="none">`
+/// wrapper. The current callers always satisfy the no-scaling case for
+/// every cell (JointChart's marginals shrink the data axis but match
+/// in the ratio dimension); even so we emit scaled wrappers when any
+/// slot diverges from native to keep the contract symmetric.
+///
 /// `spacing` is in absolute SVG units between adjacent cells.
 pub fn compose_svg_grid(
     cells: &[Option<String>],
@@ -46,9 +59,9 @@ pub fn compose_svg_grid(
         return Err(CompositorError::EmptyInput);
     }
 
-    // First pass: parse each non-None cell, record max dimensions per row/col.
-    let mut col_widths = vec![0.0_f64; cols];
-    let mut row_heights = vec![0.0_f64; rows];
+    // First pass: parse each non-None cell, record max native dimension per row/col.
+    let mut native_col_w = vec![0.0_f64; cols];
+    let mut native_row_h = vec![0.0_f64; rows];
     let mut owned: Vec<Option<OwnedCell>> = Vec::with_capacity(cells.len());
 
     for (idx, opt) in cells.iter().enumerate() {
@@ -56,8 +69,8 @@ pub fn compose_svg_grid(
             let p = parse_svg_root(svg)?;
             let r = idx / cols;
             let c = idx % cols;
-            col_widths[c] = col_widths[c].max(p.width);
-            row_heights[r] = row_heights[r].max(p.height);
+            native_col_w[c] = native_col_w[c].max(p.width);
+            native_row_h[r] = native_row_h[r].max(p.height);
             owned.push(Some(OwnedCell {
                 width: p.width,
                 height: p.height,
@@ -67,6 +80,42 @@ pub fn compose_svg_grid(
             owned.push(None);
         }
     }
+
+    // Compute scaling factors so the dominant-share row/col renders at its
+    // native size, and smaller-share rows/cols get proportionally smaller
+    // (and stretch-scaled) allocations.
+    //
+    //   col_widths[c] = K_w * col_ratios[c]
+    //   K_w = MIN over c of (native_col_w[c] / col_ratios[c])
+    //
+    // Pick MIN rather than MAX: MAX would expand the dominant cell to make
+    // room for an over-sized small-share cell at native; MIN keeps the
+    // dominant cell at native and shrinks the smaller-share cell to fit
+    // its allocated share. For JointChart this is the intent — the centre
+    // panel is at native; marginals scale to their narrow strips. For
+    // ClusterMapChart's pre-sized dendrograms K_w is uniform across cols
+    // (intentional pre-resize), so MIN == MAX and the layout is
+    // byte-identical to the prior algorithm.
+    //
+    // Cells that pre-resize cleanly (native matches slot for every row/col)
+    // keep the lightweight `<g transform>` wrapper in the emit loop below.
+    // Cells whose native dim differs from their slot get a nested
+    // `<svg viewBox preserveAspectRatio="none">` wrapper that stretches
+    // the body to fit (see compositor::write_scaled_cell).
+    let k_w = col_ratios
+        .iter()
+        .zip(native_col_w.iter())
+        .filter_map(|(r, nw)| if *r > 0.0 && *nw > 0.0 { Some(nw / r) } else { None })
+        .fold(f64::INFINITY, f64::min);
+    let k_h = row_ratios
+        .iter()
+        .zip(native_row_h.iter())
+        .filter_map(|(r, nh)| if *r > 0.0 && *nh > 0.0 { Some(nh / r) } else { None })
+        .fold(f64::INFINITY, f64::min);
+    let k_w = if k_w.is_finite() { k_w } else { 0.0 };
+    let k_h = if k_h.is_finite() { k_h } else { 0.0 };
+    let col_widths: Vec<f64> = col_ratios.iter().map(|r| k_w * r).collect();
+    let row_heights: Vec<f64> = row_ratios.iter().map(|r| k_h * r).collect();
 
     let total_w: f64 = col_widths.iter().sum::<f64>()
         + spacing * (cols.saturating_sub(1)) as f64;
@@ -81,7 +130,8 @@ pub fn compose_svg_grid(
     let mut out = String::with_capacity(capacity);
     write_svg_open(&mut out, total_w, total_h);
 
-    // Second pass: emit cells with translate transforms.
+    // Second pass: emit cells with translate-or-viewBox wrappers depending
+    // on whether the cell's native size matches its allocated slot.
     let mut first_emitted = false;
     let mut y_offset = 0.0_f64;
     for r in 0..rows {
@@ -91,8 +141,22 @@ pub fn compose_svg_grid(
             if let Some(cell) = &owned[idx] {
                 let is_first = !first_emitted;
                 first_emitted = true;
-                write_cell(&mut out, x_offset, y_offset, idx, &cell.body, is_first);
-                let _ = (cell.width, cell.height); // unused per-cell dims (F22 will consume)
+                let slot_w = col_widths[c];
+                let slot_h = row_heights[r];
+                let near_eq = |a: f64, b: f64| (a - b).abs() < 1e-6;
+                if near_eq(cell.width, slot_w) && near_eq(cell.height, slot_h) {
+                    // No scaling needed — keep the lightweight <g translate> wrapper.
+                    write_cell(&mut out, x_offset, y_offset, idx, &cell.body, is_first);
+                } else {
+                    // Slot != native: scale the cell to fit via nested <svg>
+                    // with preserveAspectRatio="none". The inner content's
+                    // viewBox preserves its coordinate system; only the outer
+                    // bounding box stretches.
+                    write_scaled_cell(
+                        &mut out, x_offset, y_offset, slot_w, slot_h,
+                        cell.width, cell.height, idx, &cell.body, is_first,
+                    );
+                }
             }
             x_offset += col_widths[c] + if c + 1 < cols { spacing } else { 0.0 };
         }
@@ -101,6 +165,7 @@ pub fn compose_svg_grid(
     out.push_str("</svg>");
     Ok(out)
 }
+
 
 #[cfg(test)]
 mod tests {
