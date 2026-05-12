@@ -97,12 +97,14 @@ def _inject_metrics_corner(
         if kind in ("studentized", "scaled")
         else "residual"
     )
+    from ferrum._metrics_fmt import format_corner_metrics
+
     y_true = np.asarray(df["y_true"].to_list(), dtype=float)
     y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
     r2 = _r2_score(y_true, y_pred)
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
     mae = float(np.mean(np.abs(y_true - y_pred)))
-    corner_text = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
+    corner_text = format_corner_metrics(r2, rmse, mae)
 
     n = df.height
     anchor_idx = int(np.argmax(y_pred))
