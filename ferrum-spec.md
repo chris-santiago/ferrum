@@ -417,6 +417,17 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 
 > *(2026-05-10) Phase 8b: `mark_swarm` `dodge=` parameter deferred (single-group swarm only in 8b).*
 
+> **2026-05-12 (Phase 9, F16 audit):** Type inference for the color
+> channel follows the same rule as the axis scales: continuous color is
+> selected when the `type=` argument on `Color(...)` is `"Q"` /
+> `Quantitative` or `"T"` / `Temporal`, or when `type=` is `None` and
+> the column dtype is numeric (any width: Float32/64, Int8/16/32/64,
+> UInt8/16/32/64) or temporal (Date32/64, Timestamp). All other cases
+> fall through to a categorical color scale. A user-supplied
+> `type="quantitative"` on a non-numeric column raises
+> `EncodingTypeMismatch` per the line-52 "no magic inference that
+> silently fails" rule.
+
 > *(2026-05-10) Phase 8b: `mark_hex` only count/mean/sum aggregates supported. Other Vega-Lite aggregates warn-once and fall back to count.*
 
 **Bivariate density:** When both X and Y channels are encoded as quantitative fields, `mark_density` switches to bivariate KDE mode and renders filled contours, equivalent to `mark_contour` with `fill=True`. The `multiple` parameter applies to univariate mode only.
@@ -827,6 +838,27 @@ JointChart(center, *, top=None, right=None, ratio=5, spacing=10.0)
 > default for `JointChart` / `RepeatChart` / `ClusterMapChart` was
 > bumped from `0.02` (effectively zero) to `10.0` to match
 > `HConcatChart` / `VConcatChart`. Affected goldens were re-blessed.
+
+> **2026-05-12 (Phase 9, F20 audit):** The grid compositor allocates
+> slot dimensions as `K * ratio[i]`, where `K = min_i(native_dim[i] /
+> ratio[i])`. The dominant row/column renders at its native size; smaller
+> cells are stretched into their declared ratio via nested
+> `<svg viewBox preserveAspectRatio="none">` wrappers. This is the
+> algorithm that gives `JointChart(ratio=5)` its 5:1 center-to-marginal
+> proportions and that drives the `row_ratios` / `col_ratios` parameters
+> on the internal `compose_svg_grid` binding.
+>
+> **Non-uniform-stretch caveat:** the `preserveAspectRatio="none"`
+> wrapper distorts glyphs when the slot's aspect ratio diverges from
+> the cell's native aspect ratio. For `JointChart` this is harmless —
+> the shared data axis stays aligned by construction; only the redundant
+> count/density axis stretches. Compound views with intrinsic shape
+> constraints (dendrograms, geographic projections, fixed-aspect
+> coordinate systems) must pre-resize their cells so the slot ratios are
+> already satisfied at native size. `ClusterMapChart` is the example
+> here: dendrogram heights and widths are pre-computed to match the
+> heatmap's row/column slots so `K_w` and `K_h` collapse to unity and
+> no scaling fires.
 
 > **2026-05-11 (Phase 9, P2.5):** `RepeatChart` now ships the previously
 > dormant `columns`, `layer`, and `resolve` kwargs:
