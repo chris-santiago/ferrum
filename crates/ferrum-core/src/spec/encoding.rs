@@ -457,6 +457,46 @@ pub struct Encoding {
     pub text: Option<EncodingSpec>,
 }
 
+impl Encoding {
+    /// Inherit unset encoding channels from `parent`.
+    ///
+    /// For each of the 9 channels (x, y, color, size, shape, opacity, x2, y2, text):
+    ///   - If this layer's channel is unset (`None`), adopt the parent's value.
+    ///   - If this layer's channel is set with the same `field` as the parent
+    ///     and has no `scale` of its own, inherit the parent's scale spec.
+    ///     This lets a chart-level explicit scale (domain/range/padding)
+    ///     apply to every layer that references the same field, while
+    ///     leaving layer-supplied scales untouched.
+    ///
+    /// Phase 10f: pre-F7 only x/y/color/size received the scale merge;
+    /// shape/opacity/x2/y2/text fell through with no merge. F7 applies the
+    /// merge uniformly so the policy is symmetric and predictable — the
+    /// per-channel asymmetry was an undocumented accident.
+    pub fn inherit_from(&mut self, parent: &Encoding) {
+        fn inherit(
+            child: &mut Option<EncodingSpec>,
+            parent: &Option<EncodingSpec>,
+        ) {
+            match (child.as_mut(), parent.as_ref()) {
+                (None, Some(_)) => { *child = parent.clone(); }
+                (Some(c), Some(p)) if c.field == p.field && c.scale.is_none() && p.scale.is_some() => {
+                    c.scale = p.scale.clone();
+                }
+                _ => {}
+            }
+        }
+        inherit(&mut self.x, &parent.x);
+        inherit(&mut self.y, &parent.y);
+        inherit(&mut self.color, &parent.color);
+        inherit(&mut self.size, &parent.size);
+        inherit(&mut self.shape, &parent.shape);
+        inherit(&mut self.opacity, &parent.opacity);
+        inherit(&mut self.x2, &parent.x2);
+        inherit(&mut self.y2, &parent.y2);
+        inherit(&mut self.text, &parent.text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
