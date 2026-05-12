@@ -1,0 +1,7 @@
+plot_type = "Class prediction error"
+dataset = "load_iris, LogisticRegression(max_iter=500)"
+width = 600
+height = 500
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.class_prediction_error_chart available; multiclass stacked-bar visualization of per-class prediction breakdown."

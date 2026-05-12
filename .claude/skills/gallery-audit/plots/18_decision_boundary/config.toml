@@ -1,0 +1,7 @@
+plot_type = "Decision boundary"
+dataset = "load_iris[:, :2], LogisticRegression(max_iter=500), features=(0,1)"
+width = 600
+height = 500
+panels = ["ferrum", "sklearn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.decision_boundary_chart available; passes scatter=True to show training points overlaid on filled regions."

@@ -1,0 +1,7 @@
+plot_type = "Intercluster distance map"
+dataset = "make_blobs(n_samples=300, centers=5, random_state=0), KMeans(n_clusters=5, random_state=0)"
+width = 600
+height = 500
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.intercluster_distance_chart available; default MDS embedding with circle sizes proportional to cluster membership."

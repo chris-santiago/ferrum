@@ -1,0 +1,7 @@
+plot_type = "SHAP summary (beeswarm)"
+dataset = "make_classification(n_samples=200, n_features=8), RandomForestClassifier(n_estimators=20)"
+width = 700
+height = 500
+panels = ["ferrum", "shap"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.shap_chart available; default kind='beeswarm', max_display=20, order='abs_mean'."

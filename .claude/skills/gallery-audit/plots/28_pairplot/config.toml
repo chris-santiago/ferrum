@@ -1,0 +1,7 @@
+plot_type = "Pairplot (scatter matrix)"
+dataset = "load_iris with species column (cast to str for ferrum hue)"
+width = 700
+height = 700
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.pairplot available; ferrum requires hue column as Utf8/str (NOT Int64) — fixtures cast species labels to strings."

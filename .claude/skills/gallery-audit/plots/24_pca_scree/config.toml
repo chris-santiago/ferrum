@@ -1,0 +1,7 @@
+plot_type = "PCA scree plot"
+dataset = "load_wine, PCA(n_components=8)"
+width = 600
+height = 500
+panels = ["ferrum", "sklearn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.pca_scree_chart available; default cumulative_line=True, threshold=0.95."

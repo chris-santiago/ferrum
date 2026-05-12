@@ -1,0 +1,7 @@
+plot_type = "Joint plot (scatter + marginal hist)"
+dataset = "seaborn tips dataset"
+width = 600
+height = 600
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.jointplot available; default kind='scatter', marginal_kind='hist'."

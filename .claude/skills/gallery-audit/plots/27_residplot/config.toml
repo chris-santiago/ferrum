@@ -1,0 +1,7 @@
+plot_type = "Residual scatter (residplot)"
+dataset = "seaborn tips dataset"
+width = 600
+height = 500
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.residplot available; seaborn-style figure-level fn; default order=1 (linear), no lowess."

@@ -1,0 +1,7 @@
+plot_type = "Cluster heatmap (clustermap)"
+dataset = "load_iris numeric features"
+width = 700
+height = 700
+panels = ["ferrum", "seaborn"]
+ferrum_status = "PARTIAL"
+ferrum_notes = "ferrum.clustermap is defined but raises `unknown column '_row_id' referenced by an encoding` at render time — confirmed by audit smoke test. Audit will flag this as a panel-fail bug."

@@ -1,0 +1,7 @@
+plot_type = "Cluster diagnostics (elbow + silhouette)"
+dataset = "make_blobs(n_samples=300, centers=5, random_state=0)"
+width = 700
+height = 500
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.cluster_diagnostics available; ks=range(2,11), default scoring='both' (distortion + silhouette)."

@@ -1,0 +1,7 @@
+plot_type = "Feature rank (Rank2D)"
+dataset = "load_wine"
+width = 600
+height = 600
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.rank_chart available; default rank='2d' produces a pairwise Pearson correlation heatmap of features."

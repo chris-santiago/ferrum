@@ -1,0 +1,7 @@
+plot_type = "Parallel coordinates"
+dataset = "load_iris as polars DataFrame, hue=species"
+width = 800
+height = 500
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.parallel_coordinates_chart available; default rescale='minmax' so features share a y-axis."
