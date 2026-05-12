@@ -1,41 +1,12 @@
-# Follow-up: P1.1 protocol collapse + P1.3 layer/pending-mark dataclasses
+# Follow-up: P1.3b/c layer dict + `_pending_stat_mark` dataclasses
 
 **Filed**: 2026-05-11
-**Origin**: deferred from `docs/superpowers/plans/2026-05-11-python-coherence-pass-plan.md` P1.1 (C2) and P1.3 (C5)
+**Origin**: deferred from `docs/superpowers/plans/2026-05-11-python-coherence-pass-plan.md` P1.3 (C5)
 **Status**: scoped, not yet done
 
-## P1.1 — collapse `_resolve_pending` 2-tuple/3-tuple protocol (C2)
-
-`_resolve_pending` currently branches on `len(_pending_stat_mark) == 3`:
-
-- **3-tuple** `(kind, kwargs, desugar_fn)` is the generic helper-driven form
-  used by every composite/diagnostic mark (Phase 8b+).
-- **2-tuple** `(kind, kwargs)` is the legacy form used by `mark_density`,
-  `mark_histogram`, `mark_smooth`. The resolver dispatches on `kind` to the
-  appropriate desugar function with mark-specific orientation / bivariate
-  routing logic.
-
-The verification verdict was DRIFT — the 2-tuple form is not intentional
-protocol evolution.
-
-**Why deferred**: collapsing requires:
-
-1. The generic 3-tuple resolve to support `y2` remap (currently only `x`,
-   `y`, `x2`). Trivial — one branch.
-2. Closure adapters for density/histogram/smooth that handle:
-   - `mark_density`: orientation-based field-channel choice + reconstructing
-     `chart_encoding` for bivariate routing through `desugar_contour`.
-   - `mark_histogram`: orientation-based field-channel choice + post-desugar
-     remap rewriting (the horizontal path emits `y/y2/x` instead of
-     `x/x2/y` in the encoding).
-   - `mark_smooth`: requires both x and y; otherwise straightforward.
-3. Removing the eager paths in `mark_density`/`mark_histogram`/`mark_smooth`
-   (which currently fast-path when encoding is already set) **or** keeping
-   them and deleting only the 2-tuple sentinel branch in the resolver.
-
-The risk surface is modest but the bivariate-density routing through
-`chart_encoding` is subtle enough that it deserves a focused commit with
-a careful golden audit, not a piggy-back on another refactor.
+P1.1 (C2 — collapse `_resolve_pending` 2/3-tuple protocol) was originally
+filed here as deferred. It landed in commit `bbe518c` with the closure
+adapters described in the original deferral note; this section is removed.
 
 ## P1.3 — frozen dataclasses for layer dicts and `_pending_stat_mark`
 
