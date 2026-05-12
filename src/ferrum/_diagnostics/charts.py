@@ -16,6 +16,7 @@ from typing import Any
 
 import polars as pl
 
+from ferrum.encoding import X, Y
 
 from ferrum._sentinels import _inject_constant  # noqa: F401  re-export
 
@@ -244,6 +245,11 @@ def _residuals_panel(
             )
         else:
             chart = ferrum.Chart(df).mark_residuals(kind=kind)
+        chart = chart.encode(
+            x=X("y_pred", title="Fitted values"),
+            y=Y(y_col, title="Studentized residual"),
+        )
+        chart = chart.properties(title=ferrum.Title("Residuals vs Fitted"))
         # Schwabish SB3: detect the ``_metrics_text``/``_metrics_y``
         # columns injected upstream by ``_inject_metrics_corner`` and
         # overlay the corner annotation. No-op when the columns are
@@ -253,11 +259,27 @@ def _residuals_panel(
         return _overlay_metrics_corner(chart)
 
     if name == "qq":
-        return ferrum.Chart(df).mark_qq().encode(x="studentized_residual")
+        return (
+            ferrum.Chart(df)
+            .mark_qq()
+            .encode(
+                x=X("studentized_residual", title="Theoretical quantiles"),
+                y=Y("sample", title="Sample quantiles"),
+            )
+            .properties(title=ferrum.Title("Normal Q–Q"))
+        )
 
     if name == "scale_location":
         d2 = df.with_columns(pl.col("studentized_residual").abs().sqrt().alias("sqrt_abs_resid"))
-        return ferrum.Chart(d2).mark_point().encode(x="y_pred", y="sqrt_abs_resid")
+        return (
+            ferrum.Chart(d2)
+            .mark_point()
+            .encode(
+                x=X("y_pred", title="Fitted values"),
+                y=Y("sqrt_abs_resid", title="√|Studentized residual|"),
+            )
+            .properties(title=ferrum.Title("Scale–Location"))
+        )
 
     if name == "residuals_vs_leverage":
         # Inject outlier columns BEFORE constructing the base chart so
@@ -272,7 +294,15 @@ def _residuals_panel(
                 threshold=cook_threshold,
                 x_col="leverage",
             )
-        base = ferrum.Chart(df).mark_point().encode(x="leverage", y=y_col)
+        base = (
+            ferrum.Chart(df)
+            .mark_point()
+            .encode(
+                x=X("leverage", title="Leverage"),
+                y=Y(y_col, title="Studentized residual"),
+            )
+            .properties(title=ferrum.Title("Residuals vs Leverage"))
+        )
         if cook_threshold is not None and "_cook_outlier_x" in df.columns:
             overlay = (
                 ferrum.Chart(df)
@@ -349,6 +379,11 @@ def _prediction_error_chart_from_source(
         ci=ci,
         reference_band=reference_band,
     )
+    chart = chart.encode(
+        x=X("y_pred", title="Predicted value"),
+        y=Y("y_true", title="True value"),
+    )
+    chart = chart.properties(title=ferrum.Title("Prediction Error"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -395,6 +430,10 @@ def _roc_chart_from_source(
         annotate_auc=False,
         color_field=color_field,
     )
+    chart = chart.encode(
+        x=X("fpr", title="False Positive Rate"),
+        y=Y("tpr", title="True Positive Rate"),
+    )
 
     n_curves = len(set(df[color_field].to_list())) if color_field is not None else 1
     if n_curves == 1:
@@ -402,10 +441,10 @@ def _roc_chart_from_source(
         tpr = np.asarray(df["tpr"].to_list(), dtype=float)
         auc_value = _trapezoid_auc(fpr, tpr)
         chart = chart.properties(
-            title=ferrum.Title(f"ROC — AUC {auc_value:.3f}", subtitle=subtitle),
+            title=ferrum.Title(f"ROC Curve — AUC {auc_value:.3f}", subtitle=subtitle),
         )
     else:
-        chart = chart.properties(title=ferrum.Title("ROC", subtitle=subtitle))
+        chart = chart.properties(title=ferrum.Title("ROC Curve", subtitle=subtitle))
 
     if annotate_auc:
         chart = _apply_metric_label_explicit(
@@ -495,7 +534,6 @@ def _pr_chart_from_source(
 
     import ferrum
     from ferrum.annotations import _apply_metric_label_explicit, _ap_step
-    from ferrum.encoding import X, Y
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
@@ -536,8 +574,8 @@ def _pr_chart_from_source(
             color_field=color_field,
         )
         .encode(
-            x=X("recall", scale={"type": "linear", "domain": [0.0, 1.05]}),
-            y=Y("precision", scale={"type": "linear", "domain": [0.0, 1.05]}),
+            x=X("recall", title="Recall", scale={"type": "linear", "domain": [0.0, 1.05]}),
+            y=Y("precision", title="Precision", scale={"type": "linear", "domain": [0.0, 1.05]}),
         )
     )
 
@@ -554,13 +592,13 @@ def _pr_chart_from_source(
         ap_value = _ap_step(recall, precision)
         chart = chart.properties(
             title=ferrum.Title(
-                f"Precision–Recall — AP {ap_value:.3f}",
+                f"Precision–Recall Curve — AP {ap_value:.3f}",
                 subtitle=subtitle,
             ),
         )
     else:
         chart = chart.properties(
-            title=ferrum.Title("Precision–Recall", subtitle=subtitle),
+            title=ferrum.Title("Precision–Recall Curve", subtitle=subtitle),
         )
 
     if baseline_prevalence is not None:
@@ -702,6 +740,10 @@ def _calibration_chart_from_source(
         strategy=strategy,
         color_field=color,
     )
+    chart = chart.encode(
+        x=X("mean_predicted", title="Mean predicted probability"),
+        y=Y("fraction_positive", title="Fraction of positives"),
+    )
 
     # Active title fires when exactly one model. Compute the true
     # per-sample Brier from ``source.model.predict_proba`` and
@@ -730,13 +772,13 @@ def _calibration_chart_from_source(
     if brier_value is not None:
         chart = chart.properties(
             title=ferrum.Title(
-                f"Calibration — Brier {brier_value:.3f}",
+                f"Calibration Curve — Brier {brier_value:.3f}",
                 subtitle=subtitle,
             ),
         )
     else:
         chart = chart.properties(
-            title=ferrum.Title("Calibration", subtitle=subtitle),
+            title=ferrum.Title("Calibration Curve", subtitle=subtitle),
         )
 
     if annotate_brier:
@@ -779,8 +821,12 @@ def _gain_chart_from_source(
     if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
     chart = chart.mark_gain(color_field=color_field)
+    chart = chart.encode(
+        x=X("percent_population", title="Percentage of sample"),
+        y=Y("gain", title="Gain"),
+    )
     chart = chart.properties(
-        title=ferrum.Title("Cumulative gain", subtitle=subtitle),
+        title=ferrum.Title("Cumulative Gains Curve", subtitle=subtitle),
     )
     if color_field is not None:
         chart = _direct_label_endpoint(
@@ -815,7 +861,11 @@ def _lift_chart_from_source(
     if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
     chart = chart.mark_lift(color_field=color_field)
-    chart = chart.properties(title=ferrum.Title("Lift", subtitle=subtitle))
+    chart = chart.encode(
+        x=X("percent_population", title="Percentage of sample"),
+        y=Y("lift", title="Lift"),
+    )
+    chart = chart.properties(title=ferrum.Title("Lift Curve", subtitle=subtitle))
     if color_field is not None:
         chart = _direct_label_endpoint(
             chart,
@@ -843,6 +893,11 @@ def _confusion_chart_from_source(
         normalize=normalize,
         annotate=annotate,
     )
+    chart = chart.encode(
+        x=X("predicted", title="Predicted label"),
+        y=Y("actual", title="True label"),
+    )
+    chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -878,6 +933,11 @@ def _class_prediction_error_chart_from_source(
         normalize=normalize,
         show_counts=show_counts,
     )
+    chart = chart.encode(
+        x=X("actual", title="Actual class"),
+        y=Y("count", title="Number of predictions"),
+    )
+    chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1133,6 +1193,11 @@ def _shap_beeswarm_chart_from_source(
         zero_line=zero_line and not is_faceted,
         x_scale_domain=domain,
     )
+    chart = chart.encode(
+        x=X("shap_value", title="SHAP value"),
+        y=Y("feature", title="Feature"),
+    )
+    chart = chart.properties(title=ferrum.Title("SHAP Summary"))
     if is_faceted:
         chart = chart.facet(col="class_label")
     if theme is not None:
@@ -1382,8 +1447,10 @@ def _pdp_chart_from_source(
             center=center,
             color_field=None,  # one feature per facet — color is redundant
         )
+        .encode(y=Y("pd_value", title="Partial dependence"))
         .facet(col="feature")
     )
+    chart = chart.properties(title=ferrum.Title("Partial Dependence"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1429,8 +1496,12 @@ def _discrimination_threshold_chart_from_source(
         threshold_line=threshold_line,
         optimum_label=optimum_label,
     )
+    chart = chart.encode(
+        x=X("threshold", title="Discrimination threshold"),
+        y=Y("value", title="Score"),
+    )
     chart = chart.properties(
-        title=ferrum.Title("Discrimination threshold", subtitle=subtitle),
+        title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -1478,8 +1549,12 @@ def _learning_curve_chart_from_source(
         .encode(color=ferrum.Color("split", legend=None))
         .mark_learning_curve(ci_style=ci_style)
     )
+    chart = chart.encode(
+        x=X("train_size", title="Training instances"),
+        y=Y("mean_score", title="Score"),
+    )
     chart = chart.properties(
-        title=ferrum.Title("Learning curve", subtitle=subtitle),
+        title=ferrum.Title("Learning Curve", subtitle=subtitle),
     )
     chart = _direct_label_endpoint(
         chart,
@@ -1532,8 +1607,11 @@ def _validation_curve_chart_from_source(
             param_label=param,
         )
     )
+    chart = chart.encode(
+        y=Y("mean_score", title="Score"),
+    )
     chart = chart.properties(
-        title=ferrum.Title(f"Validation curve — {param}", subtitle=subtitle),
+        title=ferrum.Title(f"Validation Curve — {param}", subtitle=subtitle),
     )
     chart = _direct_label_endpoint(
         chart,
@@ -1566,6 +1644,8 @@ def _cv_scores_chart_from_source(
     if kind == "bar":
         df = df.group_by("split").agg(pl.col("score").mean()).sort("split")
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
+    chart = chart.encode(y=Y("score", title="Score"))
+    chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1593,6 +1673,8 @@ def _alpha_selection_chart_from_source(
         log_scale=log_scale,
         highlight_best=highlight_best,
     )
+    chart = chart.encode(y=Y("mean_score", title="Score"))
+    chart = chart.properties(title=ferrum.Title("Alpha Selection"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1638,6 +1720,11 @@ def _pca_scree_chart_from_source(
         cumulative_line=cumulative_line,
         threshold_line=threshold,
     )
+    chart = chart.encode(
+        x=X("component", title="Component"),
+        y=Y("explained_variance", title="Explained variance"),
+    )
+    chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1657,7 +1744,6 @@ def _intercluster_distance_chart_from_source(
     cluster centers to the extreme corners of the embedded space).
     """
     import ferrum
-    from ferrum.encoding import X, Y
 
     df = source.intercluster_distance(k, method=method)
     x_lo = float(df["x"].min() or 0.0)
@@ -1672,6 +1758,7 @@ def _intercluster_distance_chart_from_source(
         .encode(
             x=X(
                 "x",
+                title=f"{method.upper()}1",
                 scale={
                     "type": "linear",
                     "domain": [x_lo - x_pad, x_hi + x_pad],
@@ -1679,6 +1766,7 @@ def _intercluster_distance_chart_from_source(
             ),
             y=Y(
                 "y",
+                title=f"{method.upper()}2",
                 scale={
                     "type": "linear",
                     "domain": [y_lo - y_pad, y_hi + y_pad],
@@ -1686,6 +1774,7 @@ def _intercluster_distance_chart_from_source(
             ),
         )
     )
+    chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1718,7 +1807,6 @@ def _rank1d_chart_from_dataframe(
     and makes relative magnitudes legible.
     """
     import ferrum
-    from ferrum.encoding import X, Y
 
     if top_k is not None:
         df = df.head(int(top_k))
@@ -1780,6 +1868,7 @@ def _rank2d_chart_from_dataframe(
             .alias("correlation_fmt"),
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
+    chart = chart.properties(title=ferrum.Title("Feature Correlation"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1910,6 +1999,7 @@ def _parallel_coords_chart_from_dataframe(
         alpha=alpha,
         color_field=hue,
     )
+    chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1973,6 +2063,7 @@ def _decision_boundary_chart_from_source(
             }
         )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
+        chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         if theme is not None:
             chart = chart.theme(theme)
         return chart
@@ -1988,6 +2079,7 @@ def _decision_boundary_chart_from_source(
             mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
         )
     )
+    chart = chart.properties(title=ferrum.Title("Decision Boundary"))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2177,8 +2269,20 @@ def _cluster_diagnostics_chart(
             }
         )
     df = pl.DataFrame(rows)
-    elbow = ferrum.Chart(df).mark_line().encode(x="k", y="inertia")
-    sil = ferrum.Chart(df).mark_line().encode(x="k", y="silhouette")
+    from ferrum.encoding import X as XEnc, Y as YEnc
+
+    elbow = (
+        ferrum.Chart(df)
+        .mark_line()
+        .encode(x=XEnc("k", title="k"), y=YEnc("inertia", title="Distortion score"))
+        .properties(title=ferrum.Title("Cluster Diagnostics"))
+    )
+    sil = (
+        ferrum.Chart(df)
+        .mark_line()
+        .encode(x=XEnc("k", title="k"), y=YEnc("silhouette", title="Silhouette score"))
+        .properties(title=ferrum.Title("Cluster Diagnostics"))
+    )
     if scoring == "elbow":
         chart = elbow
     elif scoring == "silhouette":

@@ -11,7 +11,7 @@ def test_roc_single_curve_active_title():
     model = LogisticRegression().fit(X, y)
     chart = fm.roc_chart(model, X, y, per_class=False)
     svg = chart.show_svg()
-    assert re.search(r">ROC — AUC \d\.\d{3}<", svg)
+    assert re.search(r">ROC Curve — AUC \d\.\d{3}<", svg)
 
 
 def test_roc_per_class_falls_back_to_descriptive_title():
@@ -21,4 +21,4 @@ def test_roc_per_class_falls_back_to_descriptive_title():
     model = LogisticRegression(max_iter=300).fit(X, y)
     chart = fm.roc_chart(model, X, y, per_class=True)
     svg = chart.show_svg()
-    assert ">ROC<" in svg
+    assert ">ROC Curve<" in svg
