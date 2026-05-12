@@ -70,20 +70,16 @@ fn apply_dodge(
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| {
-            crate::render::RenderError::Other(format!(
-                "Dodge: by-column '{by_col_name}' must be Utf8"
-            ))
+            crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("by-column '{by_col_name}' must be Utf8") }
         })?;
 
     // Resolve x column (the axis being dodged).
     let x_field = encoding.x.as_ref().ok_or_else(|| {
-        crate::render::RenderError::Other("Dodge: x encoding required".into())
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "x encoding required".into() }
     })?;
     let x_col_idx = batch.schema().index_of(&x_field.field).map_err(|_| {
-        crate::render::RenderError::Other(format!(
-            "Dodge: x column '{}' not found",
-            x_field.field
-        ))
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("x column '{}' not found",
+            x_field.field) }
     })?;
     let is_ordinal_x = batch.schema().field(x_col_idx).data_type() != &DataType::Float64;
     if is_ordinal_x {
@@ -94,7 +90,7 @@ fn apply_dodge(
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| {
-            crate::render::RenderError::Other("Dodge: x must be Float64".into())
+            crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "x must be Float64".into() }
         })?;
 
     // 1. Compute median spacing of unique x values (bandwidth proxy for continuous x).
@@ -142,7 +138,7 @@ fn apply_dodge(
     cols[x_col_idx] = Arc::new(Float64Array::from(new_x));
     let schema = batch.schema();
     RecordBatch::try_new(schema, cols)
-        .map_err(|e| crate::render::RenderError::Other(format!("Dodge: {e}")))
+        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("{e}") })
 }
 
 /// Ordinal-x Dodge — operates in pixel space because the categorical x cannot
@@ -200,7 +196,7 @@ fn apply_dodge_ordinal(
     let new_schema = Arc::new(Schema::new(fields));
 
     RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::Other(format!("Dodge ordinal: {e}")))
+        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("ordinal: {e}") })
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +283,7 @@ fn apply_jitter(
     if !need_offsets {
         let schema = batch.schema();
         return RecordBatch::try_new(schema, cols)
-            .map_err(|e| crate::render::RenderError::Other(format!("Jitter: {e}")));
+            .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Jitter", reason: format!("{e}") });
     }
 
     cols.push(Arc::new(Float64Array::from(x_pixel_offsets)));
@@ -297,7 +293,7 @@ fn apply_jitter(
     fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
     let new_schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::Other(format!("Jitter ordinal: {e}")))
+        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Jitter", reason: format!("ordinal: {e}") })
 }
 
 // ---------------------------------------------------------------------------
@@ -326,22 +322,18 @@ pub(crate) fn apply_stack(
     let Some(by_arr) = by_arr_opt else { return Ok(batch.clone()); };
 
     let x_field = encoding.x.as_ref().ok_or_else(|| {
-        crate::render::RenderError::Other("Stack: x encoding required".into())
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "x encoding required".into() }
     })?;
     let y_field = encoding.y.as_ref().ok_or_else(|| {
-        crate::render::RenderError::Other("Stack: y encoding required".into())
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "y encoding required".into() }
     })?;
     let xi = batch.schema().index_of(&x_field.field).map_err(|_| {
-        crate::render::RenderError::Other(format!(
-            "Stack: x col '{}' not found",
-            x_field.field
-        ))
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("x col '{}' not found",
+            x_field.field) }
     })?;
     let yi = batch.schema().index_of(&y_field.field).map_err(|_| {
-        crate::render::RenderError::Other(format!(
-            "Stack: y col '{}' not found",
-            y_field.field
-        ))
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("y col '{}' not found",
+            y_field.field) }
     })?;
     // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column),
     // we transparently widen to f64 so stacked histograms over Bin's groupby
@@ -352,10 +344,10 @@ pub(crate) fn apply_stack(
     } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
         (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
     } else {
-        return Err(crate::render::RenderError::Other(format!(
-            "Stack: y must be Float64 or UInt64; got {:?}",
-            y_col.data_type()
-        )));
+        return Err(crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Stack",
+            reason: format!("y must be Float64 or UInt64; got {:?}", y_col.data_type()),
+        });
     };
     let ya_len = ya_vals.len();
 
@@ -372,9 +364,10 @@ pub(crate) fn apply_stack(
             .map(|i| xxh3::hash64(xs.value(i).as_bytes()))
             .collect()
     } else {
-        return Err(crate::render::RenderError::Other(
-            "Stack: x column must be Float64 or Utf8".into(),
-        ));
+        return Err(crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Stack",
+            reason: "x column must be Float64 or Utf8".into(),
+        });
     };
 
     // Group order from `by` channel (first-appearance).
@@ -456,7 +449,7 @@ pub(crate) fn apply_stack(
 
     let new_schema = Arc::new(Schema::new(new_fields));
     RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::Other(format!("Stack: {e}")))
+        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("{e}") })
 }
 
 #[cfg(test)]

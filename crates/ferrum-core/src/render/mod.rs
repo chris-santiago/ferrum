@@ -44,10 +44,16 @@ pub enum RenderError {
     ScaleResolutionFailed(String),
     LayoutFailed(String),
     ResvgFailed(String),
-    /// Phase 9c — open-ended error variant used by render passes (e.g. the
-    /// position-adjustment pass) where the failure does not match any of the
-    /// structured variants above.
-    Other(String),
+    /// A position-adjustment pass (Dodge/Jitter/Stack) rejected its inputs.
+    /// `adjustment` names the adjustment; `reason` is the user-facing detail.
+    PositionAdjustFailed { adjustment: &'static str, reason: String },
+    /// A column carried an Arrow dtype the renderer cannot interpret for
+    /// the given encoding channel. Display preserves the prior prose so
+    /// existing diagnostics remain searchable.
+    UnsupportedDtype { channel: String, dtype: String },
+    /// The unioned numeric/temporal extent for an axis or color channel
+    /// produced no finite values (all rows null/NaN or empty after filter).
+    EmptyDomain { channel: String, field: String },
 }
 
 impl std::fmt::Display for RenderError {
@@ -71,8 +77,12 @@ impl std::fmt::Display for RenderError {
                 write!(f, "layout failed: {s}"),
             Self::ResvgFailed(s) =>
                 write!(f, "PNG rasterization failed: {s}"),
-            Self::Other(s) =>
-                write!(f, "{s}"),
+            Self::PositionAdjustFailed { adjustment, reason } =>
+                write!(f, "{adjustment}: {reason}"),
+            Self::UnsupportedDtype { channel, dtype } =>
+                write!(f, "column '{channel}' has unsupported dtype: {dtype}"),
+            Self::EmptyDomain { channel, field } =>
+                write!(f, "{channel}: no usable values found for field '{field}'"),
         }
     }
 }

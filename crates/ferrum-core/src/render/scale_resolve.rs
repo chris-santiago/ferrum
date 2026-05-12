@@ -483,9 +483,9 @@ fn build_axis_scale(
     match dtype {
         SpecDataType::Quantitative => {
             let (min, max) = numeric_domain_union(
-                &enc.field, paired_enc.map(|p| p.field.as_str()),
+                channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
                 primary_batch, transform_outputs, spec,
-            ).map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
+            )?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
@@ -498,9 +498,9 @@ fn build_axis_scale(
         }
         SpecDataType::Temporal => {
             let (min, max) = numeric_domain_union(
-                &enc.field, paired_enc.map(|p| p.field.as_str()),
+                channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
                 primary_batch, transform_outputs, spec,
-            ).map_err(|e| RenderError::ScaleResolutionFailed(format!("{channel}: {e}")))?;
+            )?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
@@ -541,34 +541,38 @@ fn axis_pixel_range(channel: &str, dtype: &SpecDataType, pixel_range: (f64, f64)
 ///     `box` named output).
 ///   - The paired field (x2/y2) follows the same lookup discipline.
 fn numeric_domain_union(
+    channel: &str,
     field: &str,
     paired_field: Option<&str>,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64), RenderError> {
     let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
         Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
         None => std::collections::HashSet::new(),
     };
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut accumulate = |c: &dyn Array| -> Result<(), String> {
-        let (a, b) = column_min_max_f64(c)?;
+    let mut accumulate = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
+        let (a, b) = column_min_max_f64(c).map_err(|_| RenderError::UnsupportedDtype {
+            channel: source_field.to_string(),
+            dtype: format!("{:?}", c.data_type()),
+        })?;
         if a < mn { mn = a; }
         if b > mx { mx = b; }
         Ok(())
     };
 
-    let mut union_field = |f: &str| -> Result<(), String> {
+    let mut union_field = |f: &str| -> Result<(), RenderError> {
         let primary_has = primary_batch.column_by_name(f).is_some();
         if let Some(c) = primary_batch.column_by_name(f) {
-            accumulate(c.as_ref())?;
+            accumulate(c.as_ref(), f)?;
         }
         for (key, batch) in transform_outputs.iter() {
             let key_is_referenced = layer_data_sources.contains(key.as_str());
             if !primary_has || key_is_referenced {
                 if let Some(c) = batch.column_by_name(f) {
-                    accumulate(c.as_ref())?;
+                    accumulate(c.as_ref(), f)?;
                 }
             }
         }
@@ -581,7 +585,10 @@ fn numeric_domain_union(
     }
 
     if !mn.is_finite() || !mx.is_finite() {
-        return Err(format!("no usable values found for field '{}'", field));
+        return Err(RenderError::EmptyDomain {
+            channel: channel.to_string(),
+            field: field.to_string(),
+        });
     }
     Ok((mn, mx))
 }
@@ -681,8 +688,10 @@ fn resolve_continuous_domain_and_range(
     let d = match domain {
         Some(d) => d.clone(),
         None => {
-            let (mn, mx) = column_min_max_f64(col)
-                .map_err(RenderError::ScaleResolutionFailed)?;
+            let (mn, mx) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+                channel: "scale".to_string(),
+                dtype: format!("{:?}", col.data_type()),
+            })?;
             vec![mn, mx]
         }
     };
@@ -777,8 +786,10 @@ pub fn build_size_scale(
     let col = batch
         .column_by_name(&size_enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: size_enc.field.clone() })?;
-    let (min, max) = column_min_max_f64(col)
-        .map_err(|e| RenderError::ScaleResolutionFailed(format!("size: {e}")))?;
+    let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+        channel: format!("size:{}", size_enc.field),
+        dtype: format!("{:?}", col.data_type()),
+    })?;
     let (lo, hi) = if let Some(crate::spec::encoding::ScaleSpec::Linear { range, .. })
         = &size_enc.scale
     {
@@ -842,8 +853,10 @@ pub fn build_opacity_scale(
     let col = batch
         .column_by_name(&op_enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: op_enc.field.clone() })?;
-    let (min, max) = column_min_max_f64(col)
-        .map_err(|e| RenderError::ScaleResolutionFailed(format!("opacity: {e}")))?;
+    let (min, max) = column_min_max_f64(col).map_err(|_| RenderError::UnsupportedDtype {
+        channel: format!("opacity:{}", op_enc.field),
+        dtype: format!("{:?}", col.data_type()),
+    })?;
     let inner = ScaleKind::Linear(LinearScale::new_internal(
         vec![min, max],
         vec![theme.opacity_min, theme.opacity_max],

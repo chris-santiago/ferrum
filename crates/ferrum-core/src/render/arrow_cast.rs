@@ -73,9 +73,10 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::UInt16 => collect_as!(UInt16Array),
         DataType::UInt8 => collect_as!(UInt8Array),
         DataType::Timestamp(_, _) => collect_as!(TimestampMillisecondArray),
-        other => Err(RenderError::ScaleResolutionFailed(
-            format!("column '{field}' has unsupported dtype for f64 read: {other:?}")
-        )),
+        other => Err(RenderError::UnsupportedDtype {
+            channel: field.to_string(),
+            dtype: format!("{other:?}"),
+        }),
     }
 }
 
@@ -91,9 +92,10 @@ pub(crate) fn col_as_str(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
     if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
         Ok(a.iter().map(|o| o.map(|s| s.to_string())).collect())
     } else {
-        Err(RenderError::ScaleResolutionFailed(
-            format!("column '{field}' must be Utf8 to read as strings: {:?}", col.data_type())
-        ))
+        Err(RenderError::UnsupportedDtype {
+            channel: field.to_string(),
+            dtype: format!("{:?} (expected Utf8)", col.data_type()),
+        })
     }
 }
 
@@ -182,10 +184,10 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
     } else if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
         for v in a.iter().flatten() { push(v.to_string()); }
     } else {
-        return Err(RenderError::ScaleResolutionFailed(format!(
-            "can't enumerate distinct values from column dtype {:?}",
-            col.data_type()
-        )));
+        return Err(RenderError::UnsupportedDtype {
+            channel: field.to_string(),
+            dtype: format!("{:?} (cannot enumerate distinct values)", col.data_type()),
+        });
     }
     Ok(out)
 }
