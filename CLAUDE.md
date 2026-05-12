@@ -99,6 +99,17 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 
 ## Code-quality guardrails
 
+### Before writing code — read the review principles
+
+Before any session or subagent writes or modifies Python or Rust in this repo, it must first read the corresponding review skill so new code aligns with the same idioms, severity rubric, and architectural expectations the review surfaces will later enforce:
+
+- **Writing Python?** Read `.claude/skills/python-review/SKILL.md` (and the relevant files under `.claude/skills/python-review/references/`) before editing any `*.py`.
+- **Writing Rust?** Read `.claude/skills/rust-review/SKILL.md` (and the relevant files under `.claude/skills/rust-review/references/`) before editing any `*.rs`.
+
+This is a read-only orientation step — do not invoke the full multi-phase review skill, just internalize the principles. The goal is to write code that would pass a review on the first pass, not to discover violations after the fact. The same rule applies to subagents dispatched to implement code: brief them with the relevant principles in their prompt, or instruct them to read the skill before they write.
+
+### Review surfaces
+
 Ferrum has four code-review surfaces: two heavyweight interactive skills for human-invoked audits, and two lightweight autonomous agents for regression-gating fixes the orchestrator is about to commit. Pick the right one for the job.
 
 | Surface | Type | Invoked by | Scope | Writes code? |
