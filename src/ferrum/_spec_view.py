@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ferrum._layer import _layer_get
+
 
 class _SpecView:
     """Python-side typed view over a layered ``ChartSpec``.
@@ -31,16 +33,16 @@ class _SpecView:
             return self._layers_cached
         from types import SimpleNamespace
         out = []
-        for d in self._layer_dicts:
-            mark_name = d.get("mark", "point")
+        for layer in self._layer_dicts:
+            mark_name = _layer_get(layer, "mark", "point")
             mark_obj = SimpleNamespace(name=mark_name)
-            mark_kwargs = d.get("mark_kwargs") or d.get("mark_style")
+            mark_kwargs = _layer_get(layer, "mark_kwargs")
             ns = SimpleNamespace(
                 mark=mark_obj,
-                encoding=d.get("encoding") or {},
+                encoding=_layer_get(layer, "encoding") or {},
                 mark_kwargs=mark_kwargs if mark_kwargs else None,
-                data_source=d.get("data_source"),
-                transforms=list(d.get("transforms") or []),
+                data_source=_layer_get(layer, "data_source"),
+                transforms=list(_layer_get(layer, "transforms") or []),
             )
             out.append(ns)
         self._layers_cached = out

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
+from ferrum._layer import _Layer, _layer_get
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase
@@ -130,22 +131,22 @@ def _resolve_smooth(x_field, y_field, **kwargs):
 
 
 def _expand_layers(c: "Chart") -> tuple[list, list]:
-    """Return ``(layer_dicts, top_level_transforms)`` for one side of ``Chart + Chart``.
+    """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
 
     Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
     ``None``) — splat their layers as-is and carry their top-level transforms
-    across.  Plain single-mark charts wrap into a one-element list with the
-    chart's own mark/encoding/etc.
+    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list
+    with the chart's own mark/encoding/etc.
     """
     if c._layers is not None:
         return list(c._layers), list(c._transforms or [])
-    return [{
-        "mark": c._mark,
-        "encoding": dict(c._encoding),
-        "transforms": list(c._transforms),
-        "mark_style": dict(c._mark_kwargs),
-        "position": c._position,
-    }], []
+    return [_Layer(
+        mark=c._mark,
+        encoding=dict(c._encoding),
+        transforms=list(c._transforms),
+        mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
+        position=c._position,
+    )], []
 
 
 def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
@@ -3833,8 +3834,9 @@ class Chart:
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
+            layer_encoding = _layer_get(layer, "encoding") or {}
             for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
-                ch = layer.get("encoding", {}).get(axis)
+                ch = layer_encoding.get(axis)
                 if ch is None:
                     continue
                 if hasattr(ch, "to_encoding_spec_dict"):
@@ -3853,24 +3855,27 @@ class Chart:
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
-            # Accept either legacy `mark_style` (8a layered overlays) or
-            # `mark_kwargs` (composite-mark desugar, Phase 8b Tasks 23-33).
-            mark_style = layer.get("mark_style") or layer.get("mark_kwargs") or {}
-            layer_dict: dict = {"mark": layer.get("mark", "point"), "encoding": encoding_dict}
-            if mark_style:
-                layer_dict["mark_style"] = dict(mark_style)
+            mark_kwargs = _layer_get(layer, "mark_kwargs") or {}
+            layer_dict: dict = {
+                "mark": _layer_get(layer, "mark", "point"),
+                "encoding": encoding_dict,
+            }
+            # Wire format to Rust's coerce_layers preserves the legacy
+            # ``mark_style`` key.
+            if mark_kwargs:
+                layer_dict["mark_style"] = dict(mark_kwargs)
             # data_source: composite-mark layers may pull from a named transform
             # output instead of the final pipeline batch. Only emit when set.
-            data_source = layer.get("data_source")
+            data_source = _layer_get(layer, "data_source")
             if data_source is not None:
                 layer_dict["data_source"] = data_source
             # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
-            raw_transforms = layer.get("transforms") or []
+            raw_transforms = _layer_get(layer, "transforms") or []
             if raw_transforms:
                 layer_dict["transforms"] = Chart._transforms_to_json_list(raw_transforms)
             # Phase 9c — per-layer position adjustment. Serialize value classes
             # via ``to_spec_dict``; allow already-dict payloads to pass through.
-            position = layer.get("position")
+            position = _layer_get(layer, "position")
             if position is not None:
                 layer_dict["position"] = (
                     position.to_spec_dict()

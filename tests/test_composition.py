@@ -76,8 +76,8 @@ def test_layer_marks_are_recorded(df):
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_line().encode(x="a", y="b")
     layered = c1 + c2
-    assert layered._layers[0]["mark"] == "point"
-    assert layered._layers[1]["mark"] == "line"
+    assert layered._layers[0].mark == "point"
+    assert layered._layers[1].mark == "line"
 
 
 def test_layer_same_df_object_by_identity(df):
