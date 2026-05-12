@@ -1044,6 +1044,7 @@ def _shap_beeswarm_chart_from_source(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    zero_line: bool = True,
     theme: Any = None,
 ):
     """Beeswarm chart: per-sample shap values colored by feature value.
@@ -1052,6 +1053,11 @@ def _shap_beeswarm_chart_from_source(
     with one beeswarm panel per class; ``per_class=False`` (default)
     renders a single panel using the first class_label group (the only
     group on regression and binary classifiers).
+
+    Schwabish SB-followup (2026-05-12): ``zero_line=True`` overlays a
+    dashed vertical reference at ``x=0`` so the sign of each feature's
+    SHAP impact is immediately legible. Skipped automatically on the
+    faceted ``per_class`` path (each facet would need its own column).
     """
     import ferrum
 
@@ -1059,6 +1065,16 @@ def _shap_beeswarm_chart_from_source(
     sv = _shap_select_class(sv, per_class=per_class)
     keep = _shap_order_features(sv, order=order, max_display=max_display)
     plot_df = sv.filter(pl.col("feature").is_in(keep))
+
+    # Inject _ref_zero column on the SAME data so the rule layer overlays
+    # as a true same-data layer rather than the HConcat fallback.
+    if zero_line and not (per_class and plot_df["class_label"].n_unique() > 1):
+        n = plot_df.height
+        if n > 0:
+            zero_col = [0.0] + [None] * (n - 1)
+            plot_df = plot_df.with_columns(
+                pl.Series("_ref_zero", zero_col, dtype=pl.Float64),
+            )
 
     x_min = float(plot_df["shap_value"].min())
     x_max = float(plot_df["shap_value"].max())
@@ -1070,6 +1086,16 @@ def _shap_beeswarm_chart_from_source(
     )
     if per_class and plot_df["class_label"].n_unique() > 1:
         chart = chart.facet(col="class_label")
+    elif zero_line and "_ref_zero" in plot_df.columns:
+        # Layer a dashed vertical reference at x=0. The mark_rule
+        # encoding uses x="_ref_zero" so the renderer draws exactly one
+        # rule (the column has a single non-null row).
+        zero_layer = (
+            ferrum.Chart(plot_df)
+            .mark_rule(stroke_dash=[3, 3], stroke="#8a8a8a")
+            .encode(x="_ref_zero")
+        )
+        chart = chart + zero_layer
     if theme is not None:
         chart = chart.theme(theme)
     return chart

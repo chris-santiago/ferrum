@@ -753,6 +753,7 @@ def shap_beeswarm_chart(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    zero_line: bool = True,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -777,6 +778,7 @@ def shap_beeswarm_chart(
         order=order,
         background=background,
         per_class=per_class,
+        zero_line=zero_line,
         theme=theme,
     )
 
