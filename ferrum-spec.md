@@ -1231,6 +1231,49 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
                         kind="box", split="both", theme=None)
 ```
 
+> **Schwabish SB3 — 2026-05-11 — figure-function defaults.** Eight
+> Group-B functions adopt the Schwabish defaults from §3.19's principles doc:
+>
+> - `roc_chart`: `annotate_auc=True` by default; single-curve charts get the
+>   active title `"ROC — AUC X.XXX"`; multi-curve charts get a descriptive
+>   `"ROC"` title plus one `AUCLabel` per curve, staggered along the y axis
+>   so labels do not collide at the line endpoint.
+> - `pr_chart`: `annotate_ap=True` by default; active title parallels
+>   `roc_chart`. Binary classifiers additionally render a dashed horizontal
+>   baseline at the positive-class prevalence so the chance-level floor is
+>   always visible.
+> - `calibration_chart`: new `annotate_brier=True` kwarg (default on).
+>   Single-model charts get an active title carrying the per-sample Brier
+>   score computed from `model.predict_proba` plus a corner `BrierLabel`;
+>   multi-model charts get one `BrierLabel` per model from the bin-level
+>   reliability data.
+> - `residuals_chart`: new `annotate_metrics=True` kwarg (default on).
+>   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on the
+>   single-panel layout (`panels="single"` or `panels=None`). The 4-panel
+>   `panels="auto"` layout skips the corner annotation — the residuals-vs-
+>   fitted panel still benefits from the descriptive Schwabish-style
+>   information density.
+> - `importance_chart`: new `show_values=True` kwarg (default on). Emits
+>   the formatted importance value at each bar's end via a same-data
+>   `mark_text` overlay.
+> - `learning_curve_chart` and `validation_curve_chart`: replace the
+>   categorical color legend with endpoint-anchored direct labels (`train`
+>   / `test`) via the new private `_direct_label_endpoint` helper. Legend
+>   suppression flows through the new `Color(field, legend=None)` honored
+>   kwarg (serialized to the renderer as `legend = {"disabled": true}`).
+> - `confusion_matrix_chart`: docstring already specified `annotate=True`
+>   default; SB3 added a regression test.
+>
+> Every Group-B function also accepts an opt-in `subtitle: str = None`
+> kwarg that flows through to the `Title(text, subtitle=…)` primitive.
+>
+> Implementation lives in `src/ferrum/_diagnostics/charts.py` for the
+> single-model builders and `src/ferrum/_direct_label.py` for the
+> direct-label helper; primitives in `src/ferrum/annotations.py`. The
+> renderer-side legend suppression and `mark_text` align / dx / dy
+> support land in `crates/ferrum-core/src/render/prepare.rs` and
+> `…/marks/text.rs` respectively.
+
 ---
 
 ### 3.15 Sklearn-Protocol Visualizers
