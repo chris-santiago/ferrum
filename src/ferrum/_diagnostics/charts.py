@@ -1126,10 +1126,15 @@ def _shap_beeswarm_chart_from_source(
     renders a single panel using the first class_label group (the only
     group on regression and binary classifiers).
 
-    Schwabish SB-followup (2026-05-12): ``zero_line=True`` overlays a
-    dashed vertical reference at ``x=0`` so the sign of each feature's
-    SHAP impact is immediately legible. Skipped automatically on the
-    faceted ``per_class`` path (each facet would need its own column).
+    Schwabish SB-followup (2026-05-12): ``zero_line=True`` (default)
+    routes through ``Chart.mark_shap_beeswarm(zero_line=...)`` which
+    owns both the sentinel ``_ref_zero`` column injection (via its
+    ``data_transform``) and the dashed-rule layer (emitted by
+    ``desugar_shap_beeswarm``). Chart-API callers (
+    ``Chart(df).mark_shap_beeswarm(zero_line=True)``) get the same
+    behaviour. Disabled automatically on the faceted ``per_class``
+    multi-panel path — each facet would need its own non-null sentinel
+    row.
     """
     import ferrum
 
@@ -1138,36 +1143,20 @@ def _shap_beeswarm_chart_from_source(
     keep = _shap_order_features(sv, order=order, max_display=max_display)
     plot_df = sv.filter(pl.col("feature").is_in(keep))
 
-    # Inject _ref_zero column on the SAME data so the rule layer overlays
-    # as a true same-data layer rather than the HConcat fallback.
-    if zero_line and not (per_class and plot_df["class_label"].n_unique() > 1):
-        n = plot_df.height
-        if n > 0:
-            zero_col = [0.0] + [None] * (n - 1)
-            plot_df = plot_df.with_columns(
-                pl.Series("_ref_zero", zero_col, dtype=pl.Float64),
-            )
-
+    is_faceted = per_class and plot_df["class_label"].n_unique() > 1
     x_min = float(plot_df["shap_value"].min())
     x_max = float(plot_df["shap_value"].max())
     pad = max(abs(x_min), abs(x_max)) * 0.05 if (x_min < x_max) else 1.0
     domain = (x_min - pad, x_max + pad)
 
     chart = ferrum.Chart(plot_df).mark_shap_beeswarm(
-        max_display=max_display, order=order, x_scale_domain=domain,
+        max_display=max_display,
+        order=order,
+        zero_line=zero_line and not is_faceted,
+        x_scale_domain=domain,
     )
-    if per_class and plot_df["class_label"].n_unique() > 1:
+    if is_faceted:
         chart = chart.facet(col="class_label")
-    elif zero_line and "_ref_zero" in plot_df.columns:
-        # Layer a dashed vertical reference at x=0. The mark_rule
-        # encoding uses x="_ref_zero" so the renderer draws exactly one
-        # rule (the column has a single non-null row).
-        zero_layer = (
-            ferrum.Chart(plot_df)
-            .mark_rule(stroke_dash=[3, 3], stroke="#8a8a8a")
-            .encode(x="_ref_zero")
-        )
-        chart = chart + zero_layer
     if theme is not None:
         chart = chart.theme(theme)
     return chart

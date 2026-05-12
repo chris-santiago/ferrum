@@ -2360,6 +2360,7 @@ class Chart:
         max_display: int = 20,
         color_bar: bool = True,
         order: str = "abs_mean",
+        zero_line: bool = True,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -2369,6 +2370,10 @@ class Chart:
         feature as a swarm of points, coloured by the feature's original value.
         Data must carry the long-form schema from ``ModelSource.shap_values()``
         pre-filtered to the top ``max_display`` features by the chart builder.
+
+        When ``zero_line=True`` (default) a sentinel ``_ref_zero`` column is
+        injected and the downstream desugar appends a dashed ``mark_rule``
+        layer at ``x=0``.
 
         Parameters
         ----------
@@ -2380,6 +2385,10 @@ class Chart:
         order : {"abs_mean", "mean", "none"}, default "abs_mean"
             Feature ordering: by mean absolute SHAP (``"abs_mean"``), signed
             mean SHAP (``"mean"``), or original order (``"none"``).
+        zero_line : bool, optional
+            Whether to overlay a dashed vertical reference rule at
+            ``shap_value = 0``.  Default is ``True`` (Schwabish SB-followup
+            2026-05-12).
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -2398,6 +2407,13 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_shap_beeswarm
+        from ferrum._diagnostics.charts import _inject_constant
+
+        def _shap_beeswarm_prep(df):
+            if zero_line and "shap_value" in df.columns:
+                return _inject_constant(df, "_ref_zero", 0.0)
+            return df
+
         return self._set_composite_mark(
             "shap_beeswarm",
             desugar_shap_beeswarm,
@@ -2405,10 +2421,12 @@ class Chart:
                 "max_display": max_display,
                 "color_bar": color_bar,
                 "order": order,
+                "zero_line": zero_line,
                 **mark_kwargs,
             },
             placeholder="point",
             position=position,
+            data_transform=_shap_beeswarm_prep,
         )
 
     def mark_shap_bar(

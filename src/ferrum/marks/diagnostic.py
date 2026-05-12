@@ -505,6 +505,7 @@ def desugar_shap_beeswarm(
     max_display: int = 20,
     color_bar: bool = True,
     order: str = "abs_mean",
+    zero_line: bool = True,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
 ) -> tuple:
     """SHAP beeswarm mark: categorical scatter of per-sample shap values.
@@ -512,13 +513,19 @@ def desugar_shap_beeswarm(
     Data contract: ``feature`` (Utf8), ``shap_value`` (Float64),
     ``feature_value_normalized`` (Float64) as emitted by
     ``ModelSource.shap_values()`` and pre-filtered by the chart builder
-    to the top ``max_display`` features.
+    to the top ``max_display`` features. When ``zero_line=True`` the
+    data must also carry a sentinel ``_ref_zero`` Float64 column (one
+    ``0.0`` value, rest null) — ``Chart.mark_shap_beeswarm`` injects
+    that column via its ``data_transform``.
 
     Renders one point per (sample, feature) cell with feature on the
     ordinal y-axis, shap_value on the quantitative x-axis, and the
     z-scored feature value on the continuous color scale. Vertical
     spread within each feature band uses the Phase 10d-pre Jitter
     ordinal-axis path; ``width=0.6`` keeps the band well-contained.
+    ``zero_line=True`` (Schwabish SB-followup 2026-05-12) appends a
+    dashed ``mark_rule`` layer at ``x=0`` so the sign of each feature's
+    SHAP impact is immediately legible.
 
     ``color_bar`` and ``order`` are informational at the mark layer —
     the chart builder is responsible for any reordering / aggregation
@@ -546,6 +553,12 @@ def desugar_shap_beeswarm(
             position=Jitter(axis="y", width=0.6, seed=42),
         ),
     ]
+    if zero_line:
+        layers.append(_Layer(
+            mark="rule",
+            encoding={"x": "_ref_zero"},
+            mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+        ))
     return ("__layered__", [], None, None, layers)
 
 
