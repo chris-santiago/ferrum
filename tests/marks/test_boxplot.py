@@ -11,17 +11,17 @@ def df():
     })
 
 
-def test_boxplot_smoke_4_layers(df):
+def test_boxplot_smoke_6_layers(df):
     chart = fe.Chart(df).mark_boxplot().encode(x="group", y="value")
     spec = chart._build_spec()
     assert spec.layers is not None
-    assert len(spec.layers) == 4  # rule + rect + tick + outliers point
+    assert len(spec.layers) == 6  # rule + lower cap + upper cap + rect + tick + outliers point
 
 
-def test_boxplot_no_outliers_3_layers(df):
+def test_boxplot_no_outliers_5_layers(df):
     chart = fe.Chart(df).mark_boxplot(outliers=False).encode(x="group", y="value")
     spec = chart._build_spec()
-    assert len(spec.layers) == 3
+    assert len(spec.layers) == 5  # rule + lower cap + upper cap + rect + tick
 
 
 def test_boxplot_extent_min_max(df):

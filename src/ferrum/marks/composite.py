@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import _Layer
+from ferrum.encoding import X, Y
 
 
 def desugar_boxplot(
@@ -26,8 +27,8 @@ def desugar_boxplot(
     """Box-plot composite mark desugar.
 
     Converts ``chart.mark_boxplot(...)`` into a ``BoxStats`` transform plus
-    three (or four) primitive layers: a whisker rule, an IQR rect, a median
-    tick, and an optional outlier point layer.
+    five (or six) primitive layers: a whisker rule, lower and upper whisker
+    caps, an IQR rect, a median tick, and an optional outlier point layer.
 
     Data contract
     -------------
@@ -44,10 +45,13 @@ def desugar_boxplot(
     Layers emitted
     --------------
     1. ``rule``   — ``y=lower_whisker``, ``y2=upper_whisker`` (whiskers).
-    2. ``rect``   — ``y=q1``, ``y2=q3`` (IQR box, ``width=size``).
-    3. ``tick``   — ``y=median`` (median line).
-    4. ``point``  — ``y=<val>`` from the ``"outliers"`` output (when
-       ``outliers=True``).
+    2. ``tick``   — ``y=lower_whisker``, ``band_size=0.3`` (lower cap).
+    3. ``tick``   — ``y=upper_whisker``, ``band_size=0.3`` (upper cap).
+    4. ``rect``   — ``y=q1``, ``y2=q3``, axis title set to original field
+       name (IQR box, ``width=size``).
+    5. ``tick``   — ``y=median``, dark stroke (median line).
+    6. ``point``  — ``y=<val>``, ``filled=False`` from the ``"outliers"``
+       output (when ``outliers=True``).
 
     Parameters
     ----------
@@ -84,8 +88,8 @@ def desugar_boxplot(
     >>> result = desugar_boxplot("species", "sepal_length")
     >>> result[0]
     '__layered__'
-    >>> len(result[4])  # 4 layers: whisker, box, median, outlier
-    4
+    >>> len(result[4])  # 6 layers: whisker, lower cap, upper cap, box, median, outlier
+    6
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
@@ -103,28 +107,33 @@ def desugar_boxplot(
 
     band = size or 0.6
 
-    def enc(y_col, y2_col=None):
+    def enc(y_col, y2_col=None, *, title=None):
         if horizontal:
-            d = {"x": y_col, "y": cat}
+            d: dict = {"x": X(y_col, title=title) if title else y_col, "y": cat}
             if y2_col:
                 d["x2"] = y2_col
         else:
-            d = {"x": cat, "y": y_col}
+            d = {"x": cat, "y": Y(y_col, title=title) if title else y_col}
             if y2_col:
                 d["y2"] = y2_col
         return d
 
     layers = [
         _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker"), data_source="box"),
+        _Layer(mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
+        _Layer(mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(
-            mark="rect", encoding=enc("q1", "q3"), mark_kwargs={"width": band}, data_source="box"
+            mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"width": band}, data_source="box"
         ),
         _Layer(
-            mark="tick", encoding=enc("median"), mark_kwargs={"band_size": band}, data_source="box"
+            mark="tick",
+            encoding=enc("median"),
+            mark_kwargs={"band_size": band, "stroke": "#222222", "stroke_width": 2},
+            data_source="box",
         ),
     ]
     if outliers:
-        layers.append(_Layer(mark="point", encoding=enc(val), data_source="outliers"))
+        layers.append(_Layer(mark="point", encoding=enc(val), mark_kwargs={"filled": False}, data_source="outliers"))
 
     return ("__layered__", transforms, None, None, layers)
 
