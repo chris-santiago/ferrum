@@ -133,16 +133,24 @@ impl TransformSpec {
         ctx: &TransformContext,
     ) -> PyResult<RecordBatch> {
         // Default: ignore context and forward to existing apply().
-        // Phase 8b transforms that NEED context (Raster, Swarm) override here.
-        // Phase 9 finalize: Reorder optionally reads its index column from a
-        // sibling named output via ctx.named_outputs.
-        match self {
-            Self::Raster(s) => crate::transform::raster::apply_with_context(s, batch, ctx),
-            Self::Swarm(s) => crate::transform::swarm::apply_with_context(s, batch, ctx),
-            Self::Violin(s) => crate::transform::violin::apply_with_context(s, batch, ctx),
-            Self::Reorder(s) =>
-                crate::transform::reorder::apply_with_outputs(s, batch, Some(&ctx.named_outputs)),
-            _ => self.apply(batch),
+        // The macro arm enumerates the variants whose context-override has the
+        // standard `apply_with_context(s, batch, ctx)` signature. Reorder has a
+        // different signature (`apply_with_outputs(s, batch, &named_outputs)`),
+        // so it stays explicit alongside the default fallback.
+        macro_rules! arm {
+            ($($V:ident => $m:ident,)*) => {
+                match self {
+                    $( Self::$V(s) => crate::transform::$m::apply_with_context(s, batch, ctx), )*
+                    Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
+                        s, batch, Some(&ctx.named_outputs)),
+                    _ => self.apply(batch),
+                }
+            };
+        }
+        arm! {
+            Raster => raster,
+            Swarm  => swarm,
+            Violin => violin,
         }
     }
 
@@ -160,14 +168,25 @@ impl TransformSpec {
         input: &RecordBatch,
         primary: &RecordBatch,
     ) -> PyResult<Vec<(String, RecordBatch)>> {
-        match self {
-            Self::Qq(s) => crate::transform::qq::secondary_outputs(s, primary),
-            Self::Linkage(s) => crate::transform::linkage::secondary_outputs(s, primary),
-            Self::LetterValue(s) => crate::transform::letter_value::secondary_outputs(s, input, primary),
-            _ => {
-                let _ = input;
-                Ok(Vec::new())
-            }
+        // The macro arm enumerates variants whose secondary-output has the
+        // standard `secondary_outputs(s, primary)` signature. LetterValue takes
+        // both input and primary, so it stays explicit.
+        macro_rules! arm {
+            ($($V:ident => $m:ident,)*) => {
+                match self {
+                    $( Self::$V(s) => crate::transform::$m::secondary_outputs(s, primary), )*
+                    Self::LetterValue(s) =>
+                        crate::transform::letter_value::secondary_outputs(s, input, primary),
+                    _ => {
+                        let _ = input;
+                        Ok(Vec::new())
+                    }
+                }
+            };
+        }
+        arm! {
+            Qq      => qq,
+            Linkage => linkage,
         }
     }
 }
