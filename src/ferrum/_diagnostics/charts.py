@@ -751,14 +751,34 @@ def _calibration_chart_from_source(
 def _gain_chart_from_source(
     source: Any,
     *,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
-    """Build a cumulative-gain chart from a ModelSource."""
+    """Build a cumulative-gain chart from a ModelSource.
+
+    Schwabish SB-followup (2026-05-12): when ``direct_labels=True``
+    (default), replaces the categorical color legend with endpoint-
+    anchored direct labels via ``_direct_label_endpoint`` and adds a
+    ``Cumulative gain`` active title.
+    """
     import ferrum
+    from ferrum._direct_label import _direct_label_endpoint
+
     df = source.cumulative_gain()
-    chart = ferrum.Chart(df).mark_gain(
-        color_field=_color_field_for(df, "class"),
+    color_field = _color_field_for(df, "class")
+    chart = ferrum.Chart(df)
+    if direct_labels and color_field is not None:
+        chart = chart.encode(color=ferrum.Color(color_field, legend=None))
+    chart = chart.mark_gain(color_field=color_field)
+    chart = chart.properties(
+        title=ferrum.Title("Cumulative gain", subtitle=subtitle),
     )
+    if direct_labels and color_field is not None:
+        chart = _direct_label_endpoint(
+            chart, label_field=color_field,
+            x_col="percent_population", y_col="gain",
+        )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -767,14 +787,30 @@ def _gain_chart_from_source(
 def _lift_chart_from_source(
     source: Any,
     *,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
-    """Build a lift chart from a ModelSource."""
+    """Build a lift chart from a ModelSource.
+
+    Schwabish SB-followup (2026-05-12): direct labels + legend
+    suppression + ``Lift`` active title — mirrors ``_gain_chart_from_source``.
+    """
     import ferrum
+    from ferrum._direct_label import _direct_label_endpoint
+
     df = source.lift_curve()
-    chart = ferrum.Chart(df).mark_lift(
-        color_field=_color_field_for(df, "class"),
-    )
+    color_field = _color_field_for(df, "class")
+    chart = ferrum.Chart(df)
+    if direct_labels and color_field is not None:
+        chart = chart.encode(color=ferrum.Color(color_field, legend=None))
+    chart = chart.mark_lift(color_field=color_field)
+    chart = chart.properties(title=ferrum.Title("Lift", subtitle=subtitle))
+    if direct_labels and color_field is not None:
+        chart = _direct_label_endpoint(
+            chart, label_field=color_field,
+            x_col="percent_population", y_col="lift",
+        )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1290,14 +1326,30 @@ def _discrimination_threshold_chart_from_source(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
     """Build a discrimination-threshold chart from a ModelSource.
 
     The underlying DataFrame is unpivoted to long form
     ``(threshold, metric, value)`` for plotting.
+
+    Schwabish SB-followup (2026-05-12): adds a ``Discrimination
+    threshold`` active title. Direct-label wiring was considered and
+    rejected — the four default metrics (precision / recall / f1 /
+    queue_rate) cross over each other and converge near
+    ``(threshold=1, value=0)`` and ``(threshold=0, value=1)``, so
+    endpoint labels collapse on top of each other regardless of side.
+    The existing legend is the right affordance for this chart shape;
+    the ``direct_labels`` kwarg is accepted but currently a no-op
+    pending a more appropriate placement strategy (e.g. at each
+    metric's peak y position along the curve).
     """
     import ferrum
+
+    del direct_labels  # reserved — see docstring; no-op today
+
     df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
     long_df = df.unpivot(
         index="threshold",
@@ -1320,6 +1372,9 @@ def _discrimination_threshold_chart_from_source(
         metrics=metrics,
         n_thresholds=n_thresholds,
         threshold_line=threshold_line,
+    )
+    chart = chart.properties(
+        title=ferrum.Title("Discrimination threshold", subtitle=subtitle),
     )
     if theme is not None:
         chart = chart.theme(theme)

@@ -459,6 +459,8 @@ def gain_chart(
     X: Any = None,
     y: Any = None,
     *,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -496,7 +498,9 @@ def gain_chart(
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
-    return _gain_chart_from_source(source, theme=theme)
+    return _gain_chart_from_source(
+        source, direct_labels=direct_labels, subtitle=subtitle, theme=theme,
+    )
 
 
 def lift_chart(
@@ -504,6 +508,8 @@ def lift_chart(
     X: Any = None,
     y: Any = None,
     *,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -541,7 +547,9 @@ def lift_chart(
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
-    return _lift_chart_from_source(source, theme=theme)
+    return _lift_chart_from_source(
+        source, direct_labels=direct_labels, subtitle=subtitle, theme=theme,
+    )
 
 
 # --- 10c: classification matrices ------------------------------------
@@ -1068,6 +1076,8 @@ def discrimination_threshold_chart(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
+    direct_labels: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -1125,6 +1135,8 @@ def discrimination_threshold_chart(
         metrics=metrics,
         cv=cv,
         threshold_line=threshold_line,
+        direct_labels=direct_labels,
+        subtitle=subtitle,
         theme=theme,
     )
 

@@ -70,8 +70,20 @@ def _direct_label_endpoint(
 
     series_arr = np.asarray(tbl.column(label_field).to_pylist())
     x_all = np.asarray(tbl.column(x_col).to_pylist(), dtype=float)
+    y_all = (
+        np.asarray(tbl.column(y_col).to_pylist(), dtype=float)
+        if y_col in tbl.column_names
+        else None
+    )
     labels_col: list[str | None] = [None] * len(series_arr)
-    for series in sorted(set(series_arr.tolist()), key=str):
+    label_y_col: list[float | None] = [None] * len(series_arr)
+    # Collect endpoint coordinates per series so we can detect collisions
+    # (e.g. binary gain/lift curves saturating at gain=1 produce overlapping
+    # endpoint labels). When two endpoints are within ``stagger_threshold``
+    # of each other on the y axis, stagger downward by ``stagger_step``.
+    series_list = sorted(set(series_arr.tolist()), key=str)
+    series_endpoints: list[tuple[str, int, float, float]] = []
+    for series in series_list:
         mask = series_arr == series
         if not mask.any():
             continue
@@ -80,7 +92,31 @@ def _direct_label_endpoint(
             np.argmax(masked_x) if position == "end" else np.argmin(masked_x)
         )
         global_idx = int(np.where(mask)[0][idx_in_mask])
-        labels_col[global_idx] = str(series)
+        ep_x = float(masked_x[idx_in_mask])
+        ep_y = float(y_all[global_idx]) if y_all is not None else 0.0
+        series_endpoints.append((str(series), global_idx, ep_x, ep_y))
+
+    y_range = (
+        float(np.nanmax(y_all) - np.nanmin(y_all))
+        if (y_all is not None and y_all.size)
+        else 1.0
+    )
+    stagger_step = max(y_range * 0.05, 1e-9)
+    stagger_threshold = stagger_step * 0.8
+
+    used_y: list[float] = []
+    # Process endpoints in descending y order so the highest sits at its
+    # natural position and subsequent labels stagger downward.
+    for series, global_idx, ep_x, ep_y in sorted(
+        series_endpoints, key=lambda t: -t[3],
+    ):
+        target_y = ep_y
+        # Push down if too close to a previously placed label.
+        while any(abs(target_y - prev_y) < stagger_threshold for prev_y in used_y):
+            target_y -= stagger_step
+        used_y.append(target_y)
+        labels_col[global_idx] = series
+        label_y_col[global_idx] = target_y
 
     base_pl = (
         chart._data
@@ -89,16 +125,17 @@ def _direct_label_endpoint(
     )
     augmented = base_pl.with_columns(
         pl.Series("_direct_label_text", labels_col, dtype=pl.Utf8),
+        pl.Series("_direct_label_y", label_y_col, dtype=pl.Float64),
     )
     chart_aug = chart._clone()
     chart_aug._data = augmented
     # Anchor labels just inside the endpoint (align="right", dx=-4) so
     # they remain inside the plot extent even without extra horizontal
-    # padding. Placing them outside-right would require axis padding the
-    # default theme doesn't provide.
+    # padding. The y-coord uses the per-series staggered value (above),
+    # so colliding endpoints separate vertically instead of overlapping.
     annot_layer = (
         Chart(augmented)
         .mark_text(align="right", dx=-4)
-        .encode(x=x_col, y=y_col, text="_direct_label_text")
+        .encode(x=x_col, y="_direct_label_y", text="_direct_label_text")
     )
     return chart_aug + annot_layer
