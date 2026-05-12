@@ -456,6 +456,7 @@ def desugar_confusion(
     normalize: str | None = None,
     annotate: bool = True,
     color_field: str = "value",
+    cmap: str = "blues",
 ) -> tuple:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
@@ -468,12 +469,19 @@ def desugar_confusion(
     ``normalize`` is informational at the mark layer (the chart builder
     is responsible for shaping the data); the user-visible normalization
     happens upstream in ``ModelSource.confusion_matrix``.
+
+    ``cmap`` selects the sequential colormap applied to the heat cells.
+    Default ``"blues"`` gives a perceptually-uniform blue ramp recommended
+    for count/probability matrices (gallery feedback C2).
     """
+    from ferrum.encoding import Color
+
     del normalize, x_field, y_field
+    color_enc = Color(color_field, scheme=cmap)
     layers: list = [
         _Layer(
             mark="rect",
-            encoding={"x": "predicted", "y": "actual", "color": color_field},
+            encoding={"x": "predicted", "y": "actual", "color": color_enc},
         ),
     ]
     if annotate:
@@ -1367,6 +1375,7 @@ def desugar_rank2d(
     annot: bool = True,
     color_field: str = "correlation",
     text_field: str = "correlation_fmt",
+    cmap: str = "rdbu",
     **mark_kwargs: Any,
 ) -> tuple:
     """Pairwise feature ranking — long-form correlation matrix heatmap.
@@ -1377,14 +1386,21 @@ def desugar_rank2d(
     (Utf8 — preformatted to 2 decimal places by the chart builder so
     the renderer can lay out short labels without invoking
     Rust-side number formatting per cell).
+
+    ``cmap`` selects the diverging colormap applied to correlation cells.
+    Default ``"rdbu"`` centres the scale at zero with red for negative and
+    blue for positive correlations (gallery feedback C2).
     """
+    from ferrum.encoding import Color
+
     del x_field, y_field
 
     user_kw = _validate("rank2d", mark_kwargs)
+    color_enc = Color(color_field, scheme=cmap)
     rect_enc: dict[str, Any] = {
         "x": "feature_x",
         "y": "feature_y",
-        "color": color_field,
+        "color": color_enc,
     }
     layers: list = [_Layer(mark="rect", encoding=rect_enc)]
     if annot:

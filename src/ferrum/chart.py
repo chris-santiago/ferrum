@@ -2340,6 +2340,7 @@ class Chart:
         normalize: str | None = None,
         annotate: bool = True,
         color_field: str = "value",
+        cmap: str = "blues",
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -2361,6 +2362,10 @@ class Chart:
         color_field : str, optional
             Column name driving the heatmap colour scale.  Default is
             ``"value"``.
+        cmap : str, optional
+            Sequential colormap name for the heat cells.  Default is
+            ``"blues"`` (gallery feedback C2 — blue ramp for count/probability
+            matrices).
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -2387,6 +2392,7 @@ class Chart:
                 "normalize": normalize,
                 "annotate": annotate,
                 "color_field": color_field,
+                "cmap": cmap,
                 **mark_kwargs,
             },
             placeholder="point",
@@ -3395,6 +3401,7 @@ class Chart:
         annot: bool = True,
         color_field: str = "correlation",
         text_field: str = "correlation_fmt",
+        cmap: str = "rdbu",
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -3416,6 +3423,10 @@ class Chart:
             ``"correlation"``.
         text_field : str, optional
             Column read by the text layer.  Default is ``"correlation_fmt"``.
+        cmap : str, optional
+            Diverging colormap name for correlation cells.  Default is
+            ``"rdbu"`` — red for negative, blue for positive, white at zero
+            (gallery feedback C2).
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -3442,6 +3453,7 @@ class Chart:
                 "annot": annot,
                 "color_field": color_field,
                 "text_field": text_field,
+                "cmap": cmap,
                 **mark_kwargs,
             },
             placeholder="rect",

@@ -73,11 +73,12 @@ pub const CATEGORICAL_SCHEMES: &[&str] = &[
     "okabe_ito", "tableau10", "set1", "set2", "paired", "pastel", "dark2",
 ];
 
-/// Sequential scheme names recognized by `ContinuousScheme` in `render/color`.
-/// Listed here so theme-side validation can accept them without depending on
-/// the continuous-scale machinery.
+/// Sequential/diverging scheme names recognized by `ContinuousScheme` in
+/// `render/color`. Listed here so theme-side validation can accept them
+/// without depending on the continuous-scale machinery. "blues" is a
+/// sequential single-hue ramp; "rdbu" is a diverging red-blue scheme.
 pub const SEQUENTIAL_SCHEMES: &[&str] = &[
-    "viridis", "plasma", "magma", "inferno", "cividis",
+    "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu",
 ];
 
 /// True when `name` is one of the recognized categorical schemes.

@@ -10,6 +10,14 @@ pub enum NamedContinuous {
     Magma,
     Inferno,
     Cividis,
+    /// Sequential single-hue blue ramp (light → dark blue). Default for
+    /// confusion matrices and other sequential count/probability heatmaps
+    /// (gallery feedback C2).
+    Blues,
+    /// Red–Blue diverging scheme, centred on 0. Default for correlation
+    /// heatmaps (rank2d) where negative correlations are red and positive
+    /// correlations are blue (gallery feedback C2).
+    RdBu,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,12 +35,14 @@ impl NamedContinuous {
             "magma"   => Some(Self::Magma),
             "inferno" => Some(Self::Inferno),
             "cividis" => Some(Self::Cividis),
+            "blues"   => Some(Self::Blues),
+            "rdbu"    => Some(Self::RdBu),
             _ => None,
         }
     }
 
     pub fn list() -> &'static [&'static str] {
-        &["viridis", "plasma", "magma", "inferno", "cividis"]
+        &["viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu"]
     }
 
     fn colorous_gradient(&self) -> colorous::Gradient {
@@ -42,6 +52,8 @@ impl NamedContinuous {
             Self::Magma   => colorous::MAGMA,
             Self::Inferno => colorous::INFERNO,
             Self::Cividis => colorous::CIVIDIS,
+            Self::Blues   => colorous::BLUES,
+            Self::RdBu    => colorous::RED_BLUE,
         }
     }
 }
@@ -96,7 +108,7 @@ use pyo3::exceptions::PyValueError;
 /// numeric values are mapped to colors.
 ///
 /// Named built-in colormaps: ``"viridis"``, ``"plasma"``, ``"magma"``,
-/// ``"inferno"``, ``"cividis"``.
+/// ``"inferno"``, ``"cividis"``, ``"blues"``, ``"rdbu"``.
 ///
 /// Do not call the constructor directly. Obtain an instance via
 /// ``ferrum.continuous_palette(name)`` (named map) or
@@ -120,13 +132,13 @@ pub struct PyContinuousScheme(pub ContinuousScheme);
 #[pymethods]
 impl PyContinuousScheme {
     /// Look up a built-in continuous colormap by name. Accepted names:
-    /// "viridis", "plasma", "magma", "inferno", "cividis".
+    /// "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu".
     #[staticmethod]
     fn from_name(name: &str) -> PyResult<Self> {
         NamedContinuous::from_name(name)
             .map(|n| Self(ContinuousScheme::Named(n)))
             .ok_or_else(|| PyValueError::new_err(format!(
-                "Unknown colormap: '{name}'; available: viridis, plasma, magma, inferno, cividis"
+                "Unknown colormap: '{name}'; available: viridis, plasma, magma, inferno, cividis, blues, rdbu"
             )))
     }
 
