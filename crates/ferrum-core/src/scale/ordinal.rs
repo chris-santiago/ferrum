@@ -1,6 +1,49 @@
 use pyo3::prelude::*;
 
-use super::core::{validate_ordinal, Scale};
+use super::core::validate_ordinal;
+
+#[derive(Debug, Clone, PartialEq)]
+struct OrdinalScaleData {
+    domain: Vec<String>,
+    range: Vec<f64>,
+    padding: f64,
+}
+
+impl OrdinalScaleData {
+    fn layout(&self) -> (f64, f64, f64) {
+        let r_lo = *self.range.first().unwrap();
+        let r_hi = *self.range.last().unwrap();
+        let n = self.domain.len() as f64;
+        let step = (r_hi - r_lo) / n;
+        let half_band = step.abs() * (1.0 - self.padding) / 2.0;
+        let first_center = r_lo + step / 2.0;
+        (first_center, step, half_band)
+    }
+
+    fn scale_str(&self, s: &str) -> f64 {
+        let idx = match self.domain.iter().position(|c| c == s) {
+            Some(i) => i,
+            None => return f64::NAN,
+        };
+        let (first_center, step, _) = self.layout();
+        first_center + (idx as f64) * step
+    }
+
+    fn invert_band(&self, y: f64) -> Option<String> {
+        if y.is_nan() { return None; }
+        let (first_center, step, half_band) = self.layout();
+        if step == 0.0 { return None; }
+        let raw = (y - first_center) / step;
+        let idx = raw.round() as i64;
+        if idx < 0 || idx as usize >= self.domain.len() { return None; }
+        let center = first_center + (idx as f64) * step;
+        if (y - center).abs() <= half_band {
+            Some(self.domain[idx as usize].clone())
+        } else {
+            None
+        }
+    }
+}
 
 /// Discrete ordinal scale.
 ///
@@ -30,12 +73,12 @@ use super::core::{validate_ordinal, Scale};
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrdinalScale(Scale);
+pub struct OrdinalScale(OrdinalScaleData);
 
 impl OrdinalScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
     pub(crate) fn new_internal(domain: Vec<String>, range: Vec<f64>, padding: f64) -> Self {
-        OrdinalScale(Scale::Ordinal { domain, range, padding })
+        OrdinalScale(OrdinalScaleData { domain, range, padding })
     }
 
     /// Crate-internal lookup. Returns `None` if `value` is not in the domain.
@@ -46,11 +89,7 @@ impl OrdinalScale {
 
     /// Crate-internal tick call (returns the categorical domain).
     pub(crate) fn ticks_internal(&self) -> Vec<String> {
-        match &self.0 {
-            Scale::Ordinal { domain, .. } => domain.clone(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.domain.clone()
     }
 
     /// Per-category band width in pixels (the full step between consecutive
@@ -58,39 +97,26 @@ impl OrdinalScale {
     /// Dodge) to compute sub-band offsets. The returned value is positive even
     /// when the range is reversed (lo > hi).
     pub(crate) fn bandwidth(&self) -> f64 {
-        match &self.0 {
-            Scale::Ordinal { domain, range, .. } => {
-                if domain.is_empty() { return 0.0; }
-                let r_lo = *range.first().unwrap();
-                let r_hi = *range.last().unwrap();
-                ((r_hi - r_lo) / domain.len() as f64).abs()
-            }
-            #[allow(unreachable_patterns)]
-            _ => 0.0,
-        }
+        if self.0.domain.is_empty() { return 0.0; }
+        let r_lo = *self.0.range.first().unwrap();
+        let r_hi = *self.0.range.last().unwrap();
+        ((r_hi - r_lo) / self.0.domain.len() as f64).abs()
     }
 
     /// Pixel-range endpoints `[lo, hi]` of the underlying scale.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
-        match &self.0 {
-            Scale::Ordinal { range, .. } => [
-                *range.first().unwrap(),
-                *range.last().unwrap(),
-            ],
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        [
+            *self.0.range.first().unwrap(),
+            *self.0.range.last().unwrap(),
+        ]
     }
 
     pub(crate) fn repr_string(&self) -> String {
-        match &self.0 {
-            Scale::Ordinal { domain, range, padding } => format!(
-                "OrdinalScale(domain={:?}, range=[{}, {}], padding={})",
-                domain, range.first().copied().unwrap_or(0.0), range.last().copied().unwrap_or(0.0), padding
-            ),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        let OrdinalScaleData { domain, range, padding } = &self.0;
+        format!(
+            "OrdinalScale(domain={:?}, range=[{}, {}], padding={})",
+            domain, range.first().copied().unwrap_or(0.0), range.last().copied().unwrap_or(0.0), padding
+        )
     }
 }
 
@@ -100,7 +126,7 @@ impl OrdinalScale {
     #[pyo3(signature = (*, domain, range, padding = 0.0))]
     fn new(domain: Vec<String>, range: Vec<f64>, padding: f64) -> PyResult<Self> {
         validate_ordinal(&domain, &range, padding)?;
-        Ok(OrdinalScale(Scale::Ordinal { domain, range, padding }))
+        Ok(OrdinalScale(OrdinalScaleData { domain, range, padding }))
     }
 
     /// Map a category label to its band-center pixel coordinate.
@@ -118,11 +144,7 @@ impl OrdinalScale {
 
     /// Return the domain categories in order.
     fn ticks(&self) -> Vec<String> {
-        match &self.0 {
-            Scale::Ordinal { domain, .. } => domain.clone(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.domain.clone()
     }
 
     /// Return this scale unchanged (ordinal scales have no numeric "nice" rounding).
@@ -133,32 +155,63 @@ impl OrdinalScale {
     /// Ordered list of category labels.
     #[getter]
     fn domain(&self) -> Vec<String> {
-        match &self.0 {
-            Scale::Ordinal { domain, .. } => domain.clone(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.domain.clone()
     }
 
     /// Pixel extent of the scale as the full range list.
     #[getter]
     fn range(&self) -> Vec<f64> {
-        match &self.0 {
-            Scale::Ordinal { range, .. } => range.clone(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.range.clone()
     }
 
     /// Fractional inner padding between bands.
     #[getter]
     fn padding(&self) -> f64 {
-        match &self.0 {
-            Scale::Ordinal { padding, .. } => *padding,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.padding
     }
 
     fn __repr__(&self) -> String { self.repr_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(domain: Vec<&str>, range: Vec<f64>, padding: f64) -> OrdinalScaleData {
+        OrdinalScaleData {
+            domain: domain.into_iter().map(String::from).collect(),
+            range,
+            padding,
+        }
+    }
+
+    #[test]
+    fn ordinal_band_centers_no_padding() {
+        let s = d(vec!["a", "b", "c"], vec![0.0, 30.0], 0.0);
+        assert!((s.scale_str("a") - 5.0).abs() < 1e-12);
+        assert!((s.scale_str("b") - 15.0).abs() < 1e-12);
+        assert!((s.scale_str("c") - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ordinal_invert_round_trip() {
+        let s = d(vec!["a", "b", "c"], vec![0.0, 30.0], 0.0);
+        for cat in ["a", "b", "c"] {
+            let y = s.scale_str(cat);
+            let back = s.invert_band(y);
+            assert_eq!(back.as_deref(), Some(cat), "round-trip failed for {cat}");
+        }
+    }
+
+    #[test]
+    fn ordinal_invert_outside_band_returns_none() {
+        let s = d(vec!["a", "b", "c"], vec![0.0, 30.0], 0.5);
+        assert!(s.invert_band(10.0).is_none());
+    }
+
+    #[test]
+    fn ordinal_unknown_category_returns_nan() {
+        let s = d(vec!["a"], vec![0.0, 10.0], 0.0);
+        assert!(s.scale_str("z").is_nan());
+    }
 }

@@ -13,22 +13,11 @@ use super::ticks::{nice_step, nice_ticks};
 /// the last variant has migrated.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Scale {
-    Ordinal    { domain: Vec<String>, range: Vec<f64>, padding: f64 },
     Threshold  { domain: Vec<f64>, range: Vec<f64> },
     Quantile   { domain: Vec<f64>, range: Vec<f64>, quantiles: Vec<f64> },
 }
 
 impl Scale {
-    fn ordinal_layout(domain: &[String], range: &[f64], padding: f64) -> (f64, f64, f64) {
-        let r_lo = *range.first().unwrap();
-        let r_hi = *range.last().unwrap();
-        let n = domain.len() as f64;
-        let step = (r_hi - r_lo) / n;
-        let half_band = step.abs() * (1.0 - padding) / 2.0;
-        let first_center = r_lo + step / 2.0;
-        (first_center, step, half_band)
-    }
-
     pub(crate) fn compute_quantile_cuts(sorted_sample: &[f64], k: usize) -> Vec<f64> {
         // R-7 / numpy default: linear interpolation between order statistics.
         // Returns k-1 cut points dividing the sample into k bins.
@@ -49,7 +38,6 @@ impl Scale {
 
     pub(crate) fn scale_f64(&self, x: f64) -> f64 {
         match self {
-            Scale::Ordinal { .. } => f64::NAN,
             Scale::Threshold { domain, range } => {
                 if x.is_nan() { return f64::NAN; }
                 let idx = domain.partition_point(|t| *t <= x);
@@ -72,7 +60,6 @@ impl Scale {
 
     pub(crate) fn ticks(&self, count: Option<usize>) -> Vec<f64> {
         match self {
-            Scale::Ordinal { range, .. } => range.clone(),
             Scale::Threshold { domain, .. } => domain.clone(),
             Scale::Quantile { domain, quantiles, .. } => {
                 let target = count.unwrap_or_else(|| crate::scale::ticks::sturges_floor(domain.len()));
@@ -90,47 +77,10 @@ impl Scale {
 
     pub(crate) fn nice(self) -> Self {
         match self {
-            Scale::Ordinal { domain, range, padding } => {
-                Scale::Ordinal { domain, range, padding }
-            }
             Scale::Threshold { domain, range } => Scale::Threshold { domain, range },
             Scale::Quantile { domain, range, quantiles } => {
                 Scale::Quantile { domain, range, quantiles }
             }
-        }
-    }
-
-    pub(crate) fn scale_str(&self, s: &str) -> f64 {
-        match self {
-            Scale::Ordinal { domain, range, padding } => {
-                let idx = match domain.iter().position(|c| c == s) {
-                    Some(i) => i,
-                    None => return f64::NAN,
-                };
-                let (first_center, step, _half_band) = Self::ordinal_layout(domain, range, *padding);
-                first_center + (idx as f64) * step
-            }
-            _ => f64::NAN,
-        }
-    }
-
-    pub(crate) fn invert_band(&self, y: f64) -> Option<String> {
-        match self {
-            Scale::Ordinal { domain, range, padding } => {
-                if y.is_nan() { return None; }
-                let (first_center, step, half_band) = Self::ordinal_layout(domain, range, *padding);
-                if step == 0.0 { return None; }
-                let raw = (y - first_center) / step;
-                let idx = raw.round() as i64;
-                if idx < 0 || idx as usize >= domain.len() { return None; }
-                let center = first_center + (idx as f64) * step;
-                if (y - center).abs() <= half_band {
-                    Some(domain[idx as usize].clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
         }
     }
 
@@ -281,52 +231,6 @@ mod tests {
     fn test_validate_continuous_pair_rejects_non_finite() {
         assert!(validate_continuous_pair(&[0.0, f64::NAN], &[0.0, 1.0]).is_err());
         assert!(validate_continuous_pair(&[0.0, 10.0], &[f64::INFINITY, 1.0]).is_err());
-    }
-
-    #[test]
-    fn test_ordinal_band_centers_no_padding() {
-        let s = Scale::Ordinal {
-            domain: vec!["a".into(), "b".into(), "c".into()],
-            range: vec![0.0, 30.0],
-            padding: 0.0,
-        };
-        assert!((s.scale_str("a") - 5.0).abs() < 1e-12);
-        assert!((s.scale_str("b") - 15.0).abs() < 1e-12);
-        assert!((s.scale_str("c") - 25.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_ordinal_invert_round_trip() {
-        let s = Scale::Ordinal {
-            domain: vec!["a".into(), "b".into(), "c".into()],
-            range: vec![0.0, 30.0],
-            padding: 0.0,
-        };
-        for cat in ["a", "b", "c"] {
-            let y = s.scale_str(cat);
-            let back = s.invert_band(y);
-            assert_eq!(back.as_deref(), Some(cat), "round-trip failed for {cat}");
-        }
-    }
-
-    #[test]
-    fn test_ordinal_invert_outside_band_returns_none() {
-        let s = Scale::Ordinal {
-            domain: vec!["a".into(), "b".into(), "c".into()],
-            range: vec![0.0, 30.0],
-            padding: 0.5,
-        };
-        assert!(s.invert_band(10.0).is_none());
-    }
-
-    #[test]
-    fn test_ordinal_unknown_category_returns_nan() {
-        let s = Scale::Ordinal {
-            domain: vec!["a".into()],
-            range: vec![0.0, 10.0],
-            padding: 0.0,
-        };
-        assert!(s.scale_str("z").is_nan());
     }
 
     #[test]
