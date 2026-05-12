@@ -329,54 +329,15 @@ pub fn resolve_scales_with_outputs(
     // Color/size/shape/opacity scales are primary-batch only. These channels
     // do not currently participate in cross-layer scale unification: each is
     // resolved against the chart-level transformed batch (i.e. __final__),
-    // matching Phase 8a behavior.
-    let color = if let Some(c_enc) = &spec.encoding.color {
-        // Detect whether the color column is numeric (Float64/UInt64/Int64),
-        // in which case build a Continuous scale. Otherwise fall back to the
-        // legacy Categorical path (Utf8 / Bool / Int64-as-ordinal).
-        let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
-            .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
-        let lookup_batch = located.batch;
-        let col = located.col;
-        let is_continuous_color = matches!(col.data_type(),
-            arrow::datatypes::DataType::Float64 | arrow::datatypes::DataType::UInt64);
-        if is_continuous_color {
-            // Numeric domain: min/max from the column, ignoring NaNs.
-            let (lo, hi) = numeric_extent(col);
-            // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
-            // else default to viridis.
-            use crate::render::color::{ContinuousScheme, NamedContinuous};
-            let scheme = c_enc
-                .scheme
-                .as_deref()
-                .and_then(NamedContinuous::from_name)
-                .map(ContinuousScheme::Named)
-                .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis));
-            Some(ColorScale::Continuous { domain: (lo, hi), scheme })
-        } else {
-            let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-            // Precedence: encoding.scheme (per-encoding override, e.g. heatmap
-            // cmap=) → theme.color_scheme (Theme default) → OKABE_ITO fallback.
-            // A sequential scheme name (viridis/plasma/…) on a nominal
-            // encoding can't be interpolated for n categories yet, so we
-            // substitute tableau10 — the canonical Vega-Lite categorical
-            // default — rather than collapsing to OKABE_ITO silently.
-            let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
-            let palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
-                palette::categorical_palette("tableau10")
-            } else {
-                palette::categorical_palette(resolved_name)
-            };
-            if domain.len() > palette.len() {
-                warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
-                    categories: domain.len() as u32,
-                });
-            }
-            Some(ColorScale::Categorical { domain, palette })
-        }
-    } else {
-        None
-    };
+    // matching Phase 8a behavior. (build_color_scale is the one exception —
+    // it accepts transform_outputs because composite-mark color fields may
+    // live in a named output rather than primary.)
+    let (color, color_warn) = build_color_scale(
+        &spec.encoding, primary_batch, transform_outputs, theme,
+    )?;
+    if let Some(w) = color_warn {
+        warnings.push(w);
+    }
 
     let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
     let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
@@ -769,6 +730,70 @@ fn build_from_scale_spec(
 /// to `[theme.point_size_min, theme.point_size_max]`. This lets diagnostic
 /// marks (intercluster_distance, future bubble charts) request larger point
 /// sizes per the spec without modifying the global theme.
+/// Resolve the color encoding into a `ColorScale`.
+///
+/// Routes to `Continuous` when the field's Arrow dtype is `Float64` or
+/// `UInt64`, else `Categorical`. (F16 will widen the numeric detection
+/// to consult `EncodingSpec.type_` first and treat all numeric dtypes
+/// as continuous; today's narrow check is preserved.)
+///
+/// Color is the one secondary channel that may live outside the primary
+/// batch — composite-mark color fields can resolve via `transform_outputs`
+/// — so this function accepts the named-outputs map. Size/shape/opacity
+/// builders below are primary-batch-only by design.
+///
+/// Returns `(scale, optional palette-overflow warning)` so the caller
+/// can fold the warning into its accumulator alongside the
+/// build_shape_scale warning.
+pub fn build_color_scale(
+    encoding: &crate::spec::encoding::Encoding,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &ThemeInputs,
+) -> Result<(Option<ColorScale>, Option<crate::render::RenderWarning>), RenderError> {
+    let Some(c_enc) = &encoding.color else {
+        return Ok((None, None));
+    };
+    let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
+        .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
+    let is_continuous_color = matches!(
+        located.col.data_type(),
+        arrow::datatypes::DataType::Float64 | arrow::datatypes::DataType::UInt64
+    );
+    if is_continuous_color {
+        // Numeric domain: min/max from the column, ignoring NaNs.
+        let (lo, hi) = numeric_extent(located.col);
+        // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
+        // else default to viridis.
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scheme = c_enc
+            .scheme
+            .as_deref()
+            .and_then(NamedContinuous::from_name)
+            .map(ContinuousScheme::Named)
+            .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis));
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), None))
+    } else {
+        let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+        // Precedence: encoding.scheme (per-encoding override, e.g. heatmap
+        // cmap=) → theme.color_scheme (Theme default) → OKABE_ITO fallback.
+        // A sequential scheme name (viridis/plasma/…) on a nominal encoding
+        // can't be interpolated for n categories yet, so we substitute
+        // tableau10 — the canonical Vega-Lite categorical default — rather
+        // than collapsing to OKABE_ITO silently.
+        let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
+        let palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+            palette::categorical_palette("tableau10")
+        } else {
+            palette::categorical_palette(resolved_name)
+        };
+        let warn = (domain.len() > palette.len()).then(|| {
+            crate::render::RenderWarning::ColorPaletteOverflowed { categories: domain.len() as u32 }
+        });
+        Ok((Some(ColorScale::Categorical { domain, palette }), warn))
+    }
+}
+
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
