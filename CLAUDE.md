@@ -79,6 +79,8 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 | Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
 | Gallery audit skill | `.claude/skills/gallery-audit/` |
 | Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
+| Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
+| Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
 
 ---
 
@@ -92,6 +94,51 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 - **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
+
+---
+
+## Code-quality guardrails
+
+Ferrum has four code-review surfaces: two heavyweight interactive skills for human-invoked audits, and two lightweight autonomous agents for regression-gating fixes the orchestrator is about to commit. Pick the right one for the job.
+
+| Surface | Type | Invoked by | Scope | Writes code? |
+|---|---|---|---|---|
+| `python-review` | skill | human (`/python-review`) | whole package or named subsystem | yes, with approval |
+| `rust-review` | skill | human (`/rust-review`) | whole crate or named subsystem | yes, with approval |
+| `python-review-lite` | agent | orchestrator (post-`gallery-fixer`) | only staged `*.py` diff | **never** |
+| `rust-review-lite` | agent | orchestrator (post-`gallery-fixer`) | only staged `*.rs` diff | **never** |
+
+### Heavyweight skills (`.claude/skills/{python,rust}-review/`)
+
+Multi-phase reviews (orient → diagnose → propose → execute → review) that produce a six-section report with architecture map, drift findings tagged S1–S5, refactor roadmap, and a proposed first patch. Use them when you want a senior pass over a subsystem ("review this package", "this module feels off", "audit our Rust API"). They are interactive and propose before they edit.
+
+### Lightweight agents (`.claude/agents/{python,rust}-review-lite.md`)
+
+Autonomous read-only quality gates that run **between `gallery-fixer`'s return and the orchestrator's commit**. They read only `git diff --cached`, apply a trimmed diff-level idiom checklist, run `ruff` / `cargo clippy -D warnings` on the affected files, and return one of three signals:
+
+- **clean** — no S3+ findings, linters pass → orchestrator commits
+- **block** — ≥1 S3 finding OR linter failed → orchestrator un-stages and returns the verdict to `gallery-fixer` to address; loop
+- **escalate** — ≥1 S4+ finding, OR 3 consecutive block cycles on the same row → orchestrator surfaces to user and halts
+
+Both lite agents are **read-only by design** — their `tools:` frontmatter restricts them to `Read`, `Grep`, `Glob`, `Bash`. They cannot modify code; only `gallery-fixer` (or the user) does. The lite agents never speculate refactors beyond a single-sentence "suggested fix" per finding.
+
+The orchestrator (parent Claude session) is responsible for: staging the gallery-fixer's changes, dispatching both lite agents in parallel when both languages were touched, tracking the cycle count across loops, and acting on the returned status.
+
+### Audit trail
+
+Lite-agent verdicts land at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_{python,rust}.md`. Each verdict carries YAML frontmatter (`status`, `cycle`, `n_findings` by severity, `linters` state, `files_reviewed`) followed by per-finding prose. The directory is gitignored alongside the rest of `output/`; the verdicts exist for the orchestrator and for the human reviewing a multi-cycle session, not as permanent artifacts.
+
+### Severity rubric (shared across all four surfaces)
+
+| Tag | Meaning |
+|---|---|
+| S1 | cosmetic inconsistency; low risk, low impact |
+| S2 | readability / maintainability issue; moderate leverage |
+| S3 | structural cohesion issue; high leverage — **blocks lite agents** |
+| S4 | risky design flaw or bug-prone seam — **escalates lite agents** |
+| S5 | critical correctness or API hazard — **escalates lite agents** |
+
+The lite agents apply the same rubric as the heavyweight skills so reading both outputs is calibrated to the same scale.
 
 ---
 

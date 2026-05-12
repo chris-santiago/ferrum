@@ -90,3 +90,11 @@ When you finish a batch of fixes, produce a short report. No preamble:
 ```
 
 Keep it terse — main session reads this and decides next steps.
+
+## Note: post-fix code-quality gate (added 2026-05-11)
+
+Your job ends at "verify the row + report back". You do **not** commit. The parent orchestrator now stages your changes and dispatches `python-review-lite` and/or `rust-review-lite` to gate the commit decision. If they return `block`, the orchestrator will hand you their verdict and ask you to address the findings, then re-run. If they return `escalate`, the orchestrator halts and surfaces to the user.
+
+This changes nothing about how you work — you already don't commit. Just be aware that S3+ findings against your diff will route back to you as a follow-up cycle, and that S4+ findings (e.g. introducing a `panic!` on a library boundary, importing `matplotlib`, or planting a `NotImplementedError` in a Phase 9+ chart factory) are hard escalations to the user.
+
+See `CLAUDE.md` → "Code-quality guardrails" for the full review surface and the severity rubric.
