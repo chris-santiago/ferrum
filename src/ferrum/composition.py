@@ -511,33 +511,31 @@ class RepeatChart(_ChartLike):
             Each element is ``(row_field, col_field, Chart)`` with all
             ``Repeat.*`` placeholders replaced by concrete field names.
 
-        Warns
-        -----
-        UserWarning
-            If *diagonal* is set but ``row != column`` (asymmetric repeat),
-            the diagonal template is silently skipped and a warning is issued.
+        Raises
+        ------
+        ValueError
+            If *diagonal* is set but ``row != column`` (asymmetric repeat).
+            The diagonal template only makes sense on a symmetric n×n grid
+            where each diagonal cell has ``row_field == col_field``.
         """
-        import warnings
-
         rows = self.row or []
         cols = self.column or []
 
-        asymmetric = (
+        if (
             self.diagonal is not None
             and self.row is not None
             and self.column is not None
             and self.row != self.column
-        )
-        if asymmetric:
-            warnings.warn(
-                "RepeatChart: diagonal= ignored because row != column (asymmetric repeat).",
-                UserWarning, stacklevel=2,
+        ):
+            raise ValueError(
+                "RepeatChart: diagonal= requires row == column "
+                "(diagonal cells only exist on a symmetric grid); "
+                f"got row={self.row!r}, column={self.column!r}"
             )
 
         out = []
         use_diagonal_match = (
-            self.diagonal is not None and not asymmetric
-            and len(rows) == len(cols)
+            self.diagonal is not None and len(rows) == len(cols)
         )
 
         for ri, row_field in enumerate(rows):

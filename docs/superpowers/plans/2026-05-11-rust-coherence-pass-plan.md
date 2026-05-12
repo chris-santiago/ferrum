@@ -3,6 +3,13 @@
 **Date**: 2026-05-11
 **Branch**: stacks on `fix/marks-and-composition-wiring`
 **Scope**: `crates/ferrum-core/`. No Python source changes. No `ferrum-spec.md` changes.
+
+> **Post-pass follow-up (added 2026-05-11)**: this pass did not include a
+> spec cross-reference verification stage. The Python coherence pass
+> adopted that discipline and caught 6/12 medium-confidence findings as
+> spec-committed. Audit captured at
+> `docs/superpowers/followups/2026-05-11-rust-pass-spec-audit.md` —
+> run after the Python pass completes.
 **Goal**: recover architectural cohesion before first release. Remove 24-variant
 boilerplate fan-out, collapse the over-wrapped scale stack, drain accreted
 phase-by-phase drift in `render/scale_resolve.rs`, unify Arrow dtype handling,

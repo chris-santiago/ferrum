@@ -174,10 +174,10 @@ class TestRepeatChart:
         for r, c in coords:
             assert row_idx[r] >= row_idx[c]
 
-    def test_diagonal_with_asymmetric_warns(self, iris_like):
+    def test_diagonal_with_asymmetric_raises(self, iris_like):
         off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y=Repeat.row)
         diag = fe.Chart(iris_like).mark_histogram().encode(x=Repeat.column)
-        with pytest.warns(UserWarning, match="diagonal"):
+        with pytest.raises(ValueError, match="row == column"):
             fe.RepeatChart(off, row=["a", "b"], column=["x", "y"], diagonal=diag).expand()
 
     def test_spec_shape(self, iris_like):
