@@ -44,7 +44,11 @@ class Color(ChannelBase):
     # All other channels treat `scheme` as deferred → warn-once.
     _channel_name = "color"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title"])
+    # ``legend`` honored in Schwabish SB3 (2026-05-11): passing
+    # ``legend=None`` (or ``False``) suppresses the categorical color legend
+    # at the renderer level. Used by direct-label diagnostic charts to
+    # avoid a redundant legend alongside endpoint-anchored series labels.
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend"])
 
 
 class Size(ChannelBase):

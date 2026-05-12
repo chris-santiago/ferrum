@@ -135,6 +135,8 @@ def residuals_chart(
     kind: str = "studentized",
     cook_threshold: float | str | None = None,
     panels: Any = "auto",
+    annotate_metrics: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -206,6 +208,8 @@ def residuals_chart(
         kind=kind,
         cook_threshold=cook_threshold,
         panels=panel_list,
+        annotate_metrics=annotate_metrics,
+        subtitle=subtitle,
         theme=theme,
     )
 
@@ -220,7 +224,8 @@ def roc_chart(
     *,
     per_class: bool = True,
     average: str | None = "macro",
-    annotate_auc: bool = False,
+    annotate_auc: bool = True,
+    subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -283,6 +288,7 @@ def roc_chart(
         per_class=per_class,
         average=average,
         annotate_auc=annotate_auc,
+        subtitle=subtitle,
         theme=theme,
     )
 
@@ -294,8 +300,9 @@ def pr_chart(
     *,
     per_class: bool = True,
     average: str | None = "macro",
-    annotate_ap: bool = False,
+    annotate_ap: bool = True,
     iso_lines: bool = False,
+    subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -368,6 +375,7 @@ def pr_chart(
         average=average,
         annotate_ap=annotate_ap,
         iso_lines=iso_lines,
+        subtitle=subtitle,
         theme=theme,
     )
 
@@ -379,6 +387,8 @@ def calibration_chart(
     *,
     n_bins: int = 10,
     strategy: str = "uniform",
+    annotate_brier: bool = True,
+    subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -408,6 +418,12 @@ def calibration_chart(
         Binning strategy forwarded to ``sklearn.calibration.calibration_curve``.
         ``"uniform"`` uses equally-spaced bins; ``"quantile"`` uses
         equal-frequency bins.
+    annotate_brier : bool, default True
+        When ``True``, attaches the :class:`BrierLabel` composite (spec
+        §3.11) showing the Brier score per series. The chart title also
+        encodes the Brier value when exactly one model is shown.
+    subtitle : str or None, default None
+        Optional one-line subtitle drawn beneath the chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay. Keys become model labels.
         ``model_or_source`` is treated as the base model (label
@@ -433,7 +449,8 @@ def calibration_chart(
         model_or_source, X, y, random_state=random_state, compare=compare,
     )
     return _calibration_chart_from_source(
-        source, n_bins=n_bins, strategy=strategy, theme=theme,
+        source, n_bins=n_bins, strategy=strategy,
+        annotate_brier=annotate_brier, subtitle=subtitle, theme=theme,
     )
 
 
@@ -650,6 +667,8 @@ def importance_chart(
     top_k: int | None = 20,
     orient: str = "horizontal",
     error_bars: bool = True,
+    show_values: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -710,6 +729,8 @@ def importance_chart(
         top_k=top_k,
         orient=orient,
         error_bars=error_bars,
+        show_values=show_values,
+        subtitle=subtitle,
         random_state=random_state,
         theme=theme,
     )
@@ -1117,6 +1138,7 @@ def learning_curve_chart(
     scoring: Any = None,
     train_sizes: Any = None,
     ci_style: str = "band",
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -1172,6 +1194,7 @@ def learning_curve_chart(
         scoring=scoring,
         train_sizes=train_sizes,
         ci_style=ci_style,
+        subtitle=subtitle,
         theme=theme,
     )
 
@@ -1187,6 +1210,7 @@ def validation_curve_chart(
     scoring: Any = None,
     log_scale: Any = "auto",
     ci_style: str = "band",
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
@@ -1255,7 +1279,8 @@ def validation_curve_chart(
     return _validation_curve_chart_from_source(
         source, param, values,
         cv=cv, scoring=scoring,
-        log_scale=log_scale, ci_style=ci_style, theme=theme,
+        log_scale=log_scale, ci_style=ci_style,
+        subtitle=subtitle, theme=theme,
     )
 
 

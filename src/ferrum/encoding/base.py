@@ -123,6 +123,19 @@ class ChannelBase:
             out["scale"] = _scale_to_dict(v)
         for k in ("title", "axis", "legend", "sort", "stack",
                   "impute", "scheme", "format"):
+            if k == "legend" and "legend" in self._kwargs:
+                # Schwabish SB3 (2026-05-11): distinguish "legend not
+                # specified" from "legend explicitly suppressed".
+                # ``legend=None`` / ``legend=False`` from the Color encoding
+                # signals "hide the legend"; serialize as a dict with the
+                # ``disabled: true`` flag the Rust renderer recognizes.
+                v = self._kwargs["legend"]
+                if v is None or v is False:
+                    out["legend"] = {"disabled": True}
+                elif isinstance(v, dict):
+                    out["legend"] = v
+                # Other truthy values are reserved; drop silently.
+                continue
             if (v := self._kwargs.get(k)) is not None:
                 out[k] = v
         # PyO3 EncodingSpec.__new__ expects snake_case param name `format_type`

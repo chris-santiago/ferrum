@@ -10,8 +10,12 @@ use crate::render::svg::{Stroke, SvgBuffer};
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
+    // Schwabish SB3 (2026-05-11): honor an explicit `stroke=...` kwarg
+    // (e.g. ``mark_rule(stroke="#8a8a8a")``) so reference rules can pick a
+    // neutral color distinct from the theme's mark_color. Falls back to
+    // the resolved fill (Phase 7 default) when no override is given.
     let style = Stroke {
-        stroke: ctx.mark_style.fill,
+        stroke: ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
         stroke_width: ctx.mark_style.stroke_width,
         stroke_dash: ctx.mark_style.stroke_dash.clone(),
     };
@@ -61,16 +65,27 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         }
     }
 
-    // Horizontal span: y only (no x).
-    if let (Some(yf), None) = (yf_opt, xf_opt) {
-        let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-        for (i, yopt) in ys.iter().enumerate() {
-            let yv = match yopt { Some(v) if v.is_finite() => *v, _ => continue };
-            let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-            let py = py + y_offsets[i];
-            out.line(panel.x, py, panel.x + panel.w, py, &style);
+    // Horizontal span: y only (no x), or y + x inherited from chart-level
+    // encoding (Schwabish SB3: PR baseline rule layer inherits the chart's
+    // x for axis-domain resolution; the rule still spans the full plot
+    // width). Bail out if a ranged-rule path (y2 present) actually applies.
+    if let Some(yf) = yf_opt {
+        if let Ok(ys) = col_as_f64(ctx.batch, yf) {
+            if y2f_opt.is_none() {
+                for (i, yopt) in ys.iter().enumerate() {
+                    let yv = match yopt {
+                        Some(v) if v.is_finite() => *v,
+                        _ => continue,
+                    };
+                    let py = match ctx.scales.y.to_pixel_f64(yv) {
+                        Some(p) => p, None => continue,
+                    };
+                    let py = py + y_offsets[i];
+                    out.line(panel.x, py, panel.x + panel.w, py, &style);
+                }
+                return;
+            }
         }
-        return;
     }
     // Vertical span: x only (no y).
     if let (Some(xf), None) = (xf_opt, yf_opt) {

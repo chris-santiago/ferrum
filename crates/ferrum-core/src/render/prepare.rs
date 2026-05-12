@@ -317,8 +317,24 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
+    // Schwabish SB3 (2026-05-11): respect ``legend={"disabled": true}`` on the
+    // color encoding by emitting no legend entries AND no colorbar. The
+    // Python ``Color`` class translates ``legend=None`` / ``legend=False``
+    // from ``encode(color=Color(field, legend=None))`` into this JSON shape
+    // so direct-label diagnostic charts can opt out of redundant legends.
+    let legend_disabled = spec
+        .encoding
+        .color
+        .as_ref()
+        .and_then(|c| c.legend.as_ref())
+        .and_then(|l| l.extra.get("disabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) =
-        match &provisional_scales.color {
+        if legend_disabled {
+            (Vec::new(), None)
+        } else {
+            match &provisional_scales.color {
             Some(super::scale_resolve::ColorScale::Categorical { domain, .. }) => {
                 let entries = domain.iter()
                     .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
@@ -345,6 +361,7 @@ pub fn prepare_render_inputs(
                 (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
             }
             None => (Vec::new(), None),
+            }
         };
 
     // Legend title (Themes-T2.5b): default to the color encoding's field name.

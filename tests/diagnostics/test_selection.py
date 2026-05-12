@@ -39,12 +39,15 @@ def test_learning_curve_chart_errorbar_style():
 
 
 def test_learning_curve_chart_invalid_ci_style():
+    # Schwabish SB3 (2026-05-11): the direct-label overlay forces the
+    # pending stat-mark to desugar at chart construction time (the ``+``
+    # operator resolves it), so invalid ci_style now surfaces at the
+    # ``learning_curve_chart`` call rather than later at ``show_svg``.
     model, X, y = _ridge_xy()
-    chart = ferrum.learning_curve_chart(
-        model, X, y, cv=3, ci_style="invalid", random_state=0,
-    )
     with pytest.raises(ValueError, match="ci_style"):
-        chart.show_svg()
+        ferrum.learning_curve_chart(
+            model, X, y, cv=3, ci_style="invalid", random_state=0,
+        )
 
 
 # --- validation_curve_chart -----------------------------------------------

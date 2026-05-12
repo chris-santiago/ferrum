@@ -88,13 +88,27 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         }),
     };
 
+    // Schwabish SB3 (2026-05-11): honor mark_style.align/dx/dy/font_size/
+    // font_weight/angle on mark_text so AUCLabel / APLabel / BrierLabel /
+    // _direct_label / corner-metrics overlays render where the Python author
+    // asked. ``align`` maps "left"→Start, "center"→Middle, "right"→End;
+    // ``dx`` / ``dy`` are pixel offsets applied AFTER the scale-to-pixel
+    // step so the user sees the same dx as in
+    // ``mark_text(align=..., dx=..., dy=...)``.
+    let anchor = match ctx.mark_style.align.as_deref() {
+        Some("left") => TextAnchor::Start,
+        Some("right") => TextAnchor::End,
+        _ => TextAnchor::Middle,
+    };
+    let dx = ctx.mark_style.dx.unwrap_or(0.0);
+    let dy = ctx.mark_style.dy.unwrap_or(0.0);
     let style = TextStyle {
         fill: ctx.theme.font_color,
-        font_size: ctx.theme.label_font_size,
-        anchor: TextAnchor::Middle,
-        angle: 0.0,
+        font_size: ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size),
+        anchor,
+        angle: ctx.mark_style.angle.unwrap_or(0.0),
         font_family: &ctx.theme.font_family,
-        font_weight: None,
+        font_weight: ctx.mark_style.font_weight.as_deref(),
     };
 
     for i in 0..n_x {
@@ -144,7 +158,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 None => continue,
             }
         };
-        out.text(px, py, &label, &style);
+        out.text(px + dx, py + dy, &label, &style);
     }
 }
 

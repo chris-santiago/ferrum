@@ -74,6 +74,15 @@ def _inject_cook_outliers(
     )
 
 
+def _r2_score(y_true, y_pred) -> float:
+    """Coefficient of determination — Schwabish SB3 corner-metrics helper."""
+    import numpy as np
+
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - float(np.mean(y_true))) ** 2))
+    return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
     """Sort the frame ascending by `col` so a downstream ``mark_line`` over
     that column draws a monotonic polyline.
@@ -94,30 +103,67 @@ def _residuals_chart_from_source(
     kind: str = "studentized",
     cook_threshold: float | str | None = None,
     panels: Any = None,  # None / "single" / list of panel names
+    annotate_metrics: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
     """Build a residuals diagnostic chart from a ModelSource.
 
-    When ``cook_threshold`` is set, identify observations whose
-    ``cooks_distance`` exceeds the threshold and inject
-    ``_cook_outlier_x`` / ``_cook_outlier_y`` columns (one per outlier
-    row, null elsewhere). ``cook_threshold`` may be a float, or the
-    literal ``"auto"`` to use the conventional ``4 / n`` rule, or
-    ``None`` to skip outlier highlighting. The wrapped estimator must
-    expose ``coef_`` for Cook's distance to be defined; non-linear
-    estimators surface ``NaN`` Cook's D and silently produce no
-    outliers (the threshold comparison is False for NaN).
+    Schwabish SB3 (2026-05-11): single-panel charts emit a ``Residuals``
+    title and, when ``annotate_metrics=True``, overlay a top-right
+    corner annotation with R²/RMSE/MAE. Multi-panel layouts skip the
+    corner annotation but still get the title.
     """
+    import numpy as np
+
     import ferrum
     df = source.predictions()
     if panels in (None, "single"):
         if cook_threshold is not None:
-            # Single-panel path uses mark_residuals' built-in overlay
-            # layer keyed on the y_pred-based outlier columns.
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
+
+        y_col = (
+            "studentized_residual"
+            if kind in ("studentized", "scaled")
+            else "residual"
+        )
+        if annotate_metrics:
+            y_true = np.asarray(df["y_true"].to_list(), dtype=float)
+            y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
+            r2 = _r2_score(y_true, y_pred)
+            rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+            mae = float(np.mean(np.abs(y_true - y_pred)))
+            corner_text = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
+            n = df.height
+            pred_arr = np.asarray(df["y_pred"].to_list(), dtype=float)
+            anchor_idx = int(np.argmax(pred_arr))
+            text_col: list[str | None] = [None] * n
+            text_col[anchor_idx] = corner_text
+            resid_arr = np.asarray(df[y_col].to_list(), dtype=float)
+            corner_y_col: list[float | None] = [None] * n
+            corner_y_col[anchor_idx] = float(np.max(resid_arr))
+            df = df.with_columns(
+                pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
+                pl.Series("_metrics_y", corner_y_col, dtype=pl.Float64),
+            )
+
         chart = ferrum.Chart(df).mark_residuals(
             kind=kind, cook_threshold=cook_threshold,
         )
+        chart = chart.properties(
+            title=ferrum.Title("Residuals", subtitle=subtitle),
+        )
+        if annotate_metrics:
+            # mark_residuals augments ``chart._data`` with ``_ref_zero``;
+            # reuse the post-injection DataFrame so the text layer shares
+            # data identity with the base layer and ``+`` produces a real
+            # overlay rather than the HConcat fallback.
+            text_layer = (
+                ferrum.Chart(chart._data)
+                .mark_text(align="right", dx=-4, dy=4)
+                .encode(x="y_pred", y="_metrics_y", text="_metrics_text")
+            )
+            chart = chart + text_layer
         if theme is not None:
             chart = chart.theme(theme)
         return chart
@@ -283,25 +329,51 @@ def _roc_chart_from_source(
     *,
     per_class: bool = True,
     average: str | None = "macro",
-    annotate_auc: bool = False,
+    annotate_auc: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
-    """Build an ROC chart from a ModelSource."""
+    """Build an ROC chart from a ModelSource.
+
+    Schwabish SB3 (2026-05-11): emits an active title carrying the AUC
+    value when the chart has exactly one curve, and overlays
+    :class:`ferrum.AUCLabel` text per curve via the explicit-field helper
+    (so the figure builder does not need a chart-level color encoding
+    that would leak into mark_roc's diagonal reference layer).
+    """
+    import numpy as np
+
     import ferrum
+    from ferrum.annotations import _apply_metric_label_explicit, _trapezoid_auc
+
     df = source.roc_curve(average=None if per_class else average)
-    if annotate_auc:
-        df = _inject_curve_annotation(
-            df,
-            group_field="class",
-            metric_field="auc",
-            metric_label="AUC",
-            prefix="_auc",
-        )
+    color_field = _color_field_for(df, "class")
     chart = ferrum.Chart(df).mark_roc(
         average=None if per_class else average,
-        annotate_auc=annotate_auc,
-        color_field=_color_field_for(df, "class"),
+        annotate_auc=False,
+        color_field=color_field,
     )
+
+    n_curves = (
+        len(set(df[color_field].to_list())) if color_field is not None else 1
+    )
+    if n_curves == 1:
+        fpr = np.asarray(df["fpr"].to_list(), dtype=float)
+        tpr = np.asarray(df["tpr"].to_list(), dtype=float)
+        auc_value = _trapezoid_auc(fpr, tpr)
+        chart = chart.properties(
+            title=ferrum.Title(f"ROC — AUC {auc_value:.3f}", subtitle=subtitle),
+        )
+    else:
+        chart = chart.properties(title=ferrum.Title("ROC", subtitle=subtitle))
+
+    if annotate_auc:
+        chart = _apply_metric_label_explicit(
+            chart, "auc",
+            x_col="fpr", y_col="tpr", color_col=color_field,
+            position="end",
+        )
+
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -364,48 +436,59 @@ def _pr_chart_from_source(
     *,
     per_class: bool = True,
     average: str | None = "macro",
-    annotate_ap: bool = False,
+    annotate_ap: bool = True,
     iso_lines: bool = False,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
     """Build a precision-recall chart from a ModelSource.
 
-    When ``per_class=True`` (default) the chart shows one curve per class
-    via ``ModelSource.pr_curve(average=None)``. When ``per_class=False``
-    the chart shows a single summary curve averaged across classes
-    (``"macro"`` by default, configurable to ``"micro"`` or
-    ``"weighted"``). Binary classifiers ignore ``per_class`` because
-    ``pr_curve`` returns a single curve in either case.
-
-    Pins both axes to ``[0, 1.05]`` (canonical sklearn / yellowbrick
-    convention for PR diagrams) so curves render against the full
-    precision-recall space, AP-annotation labels in the bottom-right
-    corner stay in-bounds, and visual comparisons across models with
-    very different baseline precisions remain calibrated.
+    Schwabish SB3 (2026-05-11): active title with AP for single curve,
+    positive-class-prevalence baseline hline for binary classifiers,
+    and per-curve :class:`ferrum.APLabel` overlay via the explicit-field
+    helper.
     """
+    import numpy as np
+
     import ferrum
+    from ferrum.annotations import _apply_metric_label_explicit, _ap_step
     from ferrum.encoding import X, Y
 
     df = source.pr_curve(average=None if per_class else average)
-    # Order matters: annotate first (so the per-class label rows live in
-    # the original schema), then append iso-curve rows. `_inject_pr_iso_lines`
-    # fills the new rows with nulls for every original column including the
-    # annotation columns, which is exactly what mark_text wants.
-    if annotate_ap:
-        df = _inject_curve_annotation(
-            df,
-            group_field="class",
-            metric_field="ap",
-            metric_label="AP",
-            prefix="_ap",
-        )
     if iso_lines:
         df = _inject_pr_iso_lines(df)
+
+    # Inject the positive-class-prevalence baseline as a same-data column
+    # (one non-null entry, rest null) so the mark_rule overlay shares
+    # ``chart._data`` and renders as a true layer rather than HConcat
+    # fallback. Binary classifiers only — multi-class baselines would
+    # need one rule per class which is information-dense without payoff.
+    baseline_prevalence: float | None = None
+    y_series = getattr(source, "y", None)
+    if y_series is None:
+        y_series = getattr(source, "_y", None)
+    if y_series is not None:
+        y_arr = np.asarray(y_series.to_numpy())
+        unique_y = np.unique(y_arr)
+        if len(unique_y) == 2:
+            positive = unique_y[1]
+            p = float((y_arr == positive).mean())
+            if 0.0 < p < 1.0:
+                baseline_prevalence = p
+                n = df.height
+                df = df.with_columns(
+                    pl.Series(
+                        "_baseline_y",
+                        [p] + [None] * (n - 1),
+                        dtype=pl.Float64,
+                    ),
+                )
+
     color_field = _color_field_for(df, "class")
     chart = (
         ferrum.Chart(df)
         .mark_pr(
-            annotate_ap=annotate_ap,
+            annotate_ap=False,
             iso_lines=iso_lines,
             color_field=color_field,
         )
@@ -414,6 +497,43 @@ def _pr_chart_from_source(
             y=Y("precision", scale={"type": "linear", "domain": [0.0, 1.05]}),
         )
     )
+
+    # Active title on single-curve PR charts. Drop iso-curve sentinel rows
+    # (precision==null) before computing AP.
+    curve_df = df.filter(pl.col("precision").is_not_null())
+    if color_field is not None and color_field in curve_df.columns:
+        n_curves = len(set(curve_df[color_field].to_list()))
+    else:
+        n_curves = 1
+    if n_curves == 1:
+        recall = np.asarray(curve_df["recall"].to_list(), dtype=float)
+        precision = np.asarray(curve_df["precision"].to_list(), dtype=float)
+        ap_value = _ap_step(recall, precision)
+        chart = chart.properties(
+            title=ferrum.Title(
+                f"Precision–Recall — AP {ap_value:.3f}", subtitle=subtitle,
+            ),
+        )
+    else:
+        chart = chart.properties(
+            title=ferrum.Title("Precision–Recall", subtitle=subtitle),
+        )
+
+    if baseline_prevalence is not None:
+        baseline_layer = (
+            ferrum.Chart(chart._data)
+            .mark_rule(stroke_dash=[3, 3], stroke="#8a8a8a")
+            .encode(y="_baseline_y")
+        )
+        chart = chart + baseline_layer
+
+    if annotate_ap:
+        chart = _apply_metric_label_explicit(
+            chart, "ap",
+            x_col="recall", y_col="precision", color_col=color_field,
+            position="end",
+        )
+
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -505,10 +625,21 @@ def _calibration_chart_from_source(
     *,
     n_bins: int = 10,
     strategy: str = "uniform",
+    annotate_brier: bool = True,
+    subtitle: str | None = None,
     theme: Any = None,
 ):
-    """Build a calibration (reliability) chart from a ModelSource."""
+    """Build a calibration (reliability) chart from a ModelSource.
+
+    Schwabish SB3 (2026-05-11): active title carrying the per-sample
+    Brier score when the chart shows a single model; per-series
+    :class:`ferrum.BrierLabel` overlay when ``annotate_brier=True``.
+    """
+    import numpy as np
+
     import ferrum
+    from ferrum.annotations import _apply_metric_label_explicit, _brier_score
+
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
     chart = ferrum.Chart(df).mark_calibration(
@@ -516,6 +647,50 @@ def _calibration_chart_from_source(
         strategy=strategy,
         color_field=color,
     )
+
+    # Active title fires when exactly one model. Compute the true
+    # per-sample Brier from ``source.model.predict_proba`` and
+    # ``source.y``; the compared-model case skips the active title.
+    is_single_model = not hasattr(source, "models")
+    brier_value: float | None = None
+    if is_single_model:
+        try:
+            model_attr = getattr(source, "model", None) or getattr(source, "_model", None)
+            X_attr = getattr(source, "X", None)
+            if X_attr is None:
+                X_attr = getattr(source, "_X", None)
+            y_attr = getattr(source, "y", None)
+            if y_attr is None:
+                y_attr = getattr(source, "_y", None)
+            if model_attr is not None and X_attr is not None and y_attr is not None:
+                X_np = X_attr.to_numpy()
+                proba = model_attr.predict_proba(X_np)
+                if proba.ndim == 2 and proba.shape[1] == 2:
+                    p = np.asarray(proba[:, 1], dtype=float)
+                    obs = np.asarray(y_attr.to_numpy(), dtype=float)
+                    brier_value = _brier_score(p, obs)
+        except Exception:
+            brier_value = None
+
+    if brier_value is not None:
+        chart = chart.properties(
+            title=ferrum.Title(
+                f"Calibration — Brier {brier_value:.3f}", subtitle=subtitle,
+            ),
+        )
+    else:
+        chart = chart.properties(
+            title=ferrum.Title("Calibration", subtitle=subtitle),
+        )
+
+    if annotate_brier:
+        chart = _apply_metric_label_explicit(
+            chart, "brier",
+            x_col="mean_predicted", y_col="fraction_positive",
+            color_col=color,
+            position="corner",
+        )
+
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -670,16 +845,16 @@ def _importance_chart_from_source(
     top_k: int | None = 20,
     orient: str = "horizontal",
     error_bars: bool = True,
+    show_values: bool = True,
+    subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
 ):
     """Build a feature-importance chart from a ModelSource.
 
-    Computes ``imp_lower``/``imp_upper`` from ``importance`` ± ``std`` and
-    truncates to the top-k rows by absolute importance. The value-axis
-    scale domain is set to ``[0, max(imp_upper) * 1.05]`` so bars start
-    at zero (the conventional bar-chart anchor) and the rightmost error
-    bar has a small visual margin.
+    Schwabish SB3 (2026-05-11): ``Feature importance`` title and, when
+    ``show_values=True``, overlays the formatted importance value at the
+    end of each bar via a same-data text layer.
     """
     import ferrum
 
@@ -690,6 +865,13 @@ def _importance_chart_from_source(
         (pl.col("importance") - pl.col("std")).alias("imp_lower"),
         (pl.col("importance") + pl.col("std")).alias("imp_upper"),
     ])
+
+    if show_values:
+        df = df.with_columns(
+            pl.col("importance")
+            .map_elements(lambda v: f"{v:.3f}", return_dtype=pl.Utf8)
+            .alias("_value_text"),
+        )
 
     upper_max = float(df["imp_upper"].max())
     lower_min = float(df["imp_lower"].min())
@@ -702,6 +884,25 @@ def _importance_chart_from_source(
         top_k=top_k,
         x_scale_domain=(domain_lo, domain_hi),
     )
+    chart = chart.properties(
+        title=ferrum.Title("Feature importance", subtitle=subtitle),
+    )
+
+    if show_values:
+        if orient == "horizontal":
+            text_layer = (
+                ferrum.Chart(chart._data)
+                .mark_text(align="left", dx=4)
+                .encode(x="importance", y="feature", text="_value_text")
+            )
+        else:
+            text_layer = (
+                ferrum.Chart(chart._data)
+                .mark_text(baseline="bottom", dy=-4)
+                .encode(x="feature", y="importance", text="_value_text")
+            )
+        chart = chart + text_layer
+
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1094,14 +1295,33 @@ def _learning_curve_chart_from_source(
     scoring: Any = None,
     train_sizes: Any = None,
     ci_style: str = "band",
+    subtitle: str | None = None,
     theme: Any = None,
 ):
-    """Learning-curve chart: dedupe per (train_size, split), then ribbon+line."""
+    """Learning-curve chart: dedupe per (train_size, split), then ribbon+line.
+
+    Schwabish SB3 (2026-05-11): replaces the categorical legend with
+    endpoint-anchored direct labels (``train`` / ``test``), suppresses
+    the redundant color legend via ``Color(legend=None)``, and adds a
+    ``Learning curve`` active title.
+    """
     import ferrum
+    from ferrum._direct_label import _direct_label_endpoint
 
     df = source.learning_curve(cv=cv, scoring=scoring, train_sizes=train_sizes)
     df = _dedupe_aggregated(df, "train_size", "split")
-    chart = ferrum.Chart(df).mark_learning_curve(ci_style=ci_style)
+    chart = (
+        ferrum.Chart(df)
+        .encode(color=ferrum.Color("split", legend=None))
+        .mark_learning_curve(ci_style=ci_style)
+    )
+    chart = chart.properties(
+        title=ferrum.Title("Learning curve", subtitle=subtitle),
+    )
+    chart = _direct_label_endpoint(
+        chart, label_field="split",
+        x_col="train_size", y_col="mean_score",
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1116,14 +1336,16 @@ def _validation_curve_chart_from_source(
     scoring: Any = None,
     log_scale: Any = "auto",
     ci_style: str = "band",
+    subtitle: str | None = None,
     theme: Any = None,
 ):
     """Validation-curve chart: dedupe per (param_value, split), then ribbon+line.
 
-    ``log_scale="auto"`` enables log when the parameter range spans more
-    than two orders of magnitude (max / max(min, 1e-12) > 100).
+    Schwabish SB3 (2026-05-11): direct labels + legend suppression +
+    parameterized active title (``"Validation curve — <param>"``).
     """
     import ferrum
+    from ferrum._direct_label import _direct_label_endpoint
 
     df = source.validation_curve(param, values, cv=cv, scoring=scoring)
     df = _dedupe_aggregated(df, "param_value", "split")
@@ -1136,8 +1358,19 @@ def _validation_curve_chart_from_source(
             is_log = False
     else:
         is_log = bool(log_scale)
-    chart = ferrum.Chart(df).mark_validation_curve(
-        log_scale=is_log, ci_style=ci_style, param_label=param,
+    chart = (
+        ferrum.Chart(df)
+        .encode(color=ferrum.Color("split", legend=None))
+        .mark_validation_curve(
+            log_scale=is_log, ci_style=ci_style, param_label=param,
+        )
+    )
+    chart = chart.properties(
+        title=ferrum.Title(f"Validation curve — {param}", subtitle=subtitle),
+    )
+    chart = _direct_label_endpoint(
+        chart, label_field="split",
+        x_col="param_value", y_col="mean_score",
     )
     if theme is not None:
         chart = chart.theme(theme)
