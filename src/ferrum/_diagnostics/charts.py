@@ -594,8 +594,8 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
 
     import ferrum
 
-    y_true = source._y.to_numpy()
-    y_pred = source._model.predict(source._X.to_numpy())
+    y_true = source.y.to_numpy()
+    y_pred = source.model.predict(source.X.to_numpy())
     report = classification_report(
         y_true, y_pred, output_dict=True, zero_division=0,
     )
@@ -1466,9 +1466,9 @@ def _decision_boundary_chart_from_source(
     import ferrum
     import numpy as np
 
-    X_np = source._X.to_numpy()
+    X_np = source.X.to_numpy()
     feat_idx = tuple(
-        source._feature_names.index(f) if isinstance(f, str) else int(f)
+        source.feature_names.index(f) if isinstance(f, str) else int(f)
         for f in features
     )
     if len(feat_idx) != 2:
@@ -1492,14 +1492,14 @@ def _decision_boundary_chart_from_source(
     grid = np.tile(X_np.mean(axis=0), (xx.size, 1))
     grid[:, feat_idx[0]] = xx.ravel()
     grid[:, feat_idx[1]] = yy.ravel()
-    if proba and "predict_proba" in source._capabilities:
-        z = source._model.predict_proba(grid)[:, 1].astype(np.float64)
+    if proba and "predict_proba" in source.capabilities:
+        z = source.model.predict_proba(grid)[:, 1].astype(np.float64)
     else:
-        z = np.asarray(source._model.predict(grid)).astype(np.float64)
+        z = np.asarray(source.model.predict(grid)).astype(np.float64)
     flat_x = xx.ravel()
     flat_y = yy.ravel()
 
-    do_scatter = scatter and source._y is not None
+    do_scatter = scatter and source.y is not None
     if not do_scatter:
         # Pure-boundary path: no overlay, no padding columns, no row mixing.
         grid_df = pl.DataFrame({
@@ -1521,9 +1521,9 @@ def _decision_boundary_chart_from_source(
     # P(class=1) ∈ [0, 1] and the true label is 0 or 1; map y → float
     # accordingly. Prefer the model's classes_ attribute when present;
     # fall back to lex sort.
-    y_raw = source._y.to_numpy()
-    if hasattr(source._model, "classes_"):
-        class_order = list(source._model.classes_)
+    y_raw = source.y.to_numpy()
+    if hasattr(source.model, "classes_"):
+        class_order = list(source.model.classes_)
     else:
         class_order = sorted({v for v in y_raw.tolist()})
     label_to_idx = {c: float(i) for i, c in enumerate(class_order)}

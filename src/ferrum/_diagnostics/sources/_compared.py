@@ -118,11 +118,14 @@ class ComparedModelSource:
         if name in _COMPARED_METHODS:
             method = name
             return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
-        if name in ("_X", "_y", "_feature_names", "_class_names", "_capabilities"):
+        if name in (
+            "_X", "_y", "_feature_names", "_class_names", "_capabilities",
+            "X", "y", "feature_names", "capabilities",
+        ):
             return getattr(next(iter(self._sources.values())), name)
-        if name == "_model":
+        if name in ("_model", "model"):
             raise AttributeError(
-                "ComparedModelSource has no single _model. Iterate "
+                "ComparedModelSource has no single model. Iterate "
                 "ComparedModelSource._sources.values() to access each "
                 "wrapped ModelSource's model."
             )

@@ -56,8 +56,10 @@ def test_compare_empty_dict_raises():
 def test_compare_model_attr_raises():
     X, y, m = _binary_setup()
     cms = ferrum.ModelSource.compare({"a": m}, X, y)
-    with pytest.raises(AttributeError, match="no single _model"):
+    with pytest.raises(AttributeError, match="no single model"):
         cms._model
+    with pytest.raises(AttributeError, match="no single model"):
+        cms.model
 
 
 def test_compare_unknown_attr_raises():

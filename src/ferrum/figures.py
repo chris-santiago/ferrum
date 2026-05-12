@@ -1518,10 +1518,10 @@ def intercluster_distance_chart(
     )
     source = _resolve_source(model_or_source, X, None, random_state=random_state)
     if k is None:
-        if hasattr(source._model, "n_clusters"):
-            k = int(source._model.n_clusters)
-        elif hasattr(source._model, "cluster_centers_"):
-            k = int(source._model.cluster_centers_.shape[0])
+        if hasattr(source.model, "n_clusters"):
+            k = int(source.model.n_clusters)
+        elif hasattr(source.model, "cluster_centers_"):
+            k = int(source.model.cluster_centers_.shape[0])
         else:
             raise ValueError(
                 "intercluster_distance_chart(k=...) is required when the "

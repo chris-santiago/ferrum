@@ -332,8 +332,8 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 
-        y_true = self._source._y.to_numpy()
-        y_pred = self._source._model.predict(self._source._X.to_numpy())
+        y_true = self._source.y.to_numpy()
+        y_pred = self._source.model.predict(self._source.X.to_numpy())
         self._metrics["f1_macro"] = float(
             f1_score(y_true, y_pred, average="macro", zero_division=0)
         )

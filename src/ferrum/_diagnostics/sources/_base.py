@@ -104,6 +104,38 @@ class BaseSource:
         self._cache: dict[tuple, pl.DataFrame] = {}
 
     @property
+    def X(self) -> pl.DataFrame:
+        """Feature matrix coerced to a polars DataFrame.
+
+        Returns the value supplied to ``__init__`` (after coercion).
+        Use this for read-only access from chart builders and external
+        callers — ``source._X`` is an internal alias preserved for
+        back-compat.
+        """
+        return self._X
+
+    @property
+    def y(self) -> "pl.Series | None":
+        """Target series, or ``None`` when no ``y`` was supplied.
+
+        Returns the polars Series the constructor coerced from the
+        ``y`` argument.  ``None`` means unsupervised — methods that
+        need ground truth raise on call.
+        """
+        return self._y
+
+    @property
+    def model(self) -> Any:
+        """The wrapped fitted estimator.
+
+        Returns the model object supplied at construction time unchanged.
+        Chart builders use it for occasional native introspection (e.g.
+        ``model.classes_``, ``model.n_clusters``); prefer the public
+        derived-data methods when one exists.
+        """
+        return self._model
+
+    @property
     def feature_names(self) -> list[str]:
         """Column labels for the feature matrix.
 
