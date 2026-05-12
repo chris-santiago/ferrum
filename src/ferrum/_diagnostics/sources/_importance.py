@@ -40,7 +40,7 @@ class FeatureImportanceMixin:
             "importances",
             kind=method,
             n_repeats=n_repeats,
-            scoring=str(scoring) if scoring is not None else None,
+            scoring=scoring,
             random_state=rs,
         )
         if key in self._cache:

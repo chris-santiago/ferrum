@@ -145,4 +145,24 @@ class BaseSource:
             )
 
     def _cache_key(self, method: str, **kwargs) -> tuple:
-        return (method, tuple(sorted(kwargs.items())))
+        """Build a hashable cache key from method name + kwargs.
+
+        Hashable kwarg values (the common case — ints, strs, None,
+        tuples) pass through unchanged so a string ``"f1"`` keys
+        identically across calls.  Unhashable values (lists, ndarrays,
+        cv splitter objects, …) fall back to ``repr()`` so we don't
+        raise ``TypeError`` at dict-lookup time; this trades cache
+        stability across calls (repr of mutable objects can change)
+        for crash-freedom on legitimate inputs that the public
+        signatures advertise as ``Any``.  Callers that need stable
+        cache identity across calls (e.g. for an ndarray of
+        ``train_sizes``) should normalize to a tuple before calling.
+        """
+        def _hashable(v):
+            try:
+                hash(v)
+            except TypeError:
+                return repr(v)
+            return v
+
+        return (method, tuple(sorted((k, _hashable(v)) for k, v in kwargs.items())))

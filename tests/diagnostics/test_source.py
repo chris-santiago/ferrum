@@ -98,6 +98,29 @@ def test_probabilities_caching():
     assert p1 is p2  # cache returns same object
 
 
+def test_cache_key_accepts_unhashable_kwargs():
+    # Before P3.2, _cache_key(method, train_sizes=[1, 2, 3]) crashed at
+    # dict-lookup time because the kwarg value was unhashable and ended
+    # up inside a tuple used as a dict key. The fix falls back to repr()
+    # for unhashable values so the cache lookup just doesn't hit (the
+    # call recomputes) instead of raising TypeError.
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+    # Pass a list (unhashable) — must not raise.
+    k1 = source._cache_key("dummy", train_sizes=[0.1, 0.5, 1.0])
+    k2 = source._cache_key("dummy", train_sizes=[0.1, 0.5, 1.0])
+    assert k1 == k2  # same input → same key
+    # Pass an ndarray (unhashable).
+    arr = np.array([1, 2, 3])
+    k3 = source._cache_key("dummy", train_sizes=arr)
+    assert hash(k3) == hash(k3)  # the key itself is hashable
+    # Mixed hashable + unhashable kwargs.
+    k4 = source._cache_key("dummy", cv=5, train_sizes=[0.1, 0.5])
+    assert hash(k4) == hash(k4)
+
+
 # --- 10b: classification curves --------------------------------------
 
 

@@ -37,8 +37,8 @@ class ModelSelectionMixin:
         key = self._cache_key(
             "learning_curve",
             cv=cv,
-            scoring=str(scoring) if scoring is not None else None,
-            train_sizes=str(train_sizes) if train_sizes is not None else None,
+            scoring=scoring,
+            train_sizes=train_sizes,
         )
         if key in self._cache:
             return self._cache[key]
@@ -99,7 +99,7 @@ class ModelSelectionMixin:
             param=param,
             values=tuple(float(v) for v in vals),
             cv=cv,
-            scoring=str(scoring) if scoring is not None else None,
+            scoring=scoring,
         )
         if key in self._cache:
             return self._cache[key]
@@ -153,7 +153,7 @@ class ModelSelectionMixin:
         key = self._cache_key(
             "cv_scores",
             cv=cv,
-            scoring=str(scoring) if scoring is not None else None,
+            scoring=scoring,
         )
         if key in self._cache:
             return self._cache[key]
@@ -198,7 +198,7 @@ class ModelSelectionMixin:
             "alpha_selection",
             alphas=tuple(float(v) for v in vals),
             cv=cv,
-            scoring=str(scoring) if scoring is not None else None,
+            scoring=scoring,
         )
         if key in self._cache:
             return self._cache[key]
