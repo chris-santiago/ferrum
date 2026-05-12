@@ -47,6 +47,34 @@ pub struct MarkStyle {
     pub cmap: Option<String>,
 }
 
+impl MarkStyle {
+    /// Theme-driven base style with `fill = mark_color × default_opacity`,
+    /// no stroke, no stroke width, and every text/polygon-only field unset.
+    /// All per-mark variants in `resolve_mark_style` are 1-5 field overrides
+    /// applied on top of this baseline. Matches the prior Tick/Text/Image
+    /// arm byte-for-byte.
+    fn theme_base(theme: &ThemeInputs) -> Self {
+        MarkStyle {
+            fill: with_opacity(theme.mark_color, theme.default_opacity),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: theme.default_opacity,
+            point_size: theme.point_size,
+            corner_radius: 0.0,
+            stroke_dash: None,
+            font_size: None,
+            font_weight: None,
+            align: None,
+            baseline: None,
+            dx: None,
+            dy: None,
+            angle: None,
+            detail: None,
+            cmap: None,
+        }
+    }
+}
+
 /// Build the mark-aware theme base and then apply any `MarkKwargsSpec` overrides.
 ///
 /// When `overrides` is `None`, the result is identical to the Phase 7 path
@@ -59,136 +87,37 @@ pub fn resolve_mark_style(
     theme: &ThemeInputs,
     mark: &Mark,
 ) -> MarkStyle {
-    // --- Mark-aware theme base (preserves Phase 7 behaviour exactly) ---
-    let base_fill = with_opacity(theme.mark_color, theme.default_opacity);
-    let mut style = match mark {
-        Mark::Area | Mark::Ribbon => MarkStyle {
-            fill: with_opacity(theme.mark_color, theme.area_opacity),
-            stroke: Some(theme.mark_color),
-            stroke_width: theme.line_stroke_width,
-            opacity: 1.0,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Line => MarkStyle {
-            fill: theme.mark_color,
-            stroke: Some(theme.mark_color),
-            stroke_width: theme.line_stroke_width,
-            opacity: theme.default_opacity,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Bar | Mark::Rect => MarkStyle {
-            fill: base_fill,
-            stroke: None,
-            stroke_width: 0.0,
-            opacity: theme.default_opacity,
-            point_size: theme.point_size,
-            corner_radius: theme.bar_corner_radius,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Rule | Mark::Segment => MarkStyle {
-            fill: theme.mark_color,
-            stroke: Some(theme.mark_color),
-            stroke_width: theme.line_stroke_width,
-            opacity: theme.default_opacity,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Polygon => MarkStyle {
-            fill: with_opacity(theme.mark_color, theme.area_opacity),
-            stroke: Some(theme.mark_color),
-            stroke_width: theme.line_stroke_width,
-            opacity: 1.0,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Point => MarkStyle {
-            fill: base_fill,
-            stroke: None,
-            stroke_width: 0.0,
-            opacity: theme.point_opacity,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-        Mark::Tick | Mark::Text | Mark::Image => MarkStyle {
-            fill: base_fill,
-            stroke: None,
-            stroke_width: 0.0,
-            opacity: theme.default_opacity,
-            point_size: theme.point_size,
-            corner_radius: 0.0,
-            stroke_dash: None,
-            font_size: None,
-            font_weight: None,
-            align: None,
-            baseline: None,
-            dx: None,
-            dy: None,
-            angle: None,
-            detail: None,
-            cmap: None,
-        },
-    };
+    // Mark-aware deltas from the theme baseline. Only fields that differ
+    // from `MarkStyle::theme_base` are written; everything else falls
+    // through to the baseline value.
+    let mut style = MarkStyle::theme_base(theme);
+    match mark {
+        Mark::Area | Mark::Ribbon | Mark::Polygon => {
+            style.fill = with_opacity(theme.mark_color, theme.area_opacity);
+            style.stroke = Some(theme.mark_color);
+            style.stroke_width = theme.line_stroke_width;
+            style.opacity = 1.0;
+        }
+        Mark::Line => {
+            style.fill = theme.mark_color;
+            style.stroke = Some(theme.mark_color);
+            style.stroke_width = theme.line_stroke_width;
+        }
+        Mark::Bar | Mark::Rect => {
+            style.corner_radius = theme.bar_corner_radius;
+        }
+        Mark::Rule | Mark::Segment => {
+            style.fill = theme.mark_color;
+            style.stroke = Some(theme.mark_color);
+            style.stroke_width = theme.line_stroke_width;
+        }
+        Mark::Point => {
+            style.opacity = theme.point_opacity;
+        }
+        Mark::Tick | Mark::Text | Mark::Image => {
+            // Baseline applies as-is.
+        }
+    }
 
     // --- Apply MarkKwargsSpec overrides (if any) ---
     let Some(o) = overrides else { return style };
