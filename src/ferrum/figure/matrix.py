@@ -9,6 +9,31 @@ _VALID_PAIR_KINDS = {"scatter", "kde", "hist", "reg"}
 _VALID_DIAG_KINDS = {"auto", "hist", "kde", None, "none"}
 
 
+def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any, str]:
+    """Return ``(data, tbl, id_col)`` with a guaranteed id column.
+
+    If the input has no non-numeric id column, materialise ``_row_id`` via
+    ``pl.DataFrame.with_row_index`` (cast to Utf8) and refresh the Arrow table
+    so downstream transforms see the synthetic column. When ``id_col`` is
+    already set, return inputs unchanged.
+
+    Used by ``heatmap`` and ``clustermap`` — both accept wide-format
+    DataFrames where the row identity may be implicit.
+    """
+    if id_col is not None:
+        return data, tbl, id_col
+
+    import polars as pl
+    from ferrum._coerce import to_arrow_table
+
+    try:
+        pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
+    except Exception:
+        pdf = pl.from_arrow(tbl)
+    pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
+    return pdf, to_arrow_table(pdf), "_row_id"
+
+
 def pairplot(
     data: Any, *,
     vars: Any = None, x_vars: Any = None, y_vars: Any = None,
@@ -272,18 +297,9 @@ def heatmap(
     if not value_cols:
         raise ValueError("heatmap: no numeric columns found in data")
 
-    # If no id column found, synthesize a row index.
-    import polars as pl
-    if id_col is None:
-        # Wrap data into a polars frame, add a row id.
-        try:
-            pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
-        except Exception:
-            pdf = pl.from_arrow(tbl)
-        pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
-        data = pdf
-        id_col = "_row_id"
-        tbl = to_arrow_table(data)
+    # If no id column found, synthesize a `_row_id` column so downstream
+    # transforms have a row identity to unpivot against.
+    data, tbl, id_col = _ensure_id_column(data, tbl, id_col)
 
     # robust=True: compute vmin/vmax from 2nd/98th percentiles in Python.
     if robust:
@@ -446,6 +462,11 @@ def clustermap(
     if not value_cols:
         raise ValueError("clustermap: no numeric columns found in data")
 
+    # If no id column found, synthesize a `_row_id` column so the unpivot has
+    # a row identity to carry through to the heatmap's y encoding. Mirrors
+    # heatmap's handling for all-numeric input.
+    data, tbl, id_col = _ensure_id_column(data, tbl, id_col)
+
     # Linkage transforms (rows + columns) with explicit names so we can route
     # their `segments` named outputs to the dendrogram layers.
     row_link = Linkage(
@@ -461,7 +482,7 @@ def clustermap(
 
     # Center heatmap: reorder rows + columns then unpivot.
     unpivot = Unpivot(
-        id_vars=[id_col] if id_col else [],
+        id_vars=[id_col],
         value_vars=value_cols,
         var_name="column", value_name="value",
     )
@@ -487,7 +508,7 @@ def clustermap(
         .mark_rect()
         .encode(
             x="column",
-            y=(id_col if id_col else "_row_id"),
+            y=id_col,
             color=_color_enc,
         )
     )

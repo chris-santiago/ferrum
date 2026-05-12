@@ -569,6 +569,27 @@ class TestClustermap:
         assert cm.col_dendrogram._theme._props.get("grid") is False
         assert cm.col_dendrogram._theme._props.get("mark_color") == "#ff0000"
 
+    def test_renders_when_data_has_no_id_column(self):
+        """All-numeric input must render without referencing a non-existent column.
+
+        Regression for: ``ValueError: unknown column '_row_id'``. The original
+        ``clustermap`` referenced ``_row_id`` in the y encoding when no
+        non-numeric id column was present, but never synthesized the column —
+        unlike ``heatmap``, which materialises ``_row_id`` via
+        ``with_row_index``. Mirrors a real iris-style call:
+        ``clustermap(iris.drop("target"))``.
+        """
+        rng = np.random.default_rng(7)
+        all_numeric = pl.DataFrame({
+            "A": rng.normal(0, 1, 6).tolist(),
+            "B": rng.normal(0, 1, 6).tolist(),
+            "C": rng.normal(0, 1, 6).tolist(),
+            "D": rng.normal(0, 1, 6).tolist(),
+        })
+        cm = fe.clustermap(all_numeric)
+        svg = cm.show_svg()
+        assert svg.startswith("<svg") or "<svg" in svg[:200]
+
 
 # ---------------------------------------------------------------------------
 # Task 35 — jointplot
