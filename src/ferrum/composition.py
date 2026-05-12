@@ -1,11 +1,103 @@
 """Multi-chart composition primitives (HConcat, VConcat, Joint, Repeat, ClusterMap)."""
 from __future__ import annotations
 
+import json as _json
+from pathlib import Path
 from typing import List, Optional
 
 
-class _CompositeBase:
-    """Base for HConcat/VConcat. Holds a list of children + spacing."""
+def _embed_chart_spec(c) -> Optional[dict]:
+    """Convert a Chart's ``.to_spec()`` output to an embedded JSON dict."""
+    if c is None or not hasattr(c, "to_spec"):
+        return None
+    return _json.loads(c.to_spec().to_json())
+
+
+class _ChartLike:
+    """Common rendering plumbing shared by every composition wrapper.
+
+    Concrete subclasses must implement :meth:`show_svg`, :attr:`charts`,
+    :meth:`theme`, :meth:`properties`, and :meth:`__repr__`.  This base
+    centralizes the save / show / Jupyter-display / PNG-stub boilerplate
+    that previously drifted across five copies (K2 / K3 / K11 / K15).
+    """
+
+    def show_svg(self) -> str:  # pragma: no cover - abstract
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement show_svg"
+        )
+
+    # Subclasses provide ``charts`` as either an instance attribute
+    # (symmetric containers — HConcat / VConcat) or as a ``@property``
+    # (asymmetric containers — Joint / Repeat / ClusterMap, where the
+    # shape is fixed and a derived list is the natural accessor).  We
+    # do not declare it on the base because Python's data-descriptor
+    # rules would block the attribute form on ``_CompositeBase``.
+
+    def show(self) -> None:
+        """Print the SVG markup to stdout."""
+        print(self.show_svg())
+
+    def _repr_svg_(self) -> str:
+        """Return SVG for Jupyter inline display."""
+        return self.show_svg()
+
+    def _repr_mimebundle_(self, include=None, exclude=None) -> dict:
+        """Return a Jupyter MIME bundle for rich display.
+
+        Jupyter prefers ``_repr_mimebundle_`` over per-type ``_repr_*_``
+        methods when both exist, so providing it lets front-ends negotiate
+        formats without falling back to text repr.
+        """
+        return {"image/svg+xml": self.show_svg()}
+
+    def show_png(self) -> bytes:
+        """Render to PNG bytes.
+
+        Raises
+        ------
+        NotImplementedError
+            PNG output is not yet wired; use ``.save('out.svg')`` instead.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.show_png is not yet wired; "
+            "use .save('out.svg') instead."
+        )
+
+    def save(self, path: str, *, format=None, **kwargs) -> None:
+        """Save the composition to a file.
+
+        Parameters
+        ----------
+        path : str
+            Destination file path.  The extension determines the format when
+            *format* is omitted.
+        format : str, optional
+            ``"svg"`` is the only supported value.  Other formats raise
+            ``NotImplementedError``.
+
+        Raises
+        ------
+        NotImplementedError
+            If *format* is not ``"svg"``.
+        """
+        dest = Path(path)
+        fmt = format or dest.suffix.lstrip(".")
+        if fmt == "svg":
+            dest.write_text(self.show_svg())
+        else:
+            raise NotImplementedError(
+                f"{type(self).__name__}.save({fmt!r}) is not yet supported"
+            )
+
+
+class _CompositeBase(_ChartLike):
+    """Symmetric list-of-charts container for HConcat / VConcat.
+
+    Holds an ordered ``charts`` list and a pixel ``spacing`` between cells.
+    ``__or__`` and ``__and__`` chain further compositions; ``theme`` and
+    ``properties`` fan out to every child.
+    """
 
     def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
         self.charts = list(charts)
@@ -16,6 +108,43 @@ class _CompositeBase:
 
     def __and__(self, other):
         return VConcatChart([self, other])
+
+    def theme(self, t):
+        """Apply a theme to every child chart and return a new composition.
+
+        Parameters
+        ----------
+        t : Theme
+            Theme value to apply.
+
+        Returns
+        -------
+        _CompositeBase
+            A new instance of the same composition class with *t* applied
+            to each child chart.
+        """
+        return type(self)(
+            [c.theme(t) for c in self.charts], spacing=self.spacing
+        )
+
+    def properties(self, **kwargs):
+        """Forward ``properties(**kwargs)`` to every child chart.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments accepted by ``Chart.properties`` (e.g.
+            ``width``, ``height``, ``title``, ``background``).
+
+        Returns
+        -------
+        _CompositeBase
+            A new instance of the same composition class with updated
+            child-chart properties.
+        """
+        return type(self)(
+            [c.properties(**kwargs) for c in self.charts], spacing=self.spacing
+        )
 
 
 class HConcatChart(_CompositeBase):
@@ -49,57 +178,6 @@ class HConcatChart(_CompositeBase):
         from ferrum._core import compose_svg_horizontal
         svgs = [c.show_svg() for c in self.charts]
         return compose_svg_horizontal(svgs, spacing=self.spacing, align="top")
-
-    def show_png(self) -> bytes:
-        """Render to PNG bytes.
-
-        .. note::
-            Not yet implemented in Phase 8a.  Use ``.save('out.svg')`` instead.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised until PNG wiring is complete.
-        """
-        raise NotImplementedError(
-            "HConcatChart.show_png not yet wired in Phase 8a; "
-            "use .save('out.svg') instead (Phase 8a follow-up)."
-        )
-
-    def save(self, path: str, *, format=None, **kwargs):
-        """Save the composition to a file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path.  The extension determines the format when
-            *format* is omitted.
-        format : str, optional
-            ``"svg"`` is the only supported value.  Other formats raise
-            ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            If *format* is not ``"svg"``.
-        """
-        from pathlib import Path
-        path = Path(path)
-        fmt = format or path.suffix.lstrip(".")
-        if fmt == "svg":
-            path.write_text(self.show_svg())
-        else:
-            raise NotImplementedError(
-                f"HConcatChart.save({fmt!r}) not yet supported in Phase 8a"
-            )
-
-    def show(self):
-        """Print the SVG markup to stdout."""
-        print(self.show_svg())
-
-    def _repr_svg_(self) -> str:
-        """Return SVG for Jupyter inline display."""
-        return self.show_svg()
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -138,57 +216,6 @@ class VConcatChart(_CompositeBase):
         svgs = [c.show_svg() for c in self.charts]
         return compose_svg_vertical(svgs, spacing=self.spacing, align="left")
 
-    def show_png(self) -> bytes:
-        """Render to PNG bytes.
-
-        .. note::
-            Not yet implemented in Phase 8a.  Use ``.save('out.svg')`` instead.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised until PNG wiring is complete.
-        """
-        raise NotImplementedError(
-            "VConcatChart.show_png not yet wired in Phase 8a; "
-            "use .save('out.svg') instead."
-        )
-
-    def save(self, path: str, *, format=None, **kwargs):
-        """Save the composition to a file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path.  The extension determines the format when
-            *format* is omitted.
-        format : str, optional
-            ``"svg"`` is the only supported value.  Other formats raise
-            ``NotImplementedError``.
-
-        Raises
-        ------
-        NotImplementedError
-            If *format* is not ``"svg"``.
-        """
-        from pathlib import Path
-        path = Path(path)
-        fmt = format or path.suffix.lstrip(".")
-        if fmt == "svg":
-            path.write_text(self.show_svg())
-        else:
-            raise NotImplementedError(
-                f"VConcatChart.save({fmt!r}) not yet supported in Phase 8a"
-            )
-
-    def show(self):
-        """Print the SVG markup to stdout."""
-        print(self.show_svg())
-
-    def _repr_svg_(self) -> str:
-        """Return SVG for Jupyter inline display."""
-        return self.show_svg()
-
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
         return f"VConcatChart([{', '.join(repr(c) for c in self.charts)}])"
@@ -199,15 +226,7 @@ class VConcatChart(_CompositeBase):
 # --------------------------------------------------------------------------
 
 
-def _embed_chart_spec(c) -> Optional[dict]:
-    """Convert a Chart's ``.to_spec()`` output to an embedded JSON dict."""
-    import json as _json
-    if c is None or not hasattr(c, "to_spec"):
-        return None
-    return _json.loads(c.to_spec().to_json())
-
-
-class JointChart:
+class JointChart(_ChartLike):
     """Joint distribution view: center chart plus optional top and right marginals.
 
     Lays out a 2 × 2 grid: center chart occupies the bottom-left cell,
@@ -234,8 +253,8 @@ class JointChart:
         of the y variable).
     ratio : int, default 5
         Size ratio of the center panel to each marginal panel.  Must be > 0.
-    spacing : float, default 0.02
-        Fractional gap between adjacent cells (0 = no gap, 1 = full width).
+    spacing : float, default 10.0
+        Pixel gap between adjacent cells.
 
     Raises
     ------
@@ -249,7 +268,7 @@ class JointChart:
     >>> joint.save("joint.svg")
     """
 
-    __slots__ = ("center", "top", "right", "ratio", "spacing", "_theme")
+    __slots__ = ("center", "top", "right", "ratio", "spacing")
 
     def __init__(
         self,
@@ -267,7 +286,6 @@ class JointChart:
         self.right = right
         self.ratio = ratio
         self.spacing = spacing
-        self._theme = None
 
     @property
     def charts(self) -> list:
@@ -306,18 +324,19 @@ class JointChart:
         JointChart
             A new instance with *t* applied to every sub-chart.
         """
-        new = JointChart(
+        return JointChart(
             self.center.theme(t),
             top=(self.top.theme(t) if self.top is not None else None),
             right=(self.right.theme(t) if self.right is not None else None),
             ratio=self.ratio,
             spacing=self.spacing,
         )
-        new._theme = t
-        return new
 
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to the center chart.
+
+        The marginals (top, right) are kept unchanged because their width /
+        height is derived from the center plus ``ratio`` at render time.
 
         Parameters
         ----------
@@ -330,13 +349,11 @@ class JointChart:
         JointChart
             A new instance with updated center-chart properties.
         """
-        new = JointChart(
+        return JointChart(
             self.center.properties(**kwargs),
             top=self.top, right=self.right,
             ratio=self.ratio, spacing=self.spacing,
         )
-        new._theme = self._theme
-        return new
 
     def show_svg(self) -> str:
         """Render the joint chart to an SVG string.
@@ -345,20 +362,8 @@ class JointChart:
         -------
         str
             SVG markup with the 2 × 2 grid layout.
-
-        Raises
-        ------
-        NotImplementedError
-            If ``compose_svg_grid`` is not available in the compiled
-            ``ferrum._core`` extension.
         """
-        try:
-            from ferrum._core import compose_svg_grid  # type: ignore[attr-defined]
-        except ImportError as e:
-            raise NotImplementedError(
-                "JointChart.show_svg() requires compose_svg_grid; "
-                "compose_svg_grid not available in this build"
-            ) from e
+        from ferrum._core import compose_svg_grid
         # F20: the Rust grid compositor now honors row_ratios/col_ratios via
         # viewBox-scaled per-cell wrappers, so marginals can be passed at
         # their native size and the compositor handles proportional sizing.
@@ -380,48 +385,6 @@ class JointChart:
             spacing=self.spacing,
         )
 
-    def show_png(self) -> bytes:
-        """Render to PNG bytes.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised; PNG output is not yet implemented.
-        """
-        raise NotImplementedError("JointChart.show_png — not yet implemented")
-
-    def save(self, path: str, *, format=None, **kwargs):
-        """Save the joint chart to a file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path.  The extension determines the format when
-            *format* is omitted.
-        format : str, optional
-            ``"svg"`` is the only supported value.
-
-        Raises
-        ------
-        NotImplementedError
-            If *format* is not ``"svg"``.
-        """
-        from pathlib import Path
-        path = Path(path)
-        fmt = format or path.suffix.lstrip(".")
-        if fmt == "svg":
-            path.write_text(self.show_svg())
-        else:
-            raise NotImplementedError(f"JointChart.save({fmt!r}) not yet supported")
-
-    def show(self):
-        """Print the SVG markup to stdout."""
-        print(self.show_svg())
-
-    def _repr_svg_(self) -> str:
-        """Return SVG for Jupyter inline display."""
-        return self.show_svg()
-
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
         return (
@@ -430,7 +393,7 @@ class JointChart:
         )
 
 
-class RepeatChart:
+class RepeatChart(_ChartLike):
     """Repeat a template chart over a grid of row / column field combinations.
 
     Use ``Repeat.column``, ``Repeat.row``, or ``Repeat.layer`` typed sentinels
@@ -463,8 +426,8 @@ class RepeatChart:
     corner : bool, default False
         When ``True``, only the lower-triangle cells (``ri >= ci``) are
         rendered, giving a half-matrix layout.
-    spacing : float, default 0.02
-        Fractional gap between adjacent cells.
+    spacing : float, default 10.0
+        Pixel gap between adjacent cells.
     columns : int, optional
         Maximum number of columns for a wrapped 1-D repeat layout (no-op
         for 2-D row/column repeat).
@@ -486,7 +449,7 @@ class RepeatChart:
 
     __slots__ = (
         "template", "row", "column", "layer", "diagonal", "corner",
-        "spacing", "columns", "resolve", "_theme",
+        "spacing", "columns", "resolve",
     )
 
     def __init__(
@@ -513,7 +476,11 @@ class RepeatChart:
         self.spacing = spacing
         self.columns = columns
         self.resolve = resolve
-        self._theme = None
+
+    @property
+    def charts(self) -> list:
+        """List of Chart : Template plus diagonal (when set), in init order."""
+        return [c for c in (self.template, self.diagonal) if c is not None]
 
     @property
     def spec(self) -> dict:
@@ -625,15 +592,38 @@ class RepeatChart:
         RepeatChart
             A new instance with *t* applied to the template and diagonal.
         """
-        new = RepeatChart(
+        return RepeatChart(
             self.template.theme(t),
             row=self.row, column=self.column, layer=self.layer,
             diagonal=(self.diagonal.theme(t) if self.diagonal is not None else None),
             corner=self.corner, spacing=self.spacing,
             columns=self.columns, resolve=self.resolve,
         )
-        new._theme = t
-        return new
+
+    def properties(self, **kwargs):
+        """Forward ``properties(**kwargs)`` to the template (and diagonal).
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments accepted by ``Chart.properties`` (e.g.
+            ``width``, ``height``, ``title``).
+
+        Returns
+        -------
+        RepeatChart
+            A new instance with updated template-chart properties.
+        """
+        new_diagonal = (
+            self.diagonal.properties(**kwargs) if self.diagonal is not None else None
+        )
+        return RepeatChart(
+            self.template.properties(**kwargs),
+            row=self.row, column=self.column, layer=self.layer,
+            diagonal=new_diagonal,
+            corner=self.corner, spacing=self.spacing,
+            columns=self.columns, resolve=self.resolve,
+        )
 
     def show_svg(self) -> str:
         """Render the repeated grid to an SVG string.
@@ -642,20 +632,8 @@ class RepeatChart:
         -------
         str
             SVG markup containing all materialized cell charts in a grid.
-
-        Raises
-        ------
-        NotImplementedError
-            If ``compose_svg_grid`` is not available in the compiled
-            ``ferrum._core`` extension.
         """
-        try:
-            from ferrum._core import compose_svg_grid  # type: ignore[attr-defined]
-        except ImportError as e:
-            raise NotImplementedError(
-                "RepeatChart.show_svg() requires compose_svg_grid; "
-                "compose_svg_grid not available in this build"
-            ) from e
+        from ferrum._core import compose_svg_grid
         cells = self.expand()
         rows = self.row or []
         cols = self.column or []
@@ -672,48 +650,6 @@ class RepeatChart:
             spacing=self.spacing,
         )
 
-    def show_png(self) -> bytes:
-        """Render to PNG bytes.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised; PNG output is not yet implemented.
-        """
-        raise NotImplementedError("RepeatChart.show_png — not yet implemented")
-
-    def save(self, path: str, *, format=None, **kwargs):
-        """Save the repeated grid to a file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path.  The extension determines the format when
-            *format* is omitted.
-        format : str, optional
-            ``"svg"`` is the only supported value.
-
-        Raises
-        ------
-        NotImplementedError
-            If *format* is not ``"svg"``.
-        """
-        from pathlib import Path
-        path = Path(path)
-        fmt = format or path.suffix.lstrip(".")
-        if fmt == "svg":
-            path.write_text(self.show_svg())
-        else:
-            raise NotImplementedError(f"RepeatChart.save({fmt!r}) not yet supported")
-
-    def show(self):
-        """Print the SVG markup to stdout."""
-        print(self.show_svg())
-
-    def _repr_svg_(self) -> str:
-        """Return SVG for Jupyter inline display."""
-        return self.show_svg()
-
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
         return (
@@ -722,7 +658,7 @@ class RepeatChart:
         )
 
 
-class ClusterMapChart:
+class ClusterMapChart(_ChartLike):
     """Clustered heatmap with optional row and column dendrograms.
 
     Lays out a 2 × 2 grid: the heatmap occupies the bottom-right cell,
@@ -748,8 +684,8 @@ class ClusterMapChart:
     dendrogram_ratio : float, default 0.2
         Fraction of the total width/height allocated to each dendrogram panel.
         Must be in the open interval (0, 1).
-    spacing : float, default 0.02
-        Fractional gap between adjacent cells.
+    spacing : float, default 10.0
+        Pixel gap between adjacent cells.
 
     Raises
     ------
@@ -765,7 +701,7 @@ class ClusterMapChart:
 
     __slots__ = (
         "heatmap", "row_dendrogram", "col_dendrogram",
-        "dendrogram_ratio", "spacing", "_theme",
+        "dendrogram_ratio", "spacing",
     )
 
     def __init__(
@@ -786,12 +722,15 @@ class ClusterMapChart:
         self.col_dendrogram = col_dendrogram
         self.dendrogram_ratio = dendrogram_ratio
         self.spacing = spacing
-        self._theme = None
 
     @property
     def charts(self) -> list:
-        """List of Chart : All non-None sub-charts (heatmap, col_dendrogram, row_dendrogram)."""
-        return [c for c in (self.heatmap, self.col_dendrogram, self.row_dendrogram) if c is not None]
+        """List of Chart : All non-None sub-charts in ``__init__`` order
+        (heatmap, row_dendrogram, col_dendrogram)."""
+        return [
+            c for c in (self.heatmap, self.row_dendrogram, self.col_dendrogram)
+            if c is not None
+        ]
 
     @property
     def spec(self) -> dict:
@@ -818,15 +757,38 @@ class ClusterMapChart:
         ClusterMapChart
             A new instance with *t* applied to every sub-chart.
         """
-        new = ClusterMapChart(
+        return ClusterMapChart(
             self.heatmap.theme(t),
             row_dendrogram=(self.row_dendrogram.theme(t) if self.row_dendrogram is not None else None),
             col_dendrogram=(self.col_dendrogram.theme(t) if self.col_dendrogram is not None else None),
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
-        new._theme = t
-        return new
+
+    def properties(self, **kwargs):
+        """Forward ``properties(**kwargs)`` to the heatmap chart.
+
+        The dendrogram panels are kept unchanged because their width / height
+        is derived from the heatmap plus ``dendrogram_ratio`` at render time.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments accepted by ``Chart.properties`` (e.g.
+            ``width``, ``height``, ``title``).
+
+        Returns
+        -------
+        ClusterMapChart
+            A new instance with updated heatmap-chart properties.
+        """
+        return ClusterMapChart(
+            self.heatmap.properties(**kwargs),
+            row_dendrogram=self.row_dendrogram,
+            col_dendrogram=self.col_dendrogram,
+            dendrogram_ratio=self.dendrogram_ratio,
+            spacing=self.spacing,
+        )
 
     def show_svg(self) -> str:
         """Render the cluster map to an SVG string.
@@ -835,20 +797,8 @@ class ClusterMapChart:
         -------
         str
             SVG markup with the 2 × 2 grid layout.
-
-        Raises
-        ------
-        NotImplementedError
-            If ``compose_svg_grid`` is not available in the compiled
-            ``ferrum._core`` extension.
         """
-        try:
-            from ferrum._core import compose_svg_grid  # type: ignore[attr-defined]
-        except ImportError as e:
-            raise NotImplementedError(
-                "ClusterMapChart.show_svg() requires compose_svg_grid; "
-                "compose_svg_grid not available in this build"
-            ) from e
+        from ferrum._core import compose_svg_grid
         d = self.dendrogram_ratio
         h = 1.0 - d
         # Pre-resize each component so the heatmap fills (h × h) of the grid
@@ -878,48 +828,6 @@ class ClusterMapChart:
             col_ratios=[d, h],
             spacing=self.spacing,
         )
-
-    def show_png(self) -> bytes:
-        """Render to PNG bytes.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised; PNG output is not yet implemented.
-        """
-        raise NotImplementedError("ClusterMapChart.show_png — not yet implemented")
-
-    def save(self, path: str, *, format=None, **kwargs):
-        """Save the cluster map to a file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path.  The extension determines the format when
-            *format* is omitted.
-        format : str, optional
-            ``"svg"`` is the only supported value.
-
-        Raises
-        ------
-        NotImplementedError
-            If *format* is not ``"svg"``.
-        """
-        from pathlib import Path
-        path = Path(path)
-        fmt = format or path.suffix.lstrip(".")
-        if fmt == "svg":
-            path.write_text(self.show_svg())
-        else:
-            raise NotImplementedError(f"ClusterMapChart.save({fmt!r}) not yet supported")
-
-    def show(self):
-        """Print the SVG markup to stdout."""
-        print(self.show_svg())
-
-    def _repr_svg_(self) -> str:
-        """Return SVG for Jupyter inline display."""
-        return self.show_svg()
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
