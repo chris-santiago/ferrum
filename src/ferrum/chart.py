@@ -4290,6 +4290,15 @@ class Chart:
                 if isinstance(ch.field, _RepeatPlaceholder):
                     continue
                 d = ch.to_encoding_spec_dict()
+                # Bar y-axis zero-anchor (gallery defaults A3): inject
+                # scale.zero=True on the y-encoding so bar charts always
+                # start at zero unless the caller explicitly sets domain or
+                # zero on their Y() channel.  The injected scale must carry
+                # `type` because Rust's ScaleSpec is a tagged enum.
+                if axis == "y" and resolved._mark == "bar":
+                    scale = d.get("scale") or {}
+                    if "domain" not in scale and "zero" not in scale:
+                        d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
                 # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
                 # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
                 field = d.pop("field")

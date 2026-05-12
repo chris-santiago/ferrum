@@ -12,9 +12,15 @@ def _scale_to_dict(scale: Any) -> Any:
 
     Converts LogScale, LinearScale, TimeScale, SymlogScale, and OrdinalScale
     instances to the dict shape expected by Rust's ScaleSpec serde deserialiser.
-    If ``scale`` is already a dict or ``None``, return it unchanged.
+    If ``scale`` is already a dict, ensure it has a ``type`` key (defaulting to
+    ``"linear"`` when absent) so Rust's tagged-enum deserialiser can match the
+    correct variant.  ``None`` is returned unchanged.
     """
-    if scale is None or isinstance(scale, dict):
+    if scale is None:
+        return scale
+    if isinstance(scale, dict):
+        if "type" not in scale:
+            return {"type": "linear", **scale}
         return scale
 
     # Import here to avoid circular imports at module load time.
