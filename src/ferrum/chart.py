@@ -5,6 +5,8 @@ spec is deep-copied on each call so chains compose without aliasing surprises.
 """
 from __future__ import annotations
 
+import functools
+import logging
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
@@ -18,32 +20,36 @@ from ferrum.marks.statistical import desugar_density, desugar_histogram, desugar
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
-_CHANNEL_CLASSES_BY_NAME: dict = {}
+_logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def _channel_class_map() -> dict:
+    """Build the channel-name → channel-class mapping (lazy import; once-per-process)."""
+    from ferrum.encoding import (
+        X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
+        Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
+        StrokeWidth, StrokeDash, Size, Shape, Angle,
+        Text, Detail, Tooltip, TooltipField, Href, Description, Key,
+        Facet, FacetRow, FacetCol,
+    )
+    return {
+        "x": X, "y": Y, "x2": X2, "y2": Y2,
+        "x_error": XError, "y_error": YError, "x_error2": XError2, "y_error2": YError2,
+        "theta": Theta, "radius": Radius,
+        "color": Color, "fill": Fill, "stroke": Stroke,
+        "opacity": Opacity, "fill_opacity": FillOpacity, "stroke_opacity": StrokeOpacity,
+        "stroke_width": StrokeWidth, "stroke_dash": StrokeDash,
+        "size": Size, "shape": Shape, "angle": Angle,
+        "text": Text, "detail": Detail, "tooltip": Tooltip, "tooltip_field": TooltipField,
+        "href": Href, "description": Description, "key": Key,
+        "facet": Facet, "facet_row": FacetRow, "facet_col": FacetCol,
+    }
 
 
 def _channel_class_for(name: str):
-    """Return the channel-class for a given parameter name (lazy import to avoid cycles)."""
-    if not _CHANNEL_CLASSES_BY_NAME:
-        from ferrum.encoding import (
-            X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
-            Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
-            StrokeWidth, StrokeDash, Size, Shape, Angle,
-            Text, Detail, Tooltip, TooltipField, Href, Description, Key,
-            Facet, FacetRow, FacetCol,
-        )
-        _CHANNEL_CLASSES_BY_NAME.update({
-            "x": X, "y": Y, "x2": X2, "y2": Y2,
-            "x_error": XError, "y_error": YError, "x_error2": XError2, "y_error2": YError2,
-            "theta": Theta, "radius": Radius,
-            "color": Color, "fill": Fill, "stroke": Stroke,
-            "opacity": Opacity, "fill_opacity": FillOpacity, "stroke_opacity": StrokeOpacity,
-            "stroke_width": StrokeWidth, "stroke_dash": StrokeDash,
-            "size": Size, "shape": Shape, "angle": Angle,
-            "text": Text, "detail": Detail, "tooltip": Tooltip, "tooltip_field": TooltipField,
-            "href": Href, "description": Description, "key": Key,
-            "facet": Facet, "facet_row": FacetRow, "facet_col": FacetCol,
-        })
-    return _CHANNEL_CLASSES_BY_NAME.get(name)
+    """Return the channel-class for a given parameter name."""
+    return _channel_class_map().get(name)
 
 
 class Chart:
@@ -634,6 +640,42 @@ class Chart:
         Chart(mark='rect', encoding=['x', 'y', 'color'])
         """
         return self._set_mark("rect", **kwargs)
+
+    def mark_segment(self, *, position=None, **kwargs) -> "Chart":
+        """Render data as line segments from ``(x, y)`` to ``(x2, y2)``.
+
+        Distinct from ``mark_rule`` (axis-aligned only); segments may take any
+        direction. Requires ``x``, ``y``, ``x2``, ``y2`` on the encoding.
+
+        Parameters
+        ----------
+        stroke : str, optional
+            Segment stroke colour override.
+        stroke_width : float, optional
+            Segment stroke width in pixels.
+        stroke_dash : list of float, optional
+            Dash pattern (alternating on/off pixel lengths).
+        opacity : float, optional
+            Stroke opacity in ``[0, 1]``.
+        position : Position, optional
+            Position adjustment.
+        **kwargs
+            Additional mark-style overrides forwarded to the segment layer.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` configured for segment rendering.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [0, 1], "y": [0, 1], "x2": [1, 2], "y2": [1, 0]})
+        >>> fm.Chart(df).mark_segment().encode(x="x", y="y", x2="x2", y2="y2")
+        Chart(mark='segment', encoding=['x', 'y', 'x2', 'y2'])
+        """
+        return self._set_mark("segment", position=position, **kwargs)
 
     # ---- Marks (statistical) ----
 
@@ -3241,13 +3283,7 @@ class Chart:
             Always — deferred to a future phase.
         """
         raise deferred_mark_error("geoshape")
-    def mark_segment(self, *, position=None, **kwargs) -> "Chart":
-        """Diagonal line segment from (x, y) to (x2, y2).
 
-        Distinct from ``mark_rule`` (axis-aligned only); segments may take any
-        direction. Requires ``x``, ``y``, ``x2``, ``y2`` on the encoding.
-        """
-        return self._set_mark("segment", position=position, **kwargs)
     def mark_label(self, **kwargs):
         """Render smart text labels with automatic collision avoidance.
 
@@ -4033,6 +4069,14 @@ class Chart:
             return compact
         return _json.dumps(_json.loads(compact), indent=indent)
 
+    def _render_inputs(self) -> tuple:
+        # Shared render plumbing for show_svg / show_png: spec, data, viewport, theme.
+        spec = self.to_spec()
+        data = to_arrow_table(self._data)
+        viewport = (self._width or 600.0, self._height or 400.0)
+        theme_dict = (self._theme.to_theme_inputs_dict() if self._theme else {})
+        return spec, data, viewport, theme_dict
+
     def show_svg(self) -> str:
         """Render the chart to an SVG string.
 
@@ -4053,12 +4097,8 @@ class Chart:
         >>> svg.startswith("<svg")
         True
         """
-        # Stub — full impl in Task 32
         from ferrum._core import render_svg
-        spec = self.to_spec()
-        data = to_arrow_table(self._data)
-        viewport = (self._width or 600.0, self._height or 400.0)
-        theme_dict = (self._theme.to_theme_inputs_dict() if self._theme else {})
+        spec, data, viewport, theme_dict = self._render_inputs()
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
     def show_png(self) -> bytes:
@@ -4083,10 +4123,7 @@ class Chart:
         True
         """
         from ferrum._core import render_png
-        spec = self.to_spec()
-        data = to_arrow_table(self._data)
-        viewport = (self._width or 600.0, self._height or 400.0)
-        theme_dict = (self._theme.to_theme_inputs_dict() if self._theme else {})
+        spec, data, viewport, theme_dict = self._render_inputs()
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
     def save(self, path, *, format=None, **render_kwargs) -> None:
@@ -4147,13 +4184,15 @@ class Chart:
         try:
             return self.show_svg()
         except Exception:
-            return None  # let Jupyter fall back to __repr__
+            _logger.debug("Chart._repr_svg_ failed; falling back to __repr__", exc_info=True)
+            return None
 
     def _repr_html_(self) -> str | None:
         """Jupyter HTML rich display hook — wraps SVG in a <div>."""
         try:
             return f"<div>{self.show_svg()}</div>"
         except Exception:
+            _logger.debug("Chart._repr_html_ failed; falling back to __repr__", exc_info=True)
             return None
 
     # Stubs for Phase 11
