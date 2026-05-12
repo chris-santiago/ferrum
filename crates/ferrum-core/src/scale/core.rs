@@ -1,114 +1,36 @@
-//! Sealed `Scale` enum that centralises math for every scale variant.
-//! Each scale-task in section C/D extends this with a new variant.
+//! Shared scale-construction helpers.
+//!
+//! Pre-F2b this module hosted a sealed `Scale` enum that dispatched math
+//! across every scale variant. As of F2b that enum is gone — each variant's
+//! data + math lives in its own per-file module (`linear::LinearScaleData`,
+//! `log::LogScaleData`, etc.). What remains here:
+//!
+//! - `compute_quantile_cuts` — R-7 / numpy-default quantile linear
+//!   interpolation, shared between `QuantileScale::new` and any future
+//!   binning helper that needs equal-frequency cut points.
+//! - `validate_*` functions — argument validators called from each
+//!   PyO3 constructor; centralised so the error messages stay uniform.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 
-use super::ticks::{nice_step, nice_ticks};
-
-/// Legacy sealed enum that previously centralised math for every scale
-/// variant. As of F2b, each variant's math has migrated into its own
-/// per-file module (see `linear::LinearScaleData`, etc.). Variants are
-/// being removed one at a time; this enum will be deleted entirely once
-/// the last variant has migrated.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Scale {
-    Threshold  { domain: Vec<f64>, range: Vec<f64> },
-    Quantile   { domain: Vec<f64>, range: Vec<f64>, quantiles: Vec<f64> },
-}
-
-impl Scale {
-    pub(crate) fn compute_quantile_cuts(sorted_sample: &[f64], k: usize) -> Vec<f64> {
-        // R-7 / numpy default: linear interpolation between order statistics.
-        // Returns k-1 cut points dividing the sample into k bins.
-        if k <= 1 || sorted_sample.is_empty() { return Vec::new(); }
-        let n = sorted_sample.len();
-        let mut cuts = Vec::with_capacity(k - 1);
-        for i in 1..k {
-            let p = (i as f64) / (k as f64);
-            let h = p * (n as f64 - 1.0);
-            let lo = h.floor() as usize;
-            let hi = (h.ceil() as usize).min(n - 1);
-            let frac = h - h.floor();
-            let v = sorted_sample[lo] * (1.0 - frac) + sorted_sample[hi] * frac;
-            cuts.push(v);
-        }
-        cuts
+/// R-7 / numpy default quantile cut-points: linear interpolation between
+/// order statistics. Returns `k-1` cut points dividing the sorted sample
+/// into `k` equal-probability bins.
+pub(crate) fn compute_quantile_cuts(sorted_sample: &[f64], k: usize) -> Vec<f64> {
+    if k <= 1 || sorted_sample.is_empty() { return Vec::new(); }
+    let n = sorted_sample.len();
+    let mut cuts = Vec::with_capacity(k - 1);
+    for i in 1..k {
+        let p = (i as f64) / (k as f64);
+        let h = p * (n as f64 - 1.0);
+        let lo = h.floor() as usize;
+        let hi = (h.ceil() as usize).min(n - 1);
+        let frac = h - h.floor();
+        let v = sorted_sample[lo] * (1.0 - frac) + sorted_sample[hi] * frac;
+        cuts.push(v);
     }
-
-    pub(crate) fn scale_f64(&self, x: f64) -> f64 {
-        match self {
-            Scale::Threshold { domain, range } => {
-                if x.is_nan() { return f64::NAN; }
-                let idx = domain.partition_point(|t| *t <= x);
-                range[idx]
-            }
-            Scale::Quantile { range, quantiles, .. } => {
-                if x.is_nan() { return f64::NAN; }
-                let idx = quantiles.partition_point(|q| *q <= x);
-                range[idx]
-            }
-        }
-    }
-
-    pub(crate) fn invert_f64(&self, _y: f64) -> f64 {
-        // None of the remaining variants (Ordinal/Threshold/Quantile)
-        // support continuous inversion — Ordinal uses invert_band,
-        // Threshold/Quantile use invert_extent.
-        f64::NAN
-    }
-
-    pub(crate) fn ticks(&self, count: Option<usize>) -> Vec<f64> {
-        match self {
-            Scale::Threshold { domain, .. } => domain.clone(),
-            Scale::Quantile { domain, quantiles, .. } => {
-                let target = count.unwrap_or_else(|| crate::scale::ticks::sturges_floor(domain.len()));
-                if target >= quantiles.len() {
-                    quantiles.clone()
-                } else {
-                    let step = quantiles.len() as f64 / target as f64;
-                    (0..target)
-                        .map(|i| quantiles[((i as f64 + 0.5) * step).floor() as usize])
-                        .collect()
-                }
-            }
-        }
-    }
-
-    pub(crate) fn nice(self) -> Self {
-        match self {
-            Scale::Threshold { domain, range } => Scale::Threshold { domain, range },
-            Scale::Quantile { domain, range, quantiles } => {
-                Scale::Quantile { domain, range, quantiles }
-            }
-        }
-    }
-
-    pub(crate) fn invert_extent(&self, y: f64) -> (f64, f64) {
-        match self {
-            Scale::Threshold { domain, range } => {
-                if y.is_nan() { return (f64::NAN, f64::NAN); }
-                let idx = match range.iter().position(|r| *r == y) {
-                    Some(i) => i,
-                    None => return (f64::NAN, f64::NAN),
-                };
-                let lo = if idx == 0 { f64::NEG_INFINITY } else { domain[idx - 1] };
-                let hi = if idx >= domain.len() { f64::INFINITY } else { domain[idx] };
-                (lo, hi)
-            }
-            Scale::Quantile { range, quantiles, .. } => {
-                if y.is_nan() { return (f64::NAN, f64::NAN); }
-                let idx = match range.iter().position(|r| *r == y) {
-                    Some(i) => i,
-                    None => return (f64::NAN, f64::NAN),
-                };
-                let lo = if idx == 0 { f64::NEG_INFINITY } else { quantiles[idx - 1] };
-                let hi = if idx >= quantiles.len() { f64::INFINITY } else { quantiles[idx] };
-                (lo, hi)
-            }
-            _ => (f64::NAN, f64::NAN),
-        }
-    }
+    cuts
 }
 
 // ---------- validators (used by pyclass facades) ----------
@@ -256,45 +178,6 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_scale_basic() {
-        let s = Scale::Threshold {
-            domain: vec![0.0, 10.0],
-            range: vec![1.0, 2.0, 3.0],
-        };
-        assert_eq!(s.scale_f64(-1.0), 1.0);
-        assert_eq!(s.scale_f64(0.0), 2.0);   // partition_point with <= places 0.0 into bin 1
-        assert_eq!(s.scale_f64(5.0), 2.0);
-        assert_eq!(s.scale_f64(10.0), 3.0);
-        assert_eq!(s.scale_f64(20.0), 3.0);
-    }
-
-    #[test]
-    fn test_threshold_invert_extent_round_trip() {
-        let s = Scale::Threshold {
-            domain: vec![0.0, 10.0],
-            range: vec![1.0, 2.0, 3.0],
-        };
-        let (lo, hi) = s.invert_extent(2.0);
-        assert_eq!((lo, hi), (0.0, 10.0));
-        let (lo, hi) = s.invert_extent(1.0);
-        assert!(lo.is_infinite() && lo.is_sign_negative());
-        assert_eq!(hi, 0.0);
-        let (lo, hi) = s.invert_extent(3.0);
-        assert_eq!(lo, 10.0);
-        assert!(hi.is_infinite() && hi.is_sign_positive());
-    }
-
-    #[test]
-    fn test_threshold_invert_extent_unknown_returns_nan() {
-        let s = Scale::Threshold {
-            domain: vec![0.0],
-            range: vec![1.0, 2.0],
-        };
-        let (lo, hi) = s.invert_extent(99.0);
-        assert!(lo.is_nan() && hi.is_nan());
-    }
-
-    #[test]
     fn test_validate_threshold_rejects_arity_mismatch() {
         let r = validate_threshold(&[0.0, 10.0], &[1.0, 2.0]);
         assert!(r.is_err());
@@ -309,52 +192,10 @@ mod tests {
     #[test]
     fn test_quantile_cuts_known_values() {
         let sample = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let cuts = Scale::compute_quantile_cuts(&sample, 3);
+        let cuts = compute_quantile_cuts(&sample, 3);
         assert_eq!(cuts.len(), 2);
         assert!((cuts[0] - 7.0/3.0).abs() < 1e-9, "got {}", cuts[0]);
         assert!((cuts[1] - 11.0/3.0).abs() < 1e-9, "got {}", cuts[1]);
-    }
-
-    #[test]
-    fn test_quantile_scale_basic() {
-        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let cuts = Scale::compute_quantile_cuts(&sorted, 3);
-        let s = Scale::Quantile {
-            domain: sorted.clone(),
-            range: vec![10.0, 20.0, 30.0],
-            quantiles: cuts,
-        };
-        assert_eq!(s.scale_f64(0.0), 10.0);
-        assert_eq!(s.scale_f64(2.5), 20.0);
-        assert_eq!(s.scale_f64(10.0), 30.0);
-    }
-
-    #[test]
-    fn test_quantile_invert_extent_round_trip() {
-        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let cuts = Scale::compute_quantile_cuts(&sorted, 3);
-        let s = Scale::Quantile {
-            domain: sorted,
-            range: vec![10.0, 20.0, 30.0],
-            quantiles: cuts.clone(),
-        };
-        let (lo, hi) = s.invert_extent(20.0);
-        assert!((lo - cuts[0]).abs() < 1e-9);
-        assert!((hi - cuts[1]).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_quantile_ticks_default_uses_sturges_floor() {
-        // domain length = 5, sturges_floor(5) = ceil(log2(5)+1) = ceil(3.32) = 4
-        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let cuts = Scale::compute_quantile_cuts(&sorted, 10); // 9 cuts
-        let s = Scale::Quantile {
-            domain: sorted,
-            range: vec![0.0; 10],
-            quantiles: cuts,
-        };
-        let t = s.ticks(None);
-        assert_eq!(t.len(), 4, "expected 4 ticks, got {}: {t:?}", t.len());
     }
 
     #[test]
