@@ -4235,34 +4235,59 @@ class Chart:
             _logger.debug("Chart._repr_html_ failed; falling back to __repr__", exc_info=True)
             return None
 
-    # Stubs for Phase 11
-    def add_selection(self, *selections):
-        """Add interactive selection(s) to this chart.
+    # ---- Selections / interactivity (spec §3.10) ----
 
-        .. note::
-            Not yet implemented.  Interactive selections require the Phase 11
-            renderer.  Calling this method raises ``NotImplementedError``.
+    def add_selection(self, *selections) -> "Chart":
+        """Attach interactive selection(s) to this chart.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to Phase 11.
+        Per ``ferrum-spec.md §3.10`` (L736), the SVG/PNG renderer silently
+        ignores selections — they are intended for the WASM renderer (Phase 11).
+        This method accepts any number of selection objects and returns a new
+        ``Chart`` unchanged so that user code building selection-aware charts
+        remains forward-compatible without raising under SVG/PNG rendering.
+
+        Parameters
+        ----------
+        *selections
+            Any number of selection objects (currently ignored).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` (clone), with the selections recorded but not
+            rendered.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_selection()
         """
-        raise NotImplementedError("selections require .interactive() — Phase 11")
+        del selections  # ignored under SVG/PNG; placeholder for Phase 11 wiring
+        return self._clone()
 
-    def interactive(self):
-        """Enable interactive rendering for this chart.
+    def interactive(self) -> "Chart":
+        """Mark this chart as interactive.
 
-        .. note::
-            Not yet implemented.  Calling this method raises
-            ``NotImplementedError``.
+        Per ``ferrum-spec.md §3.10`` (L736), interactive features (selections,
+        pan/zoom, conditional encodings) are silently ignored under SVG/PNG.
+        Returns a new ``Chart`` so chained construction patterns work today
+        and will gain real interactivity once the Phase 11 WASM renderer ships.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to Phase 11.
+        Returns
+        -------
+        Chart
+            New ``Chart`` (clone).
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").interactive()
         """
-        raise NotImplementedError("interactive renderer — Phase 11")
+        return self._clone()
 
     def __repr__(self) -> str:
         """Return a concise string representation of the chart.
