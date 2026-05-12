@@ -22,7 +22,18 @@ pub enum CompositorError {
     MissingAttr(String),
     MalformedAttr(String),
     AttrNotNumeric(String),
+    /// No SVGs to compose: 1D composers receive an empty list, or a grid
+    /// has every cell set to None.
     EmptyInput,
+    /// An input list arity doesn't match the declared shape — `cells` length
+    /// against `rows * cols`, or `row_ratios` / `col_ratios` against their
+    /// respective dimensions. Carries the parameter name plus the expected
+    /// and actual lengths so callers can pin the bug to a specific argument.
+    LengthMismatch { what: &'static str, expected: usize, got: usize },
+    /// `row_ratios` or `col_ratios` sums to ≤ 0 (every entry zero or
+    /// negative). The grid would have zero physical extent on at least
+    /// one axis.
+    InvalidRatios,
 }
 
 impl std::fmt::Display for CompositorError {
@@ -35,6 +46,9 @@ impl std::fmt::Display for CompositorError {
             CompositorError::MalformedAttr(n) => write!(f, "<svg> attr '{n}' is malformed"),
             CompositorError::AttrNotNumeric(n) => write!(f, "<svg> attr '{n}' is not numeric"),
             CompositorError::EmptyInput => write!(f, "no svgs to compose"),
+            CompositorError::LengthMismatch { what, expected, got } =>
+                write!(f, "{what} length mismatch: expected {expected}, got {got}"),
+            CompositorError::InvalidRatios => write!(f, "row/col ratios must sum to a positive value"),
         }
     }
 }

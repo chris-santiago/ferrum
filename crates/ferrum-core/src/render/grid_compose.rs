@@ -48,14 +48,35 @@ pub fn compose_svg_grid(
     spacing: f64,
 ) -> Result<String, CompositorError> {
     if cells.len() != rows * cols {
-        return Err(CompositorError::EmptyInput);
+        return Err(CompositorError::LengthMismatch {
+            what: "cells",
+            expected: rows * cols,
+            got: cells.len(),
+        });
     }
-    if row_ratios.len() != rows || col_ratios.len() != cols {
-        return Err(CompositorError::EmptyInput);
+    if row_ratios.len() != rows {
+        return Err(CompositorError::LengthMismatch {
+            what: "row_ratios",
+            expected: rows,
+            got: row_ratios.len(),
+        });
+    }
+    if col_ratios.len() != cols {
+        return Err(CompositorError::LengthMismatch {
+            what: "col_ratios",
+            expected: cols,
+            got: col_ratios.len(),
+        });
     }
     let row_sum: f64 = row_ratios.iter().sum();
     let col_sum: f64 = col_ratios.iter().sum();
     if row_sum <= 0.0 || col_sum <= 0.0 {
+        return Err(CompositorError::InvalidRatios);
+    }
+    // F24: an all-None cell list is conceptually empty — surface it as
+    // EmptyInput (matching the 1D composers) rather than silently
+    // emitting a 0×0 SVG.
+    if cells.iter().all(Option::is_none) {
         return Err(CompositorError::EmptyInput);
     }
 
@@ -218,6 +239,32 @@ mod tests {
         let cells: Vec<Option<String>> = vec![None];
         let err =
             compose_svg_grid(&cells, 2, 2, &[1.0, 1.0], &[1.0, 1.0], 0.0).unwrap_err();
+        assert!(matches!(
+            err,
+            CompositorError::LengthMismatch { what: "cells", expected: 4, got: 1 }
+        ), "got: {err:?}");
+    }
+
+    #[test]
+    fn compose_grid_row_ratios_arity_errors() {
+        let cells: Vec<Option<String>> = vec![None, None, None, None];
+        let err = compose_svg_grid(&cells, 2, 2, &[1.0], &[1.0, 1.0], 0.0).unwrap_err();
+        assert!(matches!(err, CompositorError::LengthMismatch { what: "row_ratios", .. }));
+    }
+
+    #[test]
+    fn compose_grid_zero_ratios_errors() {
+        let a = svg(10.0, 10.0, "red");
+        let cells = vec![Some(a), None, None, None];
+        let err = compose_svg_grid(&cells, 2, 2, &[0.0, 0.0], &[1.0, 1.0], 0.0).unwrap_err();
+        assert!(matches!(err, CompositorError::InvalidRatios));
+    }
+
+    #[test]
+    fn compose_grid_all_none_errors() {
+        // F24: all-None grid surfaces as EmptyInput (parallel to 1D composers).
+        let cells: Vec<Option<String>> = vec![None, None, None, None];
+        let err = compose_svg_grid(&cells, 2, 2, &[1.0, 1.0], &[1.0, 1.0], 0.0).unwrap_err();
         assert!(matches!(err, CompositorError::EmptyInput));
     }
 }
