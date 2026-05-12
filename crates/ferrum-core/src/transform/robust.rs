@@ -148,6 +148,15 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
         );
     }
 
+    // Schwabish SB-followup (C5, 2026-05-12): when ``inject_metrics``
+    // is set on the Fitted path, compute R²/RMSE/MAE against the input
+    // (xs, ys) using the converged (α, β). Mirrors the Smooth Fitted
+    // path's contract — text and y-anchor format are byte-identical
+    // across the two transforms because both go through
+    // ``residuals::append_metrics_columns``.
+    let metrics = spec.inject_metrics
+        .then(|| residuals::compute(&ys, &r_final));
+
     // Refresh scale + u for CI computation.
     s = mad_scale(&r_final);
     if s == 0.0 {
@@ -155,7 +164,7 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
         let grid: Vec<f64> = grid_vec(x_min, x_max, n_grid);
         let y_fit: Vec<f64> = grid.iter().map(|&xq| alpha + beta * xq).collect();
         let nans = vec![f64::NAN; n_grid];
-        return build_fitted_batch(grid, y_fit, nans.clone(), nans);
+        return build_fitted_batch(grid, y_fit, nans.clone(), nans, metrics);
     }
     for i in 0..xs.len() {
         u_vec[i] = r_final[i] / s;
@@ -180,6 +189,7 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
                     return build_fitted_batch(
                         grid, y_fit,
                         vec![f64::NAN; n_grid], vec![f64::NAN; n_grid],
+                        metrics,
                     );
                 }
             };
@@ -212,7 +222,7 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
         }
     };
 
-    build_fitted_batch(grid, y_fit, lo, hi)
+    build_fitted_batch(grid, y_fit, lo, hi, metrics)
 }
 
 // ---------- Helpers ----------
@@ -336,27 +346,38 @@ fn huber_weight(u: f64, c: f64) -> f64 {
     else { c / u.abs() }
 }
 
+/// Schwabish SB-followup (C5 audit-rework, 2026-05-12): accepts an
+/// optional ``metrics`` tuple so the Fitted path can carry the same
+/// ``_metrics_text`` / ``_metrics_y`` annotation columns Smooth emits.
+/// Delegates column emission to ``crate::transform::residuals`` so the
+/// schema + text-format invariant lives in one place across Smooth and
+/// Robust.
 fn build_fitted_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,
+    metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("x",        DataType::Float64, true),
         Field::new("y",        DataType::Float64, true),
         Field::new("ci_lower", DataType::Float64, true),
         Field::new("ci_upper", DataType::Float64, true),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(x)),
-        Arc::new(Float64Array::from(y)),
+    ];
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(x.clone())),
+        Arc::new(Float64Array::from(y.clone())),
         Arc::new(Float64Array::from(lo)),
         Arc::new(Float64Array::from(hi)),
     ];
+    if let Some(m) = metrics {
+        residuals::append_metrics_columns(&mut fields, &mut cols, &x, &y, m);
+    }
+    let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
 }
 
 fn build_nan_fitted(n_grid: usize) -> PyResult<RecordBatch> {
     let nans = vec![f64::NAN; n_grid];
-    build_fitted_batch(nans.clone(), nans.clone(), nans.clone(), nans)
+    build_fitted_batch(nans.clone(), nans.clone(), nans.clone(), nans, None)
 }
 
 /// Schwabish SB-followup (2026-05-12): mirrors
@@ -495,13 +516,17 @@ impl PyRobust {
             ))),
         };
 
-        if (inject_zero_ref || inject_metrics)
+        if inject_zero_ref
             && !matches!(output_parsed, SmoothOutput::Residuals)
         {
             return Err(PyValueError::new_err(
-                "Robust: inject_zero_ref / inject_metrics require output='residuals'",
+                "Robust: inject_zero_ref requires output='residuals'",
             ));
         }
+        // inject_metrics is allowed on both Fitted and Residuals — mirrors
+        // Smooth's policy (post-C5 audit-rework, 2026-05-12). On Fitted the
+        // metrics annotation lands on the fit-grid output via
+        // ``residuals::append_metrics_columns`` after the IRLS converges.
         Ok(PyRobust(TransformSpec::Robust(RobustSpec {
             x: x.to_string(),
             y: y.to_string(),
@@ -732,6 +757,49 @@ mod tests {
         assert_eq!(schema.field(2).name(), "ci_lower");
         assert_eq!(schema.field(3).name(), "ci_upper");
         assert_eq!(out.num_rows(), 25);
+    }
+
+    #[test]
+    fn test_robust_fitted_inject_metrics_columns_present() {
+        // Schwabish C5: inject_metrics=true on Fitted output should
+        // append _metrics_text + _metrics_y columns with exactly one
+        // non-null row, mirroring Smooth's behavior.
+        use arrow::array::StringArray;
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 0.5 * x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        let s = RobustSpec {
+            x: "x".into(), y: "y".into(),
+            n_grid: 30, ci: Some(0.95),
+            huber_c: 1.345, max_iter: 50, tol: 1e-10,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: true,
+            name: None,
+        };
+        let out = apply(&s, &batch).unwrap();
+        let schema = out.schema();
+        // Base 4 columns + 2 injected columns.
+        assert_eq!(schema.fields().len(), 6);
+        assert_eq!(schema.field(4).name(), "_metrics_text");
+        assert_eq!(schema.field(5).name(), "_metrics_y");
+
+        // Exactly one non-null row in _metrics_text; format starts with "R²".
+        let text_arr = out.column(4).as_any()
+            .downcast_ref::<StringArray>()
+            .expect("_metrics_text column should be Utf8");
+        let non_null: Vec<usize> = (0..text_arr.len())
+            .filter(|&i| !text_arr.is_null(i))
+            .collect();
+        assert_eq!(non_null.len(), 1, "exactly one non-null _metrics_text row");
+        let text = text_arr.value(non_null[0]);
+        assert!(text.starts_with("R² "),
+            "metrics text must start with 'R² '; got {text:?}");
+
+        // _metrics_y at the same row is finite (anchor y).
+        let y_anchor = col(&out, "_metrics_y")[non_null[0]];
+        assert!(y_anchor.is_finite(),
+            "_metrics_y anchor must be finite; got {y_anchor}");
     }
 
     #[test]
