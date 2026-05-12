@@ -868,6 +868,54 @@ def _shap_waterfall_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
+def _pdp_center_curves(df: pl.DataFrame) -> pl.DataFrame:
+    """Subtract each curve's value at its smallest feature_value so every
+    polyline starts at zero. Anchors per ``(feature, sample_id)`` because
+    each (feature, sample) has its own grid; the smallest grid value is
+    the anchor.
+    """
+    anchor = (
+        df.group_by(["feature", "sample_id"], maintain_order=True)
+          .agg(pl.col("pd_value").first().alias("_pd_anchor"))
+    )
+    return (
+        df.join(anchor, on=["feature", "sample_id"], how="left")
+          .with_columns(
+              (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
+          )
+          .drop("_pd_anchor")
+    )
+
+
+def _pdp_split_kind_both(df: pl.DataFrame) -> pl.DataFrame:
+    """Split ``pd_value`` into two layer-specific columns for ``kind="both"``.
+
+    - ``_pd_ice_value``: per-sample value on ICE rows (sample_id >= 0),
+      null on the average row so the ICE line layer skips it.
+    - ``_pd_avg_value``: the average curve broadcast to every row (joined
+      from the sample_id=-1 rows by ``(feature, feature_value)``). The
+      average layer reads this on ALL rows but mark_line groups by color
+      (feature) so duplicated rows merge into one polyline.
+
+    Drops the original ``sample_id == -1`` rows so the duplicate-avg
+    polyline collapses to one rendering; ``_pd_avg_value`` on the ICE
+    rows already carries the full average curve.
+    """
+    avg_only = (
+        df.filter(pl.col("sample_id") == -1)
+          .select(["feature", "feature_value", "pd_value"])
+          .rename({"pd_value": "_pd_avg_value"})
+    )
+    df = df.with_columns(
+        pl.when(pl.col("sample_id") >= 0)
+          .then(pl.col("pd_value"))
+          .otherwise(None)
+          .alias("_pd_ice_value"),
+    )
+    df = df.join(avg_only, on=["feature", "feature_value"], how="left")
+    return df.filter(pl.col("sample_id") >= 0)
+
+
 def _pdp_chart_from_source(
     source: Any,
     features: list,
@@ -910,52 +958,15 @@ def _pdp_chart_from_source(
     df = df.sort(["feature", "sample_id", "feature_value"])
 
     if center:
-        # Subtract the value at the smallest feature_value per group
-        # so every curve starts at zero. group_by(feature, sample_id)
-        # because each (feature, sample) has its own grid; the
-        # smallest grid value is the anchor.
-        anchor = (
-            df.group_by(["feature", "sample_id"], maintain_order=True)
-              .agg(pl.col("pd_value").first().alias("_pd_anchor"))
-        )
-        df = df.join(anchor, on=["feature", "sample_id"], how="left")
-        df = df.with_columns(
-            (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
-        ).drop("_pd_anchor")
-
+        df = _pdp_center_curves(df)
     if kind in ("individual", "both"):
         # mark_line reads mark_style.detail as a Utf8 column name. Cast
         # sample_id to Utf8 so the detail grouping works.
         df = df.with_columns(
             pl.col("sample_id").cast(pl.Utf8).alias("_sample_id_str"),
         )
-
     if kind == "both":
-        # Split pd_value into two layer-specific columns:
-        # _pd_ice_value: per-sample value on ICE rows (sample_id >= 0),
-        #                null on the average row so the ICE line layer
-        #                skips it.
-        # _pd_avg_value: the average curve broadcast to every row (joined
-        #                from the sample_id=-1 rows by feature,
-        #                feature_value). The average layer reads this on
-        #                ALL rows but mark_line groups by color (feature)
-        #                so duplicated rows merge into one polyline.
-        avg_only = (
-            df.filter(pl.col("sample_id") == -1)
-              .select(["feature", "feature_value", "pd_value"])
-              .rename({"pd_value": "_pd_avg_value"})
-        )
-        df = df.with_columns(
-            pl.when(pl.col("sample_id") >= 0)
-              .then(pl.col("pd_value"))
-              .otherwise(None)
-              .alias("_pd_ice_value"),
-        )
-        df = df.join(avg_only, on=["feature", "feature_value"], how="left")
-        # Drop the original average rows so the duplicate-avg polyline
-        # collapses to one rendering. (The _pd_avg_value on the ICE
-        # rows already carries the full average curve.)
-        df = df.filter(pl.col("sample_id") >= 0)
+        df = _pdp_split_kind_both(df)
 
     chart = (
         ferrum.Chart(df)
@@ -1316,6 +1327,73 @@ def _rank2d_chart_from_dataframe(
     return chart
 
 
+def _coerce_to_polars(data: Any) -> pl.DataFrame:
+    """Coerce a polars / pandas / 2D-numpy input into a polars DataFrame."""
+    import numpy as np
+
+    if isinstance(data, pl.DataFrame):
+        return data
+    if hasattr(data, "to_numpy") and hasattr(data, "columns"):
+        return pl.from_pandas(data)
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
+    return pl.DataFrame({
+        f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])
+    })
+
+
+def _resolve_pc_features(
+    df: pl.DataFrame, features: list[str] | None, hue: str | None,
+) -> list[str]:
+    """Resolve the parallel-coordinates feature list and validate it exists."""
+    if features is None:
+        features = [c for c in df.columns if c != hue]
+    else:
+        features = [str(c) for c in features]
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"parallel_coordinates: features {missing!r} are not in the "
+            f"data (available columns: {df.columns!r})."
+        )
+    return features
+
+
+def _apply_pc_rescale(
+    df: pl.DataFrame, features: list[str], rescale: str | None,
+) -> pl.DataFrame:
+    """Apply per-feature minmax / zscore rescale (or pass through on None)."""
+    if rescale is None:
+        return df
+    if rescale == "minmax":
+        for c in features:
+            col = df[c]
+            vmin = col.min()
+            vmax = col.max()
+            if vmin is None or vmax is None or vmin == vmax:
+                continue
+            df = df.with_columns(
+                ((pl.col(c) - float(vmin)) / (float(vmax) - float(vmin))).alias(c),
+            )
+        return df
+    if rescale == "zscore":
+        for c in features:
+            col = df[c]
+            mu = col.mean()
+            sd = col.std()
+            if sd is None or sd == 0.0:
+                continue
+            df = df.with_columns(
+                ((pl.col(c) - float(mu)) / float(sd)).alias(c),
+            )
+        return df
+    raise ValueError(
+        f"parallel_coordinates(rescale={rescale!r}) — expected "
+        "'minmax', 'zscore', or None."
+    )
+
+
 def _parallel_coords_chart_from_dataframe(
     data,
     *,
@@ -1336,63 +1414,10 @@ def _parallel_coords_chart_from_dataframe(
     applied before unpivot so all features share a common y axis.
     """
     import ferrum
-    import numpy as np
 
-    if isinstance(data, pl.DataFrame):
-        df = data
-    elif hasattr(data, "to_numpy") and hasattr(data, "columns"):
-        # pandas DataFrame.
-        df = pl.from_pandas(data)
-    else:
-        arr = np.asarray(data, dtype=np.float64)
-        if arr.ndim != 2:
-            raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
-        df = pl.DataFrame({
-            f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])
-        })
-
-    if features is None:
-        features = [
-            c for c in df.columns if c != hue
-        ]
-    else:
-        features = [str(c) for c in features]
-    # Validate feature columns exist.
-    missing = [c for c in features if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"parallel_coordinates: features {missing!r} are not in the "
-            f"data (available columns: {df.columns!r})."
-        )
-
-    # Optional per-feature rescale.
-    if rescale == "minmax":
-        for c in features:
-            col = df[c]
-            vmin = col.min()
-            vmax = col.max()
-            if vmin is None or vmax is None or vmin == vmax:
-                continue
-            df = df.with_columns(
-                ((pl.col(c) - float(vmin)) / (float(vmax) - float(vmin))).alias(c),
-            )
-    elif rescale == "zscore":
-        for c in features:
-            col = df[c]
-            mu = col.mean()
-            sd = col.std()
-            if sd is None or sd == 0.0:
-                continue
-            df = df.with_columns(
-                ((pl.col(c) - float(mu)) / float(sd)).alias(c),
-            )
-    elif rescale is None:
-        pass
-    else:
-        raise ValueError(
-            f"parallel_coordinates(rescale={rescale!r}) — expected "
-            "'minmax', 'zscore', or None."
-        )
+    df = _coerce_to_polars(data)
+    features = _resolve_pc_features(df, features, hue)
+    df = _apply_pc_rescale(df, features, rescale)
 
     # Reshape to long form.
     id_cols = ["sample_id"] + ([hue] if hue is not None else [])
@@ -1464,9 +1489,42 @@ def _decision_boundary_chart_from_source(
     background color including same-color cells.
     """
     import ferrum
-    import numpy as np
 
-    X_np = source.X.to_numpy()
+    feat_idx = _resolve_decision_boundary_features(source, features)
+    grid_info = _build_decision_boundary_grid(
+        source, feat_idx, grid_resolution, proba=proba,
+    )
+
+    if not (scatter and source.y is not None):
+        # Pure-boundary path: no overlay, no padding columns, no row mixing.
+        grid_df = pl.DataFrame({
+            "x": [v - grid_info["dx"] / 2 for v in grid_info["flat_x"]],
+            "x2": [v + grid_info["dx"] / 2 for v in grid_info["flat_x"]],
+            "y": [v - grid_info["dy"] / 2 for v in grid_info["flat_y"]],
+            "y2": [v + grid_info["dy"] / 2 for v in grid_info["flat_y"]],
+            "z": [float(v) for v in grid_info["z"]],
+        })
+        chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
+        if theme is not None:
+            chart = chart.theme(theme)
+        return chart
+
+    unified = _build_decision_boundary_unified(source, grid_info)
+    grid_chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
+    overlay = ferrum.Chart(unified).mark_point(
+        stroke="#000000",
+        stroke_width=1.0,
+        size=80.0,
+    ).encode(x="scatter_x", y="scatter_y", color="scatter_z")
+    chart = grid_chart + overlay
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _resolve_decision_boundary_features(
+    source: Any, features: tuple,
+) -> tuple[int, int]:
     feat_idx = tuple(
         source.feature_names.index(f) if isinstance(f, str) else int(f)
         for f in features
@@ -1476,6 +1534,23 @@ def _decision_boundary_chart_from_source(
             "decision_boundary_chart requires exactly 2 features; got "
             f"{len(feat_idx)}."
         )
+    return feat_idx  # type: ignore[return-value]
+
+
+def _build_decision_boundary_grid(
+    source: Any,
+    feat_idx: tuple[int, int],
+    grid_resolution: int,
+    *,
+    proba: bool,
+) -> dict:
+    """Compute the prediction grid + cell bounds for a 2-feature
+    decision-boundary chart. Returns a dict with ``flat_x``, ``flat_y``,
+    ``dx``, ``dy``, ``z``, and the two feature vectors ``x_col``, ``y_col``.
+    """
+    import numpy as np
+
+    X_np = source.X.to_numpy()
     x_col = X_np[:, feat_idx[0]].astype(np.float64)
     y_col = X_np[:, feat_idx[1]].astype(np.float64)
     pad_x = (x_col.max() - x_col.min()) * 0.05
@@ -1496,31 +1571,37 @@ def _decision_boundary_chart_from_source(
         z = source.model.predict_proba(grid)[:, 1].astype(np.float64)
     else:
         z = np.asarray(source.model.predict(grid)).astype(np.float64)
-    flat_x = xx.ravel()
-    flat_y = yy.ravel()
+    return {
+        "flat_x": [float(v) for v in xx.ravel()],
+        "flat_y": [float(v) for v in yy.ravel()],
+        "dx": dx,
+        "dy": dy,
+        "z": z,
+        "x_col": x_col,
+        "y_col": y_col,
+    }
 
-    do_scatter = scatter and source.y is not None
-    if not do_scatter:
-        # Pure-boundary path: no overlay, no padding columns, no row mixing.
-        grid_df = pl.DataFrame({
-            "x": [float(v) - dx / 2 for v in flat_x],
-            "x2": [float(v) + dx / 2 for v in flat_x],
-            "y": [float(v) - dy / 2 for v in flat_y],
-            "y2": [float(v) + dy / 2 for v in flat_y],
-            "z": [float(v) for v in z],
-        })
-        chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
-        if theme is not None:
-            chart = chart.theme(theme)
-        return chart
 
-    # Map y labels to the same numeric domain as z. For proba=False,
-    # z is the predicted class index (e.g. integer-cast prediction);
-    # scatter_z should be the true class index in the same encoding so
-    # matching colors = correct prediction. For proba=True, z is
-    # P(class=1) ∈ [0, 1] and the true label is 0 or 1; map y → float
-    # accordingly. Prefer the model's classes_ attribute when present;
-    # fall back to lex sort.
+def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
+    """Build the layered grid+scatter DataFrame for the overlay path.
+
+    Maps ``y`` labels to the same numeric domain as ``z``. For
+    ``proba=False`` ``z`` is the predicted class index (integer-cast
+    prediction); ``scatter_z`` is the true class index in the same
+    encoding so matching colors = correct prediction. For ``proba=True``
+    ``z`` is ``P(class=1) ∈ [0, 1]`` and the true label is 0 or 1.
+    Prefers the model's ``classes_`` attribute when present; falls back
+    to lex sort.
+
+    Grid rows hold ``x/x2/y/y2/z`` (scatter columns null); scatter rows
+    hold ``scatter_x/scatter_y/scatter_z`` (grid columns null). mark_rect
+    skips null x/x2/y/y2 cells and mark_point skips null
+    scatter_x/scatter_y, so each layer renders only its intended rows.
+    The shared ``z`` color scale resolves coherently because both ``z``
+    and ``scatter_z`` live on the same numeric domain.
+    """
+    import numpy as np
+
     y_raw = source.y.to_numpy()
     if hasattr(source.model, "classes_"):
         class_order = list(source.model.classes_)
@@ -1532,24 +1613,19 @@ def _decision_boundary_chart_from_source(
         dtype=np.float64,
     )
 
+    flat_x, flat_y = g["flat_x"], g["flat_y"]
+    dx, dy, z = g["dx"], g["dy"], g["z"]
+    x_col, y_col = g["x_col"], g["y_col"]
     n_grid = len(flat_x)
     n_scatter = len(x_col)
     nulls_grid = [None] * n_grid
     nulls_scatter = [None] * n_scatter
 
-    # Unified DataFrame: grid rows first, then scatter rows. Each layer's
-    # encoded columns are populated on its own rows and null on the
-    # other layer's rows — mark_rect skips null x/x2/y/y2 cells and
-    # mark_point skips null scatter_x/scatter_y, so each layer renders
-    # only its intended rows. The shared `z` color scale is built from
-    # the union of grid `z` and scatter `scatter_z` values; both are on
-    # the same numeric domain (class indices, or [0,1] for proba) so the
-    # continuous scale resolves coherently across layers.
-    unified = pl.DataFrame({
-        "x": [float(v) - dx / 2 for v in flat_x] + nulls_scatter,
-        "x2": [float(v) + dx / 2 for v in flat_x] + nulls_scatter,
-        "y": [float(v) - dy / 2 for v in flat_y] + nulls_scatter,
-        "y2": [float(v) + dy / 2 for v in flat_y] + nulls_scatter,
+    return pl.DataFrame({
+        "x": [v - dx / 2 for v in flat_x] + nulls_scatter,
+        "x2": [v + dx / 2 for v in flat_x] + nulls_scatter,
+        "y": [v - dy / 2 for v in flat_y] + nulls_scatter,
+        "y2": [v + dy / 2 for v in flat_y] + nulls_scatter,
         "z": [float(v) for v in z] + nulls_scatter,
         "scatter_x": nulls_grid + [float(v) for v in x_col],
         "scatter_y": nulls_grid + [float(v) for v in y_col],
@@ -1560,14 +1636,3 @@ def _decision_boundary_chart_from_source(
         "scatter_x": pl.Float64, "scatter_y": pl.Float64,
         "scatter_z": pl.Float64,
     })
-
-    grid_chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
-    overlay = ferrum.Chart(unified).mark_point(
-        stroke="#000000",
-        stroke_width=1.0,
-        size=80.0,
-    ).encode(x="scatter_x", y="scatter_y", color="scatter_z")
-    chart = grid_chart + overlay
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
