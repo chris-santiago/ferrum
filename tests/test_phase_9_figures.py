@@ -336,10 +336,15 @@ class TestResidplot:
         assert robust_t is not None
         assert robust_t.get("output") == "residuals"
 
-    def test_robust_with_annotations_raises(self, reg_data):
-        import pytest
-        with pytest.raises(NotImplementedError, match="robust=False"):
-            fe.residplot(reg_data, x="x", y="y", robust=True)
+    def test_robust_with_annotations_works(self, reg_data):
+        # Schwabish SB-followup (2026-05-12, Option B): annotations are
+        # injected by the Rust Smooth/Robust transforms, so the
+        # robust+annotations path now ships R²/RMSE/MAE alongside Huber
+        # residuals.
+        chart = fe.residplot(reg_data, x="x", y="y", robust=True)
+        svg = chart.show_svg()
+        assert "R²" in svg
+        assert "#8a8a8a" in svg
 
     def test_lowess_adds_layer(self, reg_data):
         chart = fe.residplot(reg_data, x="x", y="y", lowess=True)

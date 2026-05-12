@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -39,6 +39,22 @@ pub(crate) struct SmoothSpec {
     pub x_estimator: Option<crate::transform::aggregate::AggFn>,
     #[serde(default = "default_smooth_output")]
     pub output: SmoothOutput,
+    /// Schwabish SB-followup (2026-05-12): when ``output == Residuals`` and
+    /// this is ``true``, append a nullable ``_ref_zero`` Float64 column to
+    /// the residuals batch. One non-null entry (value ``0.0``) on the first
+    /// row, ``null`` on the rest — so a downstream ``mark_rule(y="_ref_zero")``
+    /// renders exactly one horizontal reference line at y=0 without needing
+    /// any extra Python-side data manipulation. No-op for ``Fitted`` output.
+    #[serde(default)]
+    pub inject_zero_ref: bool,
+    /// Schwabish SB-followup (2026-05-12): when ``output == Residuals`` and
+    /// this is ``true``, append nullable ``_metrics_text`` (Utf8) and
+    /// ``_metrics_y`` (Float64) columns. One non-null row at the
+    /// max-``x`` anchor with text ``"R² {r2}\nRMSE {rmse}\nMAE {mae}"`` and
+    /// y at the max residual. Designed for a same-data ``mark_text``
+    /// overlay reading both columns. No-op for ``Fitted`` output.
+    #[serde(default)]
+    pub inject_metrics: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -57,7 +73,10 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
     if xs.len() < 2 {
         return match spec.output {
             SmoothOutput::Fitted => all_nan_output(spec),
-            SmoothOutput::Residuals => build_residuals_batch(Vec::new(), Vec::new()),
+            SmoothOutput::Residuals => build_residuals_batch(
+                Vec::new(), Vec::new(),
+                spec.inject_zero_ref, None,
+            ),
         };
     }
 
@@ -143,16 +162,105 @@ fn median(v: &[f64]) -> f64 {
     if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
 }
 
-fn build_residuals_batch(xs: Vec<f64>, resid: Vec<f64>) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+/// Compute R²/RMSE/MAE from observed y values and their residuals.
+///
+/// Filters out non-finite residuals before aggregation. Returns
+/// ``(r2, rmse, mae)``. ``r2`` is 0 when ``y_obs`` has zero variance.
+///
+/// Sibling crates::transform::robust calls this via
+/// ``compute_residual_metrics_pub`` so the formatting stays
+/// byte-identical between Smooth and Robust residual paths.
+pub(crate) fn compute_residual_metrics_pub(ys_obs: &[f64], resids: &[f64]) -> (f64, f64, f64) {
+    compute_residual_metrics(ys_obs, resids)
+}
+
+fn compute_residual_metrics(ys_obs: &[f64], resids: &[f64]) -> (f64, f64, f64) {
+    let n_total = ys_obs.len() as f64;
+    if n_total == 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let mean_y = ys_obs.iter().sum::<f64>() / n_total;
+    let ss_tot: f64 = ys_obs.iter().map(|y| (y - mean_y).powi(2)).sum();
+    let mut ss_res = 0.0;
+    let mut sum_abs = 0.0;
+    let mut n_valid = 0.0;
+    for r in resids {
+        if r.is_finite() {
+            ss_res += r * r;
+            sum_abs += r.abs();
+            n_valid += 1.0;
+        }
+    }
+    let r2 = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+    let denom = if n_valid > 0.0 { n_valid } else { 1.0 };
+    let rmse = (ss_res / denom).sqrt();
+    let mae = sum_abs / denom;
+    (r2, rmse, mae)
+}
+
+/// Emit a residuals RecordBatch with the canonical ``[x, residual]``
+/// columns. Schwabish SB-followup (2026-05-12) opt-in extras:
+///
+/// - ``inject_zero_ref=true`` appends a nullable ``_ref_zero`` Float64
+///   column with one ``0.0`` on the first row (rest ``null``), enabling
+///   a single-rule overlay without further Python-side injection.
+/// - ``metrics=Some((r2, rmse, mae))`` appends ``_metrics_text`` (Utf8)
+///   and ``_metrics_y`` (Float64) with one non-null row at the anchor
+///   (max ``x``).
+fn build_residuals_batch(
+    xs: Vec<f64>, resid: Vec<f64>,
+    inject_zero_ref: bool,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    let n = xs.len();
+    let mut fields = vec![
         Field::new("x",        DataType::Float64, true),
         Field::new("residual", DataType::Float64, true),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(xs)),
-        Arc::new(Float64Array::from(resid)),
     ];
-    RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(xs.clone())),
+        Arc::new(Float64Array::from(resid.clone())),
+    ];
+
+    if inject_zero_ref {
+        let mut col: Vec<Option<f64>> = vec![None; n];
+        if n > 0 {
+            col[0] = Some(0.0);
+        }
+        fields.push(Field::new("_ref_zero", DataType::Float64, true));
+        cols.push(Arc::new(Float64Array::from(col)));
+    }
+
+    if let Some((r2, rmse, mae)) = metrics {
+        // Anchor = row with max x. Skip non-finite x's.
+        let anchor_idx = xs
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.is_finite())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i);
+        let max_resid = resid
+            .iter()
+            .filter(|r| r.is_finite())
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let max_resid = if max_resid.is_finite() { max_resid } else { 0.0 };
+
+        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
+        let mut text_col: Vec<Option<String>> = vec![None; n];
+        let mut y_col: Vec<Option<f64>> = vec![None; n];
+        if let Some(i) = anchor_idx {
+            text_col[i] = Some(text);
+            y_col[i] = Some(max_resid);
+        }
+        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
+        cols.push(Arc::new(StringArray::from(text_col)));
+        fields.push(Field::new("_metrics_y", DataType::Float64, true));
+        cols.push(Arc::new(Float64Array::from(y_col)));
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
 }
 
 fn residuals_fit(
@@ -194,7 +302,12 @@ fn residuals_fit(
         out_x.push(xi);
         out_r.push(r);
     }
-    build_residuals_batch(out_x, out_r)
+    let metrics = if spec.inject_metrics {
+        Some(compute_residual_metrics(ys_input, &out_r))
+    } else {
+        None
+    };
+    build_residuals_batch(out_x, out_r, spec.inject_zero_ref, metrics)
 }
 
 fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
@@ -527,7 +640,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", name = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, name = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
@@ -539,6 +652,8 @@ impl PySmooth {
         x_bins: Option<usize>,
         x_estimator: Option<&str>,
         output: &str,
+        inject_zero_ref: bool,
+        inject_metrics: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -595,12 +710,21 @@ impl PySmooth {
                 return Err(PyValueError::new_err("Smooth: x_bins must be > 0"));
             }
         }
+        if (inject_zero_ref || inject_metrics)
+            && !matches!(output_parsed, SmoothOutput::Residuals)
+        {
+            return Err(PyValueError::new_err(
+                "Smooth: inject_zero_ref / inject_metrics require output='residuals'",
+            ));
+        }
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
             method, ci, bandwidth, degree, n, seed,
             x_bins,
             x_estimator: x_estimator_parsed,
             output: output_parsed,
+            inject_zero_ref,
+            inject_metrics,
             name,
         })))
     }
@@ -653,6 +777,8 @@ mod tests {
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -678,6 +804,8 @@ mod tests {
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 51, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -703,6 +831,8 @@ mod tests {
             ci: Some(0.95),
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -719,6 +849,8 @@ mod tests {
             ci: None,
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -734,6 +866,8 @@ mod tests {
             ci: Some(0.95),
             bandwidth: 0.5, degree: 2, n: 100, seed: 42,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -762,6 +896,8 @@ mod tests {
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+                inject_zero_ref: false,
+                inject_metrics: false,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -795,6 +931,8 @@ mod tests {
                 method: SmoothMethod::Loess, ci: None,
                 bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+                inject_zero_ref: false,
+                inject_metrics: false,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -822,6 +960,8 @@ mod tests {
             bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
             degree: 2, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         // Primary goal: no panic with k == n == degree+1.
@@ -852,6 +992,8 @@ mod tests {
             ci: Some(0.95),
             bandwidth: 0.5, degree: 1, n: 20, seed: 42,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let spec2 = spec1.clone();
@@ -879,6 +1021,8 @@ mod tests {
             x_bins: Some(10),
             x_estimator: Some(crate::transform::aggregate::AggFn::Mean),
             output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -901,6 +1045,8 @@ mod tests {
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
             x_bins: None, x_estimator: None,
             output: SmoothOutput::Residuals,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -924,6 +1070,8 @@ mod tests {
             bandwidth: 0.0, degree: 1, n: 5, seed: 0,
             x_bins: None, x_estimator: None,
             output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();

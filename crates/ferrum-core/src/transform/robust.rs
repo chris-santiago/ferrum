@@ -46,6 +46,13 @@ pub(crate) struct RobustSpec {
     pub tol: f64,
     #[serde(default = "crate::transform::smooth::default_smooth_output")]
     pub output: SmoothOutput,
+    /// See SmoothSpec.inject_zero_ref — same semantics on the Robust
+    /// transform's residuals batch. Schwabish SB-followup (2026-05-12).
+    #[serde(default)]
+    pub inject_zero_ref: bool,
+    /// See SmoothSpec.inject_metrics. Schwabish SB-followup (2026-05-12).
+    #[serde(default)]
+    pub inject_metrics: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -60,7 +67,10 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
     if xs.len() < 2 {
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid),
-            SmoothOutput::Residuals => build_residuals_batch(Vec::new(), Vec::new()),
+            SmoothOutput::Residuals => build_residuals_batch(
+                Vec::new(), Vec::new(), &[],
+                spec.inject_zero_ref, spec.inject_metrics,
+            ),
         };
     }
 
@@ -72,7 +82,10 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
             SmoothOutput::Fitted => build_nan_fitted(n_grid),
             SmoothOutput::Residuals => {
                 let nans = vec![f64::NAN; xs.len()];
-                build_residuals_batch(xs.clone(), nans)
+                build_residuals_batch(
+                    xs.clone(), nans, &ys,
+                    spec.inject_zero_ref, spec.inject_metrics,
+                )
             }
         };
     }
@@ -128,7 +141,10 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
         .collect();
 
     if matches!(spec.output, SmoothOutput::Residuals) {
-        return build_residuals_batch(xs.clone(), r_final);
+        return build_residuals_batch(
+            xs.clone(), r_final, &ys,
+            spec.inject_zero_ref, spec.inject_metrics,
+        );
     }
 
     // Refresh scale + u for CI computation.
@@ -342,16 +358,65 @@ fn build_nan_fitted(n_grid: usize) -> PyResult<RecordBatch> {
     build_fitted_batch(nans.clone(), nans.clone(), nans.clone(), nans)
 }
 
-fn build_residuals_batch(xs: Vec<f64>, resid: Vec<f64>) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+/// Schwabish SB-followup (2026-05-12): mirrors
+/// ``smooth::build_residuals_batch`` — emits optional ``_ref_zero`` /
+/// ``_metrics_text`` / ``_metrics_y`` columns when the corresponding
+/// inject flag is set. The metrics computation needs the original
+/// ``y_obs`` to derive R² / RMSE / MAE.
+fn build_residuals_batch(
+    xs: Vec<f64>, resid: Vec<f64>, ys_obs: &[f64],
+    inject_zero_ref: bool, inject_metrics: bool,
+) -> PyResult<RecordBatch> {
+    let n = xs.len();
+    let mut fields = vec![
         Field::new("x",        DataType::Float64, true),
         Field::new("residual", DataType::Float64, true),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(xs)),
-        Arc::new(Float64Array::from(resid)),
     ];
-    RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(xs.clone())),
+        Arc::new(Float64Array::from(resid.clone())),
+    ];
+
+    if inject_zero_ref {
+        let mut col: Vec<Option<f64>> = vec![None; n];
+        if n > 0 {
+            col[0] = Some(0.0);
+        }
+        fields.push(Field::new("_ref_zero", DataType::Float64, true));
+        cols.push(Arc::new(Float64Array::from(col)));
+    }
+
+    if inject_metrics {
+        let (r2, rmse, mae) =
+            crate::transform::smooth::compute_residual_metrics_pub(ys_obs, &resid);
+        let anchor_idx = xs
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.is_finite())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i);
+        let max_resid = resid
+            .iter()
+            .filter(|r| r.is_finite())
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let max_resid = if max_resid.is_finite() { max_resid } else { 0.0 };
+
+        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
+        let mut text_col: Vec<Option<String>> = vec![None; n];
+        let mut y_col: Vec<Option<f64>> = vec![None; n];
+        if let Some(i) = anchor_idx {
+            text_col[i] = Some(text);
+            y_col[i] = Some(max_resid);
+        }
+        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
+        cols.push(Arc::new(arrow::array::StringArray::from(text_col)));
+        fields.push(Field::new("_metrics_y", DataType::Float64, true));
+        cols.push(Arc::new(Float64Array::from(y_col)));
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
 }
 
 // ---------- PyO3 wrapper ----------
@@ -410,6 +475,8 @@ impl PyRobust {
         max_iter = 25,
         tol = 1e-8,
         output = "fitted",
+        inject_zero_ref = false,
+        inject_metrics = false,
         name = None,
     ))]
     fn new(
@@ -421,6 +488,8 @@ impl PyRobust {
         max_iter: usize,
         tol: f64,
         output: &str,
+        inject_zero_ref: bool,
+        inject_metrics: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -451,6 +520,13 @@ impl PyRobust {
             ))),
         };
 
+        if (inject_zero_ref || inject_metrics)
+            && !matches!(output_parsed, SmoothOutput::Residuals)
+        {
+            return Err(PyValueError::new_err(
+                "Robust: inject_zero_ref / inject_metrics require output='residuals'",
+            ));
+        }
         Ok(PyRobust(TransformSpec::Robust(RobustSpec {
             x: x.to_string(),
             y: y.to_string(),
@@ -460,6 +536,8 @@ impl PyRobust {
             max_iter,
             tol,
             output: output_parsed,
+            inject_zero_ref,
+            inject_metrics,
             name,
         })))
     }
@@ -505,7 +583,10 @@ mod tests {
             x: "x".into(), y: "y".into(),
             n_grid, ci, huber_c,
             max_iter: 50, tol: 1e-10,
-            output, name: None,
+            output,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            name: None,
         }
     }
 
@@ -515,7 +596,10 @@ mod tests {
             x: "x".into(), y: "y".into(),
             n_grid: 100, ci: Some(0.95),
             huber_c: 1.345, max_iter: 25, tol: 1e-8,
-            output: SmoothOutput::Fitted, name: None,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            name: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: RobustSpec = serde_json::from_str(&json).unwrap();
@@ -526,7 +610,10 @@ mod tests {
             x: "a".into(), y: "b".into(),
             n_grid: 50, ci: None,
             huber_c: 2.0, max_iter: 10, tol: 1e-6,
-            output: SmoothOutput::Residuals, name: Some("r1".into()),
+            output: SmoothOutput::Residuals,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            name: Some("r1".into()),
         };
         let json2 = serde_json::to_string(&s2).unwrap();
         let parsed2: RobustSpec = serde_json::from_str(&json2).unwrap();
@@ -695,7 +782,10 @@ mod tests {
             x: "x".into(), y: "y".into(),
             n_grid: 10, ci: None,
             huber_c: 1.345, max_iter: 1, tol: 1e-8,
-            output: SmoothOutput::Fitted, name: None,
+            output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            name: None,
         };
         let out = apply(&s, &batch).unwrap();
         let y = col(&out, "y");
