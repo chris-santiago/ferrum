@@ -322,7 +322,7 @@ def residplot(
         ``zero_line=True`` (annotations flow through the Robust
         transform's same opt-in kwargs).
     dropna : bool, default True
-        Reserved for future NaN-dropping logic (no-op today).
+        Drop rows where ``x`` or ``y`` is null before fitting.
     show_metrics : bool, default True
         Schwabish SB-followup (2026-05-12): overlay a top-right corner
         annotation with ``R²`` / ``RMSE`` / ``MAE`` computed inside the
@@ -332,8 +332,10 @@ def residplot(
     zero_line : bool, default True
         Schwabish SB-followup: draw a dashed horizontal reference at
         ``y=0`` via the Rust transform's ``inject_zero_ref=True`` opt-in.
-    label : any, optional
-        Reserved for future legend-label support (no-op today).
+    label : str, optional
+        Legend label for the residual series.  When set, a constant
+        ``_label`` column is injected and mapped to color, producing a
+        single-entry legend.
     color : str or encoding, optional
         Column name or constant color forwarded to ``Chart.encode(color=)``.
     theme : Theme, optional
@@ -356,7 +358,10 @@ def residplot(
 
     >>> fm.residplot(df, x="size", y="tip", robust=True)
     """
-    del dropna, label  # reserved kwargs — not yet honored
+    if dropna:
+        import polars as pl
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = data.drop_nulls(subset=[x, y])
 
     # The Rust Smooth/Robust transforms inject ``_ref_zero``,
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
@@ -376,8 +381,15 @@ def residplot(
             inject_metrics=show_metrics,
         )
 
+    if label is not None:
+        import polars as pl
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = data.with_columns(pl.lit(label).alias("_label"))
+
     chart = Chart(data).transform(resid_transform).mark_point()
     enc: dict = {"x": "x", "y": "residual"}
+    if label is not None and color is None:
+        enc["color"] = "_label"
     if color is not None:
         enc["color"] = color
     enc.update(encode_kwargs)

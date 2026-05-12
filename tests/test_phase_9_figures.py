@@ -400,6 +400,24 @@ class TestResidplot:
         assert d.get("layers") is not None
         assert len(d["layers"]) >= 2
 
+    def test_dropna_removes_null_rows(self, reg_data):
+        data_with_nulls = reg_data.with_columns(
+            pl.when(pl.col("x") < 2).then(None).otherwise(pl.col("y")).alias("y")
+        )
+        n_nulls = data_with_nulls.filter(pl.col("y").is_null()).height
+        assert n_nulls > 0
+        chart = fe.residplot(data_with_nulls, x="x", y="y", dropna=True,
+                             show_metrics=False, zero_line=False)
+        # dropna=True should have removed the null rows before the chart
+        # received them. The chart's internal data should have fewer rows.
+        assert chart._data.height == reg_data.height - n_nulls
+
+    def test_label_adds_color_encoding(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y", label="Residuals",
+                             show_metrics=False, zero_line=False)
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("encoding", {}).get("color", {}).get("field") == "_label"
+
     def test_no_lowess_legacy_single_layer(self, reg_data):
         chart = fe.residplot(
             reg_data, x="x", y="y", lowess=False,
