@@ -1026,7 +1026,12 @@ def desugar_cv_scores(
         layers = [
             _Layer(
                 mark="bar",
-                encoding={"x": "split", "y": Y("score", title="score"), "color": "split"},
+                encoding={"x": "fold", "y": Y("score", title="score"), "color": "split"},
+            ),
+            _Layer(
+                mark="rule",
+                encoding={"y": "_mean_score", "color": "split"},
+                mark_kwargs={"stroke_dash": [4, 4]},
             ),
         ]
         return ("__layered__", [], None, None, _apply(layers, user_kw))
@@ -1089,15 +1094,18 @@ def desugar_class_prediction_error(
     y_field: str | None,
     *,
     normalize: bool = False,
-    color_field: str = "actual",
+    color_field: str = "predicted",
     show_counts: bool = True,
 ) -> tuple:
     """Stacked-bar diagnostic of predicted-class composition.
 
     Data contract: ``actual``, ``predicted``, ``value`` (same shape as
     ``ModelSource.confusion_matrix(normalize=None)``). One bar per
-    ``predicted`` value, segments colored by ``actual``. ``normalize=True``
-    switches to a per-bar 100% stack via the Stack position adjustment.
+    ``actual`` class, segments colored by ``predicted`` class. This
+    orientation (x = actual, color = predicted) surfaces which classes
+    are confused with which — the standard Class Prediction Error layout.
+    ``normalize=True`` switches to a per-bar 100% stack via the Stack
+    position adjustment.
 
     Schwabish SB-followup (2026-05-12): ``show_counts=True`` (default)
     appends a same-data ``mark_text`` layer. The text layer carries
@@ -1118,7 +1126,7 @@ def desugar_class_prediction_error(
     layers: list = [
         _Layer(
             mark="bar",
-            encoding={"x": "predicted", "y": "value", "color": color_field},
+            encoding={"x": "actual", "y": "value", "color": color_field},
             position=bar_stack,
         ),
     ]
@@ -1126,7 +1134,7 @@ def desugar_class_prediction_error(
         layers.append(
             _Layer(
                 mark="text",
-                encoding={"x": "predicted", "y": "value", "text": "_count_text"},
+                encoding={"x": "actual", "y": "value", "text": "_count_text"},
                 position=text_stack,
             )
         )

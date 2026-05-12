@@ -986,7 +986,7 @@ def _class_prediction_error_chart_from_source(
     )
     chart = chart.encode(
         x=X("actual", title="Actual class"),
-        y=Y("count", title="Number of predictions"),
+        y=Y("value", title="Number of predictions"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
     if theme is not None:
@@ -1708,8 +1708,11 @@ def _cv_scores_chart_from_source(
     split: str = "both",
     theme: Any = None,
 ):
-    """Per-fold CV-score chart. ``kind="bar"`` pre-aggregates per split;
-    ``"box"``/``"strip"`` leave raw per-fold rows for the mark layer.
+    """Per-fold CV-score chart.
+
+    ``kind="bar"`` shows one bar per fold with a dashed mean-score reference
+    line per split; ``"box"``/``"strip"`` leave raw per-fold rows for the
+    mark layer.
     """
     import ferrum
 
@@ -1717,7 +1720,8 @@ def _cv_scores_chart_from_source(
     if split != "both":
         df = df.filter(pl.col("split") == split)
     if kind == "bar":
-        df = df.group_by("split").agg(pl.col("score").mean()).sort("split")
+        # Broadcast per-split mean so the rule layer draws one line per split.
+        df = df.with_columns(pl.col("score").mean().over("split").alias("_mean_score"))
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))

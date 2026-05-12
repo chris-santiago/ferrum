@@ -2403,17 +2403,18 @@ class Chart:
         self,
         *,
         normalize: bool = False,
-        color_field: str = "actual",
+        color_field: str = "predicted",
         show_counts: bool = True,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Render a class prediction error bar chart.
 
-        Renders one stacked bar per predicted class, with segments coloured by
-        actual class.  This surfaces systematic mis-classification patterns not
-        obvious in a confusion matrix.  Data must carry long-form columns
-        ``(actual, predicted, value)`` — same shape as
+        Renders one stacked bar per actual class (x-axis), with segments
+        coloured by predicted class.  This orientation surfaces which classes
+        are confused with which — for each actual class you can see how the
+        model's predictions distribute across the predicted classes.  Data must
+        carry long-form columns ``(actual, predicted, value)`` — same shape as
         ``ModelSource.confusion_matrix(normalize=None)``.
 
         Parameters
@@ -2421,7 +2422,7 @@ class Chart:
         normalize : bool, optional
             Whether to normalise each bar to 100%.  Default is ``False``.
         color_field : str, optional
-            Column driving the segment colour.  Default is ``"actual"``.
+            Column driving the segment colour.  Default is ``"predicted"``.
         show_counts : bool, optional
             Whether to overlay per-segment count text at the segment
             centre.  Default is ``True`` (Schwabish SB-followup
