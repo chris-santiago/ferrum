@@ -1,9 +1,28 @@
-"""§3.14 Group B figure-level functions.
+"""§3.14 Group B figure-level functions — one chart per call.
 
-Each function is a thin facade over a ``_*_chart_from_source`` builder in
-``ferrum._diagnostics.charts``. The ``_resolve_source`` helper accepts a
-fitted model, an explicit ``ModelSource``, or (10h) a dict of named models
-for comparison.
+This module is one of two parallel diagnostic surfaces ferrum exposes
+on top of the same chart-builder layer. Both are documented in
+``ferrum-spec.md §3.14`` (figures) and ``§3.15`` (visualizers); both
+are first-class API.
+
+- **Figure functions** (this module). A direct ``f(model, X, y) -> Chart``
+  call. No state, no separate ``.fit()``, no metrics dict. Best for
+  exploratory work, notebook one-liners, and any path where the user
+  already has a fitted estimator and just wants a chart.
+- **Visualizers** (``ferrum._diagnostics.visualizers``). A
+  ``Viz(model).fit(X, y)`` sklearn-protocol object whose ``.show()``
+  returns the same chart. Adds an explicit ``.fit`` step, records a
+  per-visualizer ``_metrics`` dict (e.g. ``top_abs_shap``,
+  ``n_samples``), and composes inside sklearn pipelines / search /
+  evaluators because it conforms to BaseEstimator.
+
+Both surfaces dispatch to the same ``_*_chart_from_source`` builders in
+``ferrum._diagnostics.charts``; the dual API is sugar over a single
+implementation tree, not a parallel pipeline.
+
+The ``_resolve_source`` helper in this module accepts a fitted model,
+an explicit ``ferrum.ModelSource``, or a dict of named models for
+``ComparedModelSource`` (multi-model comparison).
 """
 from __future__ import annotations
 
