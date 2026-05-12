@@ -1760,40 +1760,139 @@ def rank_chart(
     >>> import ferrum as fm
     >>> fm.rank_chart(X_train, rank="2d")
     >>> fm.rank_chart(X_train, rank="1d", algorithm="shapiro", top_k=10)
+
+    .. deprecated:: 2026-05-12
+        Use :func:`rank1d_chart` or :func:`rank2d_chart` directly. This
+        dispatcher remains as a shim that forwards to the appropriate
+        sibling and will be removed in a future major release.
+    """
+    import warnings
+
+    warnings.warn(
+        "rank_chart(rank=...) is deprecated; use rank1d_chart / "
+        "rank2d_chart instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if rank == "1d":
+        return rank1d_chart(
+            data_or_source, X, y,
+            algorithm=algorithm, top_k=top_k, orient=orient,
+            color_field=color_field, random_state=random_state, theme=theme,
+        )
+    if rank == "2d":
+        return rank2d_chart(
+            data_or_source, X, y,
+            algorithm=algorithm, annot=annot,
+            random_state=random_state, theme=theme,
+        )
+    raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
+
+
+def rank1d_chart(
+    data_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    algorithm: str | None = None,
+    top_k: int | None = None,
+    orient: str = "horizontal",
+    color_field: str | None = None,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Univariate feature-ranking bar chart.
+
+    Computes a per-feature ranking score and renders a horizontal (or
+    vertical with ``orient="vertical"``) bar chart sorted by score.
+    Accepts a fitted estimator, ``ModelSource``, or a raw DataFrame /
+    2D array; the ``"covariance"`` algorithm requires ``y``.
+
+    Parameters
+    ----------
+    data_or_source : estimator, ModelSource, DataFrame, or array-like
+        Input data. When a fitted estimator or ``ModelSource`` is supplied,
+        the feature matrix is taken from the bound data.
+    X, y : optional
+        Feature matrix / target — forwarded to ``_resolve_source`` when
+        ``data_or_source`` is a raw estimator.
+    algorithm : str or None, default None
+        Ranking algorithm. ``None`` selects ``"shapiro"``.
+    top_k, orient, color_field, random_state, theme : forwarded to the
+        chart builder.
+
+    Returns
+    -------
+    Chart
+        Ranked bar chart.
     """
     import ferrum
 
-    if rank == "1d":
-        algo = algorithm or "shapiro"
-        if isinstance(data_or_source, ferrum.ModelSource):
-            df = data_or_source.rank1d(algorithm=algo)
-        elif algo == "covariance":
-            source = _resolve_source(
-                data_or_source, X, y, random_state=random_state,
-            )
-            df = source.rank1d(algorithm=algo)
-        else:
-            from ferrum._diagnostics.stats import rank1d_compute
-            data = data_or_source if X is None else X
-            df = rank1d_compute(data, algorithm=algo)
-        from ferrum._diagnostics.charts import _rank1d_chart_from_dataframe
-        return _rank1d_chart_from_dataframe(
-            df, algorithm=algo, orient=orient, top_k=top_k,
-            color_field=color_field, theme=theme,
+    algo = algorithm or "shapiro"
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank1d(algorithm=algo)
+    elif algo == "covariance":
+        source = _resolve_source(
+            data_or_source, X, y, random_state=random_state,
         )
-    if rank == "2d":
-        algo = algorithm or "pearson"
-        if isinstance(data_or_source, ferrum.ModelSource):
-            df = data_or_source.rank2d(algorithm=algo)
-        else:
-            from ferrum._diagnostics.stats import rank2d_compute
-            data = data_or_source if X is None else X
-            df = rank2d_compute(data, algorithm=algo)
-        from ferrum._diagnostics.charts import _rank2d_chart_from_dataframe
-        return _rank2d_chart_from_dataframe(
-            df, algorithm=algo, annot=annot, theme=theme,
-        )
-    raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
+        df = source.rank1d(algorithm=algo)
+    else:
+        from ferrum._diagnostics.stats import rank1d_compute
+        data = data_or_source if X is None else X
+        df = rank1d_compute(data, algorithm=algo)
+    from ferrum._diagnostics.charts import _rank1d_chart_from_dataframe
+    return _rank1d_chart_from_dataframe(
+        df, algorithm=algo, orient=orient, top_k=top_k,
+        color_field=color_field, theme=theme,
+    )
+
+
+def rank2d_chart(
+    data_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    algorithm: str | None = None,
+    annot: bool = True,
+    random_state: int | None = None,
+    theme: Any = None,
+):
+    """Pairwise feature-correlation heatmap.
+
+    Computes pairwise feature correlation (or covariance) and renders a
+    heatmap. Accepts a fitted estimator, ``ModelSource``, or a raw
+    DataFrame / 2D array (no model required).
+
+    Parameters
+    ----------
+    data_or_source : estimator, ModelSource, DataFrame, or array-like
+        Input data.
+    X, y : optional
+        Feature matrix / target.
+    algorithm : str or None, default None
+        Ranking algorithm. ``None`` selects ``"pearson"``.
+    annot : bool, default True
+        Overlay the correlation value (2 decimals) on each cell.
+    random_state, theme : optional.
+
+    Returns
+    -------
+    Chart
+        Pairwise correlation heatmap.
+    """
+    import ferrum
+
+    algo = algorithm or "pearson"
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank2d(algorithm=algo)
+    else:
+        from ferrum._diagnostics.stats import rank2d_compute
+        data = data_or_source if X is None else X
+        df = rank2d_compute(data, algorithm=algo)
+    from ferrum._diagnostics.charts import _rank2d_chart_from_dataframe
+    return _rank2d_chart_from_dataframe(
+        df, algorithm=algo, annot=annot, theme=theme,
+    )
 
 
 def parallel_coordinates_chart(

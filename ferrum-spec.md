@@ -1199,6 +1199,18 @@ ferrum.rank_chart(data_or_source, X=None, y=None, *,
                    rank="2d",       # "1d" | "2d"
                    algorithm=None,  # "1d" default: "shapiro"; "2d" default: "pearson"
                    top_k=None, theme=None)
+# **2026-05-12 (P4.4, F4):** `rank_chart(rank=...)` is deprecated;
+# use the two sibling functions `ferrum.rank1d_chart(...)` and
+# `ferrum.rank2d_chart(...)` directly. They take the same parameters
+# minus the `rank` flag and route to the same chart builders.
+# `rank_chart` retains the dispatch behavior as a DeprecationWarning
+# shim for backward compatibility.
+ferrum.rank1d_chart(data_or_source, X=None, y=None, *,
+                     algorithm=None, top_k=None, orient="horizontal",
+                     color_field=None, random_state=None, theme=None)
+ferrum.rank2d_chart(data_or_source, X=None, y=None, *,
+                     algorithm=None, annot=True,
+                     random_state=None, theme=None)
 
 ferrum.alpha_selection_chart(model, X, y, alphas, *, cv=5, scoring=None,
                                log_scale=True, ci_style="band", theme=None)

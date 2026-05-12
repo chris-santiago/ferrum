@@ -74,7 +74,7 @@ _DOC_ALLOWLIST: set[str] = {
     "cv_scores_chart", "alpha_selection_chart",
     "pca_scree_chart", "cluster_diagnostics",
     "intercluster_distance_chart", "decision_boundary_chart",
-    "rank_chart", "parallel_coordinates_chart",
+    "rank_chart", "rank1d_chart", "rank2d_chart", "parallel_coordinates_chart",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
