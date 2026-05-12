@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod transport;
+mod pyo3_serde;
 mod spec;
 mod scale;
 pub(crate) mod transform;

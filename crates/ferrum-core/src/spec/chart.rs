@@ -161,38 +161,15 @@ impl ChartSpec {
             ))),
         };
 
-        let facet = match facet {
-            None => None,
-            Some(obj) => {
-                let py = obj.py();
-                let json_module = py.import("json")?;
-                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-                Some(serde_json::from_str(&s).map_err(|e|
-                    PyValueError::new_err(format!("facet: {e}")))?)
-            }
-        };
-
-        let mark_style = match mark_style {
-            None => None,
-            Some(obj) => {
-                let py = obj.py();
-                let json_module = py.import("json")?;
-                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-                Some(serde_json::from_str(&s).map_err(|e|
-                    PyValueError::new_err(format!("mark_style: {e}")))?)
-            }
-        };
-
-        let position = match position {
-            None => None,
-            Some(obj) => {
-                let py = obj.py();
-                let json_module = py.import("json")?;
-                let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
-                Some(serde_json::from_str(&s).map_err(|e|
-                    PyValueError::new_err(format!("position: {e}")))?)
-            }
-        };
+        let facet = facet
+            .map(|obj| crate::pyo3_serde::from_py(obj, "facet"))
+            .transpose()?;
+        let mark_style = mark_style
+            .map(|obj| crate::pyo3_serde::from_py(obj, "mark_style"))
+            .transpose()?;
+        let position = position
+            .map(|obj| crate::pyo3_serde::from_py(obj, "position"))
+            .transpose()?;
 
         Ok(ChartSpec {
             data,
@@ -348,14 +325,10 @@ impl ChartSpec {
     #[getter]
     fn layers(&self, py: Python) -> PyResult<Option<Vec<Py<PyAny>>>> {
         let Some(ref vec) = self.layers else { return Ok(None) };
-        let mut out: Vec<Py<PyAny>> = Vec::with_capacity(vec.len());
-        let json_module = py.import("json")?;
-        for layer in vec {
-            let s = serde_json::to_string(layer).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let py_obj = json_module.call_method1("loads", (s,))?;
-            out.push(py_obj.unbind());
-        }
-        Ok(Some(out))
+        vec.iter()
+            .map(|layer| crate::pyo3_serde::to_py(py, layer))
+            .collect::<PyResult<Vec<_>>>()
+            .map(Some)
     }
 
     /// Coordinate system name (``"cartesian"``, ``"flip"``), or ``None``.
@@ -371,15 +344,10 @@ impl ChartSpec {
     /// Position adjustment dict (Jitter, Dodge, Stack, ...), or ``None``.
     #[getter]
     fn position(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        match &self.position {
-            None => Ok(None),
-            Some(p) => {
-                let s = serde_json::to_string(p).map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                let val = json_module.call_method1("loads", (s,))?;
-                Ok(Some(val.unbind()))
-            }
-        }
+        self.position
+            .as_ref()
+            .map(|p| crate::pyo3_serde::to_py(py, p))
+            .transpose()
     }
 
     /// Serialize this spec to its canonical JSON form.
@@ -452,16 +420,13 @@ fn coerce_layers(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Layer>> {
     use pyo3::types::{PyDict, PyList};
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("layers must be a list"))?;
-    let py = obj.py();
-    let json_module = py.import("json")?;
-    // No PyLayer class yet; deserialize Python dicts via JSON round-trip until that's added.
+    // No PyLayer class yet; deserialize Python dicts via the shared
+    // pyo3_serde helper until one is added.
     let mut out = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
-        let py_dict: &Bound<PyDict> = item.downcast::<PyDict>()
+        let _: &Bound<PyDict> = item.downcast::<PyDict>()
             .map_err(|_| PyValueError::new_err(format!("layers[{i}] must be a dict")))?;
-        let s: String = json_module.call_method1("dumps", (py_dict,))?.extract()?;
-        let layer: Layer = serde_json::from_str(&s)
-            .map_err(|e| PyValueError::new_err(format!("layers[{i}]: {e}")))?;
+        let layer: Layer = crate::pyo3_serde::from_py(&item, &format!("layers[{i}]"))?;
         out.push(layer);
     }
     Ok(out)
