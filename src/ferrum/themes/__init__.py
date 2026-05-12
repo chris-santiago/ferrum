@@ -120,6 +120,9 @@ area_opacity, opacity : optional
             "legend_orient",
             "legend_direction",
             "legend_title_font_size",
+            # Reference lines
+            "reference_line_color",
+            "reference_line_dash",
             # Spacing
             "axis_title_padding",
             "column_padding",

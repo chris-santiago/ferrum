@@ -229,6 +229,10 @@ struct ThemeOverridesSpec {
     legend_direction: Option<String>,
     legend_title_font_size: Option<f64>,
 
+    // Reference lines
+    reference_line_color: Option<String>,
+    reference_line_dash: Option<Vec<f64>>,
+
     // Spacing
     axis_title_padding: Option<f64>,
     column_padding: Option<f64>,
@@ -333,6 +337,10 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
         });
     }
     if let Some(v) = spec.legend_title_font_size { t.legend_title_font_size = v; }
+
+    // Reference lines
+    if let Some(s) = spec.reference_line_color { t.reference_line_color = parse_hex(&s)?; }
+    if let Some(v) = spec.reference_line_dash { t.reference_line_dash = Some(v); }
 
     // Spacing
     if let Some(v) = spec.axis_title_padding { t.axis_title_padding = v; }

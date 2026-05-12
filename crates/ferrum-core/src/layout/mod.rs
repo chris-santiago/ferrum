@@ -173,6 +173,10 @@ pub struct ThemeInputs {
     // Legend
     pub legend_direction: Option<LegendDirection>,
     pub legend_title_font_size: f64,
+
+    // Reference lines
+    pub reference_line_color: palette::Srgba<u8>,
+    pub reference_line_dash: Option<Vec<f64>>,
 }
 
 impl Default for ThemeInputs {
@@ -256,6 +260,10 @@ impl Default for ThemeInputs {
             legend_orient: LegendOrient::Right,
             legend_direction: None,
             legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
+
+            // Reference lines
+            reference_line_color: palette::Srgba::new(0xAA, 0xAA, 0xAA, 0xFF),
+            reference_line_dash: Some(vec![4.0, 4.0]),
         }
     }
 }

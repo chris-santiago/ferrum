@@ -71,7 +71,7 @@ def desugar_residuals(
             _Layer(
                 mark="rule",
                 encoding={"y": "_ref_zero"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     if cook_threshold is not None:
@@ -140,7 +140,7 @@ def desugar_prediction_error(
             _Layer(
                 mark="line",
                 encoding={"x": "y_true", "y": "y_true"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     return ("__layered__", [], None, None, layers)
@@ -184,7 +184,7 @@ def desugar_roc(
             _Layer(
                 mark="line",
                 encoding={"x": "fpr", "y": "fpr"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     if annotate_auc:
@@ -248,7 +248,7 @@ def desugar_pr(
                     "y": "_iso_precision",
                     "color": "_iso_f",
                 },
-                mark_kwargs={"stroke_dash": [2, 4], "opacity": 0.6},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4], "opacity": 0.6},
             )
         )
         layers.append(
@@ -329,7 +329,7 @@ def desugar_calibration(
             _Layer(
                 mark="line",
                 encoding={"x": "mean_predicted", "y": "fraction_positive"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
                 data_source="calibration_ref",
             )
         )
@@ -432,7 +432,7 @@ def desugar_discrimination_threshold(
             _Layer(
                 mark="rule",
                 encoding={"x": "_threshold_best"},
-                mark_kwargs={"stroke_dash": [4, 4], "opacity": 0.6},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4], "opacity": 0.6},
             )
         )
     if optimum_label:
@@ -620,7 +620,7 @@ def desugar_shap_beeswarm(
             _Layer(
                 mark="rule",
                 encoding={"x": "_ref_zero"},
-                mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     return ("__layered__", [], None, None, layers)
@@ -1070,7 +1070,7 @@ def desugar_alpha_selection(
             _Layer(
                 mark="rule",
                 encoding={"x": "_best_alpha"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     return ("__layered__", [], None, None, _apply(layers, user_kw))
@@ -1166,7 +1166,7 @@ def desugar_silhouette(
             _Layer(
                 mark="rule",
                 encoding={"x": "_ref_zero"},
-                mark_kwargs={"stroke_dash": [4, 4]},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
     return ("__layered__", [], None, None, _apply(layers, user_kw))
@@ -1278,7 +1278,7 @@ def desugar_pca_scree_with_threshold(
         _Layer(
             mark="rule",
             encoding={"y": "_threshold_line"},
-            mark_kwargs={"stroke_dash": [4, 4]},
+            mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
         )
     ]
     return (prefix, transforms, _ig1, _ig2, layers)

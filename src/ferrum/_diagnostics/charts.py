@@ -570,7 +570,7 @@ def _pr_chart_from_source(
             Layer(
                 mark="rule",
                 encoding={"y": "_baseline_y"},
-                mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
 

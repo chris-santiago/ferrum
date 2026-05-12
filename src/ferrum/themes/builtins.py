@@ -69,6 +69,7 @@ dark = Theme(
     mark_color="#7fb3d5",
     color_scheme="dark2",
     strip_background_color="#252540",
+    reference_line_color="#666666",
 )
 
 # Publication: print-ready monochrome. Plan's design spec used DejaVu Serif
@@ -89,6 +90,7 @@ publication = Theme(
     mark_color="#000000",
     color_scheme="tableau10",
     point_size=24,
+    reference_line_color="#999999",
 )
 
 economist = Theme(
