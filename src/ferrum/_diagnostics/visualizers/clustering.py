@@ -250,16 +250,15 @@ class ManifoldVisualizer(FerrumVisualizer):
         self.method = method
 
     def _materialize(self) -> None:
+        # ModelSource.embeddings() memoizes via BaseSource._cache, so the
+        # second call from _build_chart is a cache hit (no recomputation).
         emb = self._source.embeddings(method=self.method)
         self._metrics["n_samples"] = float(emb.height)
-        self._cached_embedding = emb
 
     def _build_chart(self) -> Any:
         import ferrum
 
-        emb = getattr(self, "_cached_embedding", None)
-        if emb is None:
-            emb = self._source.embeddings(method=self.method)
+        emb = self._source.embeddings(method=self.method)
         chart = ferrum.Chart(emb).mark_point().encode(
             x="dim_0", y="dim_1", color="label",
         )
