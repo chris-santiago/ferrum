@@ -34,7 +34,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transform::violin::PyViolin>()?;
     m.add_class::<transform::kde_2d::PyKde2D>()?;
     m.add_class::<transform::contour::PyContour>()?;
-    m.add_class::<transform::qq::PyQQ>()?;
+    m.add_class::<transform::qq::PyQq>()?;
     m.add_class::<transform::raster::PyRaster>()?;
     m.add_class::<transform::hex::PyHex>()?;
     m.add_class::<transform::swarm::PySwarm>()?;

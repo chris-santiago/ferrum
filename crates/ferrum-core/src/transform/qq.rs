@@ -392,10 +392,10 @@ use crate::transform::core::TransformSpec;
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 #[pyclass(eq, module = "ferrum._core", name = "QQ")]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PyQQ(pub(crate) TransformSpec);
+pub(crate) struct PyQq(pub(crate) TransformSpec);
 
 #[pymethods]
-impl PyQQ {
+impl PyQq {
     #[new]
     #[pyo3(signature = (
         field,
@@ -425,7 +425,7 @@ impl PyQQ {
                 )))
             }
         }
-        Ok(PyQQ(TransformSpec::Qq(QQSpec {
+        Ok(PyQq(TransformSpec::Qq(QQSpec {
             field: field.to_string(),
             distribution: distribution.to_string(),
             dequantize,

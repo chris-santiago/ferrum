@@ -264,59 +264,18 @@ impl ChartSpec {
     /// Stat transforms applied before rendering, as a list of transform objects.
     #[getter]
     fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        use crate::transform::core::{for_each_transform, TransformSpec};
         let mut out: Vec<Py<PyAny>> = Vec::with_capacity(self.transforms.len());
         for t in &self.transforms {
-            let obj: Py<PyAny> = match t {
-                crate::transform::core::TransformSpec::Bin(_) =>
-                    pyo3::Py::new(py, crate::transform::bin::PyBin(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Bin2D(_) =>
-                    pyo3::Py::new(py, crate::transform::bin_2d::PyBin2D(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Kde(_) =>
-                    pyo3::Py::new(py, crate::transform::kde::PyKde(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Smooth(_) =>
-                    pyo3::Py::new(py, crate::transform::smooth::PySmooth(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Aggregate(_) =>
-                    pyo3::Py::new(py, crate::transform::aggregate::PyAggregate(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Summary(_) =>
-                    pyo3::Py::new(py, crate::transform::summary::PySummary(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Outliers(_) =>
-                    pyo3::Py::new(py, crate::transform::outliers::PyOutliers(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::ErrorExtent(_) =>
-                    pyo3::Py::new(py, crate::transform::error_extent::PyErrorExtent(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::BoxStats(_) =>
-                    pyo3::Py::new(py, crate::transform::box_stats::PyBoxStats(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Violin(_) =>
-                    pyo3::Py::new(py, crate::transform::violin::PyViolin(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Kde2D(_) =>
-                    pyo3::Py::new(py, crate::transform::kde_2d::PyKde2D(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Contour(_) =>
-                    pyo3::Py::new(py, crate::transform::contour::PyContour(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Qq(_) =>
-                    pyo3::Py::new(py, crate::transform::qq::PyQQ(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Linkage(_) =>
-                    pyo3::Py::new(py, crate::transform::linkage::PyLinkage(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Raster(_) =>
-                    pyo3::Py::new(py, crate::transform::raster::PyRaster(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Hex(_) =>
-                    pyo3::Py::new(py, crate::transform::hex::PyHex(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Swarm(_) =>
-                    pyo3::Py::new(py, crate::transform::swarm::PySwarm(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Unpivot(_) =>
-                    pyo3::Py::new(py, crate::transform::unpivot::PyUnpivot(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Reorder(_) =>
-                    pyo3::Py::new(py, crate::transform::reorder::PyReorder(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::ReferenceLine(_) =>
-                    pyo3::Py::new(py, crate::transform::reference_line::PyReferenceLine(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::LetterValue(_) =>
-                    pyo3::Py::new(py, crate::transform::letter_value::PyLetterValue(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Logistic(_) =>
-                    pyo3::Py::new(py, crate::transform::logistic::PyLogistic(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Glm(_) =>
-                    pyo3::Py::new(py, crate::transform::glm::PyGlm(t.clone()))?.into_any(),
-                crate::transform::core::TransformSpec::Robust(_) =>
-                    pyo3::Py::new(py, crate::transform::robust::PyRobust(t.clone()))?.into_any(),
-            };
-            out.push(obj);
+            macro_rules! arm {
+                ($($V:ident => $m:ident : $py:ident,)*) => {
+                    match t { $(
+                        TransformSpec::$V(_) =>
+                            pyo3::Py::new(py, crate::transform::$m::$py(t.clone()))?.into_any(),
+                    )* }
+                };
+            }
+            out.push(for_each_transform!(arm));
         }
         Ok(out)
     }
@@ -486,7 +445,7 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(c.0);
             continue;
         }
-        if let Ok(q) = item.extract::<crate::transform::qq::PyQQ>() {
+        if let Ok(q) = item.extract::<crate::transform::qq::PyQq>() {
             out.push(q.0);
             continue;
         }

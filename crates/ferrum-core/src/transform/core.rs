@@ -62,41 +62,49 @@ pub(crate) enum TransformSpec {
 }
 
 /// Single source of truth for the 24 `TransformSpec` variants. Dispatchers
-/// across this module (and `spec/chart.rs`, `lib.rs` once F1c lands) define
-/// a local `arm!` macro and invoke `for_each_transform!(arm)`; the macro
-/// expands the table into per-variant arms. Adding a transform means one
-/// edit here plus the variant in the enum below — no more 5-site fan-out.
+/// across this module, `spec/chart.rs`, and `lib.rs` define a local `arm!`
+/// macro and invoke `for_each_transform!(arm)`; the macro expands the table
+/// into per-variant arms. Adding a transform means one edit here plus the
+/// variant in the enum below — no more 5-site fan-out.
 ///
-/// Table entries are `(Variant, module_ident)` pairs. The module is an
-/// `ident` (not a `path`) so it can be followed by `::apply` etc. at the
-/// call site without running into the path/follow-set restriction.
+/// Table entries are `(Variant, module_ident, PyWrapper)` triples:
+///   - `Variant`    — `TransformSpec` enum variant ident.
+///   - `module_ident` — name of the per-variant submodule under
+///     `crate::transform::`. An `ident` (not a `path`) so it can be
+///     followed by `::apply` at the call site.
+///   - `PyWrapper`  — name of the PyO3 newtype struct in that submodule
+///     (e.g. `PyBin` for `Bin`). Used by `chart.rs` accessors and the
+///     `lib.rs::_core` registration to project to/from Python.
+///
+/// Naming convention: wrapper is `Py<Variant>` for every entry. The
+/// historic `PyQQ` exception was renamed to `PyQq` to match `Qq`.
 macro_rules! for_each_transform {
     ($mac:ident) => {
         $mac! {
-            Bin           => bin,
-            Bin2D         => bin_2d,
-            Kde           => kde,
-            Smooth        => smooth,
-            Aggregate     => aggregate,
-            Summary       => summary,
-            Outliers      => outliers,
-            ErrorExtent   => error_extent,
-            BoxStats      => box_stats,
-            Violin        => violin,
-            Kde2D         => kde_2d,
-            Contour       => contour,
-            Qq            => qq,
-            Linkage       => linkage,
-            Raster        => raster,
-            Hex           => hex,
-            Swarm         => swarm,
-            Unpivot       => unpivot,
-            Reorder       => reorder,
-            ReferenceLine => reference_line,
-            LetterValue   => letter_value,
-            Logistic      => logistic,
-            Glm           => glm,
-            Robust        => robust,
+            Bin           => bin            : PyBin,
+            Bin2D         => bin_2d         : PyBin2D,
+            Kde           => kde            : PyKde,
+            Smooth        => smooth         : PySmooth,
+            Aggregate     => aggregate      : PyAggregate,
+            Summary       => summary        : PySummary,
+            Outliers      => outliers       : PyOutliers,
+            ErrorExtent   => error_extent   : PyErrorExtent,
+            BoxStats      => box_stats      : PyBoxStats,
+            Violin        => violin         : PyViolin,
+            Kde2D         => kde_2d         : PyKde2D,
+            Contour       => contour        : PyContour,
+            Qq            => qq             : PyQq,
+            Linkage       => linkage        : PyLinkage,
+            Raster        => raster         : PyRaster,
+            Hex           => hex            : PyHex,
+            Swarm         => swarm          : PySwarm,
+            Unpivot       => unpivot        : PyUnpivot,
+            Reorder       => reorder        : PyReorder,
+            ReferenceLine => reference_line : PyReferenceLine,
+            LetterValue   => letter_value   : PyLetterValue,
+            Logistic      => logistic       : PyLogistic,
+            Glm           => glm            : PyGlm,
+            Robust        => robust         : PyRobust,
         }
     };
 }
@@ -105,7 +113,7 @@ pub(crate) use for_each_transform;
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
         macro_rules! arm {
-            ($($V:ident => $m:ident,)*) => {
+            ($($V:ident => $m:ident : $py:ident,)*) => {
                 match self {
                     $( Self::$V(s) => crate::transform::$m::apply(s, batch), )*
                 }
@@ -263,10 +271,10 @@ pub(crate) fn apply_transforms_named(
 }
 
 fn spec_name(spec: &TransformSpec) -> Option<&str> {
-    // The module column of the table is unused here; we keep it in the
-    // pattern so spec_name reads off the same source of truth.
+    // The module + wrapper columns of the table are unused here; we keep
+    // them in the pattern so spec_name reads off the same source of truth.
     macro_rules! arm {
-        ($($V:ident => $m:ident,)*) => {
+        ($($V:ident => $m:ident : $py:ident,)*) => {
             match spec { $( TransformSpec::$V(s) => s.name.as_deref(), )* }
         };
     }
