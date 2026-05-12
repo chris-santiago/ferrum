@@ -5,11 +5,10 @@ Proxies every Phase 10 derived-data method through each underlying
 ``model: Utf8`` column stamped on each one, so chart builders can
 route ``color="model"`` to overlay one curve per model.
 
-The ``_COMPARED_METHODS`` frozenset is the dispatch surface — when
-adding a new diagnostic to ``ModelSource``, append its method name
-here so the multi-model wrapper picks it up.  P3.4 (D11) will drive
-this list from the per-domain mixins instead of maintaining it by
-hand.
+The ``_COMPARED_METHODS`` frozenset is derived automatically from
+the six per-domain mixins — when you add a public method to any
+mixin it joins the multi-model dispatch surface with no further
+bookkeeping.
 """
 from __future__ import annotations
 
@@ -17,35 +16,41 @@ from typing import Any
 
 import polars as pl
 
+from ._classification import ClassificationCurvesMixin
+from ._clustering import ClusteringMixin
+from ._importance import FeatureImportanceMixin
+from ._predictions import PredictionsMixin
+from ._ranking import RankingMixin
+from ._selection import ModelSelectionMixin
 
-# Tuple of method names that `ComparedModelSource.__getattr__` proxies to
-# the underlying ``ModelSource`` instances. Mirrors every Phase 10
-# derived-data method on ``ModelSource``. When adding a new diagnostic
-# method, append it here so the multi-model dispatch picks it up.
-_COMPARED_METHODS: frozenset[str] = frozenset({
-    "predictions",
-    "probabilities",
-    "roc_curve",
-    "pr_curve",
-    "calibration_curve",
-    "cumulative_gain",
-    "lift_curve",
-    "discrimination_threshold",
-    "confusion_matrix",
-    "importances",
-    "shap_values",
-    "partial_dependence",
-    "learning_curve",
-    "validation_curve",
-    "cv_scores",
-    "alpha_selection",
-    "silhouette",
-    "pca_variance",
-    "embeddings",
-    "intercluster_distance",
-    "rank1d",
-    "rank2d",
-})
+
+_DOMAIN_MIXINS = (
+    PredictionsMixin,
+    ClassificationCurvesMixin,
+    FeatureImportanceMixin,
+    ModelSelectionMixin,
+    ClusteringMixin,
+    RankingMixin,
+)
+
+
+def _collect_compared_methods() -> frozenset[str]:
+    """Collect every public, callable method defined directly on a domain
+    mixin (not inherited from ``object``).  The frozenset becomes the
+    dispatch surface for ``ComparedModelSource.__getattr__`` — adding a
+    new method to any mixin makes it multi-model-aware automatically.
+    """
+    methods: set[str] = set()
+    for cls in _DOMAIN_MIXINS:
+        for name, attr in vars(cls).items():
+            if name.startswith("_"):
+                continue
+            if callable(attr):
+                methods.add(name)
+    return frozenset(methods)
+
+
+_COMPARED_METHODS: frozenset[str] = _collect_compared_methods()
 
 
 class ComparedModelSource:
