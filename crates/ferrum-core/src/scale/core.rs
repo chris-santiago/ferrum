@@ -13,7 +13,6 @@ use super::ticks::{nice_step, nice_ticks};
 /// the last variant has migrated.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Scale {
-    Symlog  { domain: [f64; 2], range: [f64; 2], constant: f64, clamp: bool },
     Ordinal    { domain: Vec<String>, range: Vec<f64>, padding: f64 },
     Threshold  { domain: Vec<f64>, range: Vec<f64> },
     Quantile   { domain: Vec<f64>, range: Vec<f64>, quantiles: Vec<f64> },
@@ -28,14 +27,6 @@ impl Scale {
         let half_band = step.abs() * (1.0 - padding) / 2.0;
         let first_center = r_lo + step / 2.0;
         (first_center, step, half_band)
-    }
-
-    fn symlog_fwd(x: f64, c: f64) -> f64 {
-        x.signum() * (x.abs() / c).ln_1p()
-    }
-
-    fn symlog_inv(y: f64, c: f64) -> f64 {
-        y.signum() * c * (y.abs().exp() - 1.0)
     }
 
     pub(crate) fn compute_quantile_cuts(sorted_sample: &[f64], k: usize) -> Vec<f64> {
@@ -58,22 +49,6 @@ impl Scale {
 
     pub(crate) fn scale_f64(&self, x: f64) -> f64 {
         match self {
-            Scale::Symlog { domain, range, constant, clamp } => {
-                if x.is_nan() { return f64::NAN; }
-                let [d0, d1] = *domain;
-                let [r0, r1] = *range;
-                let f = |v: f64| Self::symlog_fwd(v, *constant);
-                let t = (f(x) - f(d0)) / (f(d1) - f(d0));
-                let mapped = r0 + t * (r1 - r0);
-                if *clamp {
-                    let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
-                    mapped.clamp(lo, hi)
-                } else if x < d0.min(d1) || x > d0.max(d1) {
-                    f64::NAN
-                } else {
-                    mapped
-                }
-            }
             Scale::Ordinal { .. } => f64::NAN,
             Scale::Threshold { domain, range } => {
                 if x.is_nan() { return f64::NAN; }
@@ -88,36 +63,15 @@ impl Scale {
         }
     }
 
-    pub(crate) fn invert_f64(&self, y: f64) -> f64 {
-        match self {
-            Scale::Symlog { domain, range, constant, clamp } => {
-                if y.is_nan() { return f64::NAN; }
-                let [d0, d1] = *domain;
-                let [r0, r1] = *range;
-                let f = |v: f64| Self::symlog_fwd(v, *constant);
-                let t = (y - r0) / (r1 - r0);
-                let lmapped = f(d0) + t * (f(d1) - f(d0));
-                let mapped = Self::symlog_inv(lmapped, *constant);
-                if *clamp {
-                    let (lo, hi) = if d0 <= d1 { (d0, d1) } else { (d1, d0) };
-                    mapped.clamp(lo, hi)
-                } else if y < r0.min(r1) || y > r0.max(r1) {
-                    f64::NAN
-                } else {
-                    mapped
-                }
-            }
-            Scale::Ordinal { .. } => f64::NAN,
-            Scale::Threshold { .. } => f64::NAN,
-            Scale::Quantile { .. } => f64::NAN,
-        }
+    pub(crate) fn invert_f64(&self, _y: f64) -> f64 {
+        // None of the remaining variants (Ordinal/Threshold/Quantile)
+        // support continuous inversion — Ordinal uses invert_band,
+        // Threshold/Quantile use invert_extent.
+        f64::NAN
     }
 
     pub(crate) fn ticks(&self, count: Option<usize>) -> Vec<f64> {
         match self {
-            Scale::Symlog { domain, .. } => {
-                nice_ticks(domain[0], domain[1], count.unwrap_or(10))
-            }
             Scale::Ordinal { range, .. } => range.clone(),
             Scale::Threshold { domain, .. } => domain.clone(),
             Scale::Quantile { domain, quantiles, .. } => {
@@ -136,22 +90,6 @@ impl Scale {
 
     pub(crate) fn nice(self) -> Self {
         match self {
-            Scale::Symlog { domain, range, constant, clamp } => {
-                let step = nice_step(domain[0], domain[1], 10);
-                if !step.is_finite() || step == 0.0 {
-                    return Scale::Symlog { domain, range, constant, clamp };
-                }
-                let lo_min = domain[0].min(domain[1]);
-                let hi_max = domain[0].max(domain[1]);
-                let nice_lo = (lo_min / step).floor() * step;
-                let nice_hi = (hi_max / step).ceil() * step;
-                let new_domain = if domain[0] <= domain[1] {
-                    [nice_lo, nice_hi]
-                } else {
-                    [nice_hi, nice_lo]
-                };
-                Scale::Symlog { domain: new_domain, range, constant, clamp }
-            }
             Scale::Ordinal { domain, range, padding } => {
                 Scale::Ordinal { domain, range, padding }
             }
@@ -343,38 +281,6 @@ mod tests {
     fn test_validate_continuous_pair_rejects_non_finite() {
         assert!(validate_continuous_pair(&[0.0, f64::NAN], &[0.0, 1.0]).is_err());
         assert!(validate_continuous_pair(&[0.0, 10.0], &[f64::INFINITY, 1.0]).is_err());
-    }
-
-    #[test]
-    fn test_symlog_scale_handles_zero() {
-        let s = Scale::Symlog { domain: [-100.0, 100.0], range: [0.0, 1.0], constant: 1.0, clamp: false };
-        let y = s.scale_f64(0.0);
-        assert!(y.is_finite(), "scale(0) returned {y}");
-        assert!((y - 0.5).abs() < 1e-12, "expected 0.5, got {y}");
-    }
-
-    #[test]
-    fn test_symlog_inversion_round_trip_across_zero() {
-        let s = Scale::Symlog { domain: [-1000.0, 1000.0], range: [0.0, 1.0], constant: 1.0, clamp: false };
-        for x in [-1000.0, -100.0, -1.0, 0.0, 1.0, 100.0, 1000.0] {
-            let y = s.scale_f64(x);
-            let back = s.invert_f64(y);
-            assert!((back - x).abs() < 1e-6, "round-trip failed at x={x}: got {back}");
-        }
-    }
-
-    #[test]
-    fn test_symlog_constant_changes_curvature() {
-        // Larger constant → more linear (less compression) → x=50 on [-100,100] maps closer to 0.5
-        // Smaller constant → more log-like → x=50 maps closer to 1.0 (compressed toward endpoint)
-        let s1 = Scale::Symlog { domain: [-100.0, 100.0], range: [0.0, 1.0], constant: 1.0,   clamp: false };
-        let s2 = Scale::Symlog { domain: [-100.0, 100.0], range: [0.0, 1.0], constant: 100.0, clamp: false };
-        let y1 = s1.scale_f64(50.0);
-        let y2 = s2.scale_f64(50.0);
-        assert!(y1 > y2, "expected y1={y1} > y2={y2}: smaller constant compresses more");
-        // Both must be in (0.5, 1.0) since 50 is in the positive half of [-100, 100]
-        assert!(y1 > 0.5 && y1 < 1.0, "y1={y1} out of (0.5,1.0)");
-        assert!(y2 > 0.5 && y2 < 1.0, "y2={y2} out of (0.5,1.0)");
     }
 
     #[test]
