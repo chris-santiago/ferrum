@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
-use super::core::{validate_continuous_pair, Scale};
+use super::core::validate_continuous_pair;
+use super::linear::LinearScaleData;
 use super::ticks::nice_time_interval_ms;
 
 /// Continuous temporal scale backed by Unix epoch milliseconds.
@@ -30,13 +31,14 @@ use super::ticks::nice_time_interval_ms;
 ///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimeScale(Scale, Option<f64>);
+pub struct TimeScale(LinearScaleData, Option<f64>);
 
 impl TimeScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
-    /// `TimeScale` wraps `Scale::Linear` (epoch-ms in domain), matching `TimeScale::new`.
+    /// `TimeScale` reuses [`LinearScaleData`]: the domain-to-range mapping is
+    /// affine over epoch milliseconds, only tick/nice behavior is time-aware.
     pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, clamp: bool, nice: bool) -> Self {
-        let inner = Scale::Linear {
+        let inner = LinearScaleData {
             domain: [domain[0], domain[1]],
             range:  [range[0],  range[1]],
             clamp,
@@ -47,7 +49,7 @@ impl TimeScale {
 
     /// Crate-internal scale call (no PyO3 boundary).
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
-        self.0.scale_f64(x)
+        self.0.scale(x)
     }
 
     /// Crate-internal tick call (uses time-aware nice intervals).
@@ -57,30 +59,19 @@ impl TimeScale {
 
     /// Pixel-range pair `[lo, hi]` of the underlying scale.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
-        match &self.0 {
-            Scale::Linear { range, .. } => *range,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        self.0.range
     }
 
     pub(crate) fn repr_string(&self) -> String {
-        match &self.0 {
-            Scale::Linear { domain, range, clamp } => format!(
-                "TimeScale(domain=[{}, {}], range=[{}, {}], clamp={})",
-                domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
-            ),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        let LinearScaleData { domain, range, clamp } = &self.0;
+        format!(
+            "TimeScale(domain=[{}, {}], range=[{}, {}], clamp={})",
+            domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
+        )
     }
 
     fn time_ticks(&self, count: usize) -> Vec<f64> {
-        let (d0, d1) = match &self.0 {
-            Scale::Linear { domain, .. } => (domain[0], domain[1]),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        };
+        let [d0, d1] = self.0.domain;
         let lo = d0.min(d1);
         let hi = d0.max(d1);
         let span = hi - lo;
@@ -103,11 +94,7 @@ impl TimeScale {
     }
 
     fn time_nice(&self) -> Self {
-        let (d0, d1, range, clamp) = match &self.0 {
-            Scale::Linear { domain, range, clamp } => (domain[0], domain[1], *range, *clamp),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        };
+        let [d0, d1] = self.0.domain;
         let lo = d0.min(d1);
         let hi = d0.max(d1);
         let interval = nice_time_interval_ms(hi - lo, 10);
@@ -117,7 +104,10 @@ impl TimeScale {
         let new_lo = (lo / interval).floor() * interval;
         let new_hi = (hi / interval).ceil() * interval;
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
-        TimeScale(Scale::Linear { domain: new_domain, range, clamp }, self.1)
+        TimeScale(
+            LinearScaleData { domain: new_domain, range: self.0.range, clamp: self.0.clamp },
+            self.1,
+        )
     }
 }
 
@@ -133,7 +123,7 @@ impl TimeScale {
         padding: Option<f64>,
     ) -> PyResult<Self> {
         validate_continuous_pair(&domain, &range)?;
-        let inner = Scale::Linear {
+        let inner = LinearScaleData {
             domain: [domain[0], domain[1]],
             range:  [range[0],  range[1]],
             clamp,
@@ -147,9 +137,9 @@ impl TimeScale {
     }
 
     /// Map an epoch-millisecond value ``x`` to its output range coordinate.
-    fn scale(&self, x: f64) -> f64 { self.0.scale_f64(x) }
+    fn scale(&self, x: f64) -> f64 { self.0.scale(x) }
     /// Invert a range coordinate ``y`` back to an epoch-millisecond value.
-    fn invert(&self, y: f64) -> f64 { self.0.invert_f64(y) }
+    fn invert(&self, y: f64) -> f64 { self.0.invert(y) }
 
     /// Return approximately ``count`` time-aligned tick values within the domain.
     ///
@@ -163,33 +153,15 @@ impl TimeScale {
 
     /// Input domain as ``[t_min, t_max]`` in epoch milliseconds.
     #[getter]
-    fn domain(&self) -> Vec<f64> {
-        match &self.0 {
-            Scale::Linear { domain, .. } => domain.to_vec(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
 
     /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
-    fn range(&self) -> Vec<f64> {
-        match &self.0 {
-            Scale::Linear { range, .. } => range.to_vec(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn range(&self) -> Vec<f64> { self.0.range.to_vec() }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
-    fn clamp(&self) -> bool {
-        match &self.0 {
-            Scale::Linear { clamp, .. } => *clamp,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn clamp(&self) -> bool { self.0.clamp }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
