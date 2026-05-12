@@ -16,20 +16,7 @@ from typing import Any
 import polars as pl
 
 
-def _inject_constant(df: pl.DataFrame, name: str, value: float) -> pl.DataFrame:
-    """Append a column with one non-null row at `value`, rest null.
-
-    Used so a downstream ``mark_rule(y=name)`` (or x=name) draws exactly one
-    reference line. Rust's ``rule.rs`` skips non-finite values, so the
-    N-1 nulls produce no overdraw.
-    """
-    if name in df.columns:
-        return df
-    n = df.height
-    if n == 0:
-        return df.with_columns(pl.Series(name, [], dtype=pl.Float64))
-    series = pl.Series(name, [value] + [None] * (n - 1), dtype=pl.Float64)
-    return df.with_columns(series)
+from ferrum._sentinels import _inject_constant  # noqa: F401  re-export
 
 
 def _inject_cook_outliers(
