@@ -1,33 +1,26 @@
 """ModelSource adapter — wraps a fitted estimator + data, exposes derived data.
 
-Phase 10a: constructor, protocol detection, cache, .predictions(),
-.probabilities(). Other methods land in 10b-10g; `ComparedModelSource`
-in 10h.
+This module is a thin re-export of the implementation that lives in
+:mod:`ferrum._diagnostics.sources`.  ``ModelSource`` composes one
+mixin per phase-10 domain (predictions, classification curves,
+feature importance, model selection, clustering, ranking) over the
+shared :class:`sources._base.BaseSource` infrastructure;
+:class:`ComparedModelSource` (Phase 10h) lives in
+:mod:`sources._compared`.
 
-The implementation is split across :mod:`ferrum._diagnostics.sources`:
-
-- :class:`sources._base.BaseSource` — constructor, capability detection,
-  cache key infrastructure.
-- :class:`sources._predictions.PredictionsMixin` — 10a methods.
-- :class:`sources._classification.ClassificationCurvesMixin` — 10b methods.
-- :class:`sources._importance.FeatureImportanceMixin` — 10d methods.
-- :class:`sources._selection.ModelSelectionMixin` — 10e methods.
-- :class:`sources._clustering.ClusteringMixin` — 10f methods.
-- :class:`sources._ranking.RankingMixin` — 10g methods.
-
-Keeping ``ModelSource`` at this module path preserves
-``from ferrum._diagnostics.source import ModelSource`` for every
-external caller (visualizers, figure-level builders, tests).
+Keeping ``ModelSource`` and ``ComparedModelSource`` importable from
+this module path preserves every existing
+``from ferrum._diagnostics.source import ...`` site without
+churn — the per-domain reorganization is purely internal.
 """
 from __future__ import annotations
 
 from typing import Any
 
-import polars as pl
-
 from .sources._base import BaseSource
 from .sources._classification import ClassificationCurvesMixin
 from .sources._clustering import ClusteringMixin
+from .sources._compared import ComparedModelSource
 from .sources._importance import FeatureImportanceMixin
 from .sources._predictions import PredictionsMixin
 from .sources._ranking import RankingMixin
@@ -99,9 +92,6 @@ class ModelSource(
     >>> source.confusion_matrix(normalize="true")
     """
 
-    # __init__, feature_names, capabilities, _require_capability, and
-    # _cache_key are inherited from BaseSource — see sources/_base.py.
-
     @classmethod
     def compare(
         cls,
@@ -169,121 +159,5 @@ class ModelSource(
         }
         return ComparedModelSource(sources)
 
-# ---- Phase 10h: ComparedModelSource ----
 
-
-# Tuple of method names that `ComparedModelSource.__getattr__` proxies to
-# the underlying ``ModelSource`` instances. Mirrors every Phase 10
-# derived-data method on ``ModelSource``. When adding a new diagnostic
-# method, append it here so the multi-model dispatch picks it up.
-_COMPARED_METHODS: frozenset[str] = frozenset({
-    "predictions",
-    "probabilities",
-    "roc_curve",
-    "pr_curve",
-    "calibration_curve",
-    "cumulative_gain",
-    "lift_curve",
-    "discrimination_threshold",
-    "confusion_matrix",
-    "importances",
-    "shap_values",
-    "partial_dependence",
-    "learning_curve",
-    "validation_curve",
-    "cv_scores",
-    "alpha_selection",
-    "silhouette",
-    "pca_variance",
-    "embeddings",
-    "intercluster_distance",
-    "rank1d",
-    "rank2d",
-})
-
-
-class ComparedModelSource:
-    """Multi-model wrapper exposing the same surface as ``ModelSource``.
-
-    Every derived-data method is proxied through each underlying
-    ``ModelSource`` and the per-model outputs are concatenated with a
-    ``model: Utf8`` column stamped on each frame, so downstream chart
-    builders can route ``color="model"`` to render one curve per model.
-
-    ``_X``, ``_y``, ``_feature_names``, and ``_class_names`` resolve to
-    the first source's values (every wrapped source shares ``X`` / ``y``
-    by construction in ``ModelSource.compare``, so any one will do);
-    accessing ``_model`` raises since there is no single estimator.
-    ``model_names`` reports the configured ordering.
-
-    Parameters
-    ----------
-    sources : dict[str, ModelSource]
-        Mapping from model name (used for the ``model`` column) to the
-        underlying ``ModelSource``. Must contain at least one entry —
-        passing an empty dict raises ``ValueError``.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> cms = fm.ModelSource.compare({"ridge": ridge, "lasso": lasso}, X, y)
-    >>> fm.roc_chart(cms)                  # overlay both curves
-    >>> cms.model_names
-    ['ridge', 'lasso']
-    >>> cms.roc_curve()                    # long-form frame with `model` column
-    """
-
-    __slots__ = ("_sources",)
-
-    def __init__(self, sources: dict[str, ModelSource]):
-        if not sources:
-            raise ValueError("ComparedModelSource requires at least one source.")
-        self._sources = dict(sources)
-
-    @property
-    def model_names(self) -> list[str]:
-        """Ordered list of model display names.
-
-        Returns the keys of the ``sources`` dict supplied at construction time,
-        in insertion order. Each name corresponds to the value written into the
-        ``model`` column on every derived-data DataFrame.
-
-        Returns
-        -------
-        list[str]
-            Model names in the order they were registered.
-        """
-        return list(self._sources.keys())
-
-    def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> pl.DataFrame:
-        frames: list[pl.DataFrame] = []
-        for name, src in self._sources.items():
-            df = getattr(src, method)(*args, **kwargs)
-            frames.append(df.with_columns(pl.lit(name).alias("model")))
-        return pl.concat(frames, how="vertical_relaxed")
-
-    def __getattr__(self, name: str) -> Any:
-        # __slots__ makes attribute access strict; the runtime falls through
-        # to __getattr__ only for unknown names. We route a frozen list of
-        # ModelSource methods through `_dispatch`, expose `_X`/`_y` from the
-        # first wrapped source (chart builders sometimes need them), and
-        # explicitly forbid `_model` access since the answer would be
-        # nonsensical for a multi-model wrapper.
-        if name in _COMPARED_METHODS:
-            method = name
-            return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
-        if name in ("_X", "_y", "_feature_names", "_class_names", "_capabilities"):
-            return getattr(next(iter(self._sources.values())), name)
-        if name == "_model":
-            raise AttributeError(
-                "ComparedModelSource has no single _model. Iterate "
-                "ComparedModelSource._sources.values() to access each "
-                "wrapped ModelSource's model."
-            )
-        raise AttributeError(
-            f"ComparedModelSource has no attribute {name!r}. "
-            f"Methods routed through .compare: {sorted(_COMPARED_METHODS)}"
-        )
-
-    def __repr__(self) -> str:
-        return f"ComparedModelSource({list(self._sources.keys())!r})"
+__all__ = ["ModelSource", "ComparedModelSource"]
