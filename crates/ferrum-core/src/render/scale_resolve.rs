@@ -900,136 +900,20 @@ fn infer_spec_type(
 }
 
 fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
-    use arrow::array::{
-        Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-        UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        TimestampMillisecondArray,
-    };
-    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
-        let min = a.iter().flatten().fold(f64::INFINITY, f64::min);
-        let max = a.iter().flatten().fold(f64::NEG_INFINITY, f64::max);
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
-        let min = a.iter().flatten().fold(f32::INFINITY, f32::min) as f64;
-        let max = a.iter().flatten().fold(f32::NEG_INFINITY, f32::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64;
-        let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        let min = a.iter().flatten().fold(i32::MAX, i32::min) as f64;
-        let max = a.iter().flatten().fold(i32::MIN, i32::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
-        let min = a.iter().flatten().fold(i16::MAX, i16::min) as f64;
-        let max = a.iter().flatten().fold(i16::MIN, i16::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<Int8Array>() {
-        let min = a.iter().flatten().fold(i8::MAX, i8::min) as f64;
-        let max = a.iter().flatten().fold(i8::MIN, i8::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        // Bin transform produces count as UInt64.
-        let min = a.iter().flatten().fold(u64::MAX, u64::min) as f64;
-        let max = a.iter().flatten().fold(u64::MIN, u64::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        let min = a.iter().flatten().fold(u32::MAX, u32::min) as f64;
-        let max = a.iter().flatten().fold(u32::MIN, u32::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-        let min = a.iter().flatten().fold(u16::MAX, u16::min) as f64;
-        let max = a.iter().flatten().fold(u16::MIN, u16::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt8Array>() {
-        let min = a.iter().flatten().fold(u8::MAX, u8::min) as f64;
-        let max = a.iter().flatten().fold(u8::MIN, u8::max) as f64;
-        Ok((min, max))
-    } else if let Some(a) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64;
-        let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64;
-        Ok((min, max))
-    } else {
-        Err(format!("unsupported column dtype: {:?}", col.data_type()))
-    }
+    super::arrow_cast::min_max_f64(col)
 }
 
 /// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
 /// Returns (0.0, 1.0) when no finite values are present.
 fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
-    use arrow::array::{Float64Array, Int64Array, UInt64Array};
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
-        for i in 0..a.len() {
-            if a.is_null(i) { continue; }
-            let v = a.value(i);
-            if v.is_finite() {
-                if v < lo { lo = v; }
-                if v > hi { hi = v; }
-            }
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        for i in 0..a.len() {
-            if a.is_null(i) { continue; }
-            let v = a.value(i) as f64;
-            if v < lo { lo = v; }
-            if v > hi { hi = v; }
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        for i in 0..a.len() {
-            if a.is_null(i) { continue; }
-            let v = a.value(i) as f64;
-            if v < lo { lo = v; }
-            if v > hi { hi = v; }
-        }
-    }
-    if !lo.is_finite() || !hi.is_finite() || lo > hi {
-        return (0.0, 1.0);
-    }
-    (lo, hi)
+    super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
 fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
-    use arrow::array::{BooleanArray, Int64Array, LargeStringArray, StringArray};
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out = Vec::<String>::new();
-    let mut push = |s: String| {
-        if seen.insert(s.clone()) {
-            out.push(s);
-        }
-    };
-    if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-        for v in a.iter().flatten() {
-            push(v.to_string());
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
-        // Polars produces LargeUtf8 (LargeStringArray) for string columns.
-        for v in a.iter().flatten() {
-            push(v.to_string());
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        for v in a.iter().flatten() {
-            push(v.to_string());
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
-        for v in a.iter().flatten() {
-            push(v.to_string());
-        }
-    } else {
-        return Err(RenderError::ScaleResolutionFailed(format!(
-            "can't enumerate distinct values from column dtype {:?}",
-            col.data_type()
-        )));
-    }
-    Ok(out)
+    super::arrow_cast::distinct_values_in_order(batch, field)
 }
 
 #[cfg(test)]

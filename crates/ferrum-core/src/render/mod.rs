@@ -1,6 +1,7 @@
 //! Phase 7 — static renderer. Pure functions: ChartSpec + RecordBatch + ThemeInputs +
 //! Viewport -> deterministic SVG/PNG. See docs/superpowers/specs/2026-05-09-static-renderer-design.md.
 
+pub(crate) mod arrow_cast;
 pub(crate) mod config;
 pub(crate) mod color;
 pub(crate) mod palette;
