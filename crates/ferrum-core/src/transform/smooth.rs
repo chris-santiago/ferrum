@@ -226,10 +226,9 @@ fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn
             let n = xs_fit.len();
             let k = ((spec.bandwidth * n as f64).ceil() as usize).max((spec.degree as usize) + 1);
             let k = k.min(n);
-            let xs_clone = xs_fit.to_vec();
-            let ys_clone = ys_fit.to_vec();
+            let (sxs, sys) = sort_xy(xs_fit, ys_fit);
             let degree = spec.degree;
-            Box::new(move |x: f64| loess_at_point(&xs_clone, &ys_clone, x, k, degree))
+            Box::new(move |x: f64| loess_at_point_sorted(&sxs, &sys, x, k, degree))
         }
     }
 }
@@ -477,8 +476,9 @@ fn loess_fit(
     let k = ((bandwidth * n as f64).ceil() as usize).max((degree as usize) + 1);
     let k = k.min(n);
 
+    let (sxs, sys) = sort_xy(xs, ys);
     let y_fit: Vec<f64> = grid.iter().map(|&x0|
-        loess_at_point(xs, ys, x0, k, degree)
+        loess_at_point_sorted(&sxs, &sys, x0, k, degree)
     ).collect();
 
     let (lo, hi) = match ci {
@@ -489,14 +489,39 @@ fn loess_fit(
     build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
-fn loess_at_point(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) -> f64 {
+/// Sort `(xs, ys)` by `xs` and return the sorted pair.
+fn sort_xy(xs: &[f64], ys: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let mut pairs: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.into_iter().unzip()
+}
+
+/// LOESS evaluation at a single query point. `xs` must be sorted ascending.
+/// Uses binary search + sliding window to find the k nearest neighbors
+/// in O(log n + k) instead of the O(n log n) full-sort approach.
+fn loess_at_point_sorted(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) -> f64 {
     let n = xs.len();
     if n == 0 || k == 0 { return f64::NAN; }
-    let mut order: Vec<(usize, f64)> = (0..n).map(|i| (i, (xs[i] - x0).abs())).collect();
-    order.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let take = order.iter().take(k).copied().collect::<Vec<_>>();
-    if take.len() < (degree as usize) + 1 { return f64::NAN; }
-    let h = take.last().unwrap().1;
+    let k = k.min(n);
+    if k < (degree as usize) + 1 { return f64::NAN; }
+
+    let center = xs.partition_point(|&v| v < x0);
+    let mut best_lo = center.saturating_sub(k).min(n - k);
+    // Slide the window to minimize the max distance to x0
+    while best_lo + k < n {
+        let d_drop = (xs[best_lo] - x0).abs();
+        let d_add = (xs[best_lo + k] - x0).abs();
+        if d_add < d_drop {
+            best_lo += 1;
+        } else {
+            break;
+        }
+    }
+
+    let take: Vec<(usize, f64)> = (best_lo..best_lo + k)
+        .map(|i| (i, (xs[i] - x0).abs()))
+        .collect();
+    let h = take.iter().map(|(_, d)| *d).fold(0.0_f64, f64::max);
 
     if degree == 1 {
         let mut sw = 0.0; let mut swx = 0.0; let mut swxx = 0.0;
@@ -565,8 +590,9 @@ fn loess_bootstrap_ci(
             bx[i] = xs[j];
             by[i] = ys[j];
         }
+        let (sbx, sby) = sort_xy(&bx, &by);
         for (gi, &x0) in grid.iter().enumerate() {
-            let v = loess_at_point(&bx, &by, x0, k, degree);
+            let v = loess_at_point_sorted(&sbx, &sby, x0, k, degree);
             samples[gi].push(v);
         }
     }
