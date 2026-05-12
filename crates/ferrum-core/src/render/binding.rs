@@ -156,156 +156,145 @@ fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_b
     }
 }
 
-fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
-    let mut t = ThemeInputs::default();
-    let d = match d {
-        Some(x) => x,
-        None => return Ok(t),
-    };
-    if let Some(v) = d.get_item("mark_color")? {
-        let s: String = v.extract()?;
-        t.mark_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("background_color")? {
-        let s: String = v.extract()?;
-        t.background_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("point_size")? {
-        t.point_size = v.extract()?;
-    }
-    if let Some(v) = d.get_item("line_stroke_width")? {
-        t.line_stroke_width = v.extract()?;
-    }
-    if let Some(v) = d.get_item("bar_corner_radius")? {
-        t.bar_corner_radius = v.extract()?;
-    }
-    if let Some(v) = d.get_item("area_opacity")? {
-        t.area_opacity = v.extract()?;
-    }
-    if let Some(v) = d.get_item("grid")? {
-        t.grid = v.extract()?;
-    }
-    if let Some(v) = d.get_item("padding")? {
-        t.padding = v.extract()?;
-    }
-
-    // -------- Themes-T1 additions --------
-
-    // Spec uses `background`; binding originally read `background_color`. Accept both.
-    if let Some(v) = d.get_item("background")? {
-        let s: String = v.extract()?;
-        t.background_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
+/// Mirror of the ferrum-spec.md §3.13 Theme keys, derived via serde and
+/// `pyo3_serde::from_py` from the user's theme dict. Every field is
+/// `Option<_>` so missing keys leave the corresponding `ThemeInputs`
+/// field at its default.
+///
+/// Unknown-key handling: `#[serde(deny_unknown_fields)]` rejects typos
+/// with a serde error listing the accepted fields — replaces the prior
+/// hand-maintained `KNOWN_THEME_KEYS` parallel list.
+///
+/// Enum-valued keys (`title_anchor`, `legend_orient`, `legend_direction`)
+/// are typed as `String` here so `apply_theme_overrides` can produce the
+/// user-friendly `"title_anchor must be one of …"` error rather than
+/// serde's `unknown variant` default.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeOverridesSpec {
+    // Background / padding
+    mark_color: Option<String>,
+    background_color: Option<String>,
+    /// Alias for `background_color` (ferrum-spec.md uses `background`).
+    background: Option<String>,
+    padding: Option<f64>,
 
     // Typography
-    if let Some(v) = d.get_item("font_family")? {
-        t.font_family = v.extract::<String>()?;
-    }
-    if let Some(v) = d.get_item("font_weight")? {
-        t.font_weight = v.extract::<String>()?;
-    }
-    if let Some(v) = d.get_item("font_color")? {
-        let s: String = v.extract()?;
-        t.font_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("font_size")? {
-        t.label_font_size = v.extract()?;
-    }
-    if let Some(v) = d.get_item("title_font_family")? {
-        t.title_font_family = v.extract::<String>()?;
-    }
-    if let Some(v) = d.get_item("title_font_size")? {
-        t.title_font_size = v.extract()?;
-    }
-    if let Some(v) = d.get_item("title_font_weight")? {
-        t.title_font_weight = v.extract::<String>()?;
-    }
-    if let Some(v) = d.get_item("title_color")? {
-        let s: String = v.extract()?;
-        t.title_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("title_anchor")? {
-        let s: String = v.extract()?;
+    font_family: Option<String>,
+    font_weight: Option<String>,
+    font_color: Option<String>,
+    /// Routes to `ThemeInputs::label_font_size`, not a `font_size` field.
+    font_size: Option<f64>,
+    title_font_family: Option<String>,
+    title_font_size: Option<f64>,
+    title_font_weight: Option<String>,
+    title_color: Option<String>,
+    title_anchor: Option<String>,
+    title_offset: Option<f64>,
+    label_font_family: Option<String>,
+    label_color: Option<String>,
+
+    // Axes
+    axis_line: Option<bool>,
+    axis_line_color: Option<String>,
+    axis_line_width: Option<f64>,
+    tick_color: Option<String>,
+    tick_size: Option<f64>,
+    tick_width: Option<f64>,
+
+    // Grid
+    grid: Option<bool>,
+    grid_color: Option<String>,
+    grid_width: Option<f64>,
+    grid_dash: Option<Vec<f64>>,
+    grid_opacity: Option<f64>,
+
+    // Marks
+    point_size: Option<f64>,
+    point_opacity: Option<f64>,
+    line_stroke_width: Option<f64>,
+    bar_corner_radius: Option<f64>,
+    area_opacity: Option<f64>,
+    /// Routes to `ThemeInputs::default_opacity`.
+    opacity: Option<f64>,
+
+    // Palette
+    color_scheme: Option<String>,
+
+    // Strip
+    strip_background_color: Option<String>,
+
+    // Legend
+    legend_orient: Option<String>,
+    legend_direction: Option<String>,
+    legend_title_font_size: Option<f64>,
+
+    // Spacing
+    axis_title_padding: Option<f64>,
+    column_padding: Option<f64>,
+    row_padding: Option<f64>,
+}
+
+fn parse_hex(s: &str) -> PyResult<super::color::Color> {
+    super::color::from_hex_str(s).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyResult<()> {
+    if let Some(s) = spec.mark_color { t.mark_color = parse_hex(&s)?; }
+    // `background` is an alias for `background_color`; both populate the
+    // same field. Last-write-wins if a user passes both.
+    if let Some(s) = spec.background_color { t.background_color = parse_hex(&s)?; }
+    if let Some(s) = spec.background { t.background_color = parse_hex(&s)?; }
+    if let Some(v) = spec.padding { t.padding = v; }
+
+    // Typography
+    if let Some(v) = spec.font_family { t.font_family = v; }
+    if let Some(v) = spec.font_weight { t.font_weight = v; }
+    if let Some(s) = spec.font_color { t.font_color = parse_hex(&s)?; }
+    if let Some(v) = spec.font_size { t.label_font_size = v; }
+    if let Some(v) = spec.title_font_family { t.title_font_family = v; }
+    if let Some(v) = spec.title_font_size { t.title_font_size = v; }
+    if let Some(v) = spec.title_font_weight { t.title_font_weight = v; }
+    if let Some(s) = spec.title_color { t.title_color = parse_hex(&s)?; }
+    if let Some(s) = spec.title_anchor {
         t.title_anchor = match s.as_str() {
             "start" => TextAnchor::Start,
             "middle" => TextAnchor::Middle,
             "end" => TextAnchor::End,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "title_anchor must be one of 'start'|'middle'|'end', got '{other}'"
-                )))
-            }
+            other => return Err(PyValueError::new_err(format!(
+                "title_anchor must be one of 'start'|'middle'|'end', got '{other}'"
+            ))),
         };
     }
-    if let Some(v) = d.get_item("title_offset")? {
-        t.title_offset = v.extract()?;
-    }
-    if let Some(v) = d.get_item("label_font_family")? {
-        t.label_font_family = v.extract::<String>()?;
-    }
-    if let Some(v) = d.get_item("label_color")? {
-        let s: String = v.extract()?;
-        t.label_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
+    if let Some(v) = spec.title_offset { t.title_offset = v; }
+    if let Some(v) = spec.label_font_family { t.label_font_family = v; }
+    if let Some(s) = spec.label_color { t.label_color = parse_hex(&s)?; }
 
     // Axes
-    if let Some(v) = d.get_item("axis_line")? {
-        t.axis_line = v.extract()?;
-    }
-    if let Some(v) = d.get_item("axis_line_color")? {
-        let s: String = v.extract()?;
-        t.axis_line_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("axis_line_width")? {
-        t.axis_line_width = v.extract()?;
-    }
-    if let Some(v) = d.get_item("tick_color")? {
-        let s: String = v.extract()?;
-        t.tick_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("tick_size")? {
-        t.tick_size = v.extract()?;
-    }
-    if let Some(v) = d.get_item("tick_width")? {
-        t.tick_width = v.extract()?;
-    }
+    if let Some(v) = spec.axis_line { t.axis_line = v; }
+    if let Some(s) = spec.axis_line_color { t.axis_line_color = parse_hex(&s)?; }
+    if let Some(v) = spec.axis_line_width { t.axis_line_width = v; }
+    if let Some(s) = spec.tick_color { t.tick_color = parse_hex(&s)?; }
+    if let Some(v) = spec.tick_size { t.tick_size = v; }
+    if let Some(v) = spec.tick_width { t.tick_width = v; }
 
     // Grid
-    if let Some(v) = d.get_item("grid_color")? {
-        let s: String = v.extract()?;
-        t.grid_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
-    if let Some(v) = d.get_item("grid_width")? {
-        t.grid_width = v.extract()?;
-    }
-    if let Some(v) = d.get_item("grid_dash")? {
-        let dashes: Vec<f64> = v.extract()?;
-        t.grid_dash = Some(dashes);
-    }
-    if let Some(v) = d.get_item("grid_opacity")? {
-        t.grid_opacity = v.extract()?;
-    }
+    if let Some(v) = spec.grid { t.grid = v; }
+    if let Some(s) = spec.grid_color { t.grid_color = parse_hex(&s)?; }
+    if let Some(v) = spec.grid_width { t.grid_width = v; }
+    if let Some(v) = spec.grid_dash { t.grid_dash = Some(v); }
+    if let Some(v) = spec.grid_opacity { t.grid_opacity = v; }
 
     // Marks
-    if let Some(v) = d.get_item("point_opacity")? {
-        t.point_opacity = v.extract()?;
-    }
-    if let Some(v) = d.get_item("opacity")? {
-        t.default_opacity = v.extract()?;
-    }
+    if let Some(v) = spec.point_size { t.point_size = v; }
+    if let Some(v) = spec.point_opacity { t.point_opacity = v; }
+    if let Some(v) = spec.line_stroke_width { t.line_stroke_width = v; }
+    if let Some(v) = spec.bar_corner_radius { t.bar_corner_radius = v; }
+    if let Some(v) = spec.area_opacity { t.area_opacity = v; }
+    if let Some(v) = spec.opacity { t.default_opacity = v; }
 
     // Palette
-    if let Some(v) = d.get_item("color_scheme")? {
-        let s: String = v.extract()?;
+    if let Some(s) = spec.color_scheme {
         if !super::palette::is_categorical_scheme(&s)
             && !super::palette::is_sequential_scheme(&s)
         {
@@ -320,81 +309,44 @@ fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
     }
 
     // Strip
-    if let Some(v) = d.get_item("strip_background_color")? {
-        let s: String = v.extract()?;
-        t.strip_background_color =
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    }
+    if let Some(s) = spec.strip_background_color { t.strip_background_color = parse_hex(&s)?; }
 
     // Legend
-    if let Some(v) = d.get_item("legend_orient")? {
-        let s: String = v.extract()?;
+    if let Some(s) = spec.legend_orient {
         t.legend_orient = match s.as_str() {
             "left" => LegendOrient::Left,
             "right" => LegendOrient::Right,
             "top" => LegendOrient::Top,
             "bottom" => LegendOrient::Bottom,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "legend_orient must be one of 'left'|'right'|'top'|'bottom', got '{other}'"
-                )))
-            }
+            other => return Err(PyValueError::new_err(format!(
+                "legend_orient must be one of 'left'|'right'|'top'|'bottom', got '{other}'"
+            ))),
         };
     }
-    if let Some(v) = d.get_item("legend_direction")? {
-        let s: String = v.extract()?;
+    if let Some(s) = spec.legend_direction {
         t.legend_direction = Some(match s.as_str() {
             "horizontal" => LegendDirection::Horizontal,
             "vertical" => LegendDirection::Vertical,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "legend_direction must be one of 'horizontal'|'vertical', got '{other}'"
-                )))
-            }
+            other => return Err(PyValueError::new_err(format!(
+                "legend_direction must be one of 'horizontal'|'vertical', got '{other}'"
+            ))),
         });
     }
-    if let Some(v) = d.get_item("legend_title_font_size")? {
-        t.legend_title_font_size = v.extract()?;
-    }
+    if let Some(v) = spec.legend_title_font_size { t.legend_title_font_size = v; }
 
     // Spacing
-    if let Some(v) = d.get_item("axis_title_padding")? {
-        t.axis_title_padding = v.extract()?;
-    }
-    if let Some(v) = d.get_item("column_padding")? {
-        t.column_padding = v.extract()?;
-    }
-    if let Some(v) = d.get_item("row_padding")? {
-        t.row_padding = v.extract()?;
-    }
+    if let Some(v) = spec.axis_title_padding { t.axis_title_padding = v; }
+    if let Some(v) = spec.column_padding { t.column_padding = v; }
+    if let Some(v) = spec.row_padding { t.row_padding = v; }
 
-    // Reject unknown keys to surface typos that previously silently dropped.
-    const KNOWN_THEME_KEYS: &[&str] = &[
-        "background", "background_color", "padding",
-        "font_family", "font_weight", "font_color", "font_size",
-        "title_font_family", "title_font_size", "title_font_weight",
-        "title_color", "title_anchor", "title_offset",
-        "label_font_family", "label_color",
-        "grid", "grid_color", "grid_width", "grid_dash", "grid_opacity",
-        "axis_line", "axis_line_color", "axis_line_width",
-        "tick_color", "tick_size", "tick_width",
-        "mark_color", "point_size", "point_opacity",
-        "line_stroke_width", "bar_corner_radius", "area_opacity", "opacity",
-        "color_scheme",
-        "strip_background_color",
-        "legend_orient", "legend_direction", "legend_title_font_size",
-        "axis_title_padding", "column_padding", "row_padding",
-    ];
-    for key_obj in d.keys() {
-        let key: String = key_obj.extract()?;
-        if !KNOWN_THEME_KEYS.contains(&key.as_str()) {
-            return Err(PyValueError::new_err(format!(
-                "Unknown Theme key: '{key}'. \
-                 See ferrum-spec.md §3.13 for the supported key list."
-            )));
-        }
-    }
+    Ok(())
+}
 
+fn theme_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<ThemeInputs> {
+    let mut t = ThemeInputs::default();
+    let Some(d) = d else { return Ok(t) };
+    let spec: ThemeOverridesSpec = crate::pyo3_serde::from_py(d.as_any(), "theme")?;
+    apply_theme_overrides(&mut t, spec)?;
     Ok(t)
 }
 
@@ -411,7 +363,9 @@ mod theme_dict_tests {
             d.set_item("not_a_real_key", "value").unwrap();
             let err = theme_from_dict(Some(&d)).unwrap_err();
             let msg = err.value(py).to_string();
-            assert!(msg.contains("Unknown Theme key"), "got: {msg}");
+            // serde's `deny_unknown_fields` produces "unknown field `foo`,
+            // expected one of …" — wrapped by pyo3_serde with a "theme:" prefix.
+            assert!(msg.contains("unknown field"), "got: {msg}");
             assert!(msg.contains("not_a_real_key"), "got: {msg}");
         });
     }
