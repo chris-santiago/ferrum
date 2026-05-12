@@ -622,6 +622,41 @@ pub fn compose_svg_grid_py(
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+/// Rasterize a complete SVG string to PNG bytes.
+///
+/// Used by composition types whose ``show_svg()`` produces a complete SVG
+/// but that have no single ``ChartSpec`` + data to pass through
+/// ``render_png``.
+///
+/// Parameters
+/// ----------
+/// svg : str
+///     Complete SVG document string.
+/// scale : float, default 2.0
+///     Pixel-density multiplier applied to the SVG's intrinsic dimensions.
+///     Default is 2.0 (retina).
+///
+/// Returns
+/// -------
+/// bytes
+///     PNG image as raw bytes.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the SVG string cannot be parsed or rasterization fails.
+#[pyfunction]
+#[pyo3(signature = (svg, *, scale = 2.0))]
+pub fn rasterize_svg<'py>(
+    py: Python<'py>,
+    svg: &str,
+    scale: f64,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = super::png::rasterize_svg_auto(svg, scale)
+        .map_err(render_err_to_py)?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
 fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<()> {
     if warnings.is_empty() {
         return Ok(());

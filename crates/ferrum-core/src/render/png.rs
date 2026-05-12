@@ -26,6 +26,23 @@ pub fn svg_string_to_png_bytes(
         .map_err(|e| RenderError::ResvgFailed(format!("encode_png: {e}")))
 }
 
+/// Rasterize a complete SVG string to PNG bytes, deriving pixel dimensions
+/// from the SVG's intrinsic size multiplied by *scale*.
+///
+/// This is the entry point for composition types whose `show_svg()` produces
+/// a complete SVG but that have no single `ChartSpec` + data to pass through
+/// `render_png`.
+pub fn rasterize_svg_auto(svg: &str, scale: f64) -> Result<Vec<u8>, RenderError> {
+    let mut opts = usvg::Options::default();
+    opts.fontdb_mut().load_font_data(INTER_REGULAR.to_vec());
+    let tree = usvg::Tree::from_str(svg, &opts)
+        .map_err(|e| RenderError::ResvgFailed(format!("usvg parse: {e}")))?;
+    let size = tree.size();
+    let w = (size.width() as f64 * scale).round() as u32;
+    let h = (size.height() as f64 * scale).round() as u32;
+    svg_string_to_png_bytes(svg, w, h, scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

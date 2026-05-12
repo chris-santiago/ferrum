@@ -52,17 +52,20 @@ class _ChartLike:
         return {"image/svg+xml": self.show_svg()}
 
     def show_png(self) -> bytes:
-        """Render to PNG bytes.
+        """Render to PNG bytes (2x retina by default).
 
-        Raises
-        ------
-        NotImplementedError
-            PNG output is not yet wired; use ``.save('out.svg')`` instead.
+        Rasterises the SVG produced by ``show_svg()`` through the Rust
+        resvg pipeline -- the same rasteriser ``Chart.show_png()`` uses,
+        with the same 2x default scale.
+
+        Returns
+        -------
+        bytes
+            PNG image as raw bytes suitable for ``IPython.display.Image``
+            or writing directly to disk.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__}.show_png is not yet wired; "
-            "use .save('out.svg') instead."
-        )
+        from ferrum._core import rasterize_svg
+        return bytes(rasterize_svg(self.show_svg(), scale=2.0))
 
     def save(self, path: str, *, format=None, **kwargs) -> None:
         """Save the composition to a file.
@@ -73,21 +76,24 @@ class _ChartLike:
             Destination file path.  The extension determines the format when
             *format* is omitted.
         format : str, optional
-            ``"svg"`` is the only supported value.  Other formats raise
+            ``"svg"`` or ``"png"``.  Other formats raise
             ``NotImplementedError``.
 
         Raises
         ------
         NotImplementedError
-            If *format* is not ``"svg"``.
+            If *format* is not ``"svg"`` or ``"png"``.
         """
         dest = Path(path)
         fmt = format or dest.suffix.lstrip(".")
         if fmt == "svg":
-            dest.write_text(self.show_svg())
+            dest.write_text(self.show_svg(), encoding="utf-8")
+        elif fmt == "png":
+            dest.write_bytes(self.show_png())
         else:
             raise NotImplementedError(
-                f"{type(self).__name__}.save({fmt!r}) is not yet supported"
+                f"format={fmt!r} is not supported for {type(self).__name__}; "
+                "use 'svg' or 'png'."
             )
 
     def share_scale(self, **channels):
