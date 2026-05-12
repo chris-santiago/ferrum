@@ -171,11 +171,25 @@ impl ColorScale {
 }
 
 /// A linear size scale: maps a quantitative field to a radius/diameter in pixels.
+///
+/// The [`min_px`](Self::min_px) / [`max_px`](Self::max_px) endpoints are
+/// stored as `inner`'s pixel range — there's no separate storage. Use the
+/// accessor methods rather than re-reading `inner.pixel_range()` at call
+/// sites so the intent stays readable.
 #[derive(Debug, Clone)]
 pub struct SizeScale {
-    pub inner: ScaleKind, // typically Linear
-    pub min_px: f64,      // default 3.0
-    pub max_px: f64,      // default 30.0
+    /// The underlying linear scale (typically `ScaleKind::Linear`). Its
+    /// pixel range encodes the `[min_px, max_px]` band.
+    pub inner: ScaleKind,
+}
+
+impl SizeScale {
+    /// Pixel diameter for the smallest data value (range lower bound).
+    /// Default behavior: 3.0 px (set by `build_size_scale` from theme).
+    pub fn min_px(&self) -> f64 { self.inner.pixel_range().0 }
+    /// Pixel diameter for the largest data value (range upper bound).
+    /// Default behavior: 30.0 px (set by `build_size_scale` from theme).
+    pub fn max_px(&self) -> f64 { self.inner.pixel_range().1 }
 }
 
 /// An ordinal shape scale: maps a categorical field to one of 6 shapes.
@@ -215,12 +229,24 @@ pub const SHAPE_PALETTE: [ShapeKind; 6] = [
     ShapeKind::TriangleDown,
 ];
 
-/// A linear opacity scale: maps a quantitative field to [min_opacity, max_opacity].
+/// A linear opacity scale: maps a quantitative field to `[min_opacity, max_opacity]`.
+///
+/// The endpoints are stored as `inner`'s pixel range — no separate
+/// storage. Use the accessor methods at call sites for readability.
 #[derive(Debug, Clone)]
 pub struct OpacityScale {
-    pub inner: ScaleKind, // typically Linear
-    pub min_opacity: f64, // default 0.1
-    pub max_opacity: f64, // default 1.0
+    /// The underlying linear scale (typically `ScaleKind::Linear`). Its
+    /// pixel range encodes the `[min_opacity, max_opacity]` band.
+    pub inner: ScaleKind,
+}
+
+impl OpacityScale {
+    /// Opacity for the smallest data value (range lower bound).
+    /// Default behavior: 0.1 (set by `build_opacity_scale` from theme).
+    pub fn min_opacity(&self) -> f64 { self.inner.pixel_range().0 }
+    /// Opacity for the largest data value (range upper bound).
+    /// Default behavior: 1.0 (set by `build_opacity_scale` from theme).
+    pub fn max_opacity(&self) -> f64 { self.inner.pixel_range().1 }
 }
 
 #[derive(Debug)]
@@ -811,11 +837,8 @@ pub fn build_size_scale(
         false,
         true,
     ));
-    Ok(Some(SizeScale {
-        inner,
-        min_px: lo,
-        max_px: hi,
-    }))
+    let _ = (lo, hi); // bounds now read from inner.pixel_range() via accessors
+    Ok(Some(SizeScale { inner }))
 }
 
 /// Build a ShapeScale if `encoding.shape` is present.
@@ -863,11 +886,7 @@ pub fn build_opacity_scale(
         true,
         false,
     ));
-    Ok(Some(OpacityScale {
-        inner,
-        min_opacity: theme.opacity_min,
-        max_opacity: theme.opacity_max,
-    }))
+    Ok(Some(OpacityScale { inner }))
 }
 
 fn infer_spec_type(
@@ -1176,8 +1195,8 @@ mod tests {
         let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &theme)
             .unwrap()
             .unwrap();
-        assert_eq!(scale.min_px, 4.0);
-        assert_eq!(scale.max_px, 36.0);
+        assert_eq!(scale.min_px(), 4.0);
+        assert_eq!(scale.max_px(), 36.0);
     }
 
     #[test]
@@ -1398,7 +1417,7 @@ mod tests {
         let scale = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &theme)
             .unwrap()
             .unwrap();
-        assert_eq!(scale.min_opacity, 0.1);
-        assert_eq!(scale.max_opacity, 1.0);
+        assert_eq!(scale.min_opacity(), 0.1);
+        assert_eq!(scale.max_opacity(), 1.0);
     }
 }
