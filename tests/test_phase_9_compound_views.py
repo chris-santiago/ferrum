@@ -189,6 +189,73 @@ class TestRepeatChart:
         assert spec["column"] == ["b"]
         assert spec["corner"] is False
 
+    def test_no_axes_set_errors(self, iris_like):
+        off = fe.Chart(iris_like).mark_point()
+        with pytest.raises(ValueError, match="at least one of row"):
+            fe.RepeatChart(off)
+
+    def test_corner_without_grid_errors(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column)
+        with pytest.raises(ValueError, match="corner"):
+            fe.RepeatChart(off, column=["a", "b"], corner=True)
+
+    def test_columns_must_be_positive(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column)
+        with pytest.raises(ValueError, match="columns"):
+            fe.RepeatChart(off, column=["a"], columns=0)
+
+    def test_column_only_wrap_1d(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(
+            x=Repeat.column, y="sepal_width"
+        )
+        rc = fe.RepeatChart(
+            off, column=["sepal_length", "sepal_width", "petal_length"]
+        )
+        cells = rc.expand()
+        assert len(cells) == 3
+        for row_field, col_field, chart in cells:
+            assert row_field is None
+            assert chart._encoding["x"].field == col_field
+
+    def test_row_only_wrap_1d(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(
+            x="sepal_length", y=Repeat.row
+        )
+        rc = fe.RepeatChart(off, row=["sepal_width", "petal_length"])
+        cells = rc.expand()
+        assert len(cells) == 2
+        for row_field, col_field, chart in cells:
+            assert col_field is None
+            assert chart._encoding["y"].field == row_field
+
+    def test_column_wrap_dimensions(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        # 5 cells, columns=2 → 3 rows × 2 cols
+        rc = fe.RepeatChart(
+            off, column=["a", "b", "c", "d", "e"], columns=2
+        )
+        n_cols, n_rows = rc._wrap_dimensions(len(rc.expand()))
+        assert (n_cols, n_rows) == (2, 3)
+
+    def test_column_wrap_default_single_row(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        rc = fe.RepeatChart(off, column=["a", "b", "c"])
+        n_cols, n_rows = rc._wrap_dimensions(len(rc.expand()))
+        assert (n_cols, n_rows) == (3, 1)
+
+    def test_row_wrap_default_single_column(self, iris_like):
+        off = fe.Chart(iris_like).mark_point().encode(x="sepal_length", y=Repeat.row)
+        rc = fe.RepeatChart(off, row=["a", "b", "c"])
+        n_cols, n_rows = rc._wrap_dimensions(len(rc.expand()))
+        assert (n_cols, n_rows) == (1, 3)
+
+    def test_template_uses_missing_axis_raises(self, iris_like):
+        # template references Repeat.row, but only column= is set
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y=Repeat.row)
+        rc = fe.RepeatChart(off, column=["sepal_length", "sepal_width"])
+        with pytest.raises(ValueError, match="Repeat.row but row="):
+            rc.expand()
+
 
 class TestClusterMapChart:
     @pytest.fixture
