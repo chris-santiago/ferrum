@@ -80,6 +80,55 @@ def _channel_class_for(name: str):
     return _channel_class_map().get(name)
 
 
+# ---- _pending_stat_mark closure adapters for the legacy density/histogram/
+# smooth marks. These convert the mark-specific deferred-resolution semantics
+# (orientation field-channel choice, bivariate routing, post-desugar remap
+# rewriting) into the generic 3-tuple ``desugar_fn(x_field, y_field, **kwargs)``
+# protocol that ``_resolve_pending`` consumes uniformly. ----
+
+def _resolve_density(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_density()`` call once the encoding is known."""
+    orientation = kwargs.get("orientation", "vertical")
+    field = y_field if orientation == "horizontal" else x_field
+    if field is None:
+        ch = "y" if orientation == "horizontal" else "x"
+        raise ValueError(
+            f"mark_density() requires .encode({ch}=...) to specify the density field"
+        )
+    # Reconstruct a chart_encoding hint so density's bivariate path can route
+    # through desugar_contour(fill=True) when both x AND y are encoded.
+    chart_encoding: dict = {}
+    if x_field is not None:
+        chart_encoding["x"] = x_field
+    if y_field is not None:
+        chart_encoding["y"] = y_field
+    return desugar_density(field, chart_encoding=chart_encoding, **kwargs)
+
+
+def _resolve_histogram(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_histogram()`` call once the encoding is known.
+
+    ``desugar_histogram`` already emits the correctly-oriented remap
+    (vertical: ``{x, x2, y}``; horizontal: ``{x, y, y2}``); pass through
+    unchanged.
+    """
+    orientation = kwargs.get("orientation", "vertical")
+    field = y_field if orientation == "horizontal" else x_field
+    if field is None:
+        ch = "y" if orientation == "horizontal" else "x"
+        raise ValueError(
+            f"mark_histogram() requires .encode({ch}=...) to specify the histogram field"
+        )
+    return desugar_histogram(field, **kwargs)
+
+
+def _resolve_smooth(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_smooth()`` call once the encoding is known."""
+    if x_field is None or y_field is None:
+        raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
+    return desugar_smooth(x_field, y_field, **kwargs)
+
+
 def _expand_layers(c: "Chart") -> tuple[list, list]:
     """Return ``(layer_dicts, top_level_transforms)`` for one side of ``Chart + Chart``.
 
@@ -220,156 +269,70 @@ class Chart:
     def _resolve_pending(self) -> "Chart":
         """Resolve a pending statistical mark desugar once encoding is known.
 
-        Calling ``mark_density/histogram/smooth`` before ``.encode()`` stores a
-        ``_pending_stat_mark`` sentinel.  ``_resolve_pending`` is called at the
-        start of every render/spec-build path to apply the desugar against the
-        now-populated encoding dict.
+        Calling a composite/diagnostic ``mark_*()`` before ``.encode()`` stores
+        a ``_pending_stat_mark`` 3-tuple sentinel
+        ``(kind, kwargs, desugar_fn)``. ``_resolve_pending`` is called at the
+        start of every render/spec-build path to apply ``desugar_fn`` against
+        the now-populated encoding dict.
 
-        Two sentinel shapes are supported:
-        - 2-tuple ``(kind, kwargs)`` — legacy form for density/histogram/smooth,
-          dispatched by ``kind`` below.
-        - 3-tuple ``(kind, kwargs, desugar_fn)`` — generic form used by composite
-          marks (Phase 8b Tasks 23-33). ``desugar_fn(x_field, y_field, **kwargs)``
-          may return a 5-tuple ``("__layered__", transforms, _, _, layers)`` to
-          emit a multi-layer ChartSpec, or the legacy 3-tuple
-          ``(mark, transforms, remap)`` for a single-mark desugar.
+        ``desugar_fn(x_field, y_field, **kwargs)`` may return a 5-tuple
+        ``("__layered__", transforms, _, _, layers)`` to emit a multi-layer
+        ``ChartSpec``, or the legacy 3-tuple ``(mark, transforms, remap)`` for
+        a single-mark desugar. The remap dict supports keys ``x``, ``y``,
+        ``x2``, ``y2`` — the resolver rewrites the corresponding encoding
+        slots to the post-transform field names.
         """
         if self._pending_stat_mark is None:
             return self
-        # 3-tuple form: generic desugar callable.
-        if len(self._pending_stat_mark) == 3:
-            kind, kwargs, desugar_fn = self._pending_stat_mark
-            x_enc = self._encoding.get("x")
-            y_enc = self._encoding.get("y")
-            x_field = (
-                (x_enc.field if isinstance(x_enc, ChannelBase) else x_enc)
-                if x_enc is not None
-                else None
-            )
-            y_field = (
-                (y_enc.field if isinstance(y_enc, ChannelBase) else y_enc)
-                if y_enc is not None
-                else None
-            )
-            # Ribbon needs y2 from the encoding — inject as a kwarg.
-            if kind == "ribbon":
-                y2_enc = self._encoding.get("y2")
-                if y2_enc is not None:
-                    y2_field = (
-                        y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
-                    )
-                    kwargs = {**kwargs, "y2_field": y2_field}
-            result = desugar_fn(x_field, y_field, **kwargs)
-            new = self._clone()
-            new._pending_stat_mark = None
-            if (
-                isinstance(result, tuple)
-                and len(result) >= 1
-                and result[0] == "__layered__"
-            ):
-                # ("__layered__", transforms, _, _, layers)
-                _, transforms, _ignored1, _ignored2, layers_list = result
-                new._transforms = list(self._transforms) + list(transforms or [])
-                new._layers = list(layers_list)
-                new._mark = None  # signals layered mode in to_spec
-                return new
-            # Legacy single-mark 3-tuple: (mark, transforms, remap)
-            mark, transforms, remap = result
-            new._mark = mark
-            new._transforms = list(self._transforms) + list(transforms or [])
-            if remap:
-                from ferrum.encoding import X, X2, Y, Y2  # noqa: F401
-                if "x" in remap:
-                    new._encoding["x"] = X(remap["x"], type="Q")
-                if "y" in remap:
-                    new._encoding["y"] = Y(remap["y"], type="Q")
-                if "x2" in remap:
-                    new._encoding["x2"] = X2(remap["x2"], type="Q")
-            return new
-        # 2-tuple legacy form.
-        kind, kwargs = self._pending_stat_mark
+        kind, kwargs, desugar_fn = self._pending_stat_mark
+        x_enc = self._encoding.get("x")
+        y_enc = self._encoding.get("y")
+        x_field = (
+            (x_enc.field if isinstance(x_enc, ChannelBase) else x_enc)
+            if x_enc is not None
+            else None
+        )
+        y_field = (
+            (y_enc.field if isinstance(y_enc, ChannelBase) else y_enc)
+            if y_enc is not None
+            else None
+        )
+        # Ribbon needs y2 from the encoding — inject as a kwarg.
+        if kind == "ribbon":
+            y2_enc = self._encoding.get("y2")
+            if y2_enc is not None:
+                y2_field = (
+                    y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
+                )
+                kwargs = {**kwargs, "y2_field": y2_field}
+        result = desugar_fn(x_field, y_field, **kwargs)
         new = self._clone()
         new._pending_stat_mark = None
-        if kind == "density":
-            orientation = kwargs.get("orientation", "vertical")
-            field_channel = "y" if orientation == "horizontal" else "x"
-            enc = new._encoding.get(field_channel)
-            if enc is None:
-                raise ValueError(
-                    f"mark_density() requires .encode({field_channel}=...) "
-                    f"to specify the density field"
-                )
-            field = enc.field if isinstance(enc, ChannelBase) else enc
-            result = desugar_density(field, chart_encoding=new._encoding, **kwargs)
-            if (
-                isinstance(result, tuple)
-                and len(result) >= 1
-                and result[0] == "__layered__"
-            ):
-                # Bivariate density routed through desugar_contour(fill=True).
-                _, transforms, _ignored1, _ignored2, layers_list = result
-                new._transforms = list(new._transforms) + list(transforms or [])
-                new._layers = list(layers_list)
-                new._mark = None  # signals layered mode
-            else:
-                mark, transforms, remap = result
-                new._mark = mark
-                new._transforms = list(new._transforms) + transforms
-                from ferrum.encoding import X, Y
-                new._encoding["x"] = X(remap["x"], type="Q")
-                new._encoding["y"] = Y(remap["y"], type="Q")
-        elif kind == "histogram":
-            orientation = kwargs.get("orientation", "vertical")
-            field_channel = "y" if orientation == "horizontal" else "x"
-            enc = new._encoding.get(field_channel)
-            if enc is None:
-                raise ValueError(
-                    f"mark_histogram() requires .encode({field_channel}=...) "
-                    f"to specify the histogram field"
-                )
-            field = enc.field if isinstance(enc, ChannelBase) else enc
-            mark, transforms, remap = desugar_histogram(field, **kwargs)
-            new._mark = mark
-            new._transforms = list(new._transforms) + transforms
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and result[0] == "__layered__"
+        ):
+            # ("__layered__", transforms, _, _, layers)
+            _, transforms, _ignored1, _ignored2, layers_list = result
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = list(layers_list)
+            new._mark = None  # signals layered mode in to_spec
+            return new
+        # Legacy single-mark 3-tuple: (mark, transforms, remap)
+        mark, transforms, remap = result
+        new._mark = mark
+        new._transforms = list(self._transforms) + list(transforms or [])
+        if remap:
             from ferrum.encoding import X, X2, Y, Y2
-            if orientation == "horizontal":
+            if "x" in remap:
+                new._encoding["x"] = X(remap["x"], type="Q")
+            if "y" in remap:
                 new._encoding["y"] = Y(remap["y"], type="Q")
-                new._encoding["y2"] = Y2(remap["y2"], type="Q")
-                new._encoding["x"] = X(remap["x"], type="Q")
-            else:
-                new._encoding["x"] = X(remap["x"], type="Q")
+            if "x2" in remap:
                 new._encoding["x2"] = X2(remap["x2"], type="Q")
-                new._encoding["y"] = Y(remap["y"], type="Q")
-        elif kind == "smooth":
-            x_enc = new._encoding.get("x")
-            y_enc = new._encoding.get("y")
-            if x_enc is None or y_enc is None:
-                raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
-            x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-            y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-            result = desugar_smooth(x_field, y_field, **kwargs)
-            if (
-                isinstance(result, tuple)
-                and len(result) >= 1
-                and result[0] == "__layered__"
-            ):
-                # ("__layered__", transforms, _, _, layers) — 8b ci-band path
-                _, transforms, _ignored1, _ignored2, layers_list = result
-                new._transforms = list(new._transforms) + list(transforms or [])
-                new._layers = list(layers_list)
-                new._mark = None  # signals layered mode
-            else:
-                mark, transforms, remap = result
-                new._mark = mark
-                new._transforms = list(new._transforms) + transforms
-                # Smooth's output schema uses literal "x"/"y" columns; apply the
-                # remap so the encoding references the post-transform schema.
-                if remap:
-                    from ferrum.encoding import X, Y
-                    if "x" in remap:
-                        new._encoding["x"] = X(remap["x"], type="Q")
-                    if "y" in remap:
-                        new._encoding["y"] = Y(remap["y"], type="Q")
+            if "y2" in remap:
+                new._encoding["y2"] = Y2(remap["y2"], type="Q")
         return new
 
     # ---- Marks (primitives) ----
@@ -794,21 +757,24 @@ class Chart:
         >>> fm.Chart(df).mark_density().encode(x="val")
         Chart(mark='area', encoding=['x'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("density", position)
         orientation = kwargs.get("orientation", "vertical")
         # For horizontal orientation, the data field is bound to y rather
         # than x (JointChart's right-marginal pattern).
         field_channel = "y" if orientation == "horizontal" else "x"
         enc = self._encoding.get(field_channel)
         if enc is None:
-            # Encoding not yet set — defer resolution to render time.
-            new = self._clone()
-            new._mark = "area"  # placeholder so _mark is not None
-            new._pending_stat_mark = ("density", dict(kwargs))
-            new._position = position
-            return new
+            # Encoding not yet set — defer resolution to render time via the
+            # generic 3-tuple sentinel + closure adapter.
+            return self._set_composite_mark(
+                "density",
+                _resolve_density,
+                kwargs,
+                placeholder="area",
+                position=position,
+            )
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("density", position)
         field = enc.field if isinstance(enc, ChannelBase) else enc
         result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
         new = self._clone()
@@ -871,20 +837,22 @@ class Chart:
         >>> fm.Chart(df).mark_histogram(bin_count=5).encode(x="val")
         Chart(mark='bar', encoding=['x', 'x2', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("histogram", position)
         orientation = kwargs.get("orientation", "vertical")
         # For horizontal orientation, the binned column is bound to y rather
         # than x (JointChart's right-marginal pattern).
         field_channel = "y" if orientation == "horizontal" else "x"
         enc = self._encoding.get(field_channel)
         if enc is None:
-            new = self._clone()
-            new._mark = "bar"  # placeholder
-            new._pending_stat_mark = ("histogram", dict(kwargs))
-            new._position = position
-            return new
+            return self._set_composite_mark(
+                "histogram",
+                _resolve_histogram,
+                kwargs,
+                placeholder="bar",
+                position=position,
+            )
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("histogram", position)
         field = enc.field if isinstance(enc, ChannelBase) else enc
         mark, transforms, remap = desugar_histogram(field, **kwargs)
         new = self._clone()
@@ -939,17 +907,19 @@ class Chart:
         >>> fm.Chart(df).mark_smooth(method="linear", ci=0.95).encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("smooth", position)
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
-            new = self._clone()
-            new._mark = "line"  # placeholder
-            new._pending_stat_mark = ("smooth", dict(kwargs))
-            new._position = position
-            return new
+            return self._set_composite_mark(
+                "smooth",
+                _resolve_smooth,
+                kwargs,
+                placeholder="line",
+                position=position,
+            )
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility("smooth", position)
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
         result = desugar_smooth(x_field, y_field, **kwargs)
