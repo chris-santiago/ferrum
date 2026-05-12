@@ -245,16 +245,16 @@ def residplot(
     data: Any, *, x: str, y: str,
     lowess: bool = False, order: int = 1,
     robust: bool = False, dropna: bool = True,
+    show_metrics: bool = True, zero_line: bool = True,
     label: Any = None, color: Any = None, theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
     """Residual-diagnostic scatter plot.
 
-    Computes regression residuals via ``Smooth(output="residuals")`` (or
-    ``Robust(output="residuals")`` when ``robust=True``) and plots
-    ``(x, residual)`` with ``mark_point``.  When ``lowess=True``, a
-    ``mark_line`` lowess smoother is layered over the residuals to help
-    diagnose non-linearity.
+    Computes regression residuals and plots ``(x, residual)`` with
+    ``mark_point``. When ``lowess=True``, a ``mark_line`` lowess
+    smoother is layered over the residuals to help diagnose
+    non-linearity.
 
     Parameters
     ----------
@@ -268,13 +268,24 @@ def residplot(
         Overlay a lowess smoother on the residuals using
         ``Smooth(method="loess")``.
     order : int, default 1
-        Polynomial degree of the regression used to compute residuals
-        (forwarded to ``Smooth`` when ``robust=False``).
+        Polynomial degree of the regression used to compute residuals.
     robust : bool, default False
         Use ``Robust`` regression (MM-estimator) instead of OLS when
-        computing residuals.
+        computing residuals. Currently incompatible with
+        ``show_metrics=True`` / ``zero_line=True``; pass both False to
+        keep the legacy transform path, or switch to
+        :func:`residuals_chart` for the model-diagnostics surface.
     dropna : bool, default True
         Reserved for future NaN-dropping logic (no-op today).
+    show_metrics : bool, default True
+        Schwabish SB-followup (2026-05-12): overlay a top-right corner
+        annotation with ``R²`` / ``RMSE`` / ``MAE`` computed from the
+        underlying ``(x, y)`` regression. Bypasses the Smooth-transform
+        pipeline (residuals computed Python-side via ``np.polyfit``).
+        Set ``False`` to keep the legacy transform-based path.
+    zero_line : bool, default True
+        Schwabish SB-followup: draw a dashed horizontal reference at
+        ``y=0`` so deviations are immediately visible.
     label : any, optional
         Reserved for future legend-label support (no-op today).
     color : str or encoding, optional
@@ -287,21 +298,40 @@ def residplot(
     Returns
     -------
     Chart
-        Scatter of residuals (possibly with a lowess layer).
+        Scatter of residuals (possibly with a lowess layer, zero
+        reference line, and corner R²/RMSE/MAE annotation).
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.residplot(df, x="total_bill", y="tip")
 
-    Robust residuals with a lowess overlay:
+    Robust residuals (legacy path; no annotations):
 
-    >>> fm.residplot(df, x="size", y="tip", robust=True, lowess=True)
+    >>> fm.residplot(df, x="size", y="tip", robust=True,
+    ...              show_metrics=False, zero_line=False)
     """
-    # Build the residuals transform — unnamed so it advances the chained
-    # output. Smooth/Robust's residuals output schema is literal [x, residual]
-    # (per design §5.3), so the downstream layers encode against "x" and
-    # "residual" rather than the original column names.
+    del dropna, label  # reserved kwargs — not yet honored
+
+    annotated = show_metrics or zero_line
+    if annotated and robust:
+        raise NotImplementedError(
+            "residplot(show_metrics=True | zero_line=True) currently "
+            "requires robust=False (OLS via np.polyfit). For robust "
+            "residual diagnostics, either pass show_metrics=False, "
+            "zero_line=False (legacy Robust-transform path) or use "
+            "ferrum.residuals_chart() on a fitted estimator."
+        )
+
+    if annotated:
+        return _residplot_annotated(
+            data, x=x, y=y, lowess=lowess, order=order,
+            show_metrics=show_metrics, zero_line=zero_line,
+            color=color, theme=theme, **encode_kwargs,
+        )
+
+    # Legacy transform path — preserved byte-identical for callers that
+    # opt out of annotations or need the Robust-transform residuals.
     if robust:
         resid_transform = Robust(x=x, y=y, output="residuals")
     else:
@@ -310,7 +340,6 @@ def residplot(
             output="residuals",
         )
 
-    # Base scatter against residuals.
     chart = Chart(data).transform(resid_transform).mark_point()
     enc: dict = {"x": "x", "y": "residual"}
     if color is not None:
@@ -318,36 +347,144 @@ def residplot(
     enc.update(encode_kwargs)
     chart = chart.encode(**enc)
 
-    # Optional lowess smoother of the residuals (overlaid as a second layer).
-    # Chart-level chain: [Smooth(residuals), Smooth(loess, name="lowess")].
-    # First Smooth advances FINAL → residuals batch [x, residual].
-    # Second Smooth is named, so it doesn't advance FINAL but publishes its
-    # output ([x, y, ci_lower, ci_upper]) under "lowess". (After Phase 9's
-    # named-on-chained-current semantics fix, the named Smooth runs on the
-    # chained residuals batch, not the original data.)
-    # Layer 0 (point) consumes FINAL = residuals → encoding y="residual" works.
-    # Layer 1 (line) consumes data_source="lowess" → encoding y="y" works.
     if lowess:
         loess_transform = Smooth(
             x="x", y="residual", method="loess",
             ci=None, name="lowess",
         )
-        # Build layered chart manually to control transform placement.
         chart = chart._clone()
         chart._transforms = [resid_transform, loess_transform]
         from ferrum._layer import _Layer
         chart._layers = [
-            _Layer(
-                mark="point",
-                encoding=dict(enc),  # {"x": "x", "y": "residual", maybe color}
-            ),
+            _Layer(mark="point", encoding=dict(enc)),
             _Layer(
                 mark="line",
                 encoding={"x": "x", "y": "y"},
                 data_source="lowess",
             ),
         ]
-        chart._mark = None  # signals layered mode in to_spec
+        chart._mark = None
+
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def _residplot_annotated(
+    data: Any, *, x: str, y: str,
+    lowess: bool, order: int,
+    show_metrics: bool, zero_line: bool,
+    color: Any, theme: Any,
+    **encode_kwargs: Any,
+) -> Chart:
+    """Schwabish-annotated residplot path.
+
+    Bypasses the Smooth/Robust transforms — computes residuals in Python
+    via ``np.polyfit`` so the augmented-DataFrame pattern (same-data
+    overlays for ``_ref_zero`` and ``_metrics_text``) works the same way
+    it does in ``_residuals_chart_from_source``.
+    """
+    import numpy as np
+    import polars as pl
+
+    from ferrum._coerce import to_arrow_table
+    from ferrum._layer import _Layer
+
+    tbl = to_arrow_table(data)
+    if x not in tbl.column_names or y not in tbl.column_names:
+        raise ValueError(
+            f"residplot(x={x!r}, y={y!r}): both columns must exist on the input."
+        )
+    x_arr = np.asarray(tbl.column(x).to_pylist(), dtype=float)
+    y_arr = np.asarray(tbl.column(y).to_pylist(), dtype=float)
+    finite_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[finite_mask]
+    y_arr = y_arr[finite_mask]
+    if x_arr.size < order + 1:
+        raise ValueError(
+            f"residplot needs at least order+1={order + 1} finite points; "
+            f"got {x_arr.size}."
+        )
+
+    coeffs = np.polyfit(x_arr, y_arr, deg=order)
+    y_pred = np.polyval(coeffs, x_arr)
+    resid_arr = y_arr - y_pred
+
+    n = x_arr.size
+    df_cols: dict[str, Any] = {
+        "x": pl.Series("x", x_arr, dtype=pl.Float64),
+        "residual": pl.Series("residual", resid_arr, dtype=pl.Float64),
+    }
+    # Carry over any extra columns the user might encode against
+    # (e.g. ``color="species"``).
+    for col in tbl.column_names:
+        if col in (x, y, "x", "residual"):
+            continue
+        try:
+            df_cols[col] = pl.Series(col, tbl.column(col).to_pylist())
+        except Exception:
+            pass
+
+    df = pl.DataFrame(df_cols)
+
+    if zero_line:
+        zero_col: list = [0.0] + [None] * (n - 1)
+        df = df.with_columns(pl.Series("_ref_zero", zero_col, dtype=pl.Float64))
+
+    if show_metrics:
+        ss_res = float(np.sum(resid_arr ** 2))
+        ss_tot = float(np.sum((y_arr - float(np.mean(y_arr))) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        rmse = float(np.sqrt(np.mean(resid_arr ** 2)))
+        mae = float(np.mean(np.abs(resid_arr)))
+        anchor_idx = int(np.argmax(x_arr))
+        text_col: list = [None] * n
+        text_col[anchor_idx] = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
+        metrics_y_col: list = [None] * n
+        metrics_y_col[anchor_idx] = float(np.max(resid_arr))
+        df = df.with_columns(
+            pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
+            pl.Series("_metrics_y", metrics_y_col, dtype=pl.Float64),
+        )
+
+    chart = Chart(df).mark_point()
+    enc: dict = {"x": "x", "y": "residual"}
+    if color is not None:
+        enc["color"] = color
+    enc.update(encode_kwargs)
+    chart = chart.encode(**enc)
+
+    layers: list = [_Layer(mark="point", encoding=dict(enc))]
+    if zero_line:
+        layers.append(_Layer(
+            mark="rule",
+            encoding={"y": "_ref_zero"},
+            mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+        ))
+    if show_metrics:
+        layers.append(_Layer(
+            mark="text",
+            encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+            mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+        ))
+    if lowess:
+        # Run a fresh loess smoother on the residuals batch. The Smooth
+        # transform is named so its output is available as a separate
+        # data source; the chart's "default" data is the residuals df.
+        chart = chart._clone()
+        chart._transforms = [
+            Smooth(x="x", y="residual", method="loess", ci=None, name="lowess"),
+        ]
+        layers.append(_Layer(
+            mark="line",
+            encoding={"x": "x", "y": "y"},
+            data_source="lowess",
+        ))
+
+    chart = chart._clone()
+    chart._data = df
+    chart._layers = layers
+    chart._mark = None
 
     if theme is not None:
         chart = chart.theme(theme)

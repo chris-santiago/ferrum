@@ -304,8 +304,15 @@ class TestLmplot:
 # ---------------------------------------------------------------------------
 
 class TestResidplot:
-    def test_default(self, reg_data):
-        chart = fe.residplot(reg_data, x="x", y="y")
+    def test_default_legacy_transform_path(self, reg_data):
+        # Schwabish SB-followup (2026-05-12): the default annotated path
+        # computes residuals Python-side via np.polyfit and emits no
+        # smooth transform. Opting out of both annotations restores the
+        # legacy Smooth(output="residuals") transform path.
+        chart = fe.residplot(
+            reg_data, x="x", y="y",
+            show_metrics=False, zero_line=False,
+        )
         d = json.loads(chart.to_spec().to_json())
         smooth_t = next(
             (t for t in d.get("transforms", []) if t.get("type") == "smooth"),
@@ -314,8 +321,13 @@ class TestResidplot:
         assert smooth_t is not None
         assert smooth_t.get("output") == "residuals"
 
-    def test_robust(self, reg_data):
-        chart = fe.residplot(reg_data, x="x", y="y", robust=True)
+    def test_robust_legacy_path(self, reg_data):
+        # Robust path only available without annotations (raises
+        # NotImplementedError when paired with show_metrics/zero_line).
+        chart = fe.residplot(
+            reg_data, x="x", y="y", robust=True,
+            show_metrics=False, zero_line=False,
+        )
         d = json.loads(chart.to_spec().to_json())
         robust_t = next(
             (t for t in d.get("transforms", []) if t.get("type") == "robust"),
@@ -324,15 +336,23 @@ class TestResidplot:
         assert robust_t is not None
         assert robust_t.get("output") == "residuals"
 
+    def test_robust_with_annotations_raises(self, reg_data):
+        import pytest
+        with pytest.raises(NotImplementedError, match="robust=False"):
+            fe.residplot(reg_data, x="x", y="y", robust=True)
+
     def test_lowess_adds_layer(self, reg_data):
         chart = fe.residplot(reg_data, x="x", y="y", lowess=True)
         d = json.loads(chart.to_spec().to_json())
-        # base (point) + lowess (line) → 2+ layers
+        # base (point) + zero_line + metrics + lowess → 4 layers
         assert d.get("layers") is not None
         assert len(d["layers"]) >= 2
 
-    def test_no_lowess_single_layer(self, reg_data):
-        chart = fe.residplot(reg_data, x="x", y="y", lowess=False)
+    def test_no_lowess_legacy_single_layer(self, reg_data):
+        chart = fe.residplot(
+            reg_data, x="x", y="y", lowess=False,
+            show_metrics=False, zero_line=False,
+        )
         d = json.loads(chart.to_spec().to_json())
         assert d.get("layers") is None or len(d.get("layers", [])) <= 1
 
@@ -340,6 +360,18 @@ class TestResidplot:
         chart = fe.residplot(reg_data, x="x", y="y")
         svg = chart.show_svg()
         assert "<svg" in svg
+
+    def test_show_metrics_emits_corner_annotation(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y")
+        svg = chart.show_svg()
+        assert "R²" in svg
+
+    def test_zero_line_renders_dashed_rule(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y")
+        svg = chart.show_svg()
+        # Dashed rule at y=0 ships in stroke #8a8a8a per the
+        # _inject_metrics_corner / _inject_zero_reference idiom.
+        assert "#8a8a8a" in svg
 
 
 # ---------------------------------------------------------------------------
