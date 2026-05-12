@@ -285,4 +285,38 @@ mod tests {
         assert!((n.domain[0] - 1.0).abs() < 1e-9);
         assert!((n.domain[1] - 1000.0).abs() < 1e-9);
     }
+
+    // F17 — Underflow contract:
+    //
+    // For a positive domain, inputs ≤ 0 are out-of-domain. Without clamp,
+    // the scale returns NaN; ScaleKind::to_pixel_f64 maps NaN to None so
+    // mark renderers drop the row, matching Linear's out-of-domain
+    // behavior. With clamp=true, out-of-domain inputs map to the range
+    // endpoint (clamped) without producing NaN.
+    //
+    // This is intentional: callers either pass clamp=true (to render
+    // off-axis points at the boundary) or drop the row. The earlier
+    // F17 finding flagged a potential silent-NaN-leak path; these
+    // tests are the contract pin.
+
+    #[test]
+    fn log_zero_input_returns_nan_unclamped() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!(s.scale(0.0).is_nan(), "x=0 must be NaN on positive log domain");
+    }
+
+    #[test]
+    fn log_negative_input_returns_nan_unclamped() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!(s.scale(-1.0).is_nan(), "x=-1 must be NaN on positive log domain");
+    }
+
+    #[test]
+    fn log_zero_input_clamps_to_range_when_clamp_enabled() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, true);
+        let y = s.scale(0.0);
+        assert!(y.is_finite(), "x=0 with clamp must be finite, got {y}");
+        // 0 < domain[0], so the clamped result is the lower range bound.
+        assert_eq!(y, 0.0);
+    }
 }
