@@ -232,19 +232,34 @@ def reg_data():
 
 
 class TestLmplot:
-    def test_lm_default(self, reg_data):
+    def test_lm_default_layers(self, reg_data):
+        # Schwabish SB-followup (2026-05-12): lmplot defaults to
+        # show_metrics=True which adds a metrics-corner mark_text layer.
+        # 3 (scatter + ribbon + line) → 4 with the corner overlay.
         chart = fe.lmplot(reg_data, x="x", y="y")
         d = json.loads(chart.to_spec().to_json())
-        # scatter + ribbon + line (3 layers when ci is set).
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 4
+
+    def test_lm_no_ci_layers(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", ci=None)
+        d = json.loads(chart.to_spec().to_json())
+        # scatter + line + metrics-corner text → 3 layers.
         assert d.get("layers") is not None
         assert len(d["layers"]) == 3
 
-    def test_lm_no_ci(self, reg_data):
-        chart = fe.lmplot(reg_data, x="x", y="y", ci=None)
+    def test_lm_no_metrics_layers(self, reg_data):
+        # Opting out of the corner restores the pre-Schwabish layer count.
+        chart = fe.lmplot(reg_data, x="x", y="y", show_metrics=False)
         d = json.loads(chart.to_spec().to_json())
-        # scatter + line (no ribbon) → 2 layers.
         assert d.get("layers") is not None
-        assert len(d["layers"]) == 2
+        assert len(d["layers"]) == 3  # scatter + ribbon + line
+
+    def test_lm_show_metrics_emits_text(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y")
+        svg = chart.show_svg()
+        assert "R²" in svg
+        assert "RMSE" in svg
 
     def test_lm_no_scatter(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", scatter=False)
