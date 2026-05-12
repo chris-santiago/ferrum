@@ -20,6 +20,17 @@ from ferrum.marks.statistical import desugar_density, desugar_histogram, desugar
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
+# Channels honored by the renderer at to_spec() time. Other channels in
+# resolved._encoding (Stroke, Fill, Tooltip, etc.) are stored on the spec
+# but ignored at render time; ferrum-spec.md §3.2 promises a one-time
+# UserWarning per channel when this happens.
+_RENDERER_HONORED_CHANNELS = (
+    "x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text",
+)
+# Facet channels have a separate code path through resolved._facet — no
+# silent-drop, no warn.
+_FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
+
 _logger = logging.getLogger(__name__)
 
 
@@ -3980,12 +3991,35 @@ class Chart:
         # Resolve any pending statistical mark desugar (mark called before encode).
         resolved = self._resolve_pending()
         from ferrum import ChartSpec, EncodingSpec
+        from ferrum.repeat import _RepeatPlaceholder
+        # Spec §3.2 (L309-315): channels accepted at the encode() boundary but
+        # not yet rendered must emit a one-time UserWarning per channel so the
+        # caller knows the field will not appear in the SVG. The ferrum._warn
+        # registry dedupes process-wide on (channel_name, kwarg).
+        from ferrum._warn import warn_once
+        for ch_name, ch in resolved._encoding.items():
+            if (
+                ch_name in _RENDERER_HONORED_CHANNELS
+                or ch_name in _FACET_CHANNELS
+            ):
+                continue
+            field = getattr(ch, "field", None)
+            if field is None or isinstance(field, _RepeatPlaceholder):
+                continue
+            warn_once(
+                "encoding",
+                ch_name,
+                message=(
+                    f"Encoding channel {ch_name!r} is accepted but not yet "
+                    "rendered; the SVG will omit it (planned for a future Phase). "
+                    "Stored on EncodingSpec for forward-compatibility."
+                ),
+            )
         # Build full EncodingSpec instances per channel so honored kwargs
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": resolved._mark or "point", "data": "default"}
-        from ferrum.repeat import _RepeatPlaceholder
-        for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
+        for axis in _RENDERER_HONORED_CHANNELS:
             if axis in resolved._encoding:
                 ch = resolved._encoding[axis]
                 if ch.field is None:
