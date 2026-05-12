@@ -251,9 +251,9 @@ pub fn render_svg(
         }
 
         let panel_batch = if let Some(key) = &panel.facet_key {
-            filter_batch_by_facet(&prep.transformed, &key.field, &key.value)?
+            filter_batch_by_facet(prep.final_batch(), &key.field, &key.value)?
         } else {
-            prep.transformed.clone()
+            prep.final_batch().clone()
         };
         if panel_batch.num_rows() == 0 {
             continue;
@@ -376,7 +376,7 @@ pub fn render_svg(
         let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
             let (gs, _) = scale_resolve::resolve_scales_with_outputs(
                 &rendering_spec_for_legend,
-                &prep.transformed,
+                prep.final_batch(),
                 &prep.transform_outputs,
                 (0.0, 1.0),
                 (0.0, 1.0),

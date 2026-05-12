@@ -189,15 +189,11 @@ fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
 
 #[derive(Debug)]
 pub struct PreparedInputs {
-    /// Final output of the chart-level transform pipeline. Equal to
-    /// `transform_outputs[FINAL_OUTPUT_KEY]`. Retained as a field so existing
-    /// consumers (facet filtering, scale resolution, legend) continue to work
-    /// unchanged when no layer sets `data_source`.
-    pub transformed: RecordBatch,
     /// All chart-level transform outputs, keyed by their `name` (when present)
     /// plus `FINAL_OUTPUT_KEY` ("__final__") for the pipeline tail. Layers
     /// with `data_source: Some(name)` look up their input batch here; layers
-    /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY`.
+    /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY` via
+    /// [`PreparedInputs::final_batch`].
     pub transform_outputs: HashMap<String, RecordBatch>,
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
@@ -216,6 +212,17 @@ pub struct PreparedInputs {
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
+}
+
+impl PreparedInputs {
+    /// The final transform-pipeline output — i.e. `transform_outputs[FINAL_OUTPUT_KEY]`.
+    /// Used by the render orchestrator for facet filtering, the colorbar legend
+    /// scale rebuild, and any other consumer that needs the chart-level tail.
+    pub fn final_batch(&self) -> &RecordBatch {
+        self.transform_outputs
+            .get(FINAL_OUTPUT_KEY)
+            .expect("apply_transforms_named publishes FINAL_OUTPUT_KEY unconditionally")
+    }
 }
 
 pub fn prepare_render_inputs(
@@ -400,7 +407,6 @@ pub fn prepare_render_inputs(
     };
 
     Ok(PreparedInputs {
-        transformed,
         transform_outputs,
         provisional_scales,
         axes,
@@ -713,14 +719,14 @@ mod tests {
             "expected only __final__, got keys: {:?}",
             prep.transform_outputs.keys().collect::<Vec<_>>()
         );
-        // prep.transformed is a clone of __final__.
+        // final_batch() returns the FINAL_OUTPUT_KEY entry.
         let final_batch = prep.transform_outputs.get("__final__").unwrap();
-        assert_eq!(prep.transformed.num_rows(), final_batch.num_rows());
-        assert_eq!(prep.transformed.num_columns(), final_batch.num_columns());
+        assert_eq!(prep.final_batch().num_rows(), final_batch.num_rows());
+        assert_eq!(prep.final_batch().num_columns(), final_batch.num_columns());
         assert_eq!(
-            prep.transformed.schema(),
+            prep.final_batch().schema(),
             final_batch.schema(),
-            "transformed and __final__ schemas must match"
+            "final_batch() and __final__ schemas must match"
         );
     }
 
