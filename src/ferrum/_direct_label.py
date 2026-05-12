@@ -13,8 +13,12 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from typing import TYPE_CHECKING
+
 from ferrum.annotations import _resolve_field
-from ferrum.chart import Chart
+
+if TYPE_CHECKING:
+    from ferrum.chart import Chart
 
 
 def _direct_label_endpoint(
@@ -127,15 +131,12 @@ def _direct_label_endpoint(
         pl.Series("_direct_label_text", labels_col, dtype=pl.Utf8),
         pl.Series("_direct_label_y", label_y_col, dtype=pl.Float64),
     )
+    from ferrum.layer import Layer
+
     chart_aug = chart._clone()
     chart_aug._data = augmented
-    # Anchor labels just inside the endpoint (align="right", dx=-4) so
-    # they remain inside the plot extent even without extra horizontal
-    # padding. The y-coord uses the per-series staggered value (above),
-    # so colliding endpoints separate vertically instead of overlapping.
-    annot_layer = (
-        Chart(augmented)
-        .mark_text(align="right", dx=-4)
-        .encode(x=x_col, y="_direct_label_y", text="_direct_label_text")
-    )
-    return chart_aug + annot_layer
+    return chart_aug.layer(Layer(
+        mark="text",
+        encoding={"x": x_col, "y": "_direct_label_y", "text": "_direct_label_text"},
+        mark_kwargs={"align": "right", "dx": -4},
+    ))

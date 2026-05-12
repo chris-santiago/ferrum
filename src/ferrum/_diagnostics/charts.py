@@ -130,17 +130,16 @@ def _overlay_metrics_corner(chart):
     Schwabish SB3 (2026-05-11). Returns the original chart unchanged
     when the columns are absent, so callers can invoke unconditionally.
     """
-    import ferrum
+    from ferrum.layer import Layer
 
     data = chart._data
     if data is None or "_metrics_text" not in data.columns:
         return chart
-    text_layer = (
-        ferrum.Chart(data)
-        .mark_text(align="right", dx=-4, dy=4)
-        .encode(x="y_pred", y="_metrics_y", text="_metrics_text")
-    )
-    return chart + text_layer
+    return chart.layer(Layer(
+        mark="text",
+        encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
+        mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+    ))
 
 
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
@@ -561,12 +560,12 @@ def _pr_chart_from_source(
         )
 
     if baseline_prevalence is not None:
-        baseline_layer = (
-            ferrum.Chart(chart._data)
-            .mark_rule(stroke_dash=[3, 3], stroke="#8a8a8a")
-            .encode(y="_baseline_y")
-        )
-        chart = chart + baseline_layer
+        from ferrum.layer import Layer
+        chart = chart.layer(Layer(
+            mark="rule",
+            encoding={"y": "_baseline_y"},
+            mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+        ))
 
     if annotate_ap:
         chart = _apply_metric_label_explicit(
@@ -893,13 +892,13 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
             })
     df = pl.DataFrame(rows)
 
-    heatmap = ferrum.Chart(df).mark_rect().encode(
+    from ferrum.layer import Layer
+    chart = ferrum.Chart(df).mark_rect().encode(
         x="metric", y="class", color="value",
-    )
-    text = ferrum.Chart(df).mark_text().encode(
-        x="metric", y="class", text="value_fmt",
-    )
-    chart = heatmap + text
+    ).layer(Layer(
+        mark="text",
+        encoding={"x": "metric", "y": "class", "text": "value_fmt"},
+    ))
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -982,19 +981,20 @@ def _importance_chart_from_source(
     )
 
     if show_values:
+        from ferrum.layer import Layer
         if orient == "horizontal":
-            text_layer = (
-                ferrum.Chart(chart._data)
-                .mark_text(align="left", dx=4)
-                .encode(x="importance", y="feature", text="_value_text")
+            text_ly = Layer(
+                mark="text",
+                encoding={"x": "importance", "y": "feature", "text": "_value_text"},
+                mark_kwargs={"align": "left", "dx": 4},
             )
         else:
-            text_layer = (
-                ferrum.Chart(chart._data)
-                .mark_text(baseline="bottom", dy=-4)
-                .encode(x="feature", y="importance", text="_value_text")
+            text_ly = Layer(
+                mark="text",
+                encoding={"x": "feature", "y": "importance", "text": "_value_text"},
+                mark_kwargs={"baseline": "bottom", "dy": -4},
             )
-        chart = chart + text_layer
+        chart = chart.layer(text_ly)
 
     if theme is not None:
         chart = chart.theme(theme)
@@ -1904,14 +1904,14 @@ def _decision_boundary_chart_from_source(
             chart = chart.theme(theme)
         return chart
 
+    from ferrum.layer import Layer
     unified = _build_decision_boundary_unified(source, grid_info)
-    grid_chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
-    overlay = ferrum.Chart(unified).mark_point(
-        stroke="#000000",
-        stroke_width=1.0,
-        size=80.0,
-    ).encode(x="scatter_x", y="scatter_y", color="scatter_z")
-    chart = grid_chart + overlay
+    chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
+    chart = chart.layer(Layer(
+        mark="point",
+        encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
+        mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
+    ))
     if theme is not None:
         chart = chart.theme(theme)
     return chart

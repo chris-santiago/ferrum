@@ -24,18 +24,23 @@ class Layer:
     transforms : list, optional
         Sequence of transform objects applied to this layer's data before
         rendering.  Defaults to an empty list when omitted.
+    mark_kwargs : dict, optional
+        Extra keyword arguments forwarded to the mark renderer (e.g.
+        ``{"dx": 5, "opacity": 0.7}``).
 
     Examples
     --------
     >>> from ferrum.layer import Layer
-    >>> layer = Layer(mark="point", encoding={"x": x_ch, "y": y_ch})
+    >>> layer = Layer(mark="text", encoding={"x": "x", "y": "y"}, mark_kwargs={"dx": 5})
     """
 
-    def __init__(self, data=None, mark=None, *, encoding=None, transforms=None):
+    def __init__(self, data=None, mark=None, *, encoding=None, transforms=None,
+                 mark_kwargs=None):
         self.data = data
         self.mark = mark
         self.encoding = encoding or {}
         self.transforms = transforms or []
+        self.mark_kwargs = mark_kwargs or {}
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""

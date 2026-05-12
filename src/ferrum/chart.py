@@ -3523,6 +3523,45 @@ class Chart:
             new._transforms.extend(channel.to_implicit_transforms())
         return new
 
+    def layer(self, *layers) -> "Chart":
+        """Add one or more ``Layer`` objects to this chart.
+
+        Parameters
+        ----------
+        *layers : Layer
+            Layer objects to append. Each layer inherits the parent chart's
+            data when ``Layer.data`` is ``None``.
+
+        Returns
+        -------
+        Chart
+            This chart with the new layers appended.
+        """
+        from ferrum.layer import Layer as PublicLayer
+
+        resolved = self._resolve_pending()
+        new = resolved._clone()
+        existing, _ = _expand_layers(new)
+        converted = []
+        for ly in layers:
+            if not isinstance(ly, PublicLayer):
+                raise TypeError(
+                    f"layer() expects Layer instances; got {type(ly).__name__}"
+                )
+            if ly.data is not None:
+                raise ValueError(
+                    "Layer(data=...) is not yet supported by Chart.layer(); "
+                    "use the + operator for layers with independent data"
+                )
+            converted.append(_Layer(
+                mark=ly.mark,
+                encoding=dict(ly.encoding),
+                transforms=list(ly.transforms),
+                mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
+            ))
+        new._layers = existing + converted
+        return new
+
     def transform(self, *transforms) -> "Chart":
         """Append one or more data transforms to the chart's pipeline.
 
