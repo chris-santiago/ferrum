@@ -20,6 +20,7 @@ def main(out_dir: Path) -> None:
         model, X2, y, features=(0, 1), scatter=True, random_state=SEED
     ).properties(width=W, height=H)
     (out_dir / "ferrum.svg").write_text(chart.show_svg(), encoding="utf-8")
+    (out_dir / "ferrum.png").write_bytes(chart.show_png())
 
 
 if __name__ == "__main__":

@@ -161,13 +161,17 @@ def run_panel(cfg: RowConfig, panel: str, out_dir: Path) -> dict:
                 "status": "NOT_IMPLEMENTED" if panel == "ferrum" else "RENDER_ERROR",
                 "log": (proc.stdout + "\n" + proc.stderr).strip()}
 
-    # ferrum panel emits SVG, rasterize to PNG; comparators emit PNG directly.
+    # ferrum panels write PNG via show_png() (2× retina, Rust rasteriser).
+    # Composition types (pairplot, clustermap, etc.) only emit SVG today;
+    # fall back to resvg_py with zoom=2 for those.
     if panel == "ferrum":
-        svg_path = out_dir / "ferrum.svg"
         png_path = out_dir / "ferrum.png"
+        if png_path.exists():
+            return {"ok": True, "path": png_path, "status": "OK", "log": ""}
+        svg_path = out_dir / "ferrum.svg"
         if not svg_path.exists():
             return {"ok": False, "path": None, "status": "RENDER_ERROR",
-                    "log": f"ferrum_panel.py did not write {svg_path}"}
+                    "log": f"ferrum_panel.py did not write {svg_path} or {png_path}"}
         rasterize_svg(svg_path, png_path, cfg.width, cfg.height)
         return {"ok": True, "path": png_path, "status": "OK", "log": ""}
 
@@ -179,15 +183,14 @@ def run_panel(cfg: RowConfig, panel: str, out_dir: Path) -> dict:
 
 
 def rasterize_svg(svg_path: Path, png_path: Path, w: int, h: int) -> None:
-    """Rasterize an SVG to PNG. Mirrors `tests/_snapshots.py::rasterize_svg`.
+    """Rasterize an SVG to PNG at 2× zoom (retina).
 
-    The output PNG dimensions come from the SVG's intrinsic width/height —
-    `ferrum.Chart.properties(width=W, height=H)` is expected to emit
-    `<svg width="W" height="H">` so the PNG comes out at W×H.
+    Fallback for composition types whose show_png() is not yet wired.
+    Matches the 2× default in ferrum's Rust RenderConfig.scale.
     """
     import resvg_py
     svg = svg_path.read_text(encoding="utf-8")
-    png_bytes = bytes(resvg_py.svg_to_bytes(svg_string=svg, dpi=96))
+    png_bytes = bytes(resvg_py.svg_to_bytes(svg_string=svg, dpi=96, zoom=2))
     png_path.write_bytes(png_bytes)
     _ = (w, h)  # reserved for future size-verification logging
 

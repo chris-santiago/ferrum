@@ -19,6 +19,7 @@ def main(out_dir: Path) -> None:
     model = LinearRegression().fit(Xtr, ytr)
     chart = ferrum.residuals_chart(model, Xte, yte).properties(width=W, height=H)
     (out_dir / "ferrum.svg").write_text(chart.show_svg(), encoding="utf-8")
+    (out_dir / "ferrum.png").write_bytes(chart.show_png())
 
 
 if __name__ == "__main__":

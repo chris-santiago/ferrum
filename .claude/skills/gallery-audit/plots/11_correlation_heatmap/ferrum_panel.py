@@ -21,6 +21,7 @@ def main(out_dir: Path) -> None:
     pcorr = pl.from_pandas(corr)
     chart = ferrum.heatmap(pcorr).properties(width=W, height=H)
     (out_dir / "ferrum.svg").write_text(chart.show_svg(), encoding="utf-8")
+    (out_dir / "ferrum.png").write_bytes(chart.show_png())
 
 
 if __name__ == "__main__":

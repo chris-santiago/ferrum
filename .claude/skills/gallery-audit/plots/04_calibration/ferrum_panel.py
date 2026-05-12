@@ -19,6 +19,7 @@ def main(out_dir: Path) -> None:
     model = LogisticRegression(max_iter=2000, random_state=SEED).fit(Xtr, ytr)
     chart = ferrum.calibration_chart(model, Xte, yte).properties(width=W, height=H)
     (out_dir / "ferrum.svg").write_text(chart.show_svg(), encoding="utf-8")
+    (out_dir / "ferrum.png").write_bytes(chart.show_png())
 
 
 if __name__ == "__main__":

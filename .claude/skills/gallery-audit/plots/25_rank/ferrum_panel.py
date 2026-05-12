@@ -15,6 +15,7 @@ def main(out_dir: Path) -> None:
     X, y = load_wine(return_X_y=True)
     chart = ferrum.rank_chart(X, X, y).properties(width=W, height=H)
     (out_dir / "ferrum.svg").write_text(chart.show_svg(), encoding="utf-8")
+    (out_dir / "ferrum.png").write_bytes(chart.show_png())
 
 
 if __name__ == "__main__":
