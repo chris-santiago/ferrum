@@ -1,4 +1,5 @@
 """Phase 10e — model selection / CV curves (learning, validation, cv scores, alpha selection)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -31,9 +32,7 @@ class ModelSelectionMixin:
         overlays if a future caller wants them.
         """
         if self._y is None:
-            raise ValueError(
-                "ModelSource.learning_curve() requires y to be provided."
-            )
+            raise ValueError("ModelSource.learning_curve() requires y to be provided.")
         key = self._cache_key(
             "learning_curve",
             cv=cv,
@@ -49,8 +48,12 @@ class ModelSelectionMixin:
         y_np = np.asarray(self._y.to_numpy())
         sizes = train_sizes if train_sizes is not None else np.linspace(0.1, 1.0, 5)
         ts, tr_scores, te_scores = _lc(
-            self._model, X_np, y_np,
-            train_sizes=sizes, cv=cv, scoring=scoring,
+            self._model,
+            X_np,
+            y_np,
+            train_sizes=sizes,
+            cv=cv,
+            scoring=scoring,
             random_state=self._random_state if self._random_state is not None else 0,
             shuffle=True,
         )
@@ -62,15 +65,17 @@ class ModelSelectionMixin:
                 n = len(arr)
                 ci = 1.96 * std / np.sqrt(n) if n > 0 else 0.0
                 for s in arr:
-                    rows.append({
-                        "train_size": int(t),
-                        "split": split_name,
-                        "score": float(s),
-                        "mean_score": mean,
-                        "std_score": std,
-                        "lower": mean - ci,
-                        "upper": mean + ci,
-                    })
+                    rows.append(
+                        {
+                            "train_size": int(t),
+                            "split": split_name,
+                            "score": float(s),
+                            "mean_score": mean,
+                            "std_score": std,
+                            "lower": mean - ci,
+                            "upper": mean + ci,
+                        }
+                    )
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
@@ -90,9 +95,7 @@ class ModelSelectionMixin:
         the wrapped estimator (e.g. ``"alpha"`` for ``Ridge``).
         """
         if self._y is None:
-            raise ValueError(
-                "ModelSource.validation_curve() requires y to be provided."
-            )
+            raise ValueError("ModelSource.validation_curve() requires y to be provided.")
         vals = np.asarray(list(values), dtype=np.float64)
         key = self._cache_key(
             "validation_curve",
@@ -109,9 +112,13 @@ class ModelSelectionMixin:
         X_np = self._X.to_numpy()
         y_np = np.asarray(self._y.to_numpy())
         tr, te = _vc(
-            self._model, X_np, y_np,
-            param_name=param, param_range=vals,
-            cv=cv, scoring=scoring,
+            self._model,
+            X_np,
+            y_np,
+            param_name=param,
+            param_range=vals,
+            cv=cv,
+            scoring=scoring,
         )
         rows: list[dict] = []
         for i, v in enumerate(vals):
@@ -121,15 +128,17 @@ class ModelSelectionMixin:
                 n = len(arr)
                 ci = 1.96 * std / np.sqrt(n) if n > 0 else 0.0
                 for s in arr:
-                    rows.append({
-                        "param_value": float(v),
-                        "split": split_name,
-                        "score": float(s),
-                        "mean_score": mean,
-                        "std_score": std,
-                        "lower": mean - ci,
-                        "upper": mean + ci,
-                    })
+                    rows.append(
+                        {
+                            "param_value": float(v),
+                            "split": split_name,
+                            "score": float(s),
+                            "mean_score": mean,
+                            "std_score": std,
+                            "lower": mean - ci,
+                            "upper": mean + ci,
+                        }
+                    )
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
@@ -147,9 +156,7 @@ class ModelSelectionMixin:
         strip distributions across folds.
         """
         if self._y is None:
-            raise ValueError(
-                "ModelSource.cv_scores() requires y to be provided."
-            )
+            raise ValueError("ModelSource.cv_scores() requires y to be provided.")
         key = self._cache_key(
             "cv_scores",
             cv=cv,
@@ -163,8 +170,12 @@ class ModelSelectionMixin:
         X_np = self._X.to_numpy()
         y_np = np.asarray(self._y.to_numpy())
         result = cross_validate(
-            self._model, X_np, y_np,
-            cv=cv, scoring=scoring, return_train_score=True,
+            self._model,
+            X_np,
+            y_np,
+            cv=cv,
+            scoring=scoring,
+            return_train_score=True,
         )
         rows: list[dict] = []
         for fold, s in enumerate(result["train_score"]):
@@ -190,9 +201,7 @@ class ModelSelectionMixin:
         line, and use ``argmax(mean_score)`` to mark the best alpha.
         """
         if self._y is None:
-            raise ValueError(
-                "ModelSource.alpha_selection() requires y to be provided."
-            )
+            raise ValueError("ModelSource.alpha_selection() requires y to be provided.")
         vals = np.asarray(list(alphas), dtype=np.float64)
         key = self._cache_key(
             "alpha_selection",
@@ -208,23 +217,28 @@ class ModelSelectionMixin:
         X_np = self._X.to_numpy()
         y_np = np.asarray(self._y.to_numpy())
         _, te = _vc(
-            self._model, X_np, y_np,
-            param_name="alpha", param_range=vals,
-            cv=cv, scoring=scoring,
+            self._model,
+            X_np,
+            y_np,
+            param_name="alpha",
+            param_range=vals,
+            cv=cv,
+            scoring=scoring,
         )
         rows: list[dict] = []
         for i, a in enumerate(vals):
             mean = float(te[i].mean())
             std = float(te[i].std())
             for fold_idx, s in enumerate(te[i]):
-                rows.append({
-                    "alpha": float(a),
-                    "fold": int(fold_idx),
-                    "score": float(s),
-                    "mean_score": mean,
-                    "std_score": std,
-                })
+                rows.append(
+                    {
+                        "alpha": float(a),
+                        "fold": int(fold_idx),
+                        "score": float(s),
+                        "mean_score": mean,
+                        "std_score": std,
+                    }
+                )
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
-

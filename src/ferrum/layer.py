@@ -1,4 +1,5 @@
 """Internal layer wrapper used by composite-mark expansion."""
+
 from __future__ import annotations
 
 
@@ -34,8 +35,7 @@ class Layer:
     >>> layer = Layer(mark="text", encoding={"x": "x", "y": "y"}, mark_kwargs={"dx": 5})
     """
 
-    def __init__(self, data=None, mark=None, *, encoding=None, transforms=None,
-                 mark_kwargs=None):
+    def __init__(self, data=None, mark=None, *, encoding=None, transforms=None, mark_kwargs=None):
         self.data = data
         self.mark = mark
         self.encoding = encoding or {}

@@ -5,11 +5,19 @@ Each desugar_<name> returns the unified 4-tuple
 or 5-tuple for layered:
     ("__layered__", transforms, None, None, layers)
 """
+
 from __future__ import annotations
 from typing import Any, Optional
 
 from ferrum import (
-    BoxStats, Contour, Hex, Kde2D, QQ, Raster, Swarm, Violin,
+    BoxStats,
+    Contour,
+    Hex,
+    Kde2D,
+    QQ,
+    Raster,
+    Swarm,
+    Violin,
 )
 from ferrum._layer import _Layer
 
@@ -90,12 +98,14 @@ def desugar_contour(
         Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
-    layers = [_Layer(
-        mark="polygon",
-        encoding={"x": "contour_x", "y": "contour_y"},
-        mark_kwargs={"cmap": cmap, "detail": "level_id"},
-        data_source="contour",
-    )]
+    layers = [
+        _Layer(
+            mark="polygon",
+            encoding={"x": "contour_x", "y": "contour_y"},
+            mark_kwargs={"cmap": cmap, "detail": "level_id"},
+            data_source="contour",
+        )
+    ]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -183,23 +193,33 @@ def desugar_violin(
     if inner is None:
         return ("__layered__", transforms, None, None, [violin_layer])
     if inner == "point":
-        return ("__layered__", transforms, None, None,
-                [violin_layer, _Layer(mark="point", encoding={"x": x_field, "y": y_field})])
+        return (
+            "__layered__",
+            transforms,
+            None,
+            None,
+            [violin_layer, _Layer(mark="point", encoding={"x": x_field, "y": y_field})],
+        )
     if inner == "quartile":
         transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
-            layers.append(_Layer(
-                mark="rule",
-                encoding={"x": x_field, "y": col},
-                mark_kwargs=mk if mk else None,
-                data_source="quart",
-            ))
+            layers.append(
+                _Layer(
+                    mark="rule",
+                    encoding={"x": x_field, "y": col},
+                    mark_kwargs=mk if mk else None,
+                    data_source="quart",
+                )
+            )
         return ("__layered__", transforms, None, None, layers)
     # inner == "box"
     from ferrum.marks.composite import desugar_boxplot
-    _, box_t, _, _, box_layers = desugar_boxplot(x_field, y_field, extent=1.5, outliers=False, size=0.1)
+
+    _, box_t, _, _, box_layers = desugar_boxplot(
+        x_field, y_field, extent=1.5, outliers=False, size=0.1
+    )
     return ("__layered__", [*transforms, *box_t], None, None, [violin_layer, *box_layers])
 
 
@@ -265,22 +285,35 @@ def desugar_qq(
         raise ValueError(
             f"mark_qq distribution must be 'normal', 'uniform', or 'exponential'; got {distribution!r}"
         )
-    transforms = [QQ(field=field, distribution=distribution, dequantize=dequantize,
-                     emit_line=line, name="qq_main")]
-    layers = [_Layer(
-        mark="point",
-        encoding={"x": "theoretical", "y": "sample"},
-        data_source="qq_main",
-    )]
+    transforms = [
+        QQ(
+            field=field,
+            distribution=distribution,
+            dequantize=dequantize,
+            emit_line=line,
+            name="qq_main",
+        )
+    ]
+    layers = [
+        _Layer(
+            mark="point",
+            encoding={"x": "theoretical", "y": "sample"},
+            data_source="qq_main",
+        )
+    ]
     if line:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={
-                "x": "qq_line_x_start", "y": "qq_line_y_start",
-                "x2": "qq_line_x_end", "y2": "qq_line_y_end",
-            },
-            data_source="qq_line",
-        ))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={
+                    "x": "qq_line_x_start",
+                    "y": "qq_line_y_start",
+                    "x2": "qq_line_x_end",
+                    "y2": "qq_line_y_end",
+                },
+                data_source="qq_line",
+            )
+        )
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -363,18 +396,33 @@ def desugar_raster(
         raise ValueError(f"mark_raster aggregate={aggregate!r} requires field=...")
     if blend == "additive":
         from ferrum._warn import warn_once
-        warn_once("mark_raster", "blend_additive",
-                  "mark_raster blend='additive' deferred to Phase 11; using alpha blending")
 
-    transforms = [Raster(x=x_field, y=y_field, aggregate=aggregate, field=field,
-                         resolution=resolution, min_count=min_count, log_scale=log_scale,
-                         name="raster")]
-    layers = [_Layer(
-        mark="image",
-        encoding={"x": x_field, "y": y_field},
-        mark_kwargs={"cmap": cmap},
-        data_source="raster",
-    )]
+        warn_once(
+            "mark_raster",
+            "blend_additive",
+            "mark_raster blend='additive' deferred to Phase 11; using alpha blending",
+        )
+
+    transforms = [
+        Raster(
+            x=x_field,
+            y=y_field,
+            aggregate=aggregate,
+            field=field,
+            resolution=resolution,
+            min_count=min_count,
+            log_scale=log_scale,
+            name="raster",
+        )
+    ]
+    layers = [
+        _Layer(
+            mark="image",
+            encoding={"x": x_field, "y": y_field},
+            mark_kwargs={"cmap": cmap},
+            data_source="raster",
+        )
+    ]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -456,17 +504,24 @@ def desugar_hex(
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     if aggregate not in ("count", "mean", "sum"):
         from ferrum._warn import warn_once
-        warn_once("mark_hex", "aggregate_unsupported",
-                  f"mark_hex aggregate={aggregate!r} deferred; falling back to 'count'")
+
+        warn_once(
+            "mark_hex",
+            "aggregate_unsupported",
+            f"mark_hex aggregate={aggregate!r} deferred; falling back to 'count'",
+        )
         aggregate = "count"
-    transforms = [Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field,
-                      name="hex")]
-    layers = [_Layer(
-        mark="polygon",
-        encoding={"x": "hex_x", "y": "hex_y"},
-        mark_kwargs={"cmap": cmap, "detail": "hex_id"},
-        data_source="hex",
-    )]
+    transforms = [
+        Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
+    ]
+    layers = [
+        _Layer(
+            mark="polygon",
+            encoding={"x": "hex_x", "y": "hex_y"},
+            mark_kwargs={"cmap": cmap, "detail": "hex_id"},
+            data_source="hex",
+        )
+    ]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -544,34 +599,50 @@ def desugar_swarm(
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
     if dodge is not None:
         from ferrum._warn import warn_once
-        warn_once("mark_swarm", "dodge",
-                  "mark_swarm dodge= is not yet supported; rendering single-group swarm")
+
+        warn_once(
+            "mark_swarm",
+            "dodge",
+            "mark_swarm dodge= is not yet supported; rendering single-group swarm",
+        )
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
-    transforms = [Swarm(category=cat, value=val, point_size=float(size), spacing=spacing, side=side,
-                        name="swarm")]
+    transforms = [
+        Swarm(
+            category=cat,
+            value=val,
+            point_size=float(size),
+            spacing=spacing,
+            side=side,
+            name="swarm",
+        )
+    ]
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
         # also emits a `__pos_x_offset__` column (pixel offset on the cross axis)
         # which the renderer's standard position-offset path applies on top of
         # the category band center — same mechanism Dodge uses (Phase 9c).
-        layers = [_Layer(
-            mark="point",
-            encoding={"x": cat, "y": val},
-            data_source="swarm",
-        )]
+        layers = [
+            _Layer(
+                mark="point",
+                encoding={"x": cat, "y": val},
+                data_source="swarm",
+            )
+        ]
     else:
         # TODO(phase-10g+): horizontal-orient swarm still uses the legacy
         # value-axis-data-unit encoding. Fixing it requires either threading
         # orient through the Rust transform so it emits __pos_y_offset__ instead,
         # or adding a column-rename step in the Python pipeline. Lightly tested
         # path; smoke render still produces an SVG.
-        layers = [_Layer(
-            mark="point",
-            encoding={"x": "swarm_x", "y": "swarm_y"},
-            data_source="swarm",
-        )]
+        layers = [
+            _Layer(
+                mark="point",
+                encoding={"x": "swarm_x", "y": "swarm_y"},
+                data_source="swarm",
+            )
+        ]
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -651,7 +722,9 @@ def desugar_function(
     elif parent_chart_x_data is not None and len(parent_chart_x_data) > 0:
         d = (float(np.nanmin(parent_chart_x_data)), float(np.nanmax(parent_chart_x_data)))
     else:
-        raise ValueError("mark_function requires explicit domain when chart has no other data layers")
+        raise ValueError(
+            "mark_function requires explicit domain when chart has no other data layers"
+        )
 
     xs = np.linspace(d[0], d[1], n)
     ys = fn(xs)

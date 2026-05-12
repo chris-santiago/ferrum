@@ -1,4 +1,5 @@
 """Distribution convenience functions (displot)."""
+
 from __future__ import annotations
 from typing import Any
 
@@ -10,17 +11,26 @@ _VALID_MULTIPLE = {"layer", "stack", "fill", "dodge"}
 
 
 def displot(
-    data: Any, *,
-    x: Any = None, y: Any = None,
-    hue: Any = None, col: Any = None, row: Any = None,
+    data: Any,
+    *,
+    x: Any = None,
+    y: Any = None,
+    hue: Any = None,
+    col: Any = None,
+    row: Any = None,
     kind: str = "hist",
-    fill: bool = True, cumulative: bool = False, log_scale: bool = False,
+    fill: bool = True,
+    cumulative: bool = False,
+    log_scale: bool = False,
     stat: str = "count",
     bins: Any = "sturges",
-    bandwidth: Any = "scott", bw_adjust: float = 1.0,
+    bandwidth: Any = "scott",
+    bw_adjust: float = 1.0,
     multiple: str = "layer",
-    kde: bool = False, rug: bool = False,
-    height: float | None = None, aspect: float | None = None,
+    kde: bool = False,
+    rug: bool = False,
+    height: float | None = None,
+    aspect: float | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -114,9 +124,7 @@ def displot(
     >>> fm.displot(df, x="tip", hue="sex", multiple="stack", rug=True)
     """
     if kind not in _VALID_KINDS:
-        raise ValueError(
-            f"displot: kind must be one of {sorted(_VALID_KINDS)}; got {kind!r}"
-        )
+        raise ValueError(f"displot: kind must be one of {sorted(_VALID_KINDS)}; got {kind!r}")
     if multiple not in _VALID_MULTIPLE:
         raise ValueError(
             f"displot: multiple must be one of {sorted(_VALID_MULTIPLE)}; got {multiple!r}"
@@ -146,7 +154,8 @@ def displot(
         # (bin, group) rows preserving the hue column for color encoding +
         # position adjustment.
         hist_kwargs: dict = dict(
-            bin_count=bin_count, cumulative=cumulative,
+            bin_count=bin_count,
+            cumulative=cumulative,
             density=(stat == "density"),
             position=position,
         )
@@ -160,7 +169,9 @@ def displot(
         # overlay regardless of `multiple`), but groupby is required whenever
         # hue is set so each level gets its own curve.
         kde_kwargs: dict = dict(
-            bandwidth=bandwidth, bw_adjust=bw_adjust, fill=fill,
+            bandwidth=bandwidth,
+            bw_adjust=bw_adjust,
+            fill=fill,
             position=position,
         )
         if hue is not None:
@@ -183,9 +194,11 @@ def displot(
 
     # Optional kde/rug layers (only when not already that kind).
     if kde and kind != "kde":
-        kde_layer = Chart(data).mark_density(
-            bandwidth=bandwidth, bw_adjust=bw_adjust, fill=False
-        ).encode(x=x)
+        kde_layer = (
+            Chart(data)
+            .mark_density(bandwidth=bandwidth, bw_adjust=bw_adjust, fill=False)
+            .encode(x=x)
+        )
         chart = chart + kde_layer
     if rug and kind != "rug":
         rug_layer = Chart(data).mark_tick().encode(x=x)
@@ -194,6 +207,7 @@ def displot(
     # log_scale on x.
     if log_scale and x is not None:
         from ferrum.encoding import X
+
         chart = chart.encode(x=X(x, scale={"type": "log"}))
 
     # Faceting.

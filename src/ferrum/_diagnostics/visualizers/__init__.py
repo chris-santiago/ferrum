@@ -25,6 +25,7 @@ Each visualizer wraps a ``ModelSource`` internally — the derived-data
 layer is the same `.predictions() / .roc_curve() / .shap_values()`
 contract that both surfaces consume.
 """
+
 from __future__ import annotations
 
 from .base import FerrumVisualizer

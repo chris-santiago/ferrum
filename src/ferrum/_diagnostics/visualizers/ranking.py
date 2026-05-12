@@ -6,6 +6,7 @@ raw feature matrix X (with optional y for ``Rank1D(algorithm="covariance")``)
 and skip the ``ModelSource`` round-trip. The chart is materialized
 directly from the in-house compute helpers in ``stats.py``.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -100,9 +101,7 @@ class Rank1DVisualizer(FerrumVisualizer):
     def fit(self, X: Any, y: Any = None) -> "Rank1DVisualizer":
         if self.algorithm == "covariance":
             if y is None:
-                raise ValueError(
-                    "Rank1DVisualizer(algorithm='covariance') requires y."
-                )
+                raise ValueError("Rank1DVisualizer(algorithm='covariance') requires y.")
             cols, X_np = _columns_and_array(X)
             y_np = np.asarray(
                 y.to_numpy() if hasattr(y, "to_numpy") else y,
@@ -110,11 +109,13 @@ class Rank1DVisualizer(FerrumVisualizer):
             )
             scores = covariance_rank(X_np, y_np)
             order = np.argsort(-scores, kind="mergesort")
-            df = pl.DataFrame({
-                "feature": [str(cols[int(i)]) for i in order],
-                "score": [float(scores[int(i)]) for i in order],
-                "rank": list(range(1, len(order) + 1)),
-            })
+            df = pl.DataFrame(
+                {
+                    "feature": [str(cols[int(i)]) for i in order],
+                    "score": [float(scores[int(i)]) for i in order],
+                    "rank": list(range(1, len(order) + 1)),
+                }
+            )
         else:
             df = rank1d_compute(X, algorithm=self.algorithm)
         self._metrics["top_feature_score"] = float(df["score"][0])
@@ -194,9 +195,7 @@ class Rank2DVisualizer(FerrumVisualizer):
         df = rank2d_compute(X, algorithm=self.algorithm)
         off_diag = df.filter(pl.col("feature_x") != pl.col("feature_y"))
         if off_diag.height > 0:
-            self._metrics["max_abs_corr"] = float(
-                off_diag["correlation"].abs().max() or 0.0
-            )
+            self._metrics["max_abs_corr"] = float(off_diag["correlation"].abs().max() or 0.0)
         else:
             self._metrics["max_abs_corr"] = 0.0
         self._chart = _rank2d_chart_from_dataframe(
@@ -287,20 +286,18 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         # n_samples / n_features bookkeeping for the repr.
         if isinstance(X, pl.DataFrame):
             n_samples = X.height
-            n_features = len(self.features) if self.features else (
-                X.width - (1 if effective_hue in X.columns else 0)
+            n_features = (
+                len(self.features)
+                if self.features
+                else (X.width - (1 if effective_hue in X.columns else 0))
             )
         elif hasattr(X, "shape"):
             n_samples = int(X.shape[0])
-            n_features = (
-                len(self.features) if self.features else int(X.shape[1])
-            )
+            n_features = len(self.features) if self.features else int(X.shape[1])
         else:
             arr = np.asarray(X)
             n_samples = int(arr.shape[0])
-            n_features = (
-                len(self.features) if self.features else int(arr.shape[1])
-            )
+            n_features = len(self.features) if self.features else int(arr.shape[1])
         self._metrics["n_samples"] = float(n_samples)
         self._metrics["n_features"] = float(n_features)
         self._chart = _parallel_coords_chart_from_dataframe(

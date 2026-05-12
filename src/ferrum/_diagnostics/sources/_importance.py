@@ -1,4 +1,5 @@
 """Phase 10d — feature importance (permutation / native, SHAP, partial dependence)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -50,12 +51,13 @@ class FeatureImportanceMixin:
             imp, std = self._importances_builtin()
         elif method == "permutation":
             imp, std = self._importances_permutation(
-                n_repeats=n_repeats, scoring=scoring, random_state=rs,
+                n_repeats=n_repeats,
+                scoring=scoring,
+                random_state=rs,
             )
         else:
             raise ValueError(
-                f"ModelSource.importances(method={method!r}) — expected "
-                "'builtin' or 'permutation'."
+                f"ModelSource.importances(method={method!r}) — expected 'builtin' or 'permutation'."
             )
 
         order = np.argsort(-np.abs(imp))
@@ -79,13 +81,12 @@ class FeatureImportanceMixin:
         """
         if "feature_importances_" in self._capabilities:
             imp = np.asarray(
-                self._model.feature_importances_, dtype=np.float64,
+                self._model.feature_importances_,
+                dtype=np.float64,
             )
         elif "coef_" in self._capabilities:
             coef = np.asarray(self._model.coef_, dtype=np.float64)
-            imp = (
-                np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
-            )
+            imp = np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
         else:
             raise AttributeError(
                 "ModelSource.importances(method='builtin') requires the "
@@ -108,13 +109,14 @@ class FeatureImportanceMixin:
 
         if self._y is None:
             raise ValueError(
-                "ModelSource.importances(method='permutation') requires "
-                "y to be provided."
+                "ModelSource.importances(method='permutation') requires y to be provided."
             )
         X_np = self._X.to_numpy()
         y_np = np.asarray(self._y.to_numpy())
         result = permutation_importance(
-            self._model, X_np, y_np,
+            self._model,
+            X_np,
+            y_np,
             n_repeats=n_repeats,
             scoring=scoring,
             random_state=random_state if random_state is not None else 0,
@@ -166,11 +168,7 @@ class FeatureImportanceMixin:
         elif "feature_importances_" in self._capabilities:
             explainer = shap.TreeExplainer(self._model)
         else:
-            bg = (
-                background
-                if background is not None
-                else X_np[: min(50, len(X_np))]
-            )
+            bg = background if background is not None else X_np[: min(50, len(X_np))]
             explainer = shap.KernelExplainer(self._model.predict, bg)
 
         sv_raw = explainer.shap_values(X_np)
@@ -239,17 +237,20 @@ class FeatureImportanceMixin:
             return self._cache[key]
         require_sklearn("partial_dependence")
 
-        feature_idxs = [
-            self._feature_names.index(f) if isinstance(f, str) else f
-            for f in features
-        ]
+        feature_idxs = [self._feature_names.index(f) if isinstance(f, str) else f for f in features]
         X_np = self._X.to_numpy()
         rows: list[dict] = []
         for f_idx in feature_idxs:
             fname = str(self._feature_names[f_idx])
-            rows.extend(self._pd_rows_for_feature(
-                f_idx, fname, X_np, grid_resolution=grid_resolution, kind=kind,
-            ))
+            rows.extend(
+                self._pd_rows_for_feature(
+                    f_idx,
+                    fname,
+                    X_np,
+                    grid_resolution=grid_resolution,
+                    kind=kind,
+                )
+            )
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
@@ -285,8 +286,7 @@ class FeatureImportanceMixin:
         if kind in ("average", "both"):
             avg = np.asarray(r["average"])[0]
             rows.extend(
-                {"feature": fname, "feature_value": float(v),
-                 "pd_value": float(p), "sample_id": -1}
+                {"feature": fname, "feature_value": float(v), "pd_value": float(p), "sample_id": -1}
                 for v, p in zip(grid, avg)
             )
         if kind in ("individual", "both"):
@@ -294,8 +294,12 @@ class FeatureImportanceMixin:
             n_samples, _ = individual.shape
             for s in range(n_samples):
                 rows.extend(
-                    {"feature": fname, "feature_value": float(v),
-                     "pd_value": float(p), "sample_id": int(s)}
+                    {
+                        "feature": fname,
+                        "feature_value": float(v),
+                        "pd_value": float(p),
+                        "sample_id": int(s),
+                    }
                     for v, p in zip(grid, individual[s])
                 )
         return rows
@@ -319,9 +323,7 @@ def _split_shap_by_class(sv_raw: Any, model: Any) -> list[np.ndarray]:
     through the positive-class slice as a single-element list for schema
     uniformity.
     """
-    is_binary = (
-        hasattr(model, "classes_") and len(model.classes_) == 2
-    )
+    is_binary = hasattr(model, "classes_") and len(model.classes_) == 2
     if isinstance(sv_raw, list):
         if is_binary:
             return [np.asarray(sv_raw[1], dtype=np.float64)]

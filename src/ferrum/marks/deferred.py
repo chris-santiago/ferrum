@@ -4,6 +4,7 @@ removed `segment` from PHASE_9_PLUS_MARKS (now in 9d). The remaining four marks
 function and stay deferred consistent with the no-defer rule applying to spec
 contracts ferrum currently advertises (see ferrum-spec.md §3.3 — these aren't
 referenced by any §3.14 figure-level signature)."""
+
 from __future__ import annotations
 
 # Phase 8b marks (Sub-batches E + F landed; list now empty).
@@ -11,9 +12,14 @@ PHASE_8B_MARKS: frozenset[str] = frozenset()
 
 # Marks deferred to Phase 11+ (arc, image, geoshape, label).
 # Phase 9 closed; these four marks remain unscheduled.
-PHASE_9_PLUS_MARKS = frozenset([
-    "arc", "image", "geoshape", "label",
-])
+PHASE_9_PLUS_MARKS = frozenset(
+    [
+        "arc",
+        "image",
+        "geoshape",
+        "label",
+    ]
+)
 
 
 def deferred_mark_error(mark_name: str) -> NotImplementedError:

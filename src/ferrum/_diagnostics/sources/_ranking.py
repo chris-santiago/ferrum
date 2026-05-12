@@ -1,11 +1,11 @@
 """Phase 10g — feature ranking (rank1d, rank2d)."""
+
 from __future__ import annotations
 
 from typing import Any
 
 import numpy as np
 import polars as pl
-
 
 
 class RankingMixin:
@@ -35,18 +35,18 @@ class RankingMixin:
             return self._cache[key]
         if algorithm == "covariance":
             if self._y is None:
-                raise ValueError(
-                    "ModelSource.rank1d(algorithm='covariance') requires y."
-                )
+                raise ValueError("ModelSource.rank1d(algorithm='covariance') requires y.")
             X_np = np.asarray(self._X.to_numpy(), dtype=np.float64)
             y_np = np.asarray(self._y.to_numpy(), dtype=np.float64)
             scores = covariance_rank(X_np, y_np)
             order = np.argsort(-scores, kind="mergesort")
-            df = pl.DataFrame({
-                "feature": [str(self._feature_names[int(i)]) for i in order],
-                "score": [float(scores[int(i)]) for i in order],
-                "rank": list(range(1, len(order) + 1)),
-            })
+            df = pl.DataFrame(
+                {
+                    "feature": [str(self._feature_names[int(i)]) for i in order],
+                    "score": [float(scores[int(i)]) for i in order],
+                    "rank": list(range(1, len(order) + 1)),
+                }
+            )
         else:
             df = rank1d_compute(self._X, algorithm=algorithm)
         self._cache[key] = df
@@ -71,4 +71,3 @@ class RankingMixin:
         df = rank2d_compute(self._X, algorithm=algorithm)
         self._cache[key] = df
         return df
-

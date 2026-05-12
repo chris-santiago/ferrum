@@ -1,6 +1,7 @@
 """10a regression visualizers — ResidualsVisualizer, PredictionErrorVisualizer,
 CooksDistanceVisualizer.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -59,12 +60,14 @@ class ResidualsVisualizer(FerrumVisualizer):
     def _materialize(self) -> None:
         df = self._source.predictions()
         resid = df["residual"].to_numpy()
-        self._metrics["rmse"] = float(np.sqrt((resid ** 2).mean()))
+        self._metrics["rmse"] = float(np.sqrt((resid**2).mean()))
         self._metrics["mae"] = float(np.abs(resid).mean())
 
     def _build_chart(self) -> Any:
         return _residuals_chart_from_source(
-            self._source, kind=self.kind, theme=self.theme,
+            self._source,
+            kind=self.kind,
+            theme=self.theme,
         )
 
     def score(self, X: Any, y: Any) -> float:
@@ -121,7 +124,7 @@ class PredictionErrorVisualizer(FerrumVisualizer):
     def _materialize(self) -> None:
         df = self._source.predictions()
         resid = df["residual"].to_numpy()
-        self._metrics["rmse"] = float(np.sqrt((resid ** 2).mean()))
+        self._metrics["rmse"] = float(np.sqrt((resid**2).mean()))
 
     def _build_chart(self) -> Any:
         return _prediction_error_chart_from_source(

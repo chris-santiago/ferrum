@@ -1,4 +1,5 @@
 """Appearance encoding channels (Color, Fill, Stroke, Opacity, Size, Shape, Angle)."""
+
 from __future__ import annotations
 
 from ferrum.encoding.base import ChannelBase

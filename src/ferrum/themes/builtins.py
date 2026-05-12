@@ -41,6 +41,7 @@ Eight pre-built ``Theme`` instances are exported here and re-exported at
 ``solarized_dark``
     Dark teal background (``#002b36``), warm-light text, Set2 palette.
 """
+
 from __future__ import annotations
 
 from ferrum.themes import Theme

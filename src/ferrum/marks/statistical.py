@@ -1,5 +1,6 @@
 """Statistical mark desugaring — convert mark_density/histogram/smooth kwargs
 into (mark, transforms, encoding_remap) tuples consumed by Chart."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -118,12 +119,17 @@ def desugar_density(
         if x_enc is not None and y_enc is not None:
             from ferrum.encoding.base import ChannelBase
             from ferrum.marks.heavy_stat import desugar_contour
+
             x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
             y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
             return desugar_contour(
-                x_field, y_field, fill=True,
-                bandwidth=bandwidth, thresholds=thresholds,
-                smooth=smooth, cmap=cmap,
+                x_field,
+                y_field,
+                fill=True,
+                bandwidth=bandwidth,
+                thresholds=thresholds,
+                smooth=smooth,
+                cmap=cmap,
             )
 
     del kernel  # informational; underlying Kde uses gaussian only
@@ -147,11 +153,13 @@ def desugar_density(
 
     if orientation not in ("vertical", "horizontal"):
         raise ValueError(
-            f"desugar_density: orientation must be 'vertical' or "
-            f"'horizontal'; got {orientation!r}"
+            f"desugar_density: orientation must be 'vertical' or 'horizontal'; got {orientation!r}"
         )
     kde_kwargs: dict = dict(
-        bandwidth=bandwidth, n=n, extent=extent, cumulative=cumulative,
+        bandwidth=bandwidth,
+        n=n,
+        extent=extent,
+        cumulative=cumulative,
     )
     if groupby is not None:
         kde_kwargs["groupby"] = groupby
@@ -252,8 +260,9 @@ def desugar_histogram(
             f"desugar_histogram: orientation must be 'vertical' or "
             f"'horizontal'; got {orientation!r}"
         )
-    bin_kwargs: dict = dict(bin_count=bin_count, bin_width=bin_width, extent=extent,
-                            nice=nice, cumulative=cumulative)
+    bin_kwargs: dict = dict(
+        bin_count=bin_count, bin_width=bin_width, extent=extent, nice=nice, cumulative=cumulative
+    )
     if groupby is not None:
         bin_kwargs["groupby"] = groupby
     transforms = [Bin(field, **bin_kwargs)]
@@ -351,8 +360,7 @@ def desugar_smooth(
         # 8a-compatible single-line path: keep the legacy 3-tuple shape so the
         # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator when
         # explicitly set; otherwise omit (so existing goldens stay identical).
-        smooth_kwargs: dict = dict(method=method, ci=None,
-                                    bandwidth=bandwidth, degree=degree, n=n)
+        smooth_kwargs: dict = dict(method=method, ci=None, bandwidth=bandwidth, degree=degree, n=n)
         if x_bins is not None:
             smooth_kwargs["x_bins"] = x_bins
         if x_estimator is not None:
@@ -362,8 +370,9 @@ def desugar_smooth(
         return ("line", transforms, encoding_remap)
 
     # Layered path: ci band and/or metrics-corner overlay.
-    smooth_kwargs = dict(method=method, ci=ci, bandwidth=bandwidth,
-                          degree=degree, n=n, seed=seed, name="smooth")
+    smooth_kwargs = dict(
+        method=method, ci=ci, bandwidth=bandwidth, degree=degree, n=n, seed=seed, name="smooth"
+    )
     if x_bins is not None:
         smooth_kwargs["x_bins"] = x_bins
     if x_estimator is not None:
@@ -377,22 +386,28 @@ def desugar_smooth(
     transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
     layers = []
     if ci is not None:
-        layers.append(_Layer(
-            mark="ribbon",
-            encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
-            mark_kwargs={"opacity": 0.3},
+        layers.append(
+            _Layer(
+                mark="ribbon",
+                encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
+                mark_kwargs={"opacity": 0.3},
+                data_source="smooth",
+            )
+        )
+    layers.append(
+        _Layer(
+            mark="line",
+            encoding={"x": "x", "y": "y"},
             data_source="smooth",
-        ))
-    layers.append(_Layer(
-        mark="line",
-        encoding={"x": "x", "y": "y"},
-        data_source="smooth",
-    ))
+        )
+    )
     if show_metrics:
-        layers.append(_Layer(
-            mark="text",
-            encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
-            mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-            data_source="smooth",
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+                mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+                data_source="smooth",
+            )
+        )
     return ("__layered__", transforms, None, None, layers)

@@ -16,6 +16,7 @@ clustermap: Clustered heatmap with row/column dendrograms.
 lmplot    : Linear (and non-linear) regression scatter overlay.
 residplot : Residual-diagnostic scatter plot.
 """
+
 from ferrum.figure.distribution import displot
 from ferrum.figure.categorical import catplot
 from ferrum.figure.regression import lmplot, residplot
@@ -23,6 +24,12 @@ from ferrum.figure.matrix import pairplot, heatmap, clustermap
 from ferrum.figure.joint import jointplot
 
 __all__ = [
-    "displot", "catplot", "lmplot", "residplot",
-    "pairplot", "heatmap", "clustermap", "jointplot",
+    "displot",
+    "catplot",
+    "lmplot",
+    "residplot",
+    "pairplot",
+    "heatmap",
+    "clustermap",
+    "jointplot",
 ]

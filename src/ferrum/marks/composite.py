@@ -5,6 +5,7 @@ Each desugar_<name> returns a 5-tuple:
 
 Where `layers` is a list of ``ferrum._layer._Layer`` instances.
 """
+
 from __future__ import annotations
 from typing import Any, Optional
 
@@ -115,10 +116,12 @@ def desugar_boxplot(
 
     layers = [
         _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker"), data_source="box"),
-        _Layer(mark="rect", encoding=enc("q1", "q3"),
-               mark_kwargs={"width": band}, data_source="box"),
-        _Layer(mark="tick", encoding=enc("median"),
-               mark_kwargs={"band_size": band}, data_source="box"),
+        _Layer(
+            mark="rect", encoding=enc("q1", "q3"), mark_kwargs={"width": band}, data_source="box"
+        ),
+        _Layer(
+            mark="tick", encoding=enc("median"), mark_kwargs={"band_size": band}, data_source="box"
+        ),
     ]
     if outliers:
         layers.append(_Layer(mark="point", encoding=enc(val), data_source="outliers"))
@@ -196,12 +199,22 @@ def desugar_errorbar(
         ),
     ]
     if ticks:
-        layers.extend([
-            _Layer(mark="tick", encoding={"x": x_field, "y": "lower"},
-                   mark_kwargs={"band_size": 6}, data_source="err"),
-            _Layer(mark="tick", encoding={"x": x_field, "y": "upper"},
-                   mark_kwargs={"band_size": 6}, data_source="err"),
-        ])
+        layers.extend(
+            [
+                _Layer(
+                    mark="tick",
+                    encoding={"x": x_field, "y": "lower"},
+                    mark_kwargs={"band_size": 6},
+                    data_source="err",
+                ),
+                _Layer(
+                    mark="tick",
+                    encoding={"x": x_field, "y": "upper"},
+                    mark_kwargs={"band_size": 6},
+                    data_source="err",
+                ),
+            ]
+        )
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -274,10 +287,12 @@ def desugar_errorband(
         ),
     ]
     if borders:
-        layers.extend([
-            _Layer(mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
-            _Layer(mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
-        ])
+        layers.extend(
+            [
+                _Layer(mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
+                _Layer(mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
+            ]
+        )
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -343,7 +358,9 @@ def desugar_ribbon(
     if x_field is None or y_field is None:
         raise ValueError("mark_ribbon() requires .encode(x=..., y=...)")
     if y2_field is None:
-        raise ValueError("mark_ribbon() requires y2 in encoding (e.g. .encode(x=, y=lower, y2=upper))")
+        raise ValueError(
+            "mark_ribbon() requires y2 in encoding (e.g. .encode(x=, y=lower, y2=upper))"
+        )
     layers = [
         _Layer(
             mark="ribbon",
@@ -412,31 +429,33 @@ def desugar_boxen(
             if horizontal
             else {"x": "group", "y": "lower", "y2": "upper"}
         )
-        layers.append(_Layer(
-            mark="rect",
-            encoding=enc,
-            mark_kwargs={"opacity": opacity},
-            data_source=f"lv_depth_{k}",
-        ))
+        layers.append(
+            _Layer(
+                mark="rect",
+                encoding=enc,
+                mark_kwargs={"opacity": opacity},
+                data_source=f"lv_depth_{k}",
+            )
+        )
 
     # Median rule: at depth=1, ``lower == upper == median``.
-    layers.append(_Layer(
-        mark="rule",
-        encoding=(
-            {"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}
-        ),
-        data_source="lv_depth_1",
-    ))
+    layers.append(
+        _Layer(
+            mark="rule",
+            encoding=({"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}),
+            data_source="lv_depth_1",
+        )
+    )
 
     # Outliers: point layer reading from the dedicated outliers output. Schema:
     # [group, value, is_outlier].
-    layers.append(_Layer(
-        mark="point",
-        encoding=(
-            {"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}
-        ),
-        data_source="lv_outliers",
-    ))
+    layers.append(
+        _Layer(
+            mark="point",
+            encoding=({"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}),
+            data_source="lv_outliers",
+        )
+    )
 
     return ("__layered__", transforms, None, None, layers)
 

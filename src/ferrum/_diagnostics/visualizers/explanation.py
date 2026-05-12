@@ -1,4 +1,5 @@
 """10d explanation visualizers — feature importance, SHAP family, PDP."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -78,7 +79,8 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.importances(
-            method=self.method, random_state=self.random_state,
+            method=self.method,
+            random_state=self.random_state,
         )
         if df.height:
             self._metrics["top_feature_importance"] = float(df["importance"][0])
@@ -164,11 +166,13 @@ class SHAPVisualizer(FerrumVisualizer):
         theme: Any = None,
     ):
         import warnings
+
         warnings.warn(
             "SHAPVisualizer(kind=...) is deprecated; use "
             "SHAPBeeswarmVisualizer / SHAPBarVisualizer / "
             "SHAPWaterfallVisualizer instead.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         super().__init__(model, random_state=random_state, theme=theme)
         self.kind = kind
@@ -190,9 +194,7 @@ class SHAPVisualizer(FerrumVisualizer):
                 return
             one = sv.filter(pl.col("sample_id") == self.sample_idx)
             if one.height:
-                self._metrics["top_abs_shap"] = float(
-                    one["shap_value"].abs().max()
-                )
+                self._metrics["top_abs_shap"] = float(one["shap_value"].abs().max())
             else:
                 self._metrics["top_abs_shap"] = 0.0
             return
@@ -223,9 +225,7 @@ class SHAPVisualizer(FerrumVisualizer):
             )
         if self.kind == "waterfall":
             if self.sample_idx is None:
-                raise ValueError(
-                    "SHAPVisualizer(kind='waterfall') requires sample_idx=<int>."
-                )
+                raise ValueError("SHAPVisualizer(kind='waterfall') requires sample_idx=<int>.")
             return _shap_waterfall_chart_from_source(
                 self._source,
                 sample_idx=self.sample_idx,
@@ -235,8 +235,7 @@ class SHAPVisualizer(FerrumVisualizer):
                 theme=self.theme,
             )
         raise ValueError(
-            f"SHAPVisualizer(kind={self.kind!r}) — expected "
-            "'beeswarm', 'bar', or 'waterfall'."
+            f"SHAPVisualizer(kind={self.kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'."
         )
 
 
@@ -300,9 +299,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         expr = pl.col("shap_value").abs()
         agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
         agg = sv.group_by("feature").agg(agg_expr.alias("v"))
-        self._metrics["top_abs_shap"] = (
-            float(agg["v"].max()) if agg.height else 0.0
-        )
+        self._metrics["top_abs_shap"] = float(agg["v"].max()) if agg.height else 0.0
 
     def _build_chart(self) -> Any:
         return _shap_beeswarm_chart_from_source(
@@ -344,9 +341,7 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         expr = pl.col("shap_value").abs()
         agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
         agg = sv.group_by("feature").agg(agg_expr.alias("v"))
-        self._metrics["top_abs_shap"] = (
-            float(agg["v"].max()) if agg.height else 0.0
-        )
+        self._metrics["top_abs_shap"] = float(agg["v"].max()) if agg.height else 0.0
 
     def _build_chart(self) -> Any:
         return _shap_bar_chart_from_source(
@@ -404,9 +399,7 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         theme: Any = None,
     ):
         if sample_idx is None:
-            raise ValueError(
-                "SHAPWaterfallVisualizer requires sample_idx=<int>."
-            )
+            raise ValueError("SHAPWaterfallVisualizer requires sample_idx=<int>.")
         super().__init__(model, random_state=random_state, theme=theme)
         self.sample_idx = int(sample_idx)
         self.max_display = max_display
@@ -417,9 +410,7 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     def _materialize(self) -> None:
         sv = self._shap_dataframe()
         one = sv.filter(pl.col("sample_id") == self.sample_idx)
-        self._metrics["top_abs_shap"] = (
-            float(one["shap_value"].abs().max()) if one.height else 0.0
-        )
+        self._metrics["top_abs_shap"] = float(one["shap_value"].abs().max()) if one.height else 0.0
 
     def _build_chart(self) -> Any:
         return _shap_waterfall_chart_from_source(

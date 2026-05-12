@@ -1,4 +1,5 @@
 """Phase 10a — predictions and probabilities."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -52,7 +53,10 @@ class PredictionsMixin:
             # call is O(p³) at most and negligible for typical p.
             XtX_inv = np.linalg.pinv(X_with_intercept.T @ X_with_intercept)
             lev = np.einsum(
-                "ij,jk,ik->i", X_with_intercept, XtX_inv, X_with_intercept,
+                "ij,jk,ik->i",
+                X_with_intercept,
+                XtX_inv,
+                X_with_intercept,
             )
             lev = np.clip(lev, 0.0, 1.0 - 1e-12)
         else:
@@ -60,14 +64,16 @@ class PredictionsMixin:
             cooks = np.full_like(y_pred, np.nan)
             lev = np.full_like(y_pred, np.nan)
 
-        df = pl.DataFrame({
-            "y_true": y_true,
-            "y_pred": y_pred,
-            "residual": residual,
-            "studentized_residual": stud,
-            "cooks_distance": cooks,
-            "leverage": lev,
-        })
+        df = pl.DataFrame(
+            {
+                "y_true": y_true,
+                "y_pred": y_pred,
+                "residual": residual,
+                "studentized_residual": stud,
+                "cooks_distance": cooks,
+                "leverage": lev,
+            }
+        )
         self._cache[key] = df
         return df
 
@@ -115,4 +121,3 @@ class PredictionsMixin:
         df = pl.DataFrame(data)
         self._cache[key] = df
         return df
-

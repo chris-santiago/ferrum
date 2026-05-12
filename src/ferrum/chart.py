@@ -3,6 +3,7 @@
 Immutability rule: every fluent method returns a new Chart. The internal
 spec is deep-copied on each call so chains compose without aliasing surprises.
 """
+
 from __future__ import annotations
 
 import functools
@@ -27,7 +28,15 @@ _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "t
 # but ignored at render time; ferrum-spec.md §3.2 promises a one-time
 # UserWarning per channel when this happens.
 _RENDERER_HONORED_CHANNELS = (
-    "x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text",
+    "x",
+    "y",
+    "x2",
+    "y2",
+    "color",
+    "size",
+    "shape",
+    "opacity",
+    "text",
 )
 # Facet channels have a separate code path through resolved._facet — no
 # silent-drop, no warn.
@@ -44,6 +53,7 @@ class _Facet:
     ``"grid"`` uses ``row`` and ``col``. Other fields are sizing hints honored
     by ``_build_facet_dict()`` when serialising to the Rust ``FacetSpec``.
     """
+
     mode_kind: str
     field: Optional[str] = None
     row: Optional[str] = None
@@ -56,23 +66,71 @@ class _Facet:
 def _channel_class_map() -> dict:
     """Build the channel-name → channel-class mapping (lazy import; once-per-process)."""
     from ferrum.encoding import (
-        X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
-        Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
-        StrokeWidth, StrokeDash, Size, Shape, Angle,
-        Text, Detail, Tooltip, TooltipField, Href, Description, Key,
-        Facet, FacetRow, FacetCol,
+        X,
+        Y,
+        X2,
+        Y2,
+        XError,
+        YError,
+        XError2,
+        YError2,
+        Theta,
+        Radius,
+        Color,
+        Fill,
+        Stroke,
+        Opacity,
+        FillOpacity,
+        StrokeOpacity,
+        StrokeWidth,
+        StrokeDash,
+        Size,
+        Shape,
+        Angle,
+        Text,
+        Detail,
+        Tooltip,
+        TooltipField,
+        Href,
+        Description,
+        Key,
+        Facet,
+        FacetRow,
+        FacetCol,
     )
+
     return {
-        "x": X, "y": Y, "x2": X2, "y2": Y2,
-        "x_error": XError, "y_error": YError, "x_error2": XError2, "y_error2": YError2,
-        "theta": Theta, "radius": Radius,
-        "color": Color, "fill": Fill, "stroke": Stroke,
-        "opacity": Opacity, "fill_opacity": FillOpacity, "stroke_opacity": StrokeOpacity,
-        "stroke_width": StrokeWidth, "stroke_dash": StrokeDash,
-        "size": Size, "shape": Shape, "angle": Angle,
-        "text": Text, "detail": Detail, "tooltip": Tooltip, "tooltip_field": TooltipField,
-        "href": Href, "description": Description, "key": Key,
-        "facet": Facet, "facet_row": FacetRow, "facet_col": FacetCol,
+        "x": X,
+        "y": Y,
+        "x2": X2,
+        "y2": Y2,
+        "x_error": XError,
+        "y_error": YError,
+        "x_error2": XError2,
+        "y_error2": YError2,
+        "theta": Theta,
+        "radius": Radius,
+        "color": Color,
+        "fill": Fill,
+        "stroke": Stroke,
+        "opacity": Opacity,
+        "fill_opacity": FillOpacity,
+        "stroke_opacity": StrokeOpacity,
+        "stroke_width": StrokeWidth,
+        "stroke_dash": StrokeDash,
+        "size": Size,
+        "shape": Shape,
+        "angle": Angle,
+        "text": Text,
+        "detail": Detail,
+        "tooltip": Tooltip,
+        "tooltip_field": TooltipField,
+        "href": Href,
+        "description": Description,
+        "key": Key,
+        "facet": Facet,
+        "facet_row": FacetRow,
+        "facet_col": FacetCol,
     }
 
 
@@ -87,15 +145,14 @@ def _channel_class_for(name: str):
 # rewriting) into the generic 3-tuple ``desugar_fn(x_field, y_field, **kwargs)``
 # protocol that ``_resolve_pending`` consumes uniformly. ----
 
+
 def _resolve_density(x_field, y_field, **kwargs):
     """Resolve a deferred ``mark_density()`` call once the encoding is known."""
     orientation = kwargs.get("orientation", "vertical")
     field = y_field if orientation == "horizontal" else x_field
     if field is None:
         ch = "y" if orientation == "horizontal" else "x"
-        raise ValueError(
-            f"mark_density() requires .encode({ch}=...) to specify the density field"
-        )
+        raise ValueError(f"mark_density() requires .encode({ch}=...) to specify the density field")
     # Reconstruct a chart_encoding hint so density's bivariate path can route
     # through desugar_contour(fill=True) when both x AND y are encoded.
     chart_encoding: dict = {}
@@ -140,13 +197,15 @@ def _expand_layers(c: "Chart") -> tuple[list, list]:
     """
     if c._layers is not None:
         return list(c._layers), list(c._transforms or [])
-    return [_Layer(
-        mark=c._mark,
-        encoding=dict(c._encoding),
-        transforms=list(c._transforms),
-        mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
-        position=c._position,
-    )], []
+    return [
+        _Layer(
+            mark=c._mark,
+            encoding=dict(c._encoding),
+            transforms=list(c._transforms),
+            mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
+            position=c._position,
+        )
+    ], []
 
 
 def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
@@ -167,6 +226,7 @@ def _warn_on_layer_conflicts(lhs: "Chart", rhs: "Chart") -> None:
         or rhs._coord != lhs._coord
     ):
         import warnings
+
         warnings.warn(
             "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
             "primary layer wins.",
@@ -211,12 +271,23 @@ class Chart:
     """
 
     __slots__ = (
-        "_data", "_mark", "_mark_kwargs", "_encoding", "_transforms",
-        "_facet", "_coord", "_theme", "_layers",
-        "_width", "_height", "_title", "_description",
+        "_data",
+        "_mark",
+        "_mark_kwargs",
+        "_encoding",
+        "_transforms",
+        "_facet",
+        "_coord",
+        "_theme",
+        "_layers",
+        "_width",
+        "_height",
+        "_title",
+        "_description",
         "_pending_stat_mark",  # _PendingMark when mark_* called before .encode()
-        "_position",           # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
-        "_axis_x", "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
+        "_position",  # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
+        "_axis_x",
+        "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
     )
 
     def __init__(
@@ -241,6 +312,7 @@ class Chart:
         self._height = height
         # Schwabish SB1 (2026-05-11): accept Title value class or plain str.
         from ferrum.title import Title as _TitleCls
+
         if title is None:
             self._title = None
         elif isinstance(title, _TitleCls):
@@ -311,18 +383,12 @@ class Chart:
         if kind == "ribbon":
             y2_enc = self._encoding.get("y2")
             if y2_enc is not None:
-                y2_field = (
-                    y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
-                )
+                y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 kwargs = {**kwargs, "y2_field": y2_field}
         result = desugar_fn(x_field, y_field, **kwargs)
         new = self._clone()
         new._pending_stat_mark = None
-        if (
-            isinstance(result, tuple)
-            and len(result) >= 1
-            and result[0] == "__layered__"
-        ):
+        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
             # ("__layered__", transforms, _, _, layers)
             _, transforms, _ignored1, _ignored2, layers_list = result
             new._transforms = list(self._transforms) + list(transforms or [])
@@ -335,6 +401,7 @@ class Chart:
         new._transforms = list(self._transforms) + list(transforms or [])
         if remap:
             from ferrum.encoding import X, X2, Y, Y2
+
             if "x" in remap:
                 new._encoding["x"] = X(remap["x"], type="Q")
             if "y" in remap:
@@ -353,6 +420,7 @@ class Chart:
         position = kwargs.pop("position", None)
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility(name, position)
         m = MarkBase(name, **kwargs)
         new = self._clone()
@@ -378,12 +446,14 @@ class Chart:
         # sentinel resolved by _resolve_pending once .encode() is known.
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility(name, position)
         new = self._clone()
         new._mark = placeholder
         if data_transform is not None and new._data is not None:
             try:
                 import polars as pl
+
                 if isinstance(new._data, pl.DataFrame):
                     new._data = data_transform(new._data)
             except ImportError:
@@ -784,15 +854,12 @@ class Chart:
             )
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility("density", position)
         field = enc.field if isinstance(enc, ChannelBase) else enc
         result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
         new = self._clone()
-        if (
-            isinstance(result, tuple)
-            and len(result) >= 1
-            and result[0] == "__layered__"
-        ):
+        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
             # Bivariate density routed through desugar_contour(fill=True).
             _, transforms, _ignored1, _ignored2, layers_list = result
             new._transforms = list(self._transforms) + list(transforms or [])
@@ -803,6 +870,7 @@ class Chart:
             new._mark = mark
             new._transforms = list(self._transforms) + transforms
             from ferrum.encoding import X, Y
+
             new._encoding["x"] = X(remap["x"], type="Q")
             new._encoding["y"] = Y(remap["y"], type="Q")
         new._position = position
@@ -862,6 +930,7 @@ class Chart:
             )
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility("histogram", position)
         field = enc.field if isinstance(enc, ChannelBase) else enc
         mark, transforms, remap = desugar_histogram(field, **kwargs)
@@ -869,6 +938,7 @@ class Chart:
         new._mark = mark
         new._transforms = list(self._transforms) + transforms
         from ferrum.encoding import X, X2, Y, Y2
+
         if orientation == "horizontal":
             new._encoding["y"] = Y(remap["y"], type="Q")
             new._encoding["y2"] = Y2(remap["y2"], type="Q")
@@ -929,16 +999,13 @@ class Chart:
             )
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility("smooth", position)
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
         result = desugar_smooth(x_field, y_field, **kwargs)
         new = self._clone()
-        if (
-            isinstance(result, tuple)
-            and len(result) >= 1
-            and result[0] == "__layered__"
-        ):
+        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
             _, transforms, _ignored1, _ignored2, layers_list = result
             new._transforms = list(self._transforms) + list(transforms or [])
             new._layers = list(layers_list)
@@ -951,6 +1018,7 @@ class Chart:
             # remap so the encoding references the post-transform schema.
             if remap:
                 from ferrum.encoding import X, Y
+
                 if "x" in remap:
                     new._encoding["x"] = X(remap["x"], type="Q")
                 if "y" in remap:
@@ -1010,6 +1078,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_boxplot
+
         return self._set_composite_mark(
             "boxplot",
             desugar_boxplot,
@@ -1081,6 +1150,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_boxen
+
         return self._set_composite_mark(
             "boxen",
             desugar_boxen,
@@ -1133,6 +1203,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_errorbar
+
         return self._set_composite_mark(
             "errorbar",
             desugar_errorbar,
@@ -1141,7 +1212,9 @@ class Chart:
             position=position,
         )
 
-    def mark_errorband(self, *, extent="ci", borders=False, position=None, **mark_kwargs) -> "Chart":
+    def mark_errorband(
+        self, *, extent="ci", borders=False, position=None, **mark_kwargs
+    ) -> "Chart":
         """Render an error band (ribbon) via the ``ErrorExtent`` transform.
 
         Similar to ``mark_errorbar`` but renders the extent as a filled ribbon
@@ -1175,6 +1248,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_errorband
+
         return self._set_composite_mark(
             "errorband",
             desugar_errorband,
@@ -1183,7 +1257,9 @@ class Chart:
             position=position,
         )
 
-    def mark_ribbon(self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs) -> "Chart":
+    def mark_ribbon(
+        self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs
+    ) -> "Chart":
         """Render a ribbon (filled area between ``y`` and ``y2`` along ``x``).
 
         Requires both ``y`` and ``y2`` encoding channels.  Typically used to
@@ -1216,6 +1292,7 @@ class Chart:
         Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
         """
         from ferrum.marks.composite import desugar_ribbon
+
         return self._set_composite_mark(
             "ribbon",
             desugar_ribbon,
@@ -1275,18 +1352,25 @@ class Chart:
         Chart(mark='polygon', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_contour
+
         return self._set_composite_mark(
             "contour",
             desugar_contour,
             {
-                "bandwidth": bandwidth, "thresholds": thresholds, "smooth": smooth,
-                "fill": fill, "cmap": cmap, **mark_kwargs,
+                "bandwidth": bandwidth,
+                "thresholds": thresholds,
+                "smooth": smooth,
+                "fill": fill,
+                "cmap": cmap,
+                **mark_kwargs,
             },
             placeholder="polygon",
             position=position,
         )
 
-    def mark_violin(self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs) -> "Chart":
+    def mark_violin(
+        self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs
+    ) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
 
         Estimates a mirrored KDE per group and overlays an optional inner
@@ -1324,6 +1408,7 @@ class Chart:
         Chart(mark='polygon', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_violin
+
         return self._set_composite_mark(
             "violin",
             desugar_violin,
@@ -1332,7 +1417,9 @@ class Chart:
             position=position,
         )
 
-    def mark_qq(self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs) -> "Chart":
+    def mark_qq(
+        self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs
+    ) -> "Chart":
         """Render a quantile-quantile plot.
 
         Computes theoretical vs. sample quantiles via the ``QQ`` transform.
@@ -1440,12 +1527,19 @@ class Chart:
         Chart(mark='image', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_raster
+
         return self._set_composite_mark(
             "raster",
             desugar_raster,
             {
-                "aggregate": aggregate, "field": field, "cmap": cmap, "resolution": resolution,
-                "blend": blend, "min_count": min_count, "log_scale": log_scale, **mark_kwargs,
+                "aggregate": aggregate,
+                "field": field,
+                "cmap": cmap,
+                "resolution": resolution,
+                "blend": blend,
+                "min_count": min_count,
+                "log_scale": log_scale,
+                **mark_kwargs,
             },
             placeholder="image",
             position=position,
@@ -1503,12 +1597,18 @@ class Chart:
         Chart(mark='polygon', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_hex
+
         return self._set_composite_mark(
             "hex",
             desugar_hex,
             {
-                "bin_size": bin_size, "aggregate": aggregate, "field": field, "cmap": cmap,
-                "stroke": stroke, "stroke_width": stroke_width, **mark_kwargs,
+                "bin_size": bin_size,
+                "aggregate": aggregate,
+                "field": field,
+                "cmap": cmap,
+                "stroke": stroke,
+                "stroke_width": stroke_width,
+                **mark_kwargs,
             },
             placeholder="polygon",
             position=position,
@@ -1566,18 +1666,25 @@ class Chart:
         Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_swarm
+
         return self._set_composite_mark(
             "swarm",
             desugar_swarm,
             {
-                "size": size, "orient": orient, "spacing": spacing, "side": side,
-                "dodge": dodge, **mark_kwargs,
+                "size": size,
+                "orient": orient,
+                "spacing": spacing,
+                "side": side,
+                "dodge": dodge,
+                **mark_kwargs,
             },
             placeholder="point",
             position=position,
         )
 
-    def mark_function(self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs) -> "Chart":
+    def mark_function(
+        self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs
+    ) -> "Chart":
         """Render a mathematical function as a line.
 
         Evaluates ``fn(xs)`` on ``n`` evenly-spaced ``x`` values in the
@@ -1628,6 +1735,7 @@ class Chart:
         """
         if position is not None:
             from ferrum.position import validate_position_eligibility
+
             validate_position_eligibility("function", position)
         if self._layers is not None and self._layers:
             raise NotImplementedError(
@@ -1635,12 +1743,14 @@ class Chart:
                 "use a separate Chart composed via + instead"
             )
         from ferrum.marks.heavy_stat import desugar_function
+
         # Try to infer parent x data for domain inference
         parent_x_data = None
         x_enc = self._encoding.get("x")
         if x_enc is not None and self._data is not None:
             try:
                 from ferrum._coerce import to_arrow_table
+
                 x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
                 tbl = to_arrow_table(self._data)
                 if x_field_name in tbl.column_names:
@@ -1649,7 +1759,12 @@ class Chart:
                 pass
 
         mark, transforms, remap, synthetic = desugar_function(
-            fn, parent_chart_x_data=parent_x_data, domain=domain, n=n, clip=clip, **mark_kwargs,
+            fn,
+            parent_chart_x_data=parent_x_data,
+            domain=domain,
+            n=n,
+            clip=clip,
+            **mark_kwargs,
         )
         new = self._clone()
         new._mark = mark
@@ -1657,6 +1772,7 @@ class Chart:
         new._transforms = list(self._transforms) + list(transforms)
         if remap:
             from ferrum.encoding import X, Y
+
             if "x" in remap:
                 new._encoding["x"] = X(remap["x"], type="Q")
             if "y" in remap:
@@ -1724,6 +1840,7 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_residuals
         from ferrum._sentinels import _inject_constant
+
         return self._set_composite_mark(
             "residuals",
             desugar_residuals,
@@ -1737,9 +1854,7 @@ class Chart:
             placeholder="point",
             position=position,
             data_transform=(
-                (lambda df: _inject_constant(df, "_ref_zero", 0.0))
-                if reference_line
-                else None
+                (lambda df: _inject_constant(df, "_ref_zero", 0.0)) if reference_line else None
             ),
         )
 
@@ -1793,6 +1908,7 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_prediction_error
         from ferrum._diagnostics.charts import _sort_by
+
         return self._set_composite_mark(
             "prediction_error",
             desugar_prediction_error,
@@ -1805,9 +1921,7 @@ class Chart:
             },
             placeholder="point",
             position=position,
-            data_transform=(
-                (lambda df: _sort_by(df, "y_true")) if identity_line else None
-            ),
+            data_transform=((lambda df: _sort_by(df, "y_true")) if identity_line else None),
         )
 
     def mark_roc(
@@ -1861,6 +1975,7 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_roc
         from ferrum._diagnostics.charts import _sort_by
+
         return self._set_composite_mark(
             "roc",
             desugar_roc,
@@ -1873,9 +1988,7 @@ class Chart:
             },
             placeholder="point",
             position=position,
-            data_transform=(
-                (lambda df: _sort_by(df, "fpr")) if reference_line else None
-            ),
+            data_transform=((lambda df: _sort_by(df, "fpr")) if reference_line else None),
         )
 
     def mark_pr(
@@ -1925,6 +2038,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_pr
+
         return self._set_composite_mark(
             "pr",
             desugar_pr,
@@ -1991,6 +2105,7 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_calibration
         from ferrum._diagnostics.charts import _sort_by
+
         return self._set_composite_mark(
             "calibration",
             desugar_calibration,
@@ -2004,9 +2119,7 @@ class Chart:
             placeholder="point",
             position=position,
             data_transform=(
-                (lambda df: _sort_by(df, "mean_predicted"))
-                if reference_line
-                else None
+                (lambda df: _sort_by(df, "mean_predicted")) if reference_line else None
             ),
         )
 
@@ -2051,6 +2164,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_gain
+
         return self._set_composite_mark(
             "gain",
             desugar_gain,
@@ -2103,6 +2217,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_lift
+
         return self._set_composite_mark(
             "lift",
             desugar_lift,
@@ -2173,6 +2288,7 @@ class Chart:
 
         def _disc_threshold_prep(df):
             import polars as pl
+
             if "threshold" not in df.columns or "metric" not in df.columns:
                 return df
             n = df.height
@@ -2193,14 +2309,14 @@ class Chart:
             if optimum_label:
                 opt_x = [best_t] + [None] * (n - 1)
                 opt_y = [best_f1] + [None] * (n - 1)
-                opt_text = [
-                    f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"
-                ] + [None] * (n - 1)
-                new_cols.extend([
-                    pl.Series("_optimum_x", opt_x, dtype=pl.Float64),
-                    pl.Series("_optimum_y", opt_y, dtype=pl.Float64),
-                    pl.Series("_optimum_text", opt_text, dtype=pl.Utf8),
-                ])
+                opt_text = [f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"] + [None] * (n - 1)
+                new_cols.extend(
+                    [
+                        pl.Series("_optimum_x", opt_x, dtype=pl.Float64),
+                        pl.Series("_optimum_y", opt_y, dtype=pl.Float64),
+                        pl.Series("_optimum_text", opt_text, dtype=pl.Utf8),
+                    ]
+                )
             return df.with_columns(new_cols) if new_cols else df
 
         return self._set_composite_mark(
@@ -2263,6 +2379,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_confusion
+
         return self._set_composite_mark(
             "confusion",
             desugar_confusion,
@@ -2327,11 +2444,12 @@ class Chart:
             if not show_counts or "value" not in df.columns:
                 return df
             import polars as pl
+
             return df.with_columns(
                 pl.when(pl.col("value") > 0)
-                  .then(pl.col("value").cast(pl.Int64).cast(pl.Utf8))
-                  .otherwise(None)
-                  .alias("_count_text"),
+                .then(pl.col("value").cast(pl.Int64).cast(pl.Utf8))
+                .otherwise(None)
+                .alias("_count_text"),
             )
 
         return self._set_composite_mark(
@@ -2402,6 +2520,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_importance
+
         return self._set_composite_mark(
             "importance",
             desugar_importance,
@@ -2526,6 +2645,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_shap_bar
+
         return self._set_composite_mark(
             "shap_bar",
             desugar_shap_bar,
@@ -2584,6 +2704,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_pdp
+
         return self._set_composite_mark(
             "pdp",
             desugar_pdp,
@@ -2651,6 +2772,7 @@ class Chart:
                 "pass an integer index (e.g. sample_idx=0) to select the sample to explain."
             )
         from ferrum.marks.diagnostic import desugar_shap_waterfall
+
         return self._set_composite_mark(
             "shap_waterfall",
             desugar_shap_waterfall,
@@ -2704,6 +2826,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_learning_curve
+
         return self._set_composite_mark(
             "learning_curve",
             desugar_learning_curve,
@@ -2763,6 +2886,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_validation_curve
+
         return self._set_composite_mark(
             "validation_curve",
             desugar_validation_curve,
@@ -2817,6 +2941,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_cv_scores
+
         return self._set_composite_mark(
             "cv_scores",
             desugar_cv_scores,
@@ -2874,6 +2999,7 @@ class Chart:
 
         def _inject_best_alpha(df):
             import polars as pl
+
             if "alpha" not in df.columns or "mean_score" not in df.columns:
                 return df
             agg = (
@@ -2953,21 +3079,21 @@ class Chart:
 
         def _silhouette_prep(df):
             import polars as pl
-            if (
-                "y_position" not in df.columns
-                or "silhouette_value" not in df.columns
-            ):
+
+            if "y_position" not in df.columns or "silhouette_value" not in df.columns:
                 return df
-            df = df.with_columns([
-                pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
-                .alias("_silhouette_x_lo"),
-                pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
-                .alias("_silhouette_x_hi"),
-                (pl.col("y_position").cast(pl.Float64) - 0.5)
-                .alias("_silhouette_y_lo"),
-                (pl.col("y_position").cast(pl.Float64) + 0.5)
-                .alias("_silhouette_y_hi"),
-            ])
+            df = df.with_columns(
+                [
+                    pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value")).alias(
+                        "_silhouette_x_lo"
+                    ),
+                    pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value")).alias(
+                        "_silhouette_x_hi"
+                    ),
+                    (pl.col("y_position").cast(pl.Float64) - 0.5).alias("_silhouette_y_lo"),
+                    (pl.col("y_position").cast(pl.Float64) + 0.5).alias("_silhouette_y_hi"),
+                ]
+            )
             if zero_line:
                 df = _inject_constant(df, "_ref_zero", 0.0)
             return df
@@ -3038,20 +3164,17 @@ class Chart:
 
         def _pca_scree_prep(df):
             import polars as pl
-            if (
-                "component" not in df.columns
-                or "explained_variance_ratio" not in df.columns
-            ):
+
+            if "component" not in df.columns or "explained_variance_ratio" not in df.columns:
                 return df
-            df = df.with_columns([
-                (pl.col("component").cast(pl.Float64) - 0.4)
-                .alias("_pca_bar_x_lo"),
-                (pl.col("component").cast(pl.Float64) + 0.4)
-                .alias("_pca_bar_x_hi"),
-                pl.lit(0.0).alias("_pca_bar_y_lo"),
-                pl.col("explained_variance_ratio")
-                .alias("_pca_bar_y_hi"),
-            ])
+            df = df.with_columns(
+                [
+                    (pl.col("component").cast(pl.Float64) - 0.4).alias("_pca_bar_x_lo"),
+                    (pl.col("component").cast(pl.Float64) + 0.4).alias("_pca_bar_x_hi"),
+                    pl.lit(0.0).alias("_pca_bar_y_lo"),
+                    pl.col("explained_variance_ratio").alias("_pca_bar_y_hi"),
+                ]
+            )
             # X-axis anchor: same scale-extension trick as _y_axis_anchor — the
             # bar rects sit at component ± 0.4 but the line layer's x is the
             # bare component column. Without this, bars at the first/last
@@ -3062,7 +3185,8 @@ class Chart:
             x_anchor_vals = [x_lo, x_hi] + [None] * max(0, n_anchor - 2)
             df = df.with_columns(
                 pl.Series(
-                    "_x_axis_anchor", x_anchor_vals[:n_anchor],
+                    "_x_axis_anchor",
+                    x_anchor_vals[:n_anchor],
                     dtype=pl.Float64,
                 ),
             )
@@ -3080,21 +3204,20 @@ class Chart:
             anchor_vals = [0.0, float(anchor_hi)] + [None] * max(0, n - 2)
             df = df.with_columns(
                 pl.Series(
-                    "_y_axis_anchor", anchor_vals[:n],
+                    "_y_axis_anchor",
+                    anchor_vals[:n],
                     dtype=pl.Float64,
                 ),
             )
             if threshold_line is not None:
                 df = _inject_constant(
-                    df, "_threshold_line", float(threshold_line),
+                    df,
+                    "_threshold_line",
+                    float(threshold_line),
                 )
             return df
 
-        fn = (
-            desugar_pca_scree_with_threshold
-            if threshold_line is not None
-            else desugar_pca_scree
-        )
+        fn = desugar_pca_scree_with_threshold if threshold_line is not None else desugar_pca_scree
         return self._set_composite_mark(
             "pca_scree",
             fn,
@@ -3145,6 +3268,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_intercluster_distance
+
         return self._set_composite_mark(
             "intercluster_distance",
             desugar_intercluster_distance,
@@ -3199,6 +3323,7 @@ class Chart:
         Chart(mark='rect', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_decision_boundary
+
         return self._set_composite_mark(
             "decision_boundary",
             desugar_decision_boundary,
@@ -3251,6 +3376,7 @@ class Chart:
         Chart(mark='bar', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_rank1d
+
         return self._set_composite_mark(
             "rank1d",
             desugar_rank1d,
@@ -3308,6 +3434,7 @@ class Chart:
         Chart(mark='rect', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_rank2d
+
         return self._set_composite_mark(
             "rank2d",
             desugar_rank2d,
@@ -3366,6 +3493,7 @@ class Chart:
         Chart(mark='line', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_parallel_coordinates
+
         return self._set_composite_mark(
             "parallel_coordinates",
             desugar_parallel_coordinates,
@@ -3505,12 +3633,15 @@ class Chart:
             elif isinstance(value, str):
                 field, type_, agg = parse_shorthand(value)
                 kw = {}
-                if type_: kw["type"] = type_
-                if agg: kw["aggregate"] = agg
+                if type_:
+                    kw["type"] = type_
+                if agg:
+                    kw["aggregate"] = agg
                 channel = cls(field, **kw)
             else:
                 # Phase 9: accept Repeat sentinels (Repeat.column / .row / .layer).
                 from ferrum.repeat import _RepeatPlaceholder
+
                 if isinstance(value, _RepeatPlaceholder):
                     channel = cls(value)
                 else:
@@ -3545,20 +3676,20 @@ class Chart:
         converted = []
         for ly in layers:
             if not isinstance(ly, PublicLayer):
-                raise TypeError(
-                    f"layer() expects Layer instances; got {type(ly).__name__}"
-                )
+                raise TypeError(f"layer() expects Layer instances; got {type(ly).__name__}")
             if ly.data is not None:
                 raise ValueError(
                     "Layer(data=...) is not yet supported by Chart.layer(); "
                     "use the + operator for layers with independent data"
                 )
-            converted.append(_Layer(
-                mark=ly.mark,
-                encoding=dict(ly.encoding),
-                transforms=list(ly.transforms),
-                mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
-            ))
+            converted.append(
+                _Layer(
+                    mark=ly.mark,
+                    encoding=dict(ly.encoding),
+                    transforms=list(ly.transforms),
+                    mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
+                )
+            )
         new._layers = existing + converted
         return new
 
@@ -3637,6 +3768,7 @@ class Chart:
             return NotImplemented
         if not self._shares_data_with(other):
             import warnings
+
             warnings.warn(
                 "Layered charts with differing data render as horizontal concatenation. "
                 "Combine the two DataFrames into one with null padding "
@@ -3694,6 +3826,7 @@ class Chart:
         HConcatChart(n=2)
         """
         from ferrum.composition import HConcatChart
+
         return HConcatChart([self, other])
 
     def __and__(self, other: "Chart") -> "VConcatChart":
@@ -3724,6 +3857,7 @@ class Chart:
         VConcatChart(n=2)
         """
         from ferrum.composition import VConcatChart
+
         return VConcatChart([self, other])
 
     # ---- Facet / coord / theme ----
@@ -3784,19 +3918,32 @@ class Chart:
         new = self._clone()
         if field is not None:
             new._facet = _Facet(
-                mode_kind="wrap", field=field, ncols=ncols, nrows=nrows,
+                mode_kind="wrap",
+                field=field,
+                ncols=ncols,
+                nrows=nrows,
             )
         elif row is not None and col is not None:
             new._facet = _Facet(
-                mode_kind="grid", row=row, col=col, nrows=nrows, ncols=ncols,
+                mode_kind="grid",
+                row=row,
+                col=col,
+                nrows=nrows,
+                ncols=ncols,
             )
         elif col is not None:
             new._facet = _Facet(
-                mode_kind="wrap", field=col, ncols=ncols, nrows=nrows,
+                mode_kind="wrap",
+                field=col,
+                ncols=ncols,
+                nrows=nrows,
             )
         elif row is not None:
             new._facet = _Facet(
-                mode_kind="wrap", field=row, nrows=nrows, ncols=ncols,
+                mode_kind="wrap",
+                field=row,
+                nrows=nrows,
+                ncols=ncols,
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
@@ -3883,9 +4030,7 @@ class Chart:
         >>> chart.axis(x=False)
         """
         if show is not None and (x is not None or y is not None):
-            raise ValueError(
-                "Chart.axis: pass either show=… OR x=/y=, not both"
-            )
+            raise ValueError("Chart.axis: pass either show=… OR x=/y=, not both")
         new = self._clone()
         if show is not None:
             new._axis_x = show
@@ -3927,6 +4072,7 @@ class Chart:
         Chart(mark='bar', encoding=['x', 'y'])
         """
         from ferrum.coord import CoordFlip
+
         new = self._clone()
         if isinstance(coord, CoordFlip):
             new._coord = "flip"
@@ -3948,6 +4094,7 @@ class Chart:
             return []
         import json as _json
         from ferrum import ChartSpec
+
         # Build a minimal spec with the transforms; extract the "transforms" array.
         dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=transforms)
         parsed = _json.loads(dummy.to_json())
@@ -3960,7 +4107,7 @@ class Chart:
         value must be JSON-serializable (no PyO3 objects).
         """
         out = []
-        for layer in (self._layers or []):
+        for layer in self._layers or []:
             encoding_dict: dict = {}
             for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
                 ch = layer.encoding.get(axis)
@@ -3976,7 +4123,14 @@ class Chart:
                     enc_json_dict: dict = {"field": field}
                     if d.get("type"):
                         enc_json_dict["type_"] = d["type"]
-                    for opt_key in ("title", "aggregate", "scheme", "format", "formatType", "scale"):
+                    for opt_key in (
+                        "title",
+                        "aggregate",
+                        "scheme",
+                        "format",
+                        "formatType",
+                        "scale",
+                    ):
                         if d.get(opt_key):
                             enc_json_dict[opt_key] = d[opt_key]
                     encoding_dict[axis] = enc_json_dict
@@ -4058,16 +4212,17 @@ class Chart:
         Chart(mark='point', encoding=['x', 'y'])
         """
         new = self._clone()
-        if width is not None: new._width = width
-        if height is not None: new._height = height
+        if width is not None:
+            new._width = width
+        if height is not None:
+            new._height = height
         if title is not None:
             # Schwabish SB1: accept Title value class or plain str.
             from ferrum.title import Title as _TitleCls
-            new._title = (
-                title if isinstance(title, _TitleCls)
-                else _TitleCls(text=str(title))
-            )
-        if description is not None: new._description = description
+
+            new._title = title if isinstance(title, _TitleCls) else _TitleCls(text=str(title))
+        if description is not None:
+            new._description = description
         return new
 
     # ---- Spec output ----
@@ -4097,16 +4252,15 @@ class Chart:
         resolved = self._resolve_pending()
         from ferrum import ChartSpec, EncodingSpec
         from ferrum.repeat import _RepeatPlaceholder
+
         # Spec §3.2 (L309-315): channels accepted at the encode() boundary but
         # not yet rendered must emit a one-time UserWarning per channel so the
         # caller knows the field will not appear in the SVG. The ferrum._warn
         # registry dedupes process-wide on (channel_name, kwarg).
         from ferrum._warn import warn_once
+
         for ch_name, ch in resolved._encoding.items():
-            if (
-                ch_name in _RENDERER_HONORED_CHANNELS
-                or ch_name in _FACET_CHANNELS
-            ):
+            if ch_name in _RENDERER_HONORED_CHANNELS or ch_name in _FACET_CHANNELS:
                 continue
             field = getattr(ch, "field", None)
             if field is None or isinstance(field, _RepeatPlaceholder):
@@ -4128,7 +4282,7 @@ class Chart:
             if axis in resolved._encoding:
                 ch = resolved._encoding[axis]
                 if ch.field is None:
-                    continue   # Tooltip(*fields) etc. with no single field
+                    continue  # Tooltip(*fields) etc. with no single field
                 # Phase 9: skip channels whose field is an unresolved Repeat
                 # placeholder. RepeatChart.expand() materializes concrete charts
                 # before render; the bare template's spec just omits placeholder
@@ -4210,6 +4364,7 @@ class Chart:
         True
         """
         import json as _json
+
         spec = self.to_spec()
         compact = spec.to_json()
         if indent is None:
@@ -4221,7 +4376,7 @@ class Chart:
         spec = self.to_spec()
         data = to_arrow_table(self._data)
         viewport = (self._width or 600.0, self._height or 400.0)
-        theme_dict = (self._theme.to_theme_inputs_dict() if self._theme else {})
+        theme_dict = self._theme.to_theme_inputs_dict() if self._theme else {}
         return spec, data, viewport, theme_dict
 
     def show_svg(self) -> str:
@@ -4245,6 +4400,7 @@ class Chart:
         True
         """
         from ferrum._core import render_svg
+
         spec, data, viewport, theme_dict = self._render_inputs()
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
@@ -4270,6 +4426,7 @@ class Chart:
         True
         """
         from ferrum._core import render_png
+
         spec, data, viewport, theme_dict = self._render_inputs()
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
@@ -4302,6 +4459,7 @@ class Chart:
         >>> fm.Chart(df).mark_point().encode(x="x", y="y").save("/tmp/chart.svg")
         """
         from ferrum.display import save_chart
+
         save_chart(self, path, format=format, **render_kwargs)
 
     def show(self) -> None:
@@ -4324,6 +4482,7 @@ class Chart:
         >>> fm.Chart(df).mark_point().encode(x="x", y="y").show()  # doctest: +SKIP
         """
         from ferrum.display import show_chart
+
         show_chart(self)
 
     def _repr_svg_(self) -> str | None:

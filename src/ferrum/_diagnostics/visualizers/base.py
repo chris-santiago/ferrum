@@ -20,6 +20,7 @@ on a fitted-but-unbuilt visualizer simply returns ``None`` instead
 of raising; that's a programming error in the subclass, not a
 runtime condition to guard against.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -92,9 +93,8 @@ class FerrumVisualizer:
             ``self`` — the fitted visualizer instance.
         """
         import ferrum
-        self._source = ferrum.ModelSource(
-            self.model, X, y, random_state=self.random_state
-        )
+
+        self._source = ferrum.ModelSource(self.model, X, y, random_state=self.random_state)
         self._materialize()
         self._chart = self._build_chart()
         self._fitted = True

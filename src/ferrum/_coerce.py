@@ -9,6 +9,7 @@ Supports (per spec §3.18):
 
 Raises TypeError for unsupported types or numpy 1D without column names.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -56,13 +57,12 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
     import pyarrow as pa
 
     if data is None:
-        raise ValueError(
-            "Chart(data=None) requires per-layer data — not yet supported in Phase 8a"
-        )
+        raise ValueError("Chart(data=None) requires per-layer data — not yet supported in Phase 8a")
 
     # Fast path: polars (zero-copy via Arrow C Data Interface)
     try:
         import polars as pl
+
         if isinstance(data, pl.DataFrame):
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
@@ -92,6 +92,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
     # numpy
     try:
         import numpy as np
+
         if isinstance(data, np.ndarray):
             if data.ndim == 1:
                 raise TypeError(

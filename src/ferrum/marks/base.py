@@ -3,28 +3,55 @@
 Phase 8a: only constant overrides are supported (e.g. mark_point(size=100)).
 Encoding-driven overrides come through .encode(size=Size("col")).
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar
 
 
-_VALID_MARK_KWARGS = frozenset([
-    "size", "stroke", "fill", "opacity", "corner_radius",
-    "stroke_width", "stroke_dash", "font_size", "font_weight",
-    "align", "baseline", "dx", "dy", "angle",
-    # Mark-specific (validated per-mark):
-    "interpolate", "stroke_cap", "stroke_join",            # line/area
-    "orient",                                              # bar/tick
-    "filled", "shape",                                      # point
-    "limit",                                               # text
-    "band_size",                                           # tick
-    "line", "borders",                                     # area / errorband
-    # Statistical mark kwargs (forwarded to transform):
-    "method", "ci", "bandwidth", "degree", "n",            # smooth
-    "kernel", "extent", "cumulative",                      # density
-    "bin_count", "bin_width", "density", "right",          # histogram
-    "multiple",                                            # density/histogram
-])
+_VALID_MARK_KWARGS = frozenset(
+    [
+        "size",
+        "stroke",
+        "fill",
+        "opacity",
+        "corner_radius",
+        "stroke_width",
+        "stroke_dash",
+        "font_size",
+        "font_weight",
+        "align",
+        "baseline",
+        "dx",
+        "dy",
+        "angle",
+        # Mark-specific (validated per-mark):
+        "interpolate",
+        "stroke_cap",
+        "stroke_join",  # line/area
+        "orient",  # bar/tick
+        "filled",
+        "shape",  # point
+        "limit",  # text
+        "band_size",  # tick
+        "line",
+        "borders",  # area / errorband
+        # Statistical mark kwargs (forwarded to transform):
+        "method",
+        "ci",
+        "bandwidth",
+        "degree",
+        "n",  # smooth
+        "kernel",
+        "extent",
+        "cumulative",  # density
+        "bin_count",
+        "bin_width",
+        "density",
+        "right",  # histogram
+        "multiple",  # density/histogram
+    ]
+)
 
 
 class MarkBase:
@@ -89,9 +116,22 @@ class MarkBase:
         {'size': 40, 'opacity': 0.8}
         """
         out = {}
-        for k in ("size", "stroke", "fill", "opacity", "corner_radius",
-                  "stroke_width", "stroke_dash", "font_size", "font_weight",
-                  "align", "baseline", "dx", "dy", "angle"):
+        for k in (
+            "size",
+            "stroke",
+            "fill",
+            "opacity",
+            "corner_radius",
+            "stroke_width",
+            "stroke_dash",
+            "font_size",
+            "font_weight",
+            "align",
+            "baseline",
+            "dx",
+            "dy",
+            "angle",
+        ):
             if k in self._kwargs:
                 out[k] = self._kwargs[k]
         return out

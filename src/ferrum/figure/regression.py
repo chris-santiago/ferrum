@@ -1,9 +1,15 @@
 """Regression-plot convenience functions (lmplot, residplot)."""
+
 from __future__ import annotations
 from typing import Any
 
 from ferrum import (
-    Chart, Glm, Jitter, Logistic, Robust, Smooth,
+    Chart,
+    Glm,
+    Jitter,
+    Logistic,
+    Robust,
+    Smooth,
 )
 
 
@@ -48,12 +54,14 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
     if f_resolved._layers is not None:
         fit_layers = list(f_resolved._layers)
     else:
-        fit_layers = [_Layer(
-            mark=f_resolved._mark,
-            encoding=dict(f_resolved._encoding),
-            mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
-            position=f_resolved._position,
-        )]
+        fit_layers = [
+            _Layer(
+                mark=f_resolved._mark,
+                encoding=dict(f_resolved._encoding),
+                mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
+                position=f_resolved._position,
+            )
+        ]
 
     new._mark = None
     new._layers = [scatter_layer] + fit_layers
@@ -62,14 +70,23 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
 
 
 def lmplot(
-    data: Any, *, x: str, y: str,
-    hue: Any = None, col: Any = None, row: Any = None,
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    hue: Any = None,
+    col: Any = None,
+    row: Any = None,
     method: str = "lm",
-    ci: Any = 95, order: int = 1,
+    ci: Any = 95,
+    order: int = 1,
     scatter: bool = True,
-    scatter_kws: Any = None, line_kws: Any = None,
+    scatter_kws: Any = None,
+    line_kws: Any = None,
     truncate: bool = False,
-    x_bins: Any = None, x_estimator: Any = None, x_jitter: Any = None,
+    x_bins: Any = None,
+    x_estimator: Any = None,
+    x_jitter: Any = None,
     logx: bool = False,
     show_metrics: bool = True,
     theme: Any = None,
@@ -170,9 +187,7 @@ def lmplot(
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
     if method not in _VALID_METHODS:
-        raise ValueError(
-            f"lmplot: method must be one of {sorted(_VALID_METHODS)}; got {method!r}"
-        )
+        raise ValueError(f"lmplot: method must be one of {sorted(_VALID_METHODS)}; got {method!r}")
 
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
@@ -186,11 +201,7 @@ def lmplot(
     # the ribbon + line layers — no Python-side OLS duplication.
     # Restricted to LM-without-hue: per-group corners would crowd, and
     # the metric is well-defined only for the OLS path.
-    metrics_applied = (
-        show_metrics
-        and method == "lm"
-        and hue is None
-    )
+    metrics_applied = show_metrics and method == "lm" and hue is None
 
     # truncate: acknowledged but not yet wired to Rust x_range.
     # True = clip to data range (current Smooth default); False = extend
@@ -218,28 +229,43 @@ def lmplot(
     # ---- Fit layer (per method) ----------------------------------------
     lkw = dict(line_kws) if line_kws else {}
     if method == "lm":
-        fit = Chart(data).mark_smooth(
-            method="lm", ci=ci_frac, degree=order,
-            x_bins=x_bins, x_estimator=x_estimator,
-            show_metrics=metrics_applied,
-        ).encode(x=x, y=y)
+        fit = (
+            Chart(data)
+            .mark_smooth(
+                method="lm",
+                ci=ci_frac,
+                degree=order,
+                x_bins=x_bins,
+                x_estimator=x_estimator,
+                show_metrics=metrics_applied,
+            )
+            .encode(x=x, y=y)
+        )
     elif method == "loess":
         fit = Chart(data).mark_smooth(method="loess", ci=ci_frac).encode(x=x, y=y)
     elif method == "logistic":
-        fit = Chart(data).transform(
-            Logistic(x=x, y=y, n_grid=200, ci=ci_frac, name="logistic")
-        ).mark_line(**lkw).encode(x=x, y="fitted")
+        fit = (
+            Chart(data)
+            .transform(Logistic(x=x, y=y, n_grid=200, ci=ci_frac, name="logistic"))
+            .mark_line(**lkw)
+            .encode(x=x, y="fitted")
+        )
     elif method == "glm":
-        fit = Chart(data).transform(
-            Glm(x=x, y=y, family="gaussian", n_grid=200, ci=ci_frac, name="glm")
-        ).mark_line(**lkw).encode(x=x, y="fitted")
+        fit = (
+            Chart(data)
+            .transform(Glm(x=x, y=y, family="gaussian", n_grid=200, ci=ci_frac, name="glm"))
+            .mark_line(**lkw)
+            .encode(x=x, y="fitted")
+        )
     elif method == "robust":
-        fit = Chart(data).transform(
-            Robust(x=x, y=y, n_grid=200, ci=ci_frac, name="robust")
-        ).mark_line(**lkw).encode(x=x, y="fitted")
+        fit = (
+            Chart(data)
+            .transform(Robust(x=x, y=y, n_grid=200, ci=ci_frac, name="robust"))
+            .mark_line(**lkw)
+            .encode(x=x, y="fitted")
+        )
     else:  # pragma: no cover — guarded above
         raise ValueError(f"unreachable: method={method!r}")
-
 
     if hue is not None:
         # Ensure fit also carries color encoding so per-group fits render
@@ -249,6 +275,7 @@ def lmplot(
     # logx → log scale on x.
     if logx:
         from ferrum.encoding import X
+
         fit = fit.encode(x=X(x, scale={"type": "log"}))
         if scatter_layer is not None:
             scatter_layer = scatter_layer.encode(x=X(x, scale={"type": "log"}))
@@ -265,6 +292,7 @@ def lmplot(
     # (logistic, glm, robust) already applied lkw at mark_line construction.
     if lkw and method in ("lm", "loess") and out._layers:
         from dataclasses import replace as _dc_replace
+
         out._layers = [
             _dc_replace(layer, mark_kwargs={**(layer.mark_kwargs or {}), **lkw})
             if getattr(layer, "mark", None) == "line"
@@ -288,11 +316,19 @@ def lmplot(
 
 
 def residplot(
-    data: Any, *, x: str, y: str,
-    lowess: bool = False, order: int = 1,
-    robust: bool = False, dropna: bool = True,
-    show_metrics: bool = True, zero_line: bool = True,
-    label: Any = None, color: Any = None, theme: Any = None,
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    lowess: bool = False,
+    order: int = 1,
+    robust: bool = False,
+    dropna: bool = True,
+    show_metrics: bool = True,
+    zero_line: bool = True,
+    label: Any = None,
+    color: Any = None,
+    theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
     """Residual-diagnostic scatter plot.
@@ -360,6 +396,7 @@ def residplot(
     """
     if dropna:
         import polars as pl
+
         data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         data = data.drop_nulls(subset=[x, y])
 
@@ -369,13 +406,19 @@ def residplot(
     # computation lives in Rust; Python only declares the spec.
     if robust:
         resid_transform = Robust(
-            x=x, y=y, output="residuals",
+            x=x,
+            y=y,
+            output="residuals",
             inject_zero_ref=zero_line,
             inject_metrics=show_metrics,
         )
     else:
         resid_transform = Smooth(
-            x=x, y=y, method="lm", degree=order, ci=None,
+            x=x,
+            y=y,
+            method="lm",
+            degree=order,
+            ci=None,
             output="residuals",
             inject_zero_ref=zero_line,
             inject_metrics=show_metrics,
@@ -383,6 +426,7 @@ def residplot(
 
     if label is not None:
         import polars as pl
+
         data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         data = data.with_columns(pl.lit(label).alias("_label"))
 
@@ -406,30 +450,39 @@ def residplot(
         chart = chart._clone()
         layers: list = [_Layer(mark="point", encoding=dict(enc))]
         if zero_line:
-            layers.append(_Layer(
-                mark="rule",
-                encoding={"y": "_ref_zero"},
-                mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
-            ))
+            layers.append(
+                _Layer(
+                    mark="rule",
+                    encoding={"y": "_ref_zero"},
+                    mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+                )
+            )
         if show_metrics:
-            layers.append(_Layer(
-                mark="text",
-                encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
-                mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-            ))
+            layers.append(
+                _Layer(
+                    mark="text",
+                    encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+                    mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+                )
+            )
         if lowess:
             chart._transforms = [
                 resid_transform,
                 Smooth(
-                    x="x", y="residual", method="loess",
-                    ci=None, name="lowess",
+                    x="x",
+                    y="residual",
+                    method="loess",
+                    ci=None,
+                    name="lowess",
                 ),
             ]
-            layers.append(_Layer(
-                mark="line",
-                encoding={"x": "x", "y": "y"},
-                data_source="lowess",
-            ))
+            layers.append(
+                _Layer(
+                    mark="line",
+                    encoding={"x": "x", "y": "y"},
+                    data_source="lowess",
+                )
+            )
         chart._layers = layers
         chart._mark = None
 

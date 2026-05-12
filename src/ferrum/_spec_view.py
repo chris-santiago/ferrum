@@ -1,4 +1,5 @@
 """Python-side typed view over a layered ``ChartSpec``."""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -30,6 +31,7 @@ class _SpecView:
         if self._layers_cached is not None:
             return self._layers_cached
         from types import SimpleNamespace
+
         out = []
         for layer in self._layer_dicts:
             mark_obj = SimpleNamespace(name=layer.mark or "point")

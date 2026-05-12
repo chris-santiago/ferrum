@@ -7,6 +7,7 @@ variance/covariance ranking, and the rank1d/rank2d compute helpers.
 scipy is **not** imported at runtime. scipy is used only by
 ``tests/diagnostics/test_stats.py`` for parity validation.
 """
+
 from __future__ import annotations
 
 from math import log, sqrt
@@ -88,7 +89,7 @@ def pearson_r(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     Xm = X - X.mean(axis=0, keepdims=True)
     ym = y - y.mean()
     num = Xm.T @ ym
-    denom = np.sqrt((Xm ** 2).sum(axis=0) * (ym ** 2).sum())
+    denom = np.sqrt((Xm**2).sum(axis=0) * (ym**2).sum())
     return np.where(denom > 0, num / np.where(denom > 0, denom, 1.0), 0.0)
 
 
@@ -151,31 +152,49 @@ def _phi_inv(p: float) -> float:
         return -8.0
     if p >= 1.0:
         return 8.0
-    a = [-3.969683028665376e+01,  2.209460984245205e+02,
-         -2.759285104469687e+02,  1.383577518672690e+02,
-         -3.066479806614716e+01,  2.506628277459239e+00]
-    b = [-5.447609879822406e+01,  1.615858368580409e+02,
-         -1.556989798598866e+02,  6.680131188771972e+01,
-         -1.328068155288572e+01]
-    c = [-7.784894002430293e-03, -3.223964580411365e-01,
-         -2.400758277161838e+00, -2.549732539343734e+00,
-          4.374664141464968e+00,  2.938163982698783e+00]
-    d = [7.784695709041462e-03,  3.224671290700398e-01,
-         2.445134137142996e+00,  3.754408661907416e+00]
+    a = [
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    ]
+    b = [
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+    ]
+    c = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    ]
+    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e00, 3.754408661907416e00]
     plow = 0.02425
     phigh = 1.0 - plow
     if p < plow:
         q = sqrt(-2.0 * log(p))
-        return (((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) \
-               / ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1.0)
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
     if p <= phigh:
         q = p - 0.5
         r = q * q
-        return (((((a[0]*r + a[1])*r + a[2])*r + a[3])*r + a[4])*r + a[5]) * q \
-               / (((((b[0]*r + b[1])*r + b[2])*r + b[3])*r + b[4])*r + 1.0)
+        return (
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+            * q
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        )
     q = sqrt(-2.0 * log(1.0 - p))
-    return -(((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) \
-            / ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1.0)
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+        (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+    )
 
 
 def shapiro_w(x: np.ndarray) -> float:
@@ -196,13 +215,24 @@ def shapiro_w(x: np.ndarray) -> float:
     m_norm_sq = float((m * m).sum())
     u = 1.0 / sqrt(n)
 
-    a_n = (-2.706056 * u ** 5 + 4.434685 * u ** 4 - 2.071190 * u ** 3
-           - 0.147981 * u ** 2 + 0.221157 * u + m[-1] / sqrt(m_norm_sq))
-    a_nm1 = (-3.582633 * u ** 5 + 5.682633 * u ** 4 - 1.752460 * u ** 3
-             - 0.293762 * u ** 2 + 0.042981 * u + m[-2] / sqrt(m_norm_sq))
+    a_n = (
+        -2.706056 * u**5
+        + 4.434685 * u**4
+        - 2.071190 * u**3
+        - 0.147981 * u**2
+        + 0.221157 * u
+        + m[-1] / sqrt(m_norm_sq)
+    )
+    a_nm1 = (
+        -3.582633 * u**5
+        + 5.682633 * u**4
+        - 1.752460 * u**3
+        - 0.293762 * u**2
+        + 0.042981 * u
+        + m[-2] / sqrt(m_norm_sq)
+    )
 
-    eps = (m_norm_sq - 2.0 * m[-1] ** 2 - 2.0 * m[-2] ** 2) \
-          / (1.0 - 2.0 * a_n ** 2 - 2.0 * a_nm1 ** 2)
+    eps = (m_norm_sq - 2.0 * m[-1] ** 2 - 2.0 * m[-2] ** 2) / (1.0 - 2.0 * a_n**2 - 2.0 * a_nm1**2)
     a = np.zeros(n, dtype=np.float64)
     a[-1] = a_n
     a[-2] = a_nm1
@@ -221,6 +251,7 @@ def shapiro_w(x: np.ndarray) -> float:
 def kendall_tau_b(x: np.ndarray, y: np.ndarray) -> float:
     """Kendall's tau-b — wraps the Rust ``ferrum._core.kendall_tau_b``."""
     from ferrum._core import kendall_tau_b as _rust_ktb
+
     x64 = np.ascontiguousarray(x, dtype=np.float64).tolist()
     y64 = np.ascontiguousarray(y, dtype=np.float64).tolist()
     return float(_rust_ktb(x64, y64)["tau"])
@@ -272,11 +303,13 @@ def rank1d_compute(
             f"'covariance'; got {algorithm!r}"
         )
     order = np.argsort(-scores, kind="mergesort")
-    df = pl.DataFrame({
-        "feature": [str(cols[i]) for i in order],
-        "score": [float(scores[i]) for i in order],
-        "rank": list(range(1, len(order) + 1)),
-    })
+    df = pl.DataFrame(
+        {
+            "feature": [str(cols[i]) for i in order],
+            "score": [float(scores[i]) for i in order],
+            "rank": list(range(1, len(order) + 1)),
+        }
+    )
     if top_k is not None:
         df = df.head(int(top_k))
     return df
@@ -303,14 +336,13 @@ def rank2d_compute(X, *, algorithm: str = "pearson") -> pl.DataFrame:
         if p == 1:
             C = np.array([[1.0]])
         else:
-            Xr = np.column_stack([
-                _rankdata_average(X_np[:, j]) for j in range(p)
-            ])
+            Xr = np.column_stack([_rankdata_average(X_np[:, j]) for j in range(p)])
             C = np.corrcoef(Xr, rowvar=False)
             C = np.nan_to_num(C, nan=0.0)
             np.fill_diagonal(C, 1.0)
     elif algorithm == "kendall":
         from ferrum._core import kendall_tau_b as _rust_ktb
+
         C = np.eye(p, dtype=np.float64)
         for i in range(p):
             for j in range(i + 1, p):
@@ -339,8 +371,10 @@ def rank2d_compute(X, *, algorithm: str = "pearson") -> pl.DataFrame:
             feat_x.append(str(cols[i]))
             feat_y.append(str(cols[j]))
             corr.append(float(C[i, j]))
-    return pl.DataFrame({
-        "feature_x": feat_x,
-        "feature_y": feat_y,
-        "correlation": corr,
-    })
+    return pl.DataFrame(
+        {
+            "feature_x": feat_x,
+            "feature_y": feat_y,
+            "correlation": corr,
+        }
+    )

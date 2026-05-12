@@ -9,6 +9,7 @@ rather than a fitted instance and fits one clusterer per k inside its
 ``fit()`` method, paralleling yellowbrick's API. Every other visualizer
 follows the standard ``FerrumVisualizer.fit(X[, y])`` protocol.
 """
+
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -63,14 +64,14 @@ class SilhouetteVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         sil = self._source.silhouette()
-        self._metrics["mean_silhouette"] = float(
-            sil["silhouette_value"].mean()
-        )
+        self._metrics["mean_silhouette"] = float(sil["silhouette_value"].mean())
 
     def _build_chart(self) -> Any:
         from ..charts import _silhouette_chart_from_source
+
         return _silhouette_chart_from_source(
-            self._source, theme=self.theme,
+            self._source,
+            theme=self.theme,
         )
 
 
@@ -146,6 +147,7 @@ class ElbowVisualizer(FerrumVisualizer):
     def fit(self, X: Any, y: Any = None) -> "ElbowVisualizer":
         del y
         from ..deps import require_sklearn
+
         require_sklearn("ElbowVisualizer")
         import ferrum
 
@@ -158,18 +160,22 @@ class ElbowVisualizer(FerrumVisualizer):
             if self.metric in ("silhouette", "calinski_harabasz") and k_int < 2:
                 continue
             m = self.model_class(
-                n_clusters=k_int, random_state=seed, n_init=10,
+                n_clusters=k_int,
+                random_state=seed,
+                n_init=10,
             ).fit(X_np)
             if self.metric == "distortion":
                 score = float(m.inertia_)
             elif self.metric == "silhouette":
                 from sklearn.metrics import silhouette_score
+
                 labels = getattr(m, "labels_", None)
                 if labels is None:
                     labels = m.predict(X_np)
                 score = float(silhouette_score(X_np, labels))
             else:  # "calinski_harabasz"
                 from sklearn.metrics import calinski_harabasz_score
+
                 labels = getattr(m, "labels_", None)
                 if labels is None:
                     labels = m.predict(X_np)
@@ -259,8 +265,14 @@ class ManifoldVisualizer(FerrumVisualizer):
         import ferrum
 
         emb = self._source.embeddings(method=self.method)
-        chart = ferrum.Chart(emb).mark_point().encode(
-            x="dim_0", y="dim_1", color="label",
+        chart = (
+            ferrum.Chart(emb)
+            .mark_point()
+            .encode(
+                x="dim_0",
+                y="dim_1",
+                color="label",
+            )
         )
         if self.theme is not None:
             chart = chart.theme(self.theme)
@@ -402,9 +414,7 @@ class PCAVarianceVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         pca = self._source.pca_variance(n_components=self.n_components)
-        self._metrics["first_component_var"] = float(
-            pca["explained_variance_ratio"][0]
-        )
+        self._metrics["first_component_var"] = float(pca["explained_variance_ratio"][0])
 
     def _build_chart(self) -> Any:
         import ferrum

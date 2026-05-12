@@ -1,4 +1,5 @@
 """Color scheme lookups — ``continuous_palette`` and the ``Gradient`` factory."""
+
 from __future__ import annotations
 
 from ferrum._core import ContinuousScheme as _ContinuousScheme

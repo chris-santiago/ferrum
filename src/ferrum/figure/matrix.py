@@ -1,4 +1,5 @@
 """Matrix-of-plots convenience functions (pairplot, heatmap, clustermap)."""
+
 from __future__ import annotations
 from typing import Any
 
@@ -35,12 +36,20 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
 
 
 def pairplot(
-    data: Any, *,
-    vars: Any = None, x_vars: Any = None, y_vars: Any = None,
-    hue: Any = None, kind: str = "scatter",
+    data: Any,
+    *,
+    vars: Any = None,
+    x_vars: Any = None,
+    y_vars: Any = None,
+    hue: Any = None,
+    kind: str = "scatter",
     diag_kind: str = "auto",
-    markers: Any = None, height: float | None = None, aspect: float | None = None,
-    corner: bool = False, dropna: bool = False, theme: Any = None,
+    markers: Any = None,
+    height: float | None = None,
+    aspect: float | None = None,
+    corner: bool = False,
+    dropna: bool = False,
+    theme: Any = None,
     **encode_kwargs: Any,
 ) -> RepeatChart:
     """Pairwise-scatter grid (scatterplot matrix).
@@ -120,9 +129,7 @@ def pairplot(
     ... )
     """
     if kind not in _VALID_PAIR_KINDS:
-        raise ValueError(
-            f"pairplot: kind must be one of {sorted(_VALID_PAIR_KINDS)}; got {kind!r}"
-        )
+        raise ValueError(f"pairplot: kind must be one of {sorted(_VALID_PAIR_KINDS)}; got {kind!r}")
     if diag_kind not in _VALID_DIAG_KINDS:
         raise ValueError(
             f"pairplot: diag_kind must be one of {sorted(k for k in _VALID_DIAG_KINDS if k)}|None; "
@@ -132,21 +139,18 @@ def pairplot(
     # Resolve vars / x_vars / y_vars to (row, column) field lists.
     if vars is not None:
         if x_vars is not None or y_vars is not None:
-            raise ValueError(
-                "pairplot: cannot pass both vars= and x_vars=/y_vars="
-            )
+            raise ValueError("pairplot: cannot pass both vars= and x_vars=/y_vars=")
         rows = list(vars)
         cols = list(vars)
     elif x_vars is not None or y_vars is not None:
         if x_vars is None or y_vars is None:
-            raise ValueError(
-                "pairplot: x_vars and y_vars must be passed together"
-            )
+            raise ValueError("pairplot: x_vars and y_vars must be passed together")
         rows = list(y_vars)
         cols = list(x_vars)
     else:
         # No vars specified — auto-detect numeric columns from data.
         from ferrum._coerce import to_arrow_table
+
         tbl = to_arrow_table(data)
         numeric_cols = []
         for name in tbl.column_names:
@@ -173,7 +177,7 @@ def pairplot(
     off = off.encode(**enc)
 
     # Build the diagonal template (only meaningful for symmetric vars).
-    symmetric = (rows == cols)
+    symmetric = rows == cols
     diagonal = None
     effective_diag_kind = diag_kind
     if effective_diag_kind == "auto":
@@ -209,13 +213,20 @@ def pairplot(
 
 
 def heatmap(
-    data: Any, *,
-    annot: bool = True, fmt: str = ".2f",
+    data: Any,
+    *,
+    annot: bool = True,
+    fmt: str = ".2f",
     cmap: str = "blues",
-    linewidths: float = 0.5, linecolor: str = "white",
-    vmin: float | None = None, vmax: float | None = None,
-    center: float | None = None, robust: bool = False,
-    square: bool = False, mask: Any = None, theme: Any = None,
+    linewidths: float = 0.5,
+    linecolor: str = "white",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    center: float | None = None,
+    robust: bool = False,
+    square: bool = False,
+    mask: Any = None,
+    theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
     """2-D heatmap of a wide-format DataFrame.
@@ -304,6 +315,7 @@ def heatmap(
     # robust=True: compute vmin/vmax from 2nd/98th percentiles in Python.
     if robust:
         import numpy as np
+
         all_vals = []
         for c in value_cols:
             all_vals.extend(tbl[c].to_numpy().tolist())
@@ -316,8 +328,10 @@ def heatmap(
 
     # Build the chart: Unpivot to long format, then mark_rect.
     unpivot = Unpivot(
-        id_vars=[id_col], value_vars=value_cols,
-        var_name="column", value_name="value",
+        id_vars=[id_col],
+        value_vars=value_cols,
+        var_name="column",
+        value_name="value",
     )
     rect_kwargs: dict = {}
     if linewidths > 0:
@@ -332,6 +346,7 @@ def heatmap(
     # Apply color scale (cmap / vmin / vmax / center).
     if vmin is not None or vmax is not None or center is not None or cmap is not None:
         from ferrum.encoding import Color
+
         scale_kwargs: dict = {"type": "linear"}
         if vmin is not None and vmax is not None:
             scale_kwargs["domain"] = [vmin, vmax]
@@ -357,6 +372,7 @@ def heatmap(
     # bound to the value column. Format spec lives on the text channel.
     if annot:
         from ferrum.encoding import Text
+
         text_layer = (
             Chart(data)
             .transform(unpivot)
@@ -364,6 +380,7 @@ def heatmap(
             .encode(x="column", y=id_col, text=Text("value", format=fmt))
         )
         from ferrum.figure.regression import _merge_layers
+
         chart = _merge_layers(chart, text_layer)
 
     if theme is not None:
@@ -372,11 +389,15 @@ def heatmap(
 
 
 def clustermap(
-    data: Any, *,
-    method: str = "ward", metric: str = "euclidean",
+    data: Any,
+    *,
+    method: str = "ward",
+    metric: str = "euclidean",
     cmap: str = "viridis",
-    z_score: Any = None, standard_scale: Any = None,
-    figsize: Any = None, dendrogram_ratio: float = 0.2,
+    z_score: Any = None,
+    standard_scale: Any = None,
+    figsize: Any = None,
+    dendrogram_ratio: float = 0.2,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Any:
@@ -444,7 +465,10 @@ def clustermap(
     >>> fm.clustermap(corr_df, cmap="viridis")
     """
     from ferrum import (
-        ClusterMapChart, Linkage, Reorder, Unpivot,
+        ClusterMapChart,
+        Linkage,
+        Reorder,
+        Unpivot,
     )
     from ferrum._coerce import to_arrow_table
 
@@ -470,13 +494,19 @@ def clustermap(
     # Linkage transforms (rows + columns) with explicit names so we can route
     # their `segments` named outputs to the dendrogram layers.
     row_link = Linkage(
-        method=method, metric=metric, axis="rows",
-        z_score=z_score, standard_scale=standard_scale,
+        method=method,
+        metric=metric,
+        axis="rows",
+        z_score=z_score,
+        standard_scale=standard_scale,
         name="row_link",
     )
     col_link = Linkage(
-        method=method, metric=metric, axis="columns",
-        z_score=z_score, standard_scale=standard_scale,
+        method=method,
+        metric=metric,
+        axis="columns",
+        z_score=z_score,
+        standard_scale=standard_scale,
         name="col_link",
     )
 
@@ -484,7 +514,8 @@ def clustermap(
     unpivot = Unpivot(
         id_vars=[id_col],
         value_vars=value_cols,
-        var_name="column", value_name="value",
+        var_name="column",
+        value_name="value",
     )
     # Reorder reads its index column from a sibling named output via from=:
     # row_link publishes `row_link_order` (n rows of permutation indices);
@@ -499,12 +530,16 @@ def clustermap(
     # `drop_index=False` keeps the data columns intact (we're not dropping a
     # column from the chained batch — the index column lives in `from=` only).
     from ferrum.encoding import Color as _Color
+
     _color_enc = _Color("value", scheme=cmap)
     center = (
         Chart(data)
-        .transform(row_link, col_link,
-                   Reorder(by="original_idx", from_="row_link_order", drop_index=False),
-                   unpivot)
+        .transform(
+            row_link,
+            col_link,
+            Reorder(by="original_idx", from_="row_link_order", drop_index=False),
+            unpivot,
+        )
         .mark_rect()
         .encode(
             x="column",
@@ -529,6 +564,7 @@ def clustermap(
 
     # Row dendrogram (left): reads row_link_segments, rotated via CoordFlip.
     from ferrum import CoordFlip
+
     row_dendro_layer = _Layer(
         mark="segment",
         encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
@@ -542,6 +578,7 @@ def clustermap(
     # Dendrogram panels should not show gridlines behind the tree branches.
     # Build a no-grid base theme; if the user supplied a theme, merge on top.
     from ferrum.themes import Theme as _Theme
+
     _dendro_base = _Theme(grid=False)
     if theme is not None:
         center = center.theme(theme)

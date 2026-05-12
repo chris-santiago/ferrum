@@ -1,6 +1,7 @@
 """10e model-selection visualizers — LearningCurve, ValidationCurve,
 CVScores, AlphaSelection.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -80,7 +81,9 @@ class LearningCurveVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.learning_curve(
-            cv=self.cv, scoring=self.scoring, train_sizes=self.train_sizes,
+            cv=self.cv,
+            scoring=self.scoring,
+            train_sizes=self.train_sizes,
         )
         # mean_score is already aggregated per (train_size, split) in
         # the source schema, so collapsing per-fold rows is explicit
@@ -182,7 +185,10 @@ class ValidationCurveVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.validation_curve(
-            self.param, self.values, cv=self.cv, scoring=self.scoring,
+            self.param,
+            self.values,
+            cv=self.cv,
+            scoring=self.scoring,
         )
         # The source emits one (split, param_value) row per combination;
         # dedupe explicitly on param_value to guard against schema changes.
@@ -364,14 +370,13 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.alpha_selection(
-            self.alphas, cv=self.cv, scoring=self.scoring,
+            self.alphas,
+            cv=self.cv,
+            scoring=self.scoring,
         )
         # The source emits one row per alpha; dedupe explicitly to guard
         # against schema changes that might add a (split, alpha) breakdown.
-        agg = (
-            df.unique(subset=["alpha"], keep="first", maintain_order=True)
-            .sort("alpha")
-        )
+        agg = df.unique(subset=["alpha"], keep="first", maintain_order=True).sort("alpha")
         if agg.height:
             scores = agg["mean_score"].to_numpy()
             idx = int(np.argmax(scores))

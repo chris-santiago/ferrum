@@ -1,4 +1,5 @@
 """Multi-chart composition primitives (HConcat, VConcat, Joint, Repeat, ClusterMap)."""
+
 from __future__ import annotations
 
 import json as _json
@@ -23,9 +24,7 @@ class _ChartLike:
     """
 
     def show_svg(self) -> str:  # pragma: no cover - abstract
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement show_svg"
-        )
+        raise NotImplementedError(f"{type(self).__name__} must implement show_svg")
 
     # Subclasses provide ``charts`` as either an instance attribute
     # (symmetric containers — HConcat / VConcat) or as a ``@property``
@@ -65,6 +64,7 @@ class _ChartLike:
             or writing directly to disk.
         """
         from ferrum._core import rasterize_svg
+
         return bytes(rasterize_svg(self.show_svg(), scale=2.0))
 
     def save(self, path: str, *, format=None, **kwargs) -> None:
@@ -92,8 +92,7 @@ class _ChartLike:
             dest.write_bytes(self.show_png())
         else:
             raise NotImplementedError(
-                f"format={fmt!r} is not supported for {type(self).__name__}; "
-                "use 'svg' or 'png'."
+                f"format={fmt!r} is not supported for {type(self).__name__}; use 'svg' or 'png'."
             )
 
     def share_scale(self, **channels):
@@ -132,10 +131,7 @@ class _ChartLike:
         """
         for ch, mode in channels.items():
             if mode not in ("shared", "independent"):
-                raise ValueError(
-                    f"share_scale: {ch}={mode!r}; "
-                    "expected 'shared' or 'independent'"
-                )
+                raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
         shared = [ch for ch, mode in channels.items() if mode == "shared"]
         if not shared:
             return self
@@ -165,9 +161,7 @@ class _ChartLike:
         generic ``share_scale`` plumbing on the base and each
         composition's constructor signature.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _rebuild_with_charts"
-        )
+        raise NotImplementedError(f"{type(self).__name__} must implement _rebuild_with_charts")
 
 
 class _CompositeBase(_ChartLike):
@@ -202,9 +196,7 @@ class _CompositeBase(_ChartLike):
             A new instance of the same composition class with *t* applied
             to each child chart.
         """
-        return type(self)(
-            [c.theme(t) for c in self.charts], spacing=self.spacing
-        )
+        return type(self)([c.theme(t) for c in self.charts], spacing=self.spacing)
 
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to every child chart.
@@ -221,9 +213,7 @@ class _CompositeBase(_ChartLike):
             A new instance of the same composition class with updated
             child-chart properties.
         """
-        return type(self)(
-            [c.properties(**kwargs) for c in self.charts], spacing=self.spacing
-        )
+        return type(self)([c.properties(**kwargs) for c in self.charts], spacing=self.spacing)
 
     def _rebuild_with_charts(self, fn):
         return type(self)([fn(c) for c in self.charts], spacing=self.spacing)
@@ -258,6 +248,7 @@ class HConcatChart(_CompositeBase):
             SVG markup with sub-charts placed left-to-right.
         """
         from ferrum._core import compose_svg_horizontal
+
         svgs = [c.show_svg() for c in self.charts]
         return compose_svg_horizontal(svgs, spacing=self.spacing, align="top")
 
@@ -295,6 +286,7 @@ class VConcatChart(_CompositeBase):
             SVG markup with sub-charts stacked top-to-bottom.
         """
         from ferrum._core import compose_svg_vertical
+
         svgs = [c.show_svg() for c in self.charts]
         return compose_svg_vertical(svgs, spacing=self.spacing, align="left")
 
@@ -433,8 +425,10 @@ class JointChart(_ChartLike):
         """
         return JointChart(
             self.center.properties(**kwargs),
-            top=self.top, right=self.right,
-            ratio=self.ratio, spacing=self.spacing,
+            top=self.top,
+            right=self.right,
+            ratio=self.ratio,
+            spacing=self.spacing,
         )
 
     def _rebuild_with_charts(self, fn):
@@ -442,7 +436,8 @@ class JointChart(_ChartLike):
             fn(self.center),
             top=(fn(self.top) if self.top is not None else None),
             right=(fn(self.right) if self.right is not None else None),
-            ratio=self.ratio, spacing=self.spacing,
+            ratio=self.ratio,
+            spacing=self.spacing,
         )
 
     def show_svg(self) -> str:
@@ -454,6 +449,7 @@ class JointChart(_ChartLike):
             SVG markup with the 2 × 2 grid layout.
         """
         from ferrum._core import compose_svg_grid
+
         # F20: the Rust grid compositor now honors row_ratios/col_ratios via
         # viewBox-scaled per-cell wrappers, so marginals can be passed at
         # their native size and the compositor handles proportional sizing.
@@ -469,7 +465,9 @@ class JointChart(_ChartLike):
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         return compose_svg_grid(
-            cells, rows=2, cols=2,
+            cells,
+            rows=2,
+            cols=2,
             row_ratios=[marginal_share, center_share],
             col_ratios=[center_share, marginal_share],
             spacing=self.spacing,
@@ -543,15 +541,24 @@ class RepeatChart(_ChartLike):
     """
 
     __slots__ = (
-        "template", "row", "column", "layer", "diagonal", "corner",
-        "spacing", "columns", "resolve",
+        "template",
+        "row",
+        "column",
+        "layer",
+        "diagonal",
+        "corner",
+        "spacing",
+        "columns",
+        "resolve",
     )
 
     def __init__(
         self,
         template,
         *,
-        row=None, column=None, layer=None,
+        row=None,
+        column=None,
+        layer=None,
         diagonal=None,
         corner: bool = False,
         spacing: float = 10.0,
@@ -559,17 +566,11 @@ class RepeatChart(_ChartLike):
         resolve=None,
     ) -> None:
         if diagonal is not None and (row is None or column is None):
-            raise ValueError(
-                "RepeatChart: diagonal= requires both row= and column= to be set"
-            )
+            raise ValueError("RepeatChart: diagonal= requires both row= and column= to be set")
         if corner and (row is None or column is None):
-            raise ValueError(
-                "RepeatChart: corner=True requires both row= and column= to be set"
-            )
+            raise ValueError("RepeatChart: corner=True requires both row= and column= to be set")
         if row is None and column is None and layer is None:
-            raise ValueError(
-                "RepeatChart: at least one of row=, column=, or layer= must be set"
-            )
+            raise ValueError("RepeatChart: at least one of row=, column=, or layer= must be set")
         if columns is not None and columns <= 0:
             raise ValueError(f"RepeatChart: columns must be > 0; got {columns}")
         if resolve is not None:
@@ -582,8 +583,7 @@ class RepeatChart(_ChartLike):
             for ch, mode in resolve.items():
                 if mode not in ("shared", "independent"):
                     raise ValueError(
-                        f"RepeatChart: resolve[{ch!r}]={mode!r}; "
-                        "expected 'shared' or 'independent'"
+                        f"RepeatChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
                     )
         self.template = template
         self.row = list(row) if row is not None else None
@@ -724,9 +724,7 @@ class RepeatChart(_ChartLike):
             return self._resolve_template(self.diagonal, row_field, col_field)
         if self.layer is not None:
             layers = [
-                self._resolve_template(
-                    self.template, row_field, col_field, layer_field=lf
-                )
+                self._resolve_template(self.template, row_field, col_field, layer_field=lf)
                 for lf in self.layer
             ]
             result = layers[0]
@@ -754,16 +752,13 @@ class RepeatChart(_ChartLike):
         new = source._clone()
         for axis, ch in list(new._encoding.items()):
             if isinstance(ch, _RepeatPlaceholder):
-                concrete = self._concrete_field(
-                    ch.field, row_field, col_field, layer_field
-                )
+                concrete = self._concrete_field(ch.field, row_field, col_field, layer_field)
                 from ferrum.chart import _channel_class_for
+
                 cls = _channel_class_for(axis) or _channel_class_for("x")
                 new._encoding[axis] = cls(concrete)
             elif isinstance(ch, ChannelBase) and isinstance(ch.field, _RepeatPlaceholder):
-                concrete = self._concrete_field(
-                    ch.field.field, row_field, col_field, layer_field
-                )
+                concrete = self._concrete_field(ch.field.field, row_field, col_field, layer_field)
                 new._encoding[axis] = ch.__class__(concrete)
         return new
 
@@ -783,24 +778,15 @@ class RepeatChart(_ChartLike):
         """
         if placeholder_axis == "column":
             if col_field is None:
-                raise ValueError(
-                    "RepeatChart: template uses Repeat.column but "
-                    "column= was not set"
-                )
+                raise ValueError("RepeatChart: template uses Repeat.column but column= was not set")
             return col_field
         if placeholder_axis == "row":
             if row_field is None:
-                raise ValueError(
-                    "RepeatChart: template uses Repeat.row but "
-                    "row= was not set"
-                )
+                raise ValueError("RepeatChart: template uses Repeat.row but row= was not set")
             return row_field
         if placeholder_axis == "layer":
             if layer_field is None:
-                raise ValueError(
-                    "RepeatChart: template uses Repeat.layer but "
-                    "layer= was not set"
-                )
+                raise ValueError("RepeatChart: template uses Repeat.layer but layer= was not set")
             return layer_field
         raise ValueError(f"unknown Repeat placeholder axis '{placeholder_axis}'")
 
@@ -819,10 +805,14 @@ class RepeatChart(_ChartLike):
         """
         return RepeatChart(
             self.template.theme(t),
-            row=self.row, column=self.column, layer=self.layer,
+            row=self.row,
+            column=self.column,
+            layer=self.layer,
             diagonal=(self.diagonal.theme(t) if self.diagonal is not None else None),
-            corner=self.corner, spacing=self.spacing,
-            columns=self.columns, resolve=self.resolve,
+            corner=self.corner,
+            spacing=self.spacing,
+            columns=self.columns,
+            resolve=self.resolve,
         )
 
     def properties(self, **kwargs):
@@ -839,15 +829,17 @@ class RepeatChart(_ChartLike):
         RepeatChart
             A new instance with updated template-chart properties.
         """
-        new_diagonal = (
-            self.diagonal.properties(**kwargs) if self.diagonal is not None else None
-        )
+        new_diagonal = self.diagonal.properties(**kwargs) if self.diagonal is not None else None
         return RepeatChart(
             self.template.properties(**kwargs),
-            row=self.row, column=self.column, layer=self.layer,
+            row=self.row,
+            column=self.column,
+            layer=self.layer,
             diagonal=new_diagonal,
-            corner=self.corner, spacing=self.spacing,
-            columns=self.columns, resolve=self.resolve,
+            corner=self.corner,
+            spacing=self.spacing,
+            columns=self.columns,
+            resolve=self.resolve,
         )
 
     def share_scale(self, **channels):
@@ -871,17 +863,17 @@ class RepeatChart(_ChartLike):
         """
         for ch, mode in channels.items():
             if mode not in ("shared", "independent"):
-                raise ValueError(
-                    f"share_scale: {ch}={mode!r}; "
-                    "expected 'shared' or 'independent'"
-                )
+                raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
         merged = dict(self.resolve or {})
         merged.update(channels)
         return RepeatChart(
             self.template,
-            row=self.row, column=self.column, layer=self.layer,
+            row=self.row,
+            column=self.column,
+            layer=self.layer,
             diagonal=self.diagonal,
-            corner=self.corner, spacing=self.spacing,
+            corner=self.corner,
+            spacing=self.spacing,
             columns=self.columns,
             resolve=merged or None,
         )
@@ -904,6 +896,7 @@ class RepeatChart(_ChartLike):
         the 1-D layout is a single row (column-only) or column (row-only).
         """
         from ferrum._core import compose_svg_grid
+
         cells = self.expand()
         if self.row is not None and self.column is not None:
             n_rows = len(self.row)
@@ -920,7 +913,9 @@ class RepeatChart(_ChartLike):
             for idx, (_, _, chart) in enumerate(cells):
                 grid[idx] = chart.show_svg()
         return compose_svg_grid(
-            grid, rows=n_rows, cols=n_cols,
+            grid,
+            rows=n_rows,
+            cols=n_cols,
             row_ratios=[1.0] * n_rows,
             col_ratios=[1.0] * n_cols,
             spacing=self.spacing,
@@ -992,8 +987,11 @@ class ClusterMapChart(_ChartLike):
     """
 
     __slots__ = (
-        "heatmap", "row_dendrogram", "col_dendrogram",
-        "dendrogram_ratio", "spacing",
+        "heatmap",
+        "row_dendrogram",
+        "col_dendrogram",
+        "dendrogram_ratio",
+        "spacing",
     )
 
     def __init__(
@@ -1006,9 +1004,7 @@ class ClusterMapChart(_ChartLike):
         spacing: float = 10.0,
     ) -> None:
         if not (0.0 < dendrogram_ratio < 1.0):
-            raise ValueError(
-                f"dendrogram_ratio must be in (0, 1); got {dendrogram_ratio}"
-            )
+            raise ValueError(f"dendrogram_ratio must be in (0, 1); got {dendrogram_ratio}")
         self.heatmap = heatmap
         self.row_dendrogram = row_dendrogram
         self.col_dendrogram = col_dendrogram
@@ -1018,10 +1014,10 @@ class ClusterMapChart(_ChartLike):
     @property
     def charts(self) -> list:
         """List of Chart : All non-None sub-charts in ``__init__`` order
-        (heatmap, row_dendrogram, col_dendrogram)."""
+        (heatmap, row_dendrogram, col_dendrogram).
+        """
         return [
-            c for c in (self.heatmap, self.row_dendrogram, self.col_dendrogram)
-            if c is not None
+            c for c in (self.heatmap, self.row_dendrogram, self.col_dendrogram) if c is not None
         ]
 
     @property
@@ -1051,8 +1047,12 @@ class ClusterMapChart(_ChartLike):
         """
         return ClusterMapChart(
             self.heatmap.theme(t),
-            row_dendrogram=(self.row_dendrogram.theme(t) if self.row_dendrogram is not None else None),
-            col_dendrogram=(self.col_dendrogram.theme(t) if self.col_dendrogram is not None else None),
+            row_dendrogram=(
+                self.row_dendrogram.theme(t) if self.row_dendrogram is not None else None
+            ),
+            col_dendrogram=(
+                self.col_dendrogram.theme(t) if self.col_dendrogram is not None else None
+            ),
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
@@ -1085,12 +1085,8 @@ class ClusterMapChart(_ChartLike):
     def _rebuild_with_charts(self, fn):
         return ClusterMapChart(
             fn(self.heatmap),
-            row_dendrogram=(
-                fn(self.row_dendrogram) if self.row_dendrogram is not None else None
-            ),
-            col_dendrogram=(
-                fn(self.col_dendrogram) if self.col_dendrogram is not None else None
-            ),
+            row_dendrogram=(fn(self.row_dendrogram) if self.row_dendrogram is not None else None),
+            col_dendrogram=(fn(self.col_dendrogram) if self.col_dendrogram is not None else None),
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
@@ -1104,6 +1100,7 @@ class ClusterMapChart(_ChartLike):
             SVG markup with the 2 × 2 grid layout.
         """
         from ferrum._core import compose_svg_grid
+
         d = self.dendrogram_ratio
         h = 1.0 - d
         # Pre-resize each component so the heatmap fills (h × h) of the grid
@@ -1120,15 +1117,23 @@ class ClusterMapChart(_ChartLike):
         # matters). clustermap() already calls .axis(show=False) on each
         # dendrogram chart at construction time, so spec-level suppression
         # is in effect here — no post-render SVG mangling needed.
-        col_dendro = (self.col_dendrogram.properties(width=hm_w, height=dendro_h)
-                      if self.col_dendrogram is not None else None)
-        row_dendro = (self.row_dendrogram.properties(width=dendro_w, height=hm_h)
-                      if self.row_dendrogram is not None else None)
+        col_dendro = (
+            self.col_dendrogram.properties(width=hm_w, height=dendro_h)
+            if self.col_dendrogram is not None
+            else None
+        )
+        row_dendro = (
+            self.row_dendrogram.properties(width=dendro_w, height=hm_h)
+            if self.row_dendrogram is not None
+            else None
+        )
         col_svg = col_dendro.show_svg() if col_dendro is not None else None
         row_svg = row_dendro.show_svg() if row_dendro is not None else None
         cells = [None, col_svg, row_svg, self.heatmap.show_svg()]
         return compose_svg_grid(
-            cells, rows=2, cols=2,
+            cells,
+            rows=2,
+            cols=2,
             row_ratios=[d, h],
             col_ratios=[d, h],
             spacing=self.spacing,

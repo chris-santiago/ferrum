@@ -9,6 +9,7 @@ small data-prep helpers shared across diagnostic marks (reference-line
 injection, sort-by-axis), since several Phase 10 marks draw fixed-position
 reference lines that Rust's mark_rule renders one-line-per-row.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -71,7 +72,9 @@ def _r2_score(y_true, y_pred) -> float:
 
 
 def _inject_metrics_corner(
-    df: pl.DataFrame, *, kind: str = "studentized",
+    df: pl.DataFrame,
+    *,
+    kind: str = "studentized",
 ) -> pl.DataFrame:
     """Augment a residuals DataFrame with ``_metrics_text`` and ``_metrics_y``.
 
@@ -92,11 +95,7 @@ def _inject_metrics_corner(
 
     if df.height == 0:
         return df
-    y_col = (
-        "studentized_residual"
-        if kind in ("studentized", "scaled")
-        else "residual"
-    )
+    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     from ferrum._metrics_fmt import format_corner_metrics
 
     y_true = np.asarray(df["y_true"].to_list(), dtype=float)
@@ -135,11 +134,13 @@ def _overlay_metrics_corner(chart):
     data = chart._data
     if data is None or "_metrics_text" not in data.columns:
         return chart
-    return chart.layer(Layer(
-        mark="text",
-        encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
-        mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-    ))
+    return chart.layer(
+        Layer(
+            mark="text",
+            encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
+            mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+        )
+    )
 
 
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
@@ -188,7 +189,8 @@ def _residuals_chart_from_source(
         if cook_threshold is not None:
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
         chart = ferrum.Chart(df).mark_residuals(
-            kind=kind, cook_threshold=cook_threshold,
+            kind=kind,
+            cook_threshold=cook_threshold,
         )
         chart = chart.properties(
             title=ferrum.Title("Residuals", subtitle=subtitle),
@@ -207,14 +209,10 @@ def _residuals_chart_from_source(
     # in which case we silently drop the panel rather than crashing on
     # "no usable values for field 'leverage'".
     panel_list = panels if isinstance(panels, list) else ["residuals_vs_fitted"]
-    if (
-        "residuals_vs_leverage" in panel_list
-        and df["leverage"].is_nan().all()
-    ):
+    if "residuals_vs_leverage" in panel_list and df["leverage"].is_nan().all():
         panel_list = [p for p in panel_list if p != "residuals_vs_leverage"]
     charts = [
-        _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold)
-        for name in panel_list
+        _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold) for name in panel_list
     ]
     return _grid_panels(charts, theme=theme)
 
@@ -241,7 +239,8 @@ def _residuals_panel(
         if cook_threshold is not None:
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
             chart = ferrum.Chart(df).mark_residuals(
-                kind=kind, cook_threshold=cook_threshold,
+                kind=kind,
+                cook_threshold=cook_threshold,
             )
         else:
             chart = ferrum.Chart(df).mark_residuals(kind=kind)
@@ -257,9 +256,7 @@ def _residuals_panel(
         return ferrum.Chart(df).mark_qq().encode(x="studentized_residual")
 
     if name == "scale_location":
-        d2 = df.with_columns(
-            pl.col("studentized_residual").abs().sqrt().alias("sqrt_abs_resid")
-        )
+        d2 = df.with_columns(pl.col("studentized_residual").abs().sqrt().alias("sqrt_abs_resid"))
         return ferrum.Chart(d2).mark_point().encode(x="y_pred", y="sqrt_abs_resid")
 
     if name == "residuals_vs_leverage":
@@ -270,16 +267,23 @@ def _residuals_panel(
         # x coordinate for this panel.
         if cook_threshold is not None:
             df = _inject_cook_outliers(
-                df, kind=kind, threshold=cook_threshold, x_col="leverage",
+                df,
+                kind=kind,
+                threshold=cook_threshold,
+                x_col="leverage",
             )
         base = ferrum.Chart(df).mark_point().encode(x="leverage", y=y_col)
         if cook_threshold is not None and "_cook_outlier_x" in df.columns:
-            overlay = ferrum.Chart(df).mark_point(
-                fill="#e15759",  # tableau red, matches mark_residuals overlay
-                stroke="#000000",
-                stroke_width=1.0,
-                size=80.0,
-            ).encode(x="_cook_outlier_x", y="_cook_outlier_y")
+            overlay = (
+                ferrum.Chart(df)
+                .mark_point(
+                    fill="#e15759",  # tableau red, matches mark_residuals overlay
+                    stroke="#000000",
+                    stroke_width=1.0,
+                    size=80.0,
+                )
+                .encode(x="_cook_outlier_x", y="_cook_outlier_y")
+            )
             return base + overlay
         return base
 
@@ -328,14 +332,12 @@ def _prediction_error_chart_from_source(
         residuals = (df["y_pred"] - df["y_true"]).to_numpy()
         if ci is not None:
             if not 0.0 < ci < 1.0:
-                raise ValueError(
-                    f"mark_prediction_error(ci={ci!r}) — expected a value in (0, 1)."
-                )
+                raise ValueError(f"mark_prediction_error(ci={ci!r}) — expected a value in (0, 1).")
             alpha = (1.0 - float(ci)) / 2.0
             q_lo = float(np.quantile(residuals, alpha))
             q_hi = float(np.quantile(residuals, 1.0 - alpha))
         else:
-            sigma = float(np.sqrt(np.mean(residuals ** 2)))
+            sigma = float(np.sqrt(np.mean(residuals**2)))
             q_lo = -sigma
             q_hi = sigma
         df = df.with_columns(
@@ -394,9 +396,7 @@ def _roc_chart_from_source(
         color_field=color_field,
     )
 
-    n_curves = (
-        len(set(df[color_field].to_list())) if color_field is not None else 1
-    )
+    n_curves = len(set(df[color_field].to_list())) if color_field is not None else 1
     if n_curves == 1:
         fpr = np.asarray(df["fpr"].to_list(), dtype=float)
         tpr = np.asarray(df["tpr"].to_list(), dtype=float)
@@ -409,8 +409,11 @@ def _roc_chart_from_source(
 
     if annotate_auc:
         chart = _apply_metric_label_explicit(
-            chart, "auc",
-            x_col="fpr", y_col="tpr", color_col=color_field,
+            chart,
+            "auc",
+            x_col="fpr",
+            y_col="tpr",
+            color_col=color_field,
             position="end",
         )
 
@@ -551,7 +554,8 @@ def _pr_chart_from_source(
         ap_value = _ap_step(recall, precision)
         chart = chart.properties(
             title=ferrum.Title(
-                f"Precision–Recall — AP {ap_value:.3f}", subtitle=subtitle,
+                f"Precision–Recall — AP {ap_value:.3f}",
+                subtitle=subtitle,
             ),
         )
     else:
@@ -561,16 +565,22 @@ def _pr_chart_from_source(
 
     if baseline_prevalence is not None:
         from ferrum.layer import Layer
-        chart = chart.layer(Layer(
-            mark="rule",
-            encoding={"y": "_baseline_y"},
-            mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
-        ))
+
+        chart = chart.layer(
+            Layer(
+                mark="rule",
+                encoding={"y": "_baseline_y"},
+                mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+            )
+        )
 
     if annotate_ap:
         chart = _apply_metric_label_explicit(
-            chart, "ap",
-            x_col="recall", y_col="precision", color_col=color_field,
+            chart,
+            "ap",
+            x_col="recall",
+            y_col="precision",
+            color_col=color_field,
             position="end",
         )
 
@@ -608,14 +618,16 @@ def _inject_pr_iso_lines(
         precisions = f * recalls / (2 * recalls - f)
         valid = (precisions > 0.0) & (precisions <= 1.0)
         for r, p in zip(recalls[valid], precisions[valid]):
-            iso_rows.append({
-                "_iso_recall": float(r),
-                "_iso_precision": float(p),
-                "_iso_f": f"F={f:.1f}",
-                "_iso_label_x": None,
-                "_iso_label_y": None,
-                "_iso_label": None,
-            })
+            iso_rows.append(
+                {
+                    "_iso_recall": float(r),
+                    "_iso_precision": float(p),
+                    "_iso_f": f"F={f:.1f}",
+                    "_iso_label_x": None,
+                    "_iso_label_y": None,
+                    "_iso_label": None,
+                }
+            )
         # Label anchor at the rightmost (recall ≈ 1) point of the iso curve.
         if iso_rows:
             iso_rows[-1]["_iso_label_x"] = float(recalls[valid][-1]) - 0.02
@@ -624,21 +636,24 @@ def _inject_pr_iso_lines(
 
     iso_df = pl.DataFrame(iso_rows)
     # Extend the original PR DataFrame with null iso columns.
-    null_iso = pl.DataFrame({
-        "_iso_recall": [None] * df.height,
-        "_iso_precision": [None] * df.height,
-        "_iso_f": [None] * df.height,
-        "_iso_label_x": [None] * df.height,
-        "_iso_label_y": [None] * df.height,
-        "_iso_label": [None] * df.height,
-    }, schema={
-        "_iso_recall": pl.Float64,
-        "_iso_precision": pl.Float64,
-        "_iso_f": pl.Utf8,
-        "_iso_label_x": pl.Float64,
-        "_iso_label_y": pl.Float64,
-        "_iso_label": pl.Utf8,
-    })
+    null_iso = pl.DataFrame(
+        {
+            "_iso_recall": [None] * df.height,
+            "_iso_precision": [None] * df.height,
+            "_iso_f": [None] * df.height,
+            "_iso_label_x": [None] * df.height,
+            "_iso_label_y": [None] * df.height,
+            "_iso_label": [None] * df.height,
+        },
+        schema={
+            "_iso_recall": pl.Float64,
+            "_iso_precision": pl.Float64,
+            "_iso_f": pl.Utf8,
+            "_iso_label_x": pl.Float64,
+            "_iso_label_y": pl.Float64,
+            "_iso_label": pl.Utf8,
+        },
+    )
     df = pl.concat([df, null_iso], how="horizontal")
 
     # Extend iso_df with null PR columns so the schemas align for vertical concat.
@@ -715,7 +730,8 @@ def _calibration_chart_from_source(
     if brier_value is not None:
         chart = chart.properties(
             title=ferrum.Title(
-                f"Calibration — Brier {brier_value:.3f}", subtitle=subtitle,
+                f"Calibration — Brier {brier_value:.3f}",
+                subtitle=subtitle,
             ),
         )
     else:
@@ -725,8 +741,10 @@ def _calibration_chart_from_source(
 
     if annotate_brier:
         chart = _apply_metric_label_explicit(
-            chart, "brier",
-            x_col="mean_predicted", y_col="fraction_positive",
+            chart,
+            "brier",
+            x_col="mean_predicted",
+            y_col="fraction_positive",
             color_col=color,
             position="corner",
         )
@@ -766,8 +784,10 @@ def _gain_chart_from_source(
     )
     if color_field is not None:
         chart = _direct_label_endpoint(
-            chart, label_field=color_field,
-            x_col="percent_population", y_col="gain",
+            chart,
+            label_field=color_field,
+            x_col="percent_population",
+            y_col="gain",
         )
     if theme is not None:
         chart = chart.theme(theme)
@@ -798,8 +818,10 @@ def _lift_chart_from_source(
     chart = chart.properties(title=ferrum.Title("Lift", subtitle=subtitle))
     if color_field is not None:
         chart = _direct_label_endpoint(
-            chart, label_field=color_field,
-            x_col="percent_population", y_col="lift",
+            chart,
+            label_field=color_field,
+            x_col="percent_population",
+            y_col="lift",
         )
     if theme is not None:
         chart = chart.theme(theme)
@@ -815,9 +837,11 @@ def _confusion_chart_from_source(
 ):
     """Build a confusion-matrix heatmap chart from a ModelSource."""
     import ferrum
+
     df = source.confusion_matrix(normalize=normalize)
     chart = ferrum.Chart(df).mark_confusion(
-        normalize=normalize, annotate=annotate,
+        normalize=normalize,
+        annotate=annotate,
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -848,9 +872,11 @@ def _class_prediction_error_chart_from_source(
     ``Chart(df).mark_class_prediction_error(show_counts=True)``.
     """
     import ferrum
+
     df = source.confusion_matrix(normalize=None)
     chart = ferrum.Chart(df).mark_class_prediction_error(
-        normalize=normalize, show_counts=show_counts,
+        normalize=normalize,
+        show_counts=show_counts,
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -865,6 +891,7 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
     ``mark_confusion``.
     """
     from .deps import require_sklearn
+
     require_sklearn("ClassificationReportVisualizer")
     from sklearn.metrics import classification_report
 
@@ -873,7 +900,10 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
     y_true = source.y.to_numpy()
     y_pred = source.model.predict(source.X.to_numpy())
     report = classification_report(
-        y_true, y_pred, output_dict=True, zero_division=0,
+        y_true,
+        y_pred,
+        output_dict=True,
+        zero_division=0,
     )
 
     rows: list[dict] = []
@@ -884,21 +914,33 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
             continue
         for m_name in ("precision", "recall", "f1-score"):
             val = float(metrics[m_name])
-            rows.append({
-                "class": str(cls_label),
-                "metric": m_name,
-                "value": val,
-                "value_fmt": f"{val:.2f}",
-            })
+            rows.append(
+                {
+                    "class": str(cls_label),
+                    "metric": m_name,
+                    "value": val,
+                    "value_fmt": f"{val:.2f}",
+                }
+            )
     df = pl.DataFrame(rows)
 
     from ferrum.layer import Layer
-    chart = ferrum.Chart(df).mark_rect().encode(
-        x="metric", y="class", color="value",
-    ).layer(Layer(
-        mark="text",
-        encoding={"x": "metric", "y": "class", "text": "value_fmt"},
-    ))
+
+    chart = (
+        ferrum.Chart(df)
+        .mark_rect()
+        .encode(
+            x="metric",
+            y="class",
+            color="value",
+        )
+        .layer(
+            Layer(
+                mark="text",
+                encoding={"x": "metric", "y": "class", "text": "value_fmt"},
+            )
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -953,10 +995,12 @@ def _importance_chart_from_source(
     df = source.importances(method=method, random_state=random_state)
     if top_k is not None:
         df = df.head(top_k)
-    df = df.with_columns([
-        (pl.col("importance") - pl.col("std")).alias("imp_lower"),
-        (pl.col("importance") + pl.col("std")).alias("imp_upper"),
-    ])
+    df = df.with_columns(
+        [
+            (pl.col("importance") - pl.col("std")).alias("imp_lower"),
+            (pl.col("importance") + pl.col("std")).alias("imp_upper"),
+        ]
+    )
 
     if show_values:
         df = df.with_columns(
@@ -982,6 +1026,7 @@ def _importance_chart_from_source(
 
     if show_values:
         from ferrum.layer import Layer
+
         if orient == "horizontal":
             text_ly = Layer(
                 mark="text",
@@ -1023,14 +1068,14 @@ def _shap_select_class(sv: pl.DataFrame, *, per_class: bool) -> pl.DataFrame:
 
 
 def _shap_order_features(
-    sv: pl.DataFrame, *, order: str, max_display: int,
+    sv: pl.DataFrame,
+    *,
+    order: str,
+    max_display: int,
 ) -> list[str]:
     """Return the top-`max_display` feature names ordered by `order`."""
     if order not in _SHAP_ORDER_VALUES:
-        raise ValueError(
-            f"Unknown order {order!r}. "
-            f"Accepted values: {sorted(_SHAP_ORDER_VALUES)}"
-        )
+        raise ValueError(f"Unknown order {order!r}. Accepted values: {sorted(_SHAP_ORDER_VALUES)}")
     expr = pl.col("shap_value").abs()
     agg = expr.mean() if order == "abs_mean" else expr.max()
     ranked = (
@@ -1119,10 +1164,7 @@ def _shap_bar_chart_from_source(
     (the only group on regression and binary classifiers).
     """
     if order not in _SHAP_ORDER_VALUES:
-        raise ValueError(
-            f"Unknown order {order!r}. "
-            f"Accepted values: {sorted(_SHAP_ORDER_VALUES)}"
-        )
+        raise ValueError(f"Unknown order {order!r}. Accepted values: {sorted(_SHAP_ORDER_VALUES)}")
     import ferrum
 
     expr = pl.col("shap_value").abs()
@@ -1139,7 +1181,8 @@ def _shap_bar_chart_from_source(
     x_max = float(agg["abs_mean_shap"].max())
     domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
     chart = ferrum.Chart(agg).mark_shap_bar(
-        max_display=max_display, x_scale_domain=domain,
+        max_display=max_display,
+        x_scale_domain=domain,
     )
     if per_class and agg["class_label"].n_unique() > 1:
         chart = chart.facet(col="class_label")
@@ -1199,14 +1242,16 @@ def _shap_waterfall_chart_from_source(
     )
     sv_arr = ordered["shap_value"].to_numpy()
     cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
-    plot_df = ordered.with_columns([
-        pl.Series("x0", cum[:-1]),
-        pl.Series("x1", cum[1:]),
-        pl.when(pl.col("shap_value") >= 0)
-        .then(pl.lit("positive"))
-        .otherwise(pl.lit("negative"))
-        .alias("shap_sign"),
-    ])
+    plot_df = ordered.with_columns(
+        [
+            pl.Series("x0", cum[:-1]),
+            pl.Series("x1", cum[1:]),
+            pl.when(pl.col("shap_value") >= 0)
+            .then(pl.lit("positive"))
+            .otherwise(pl.lit("negative"))
+            .alias("shap_sign"),
+        ]
+    )
 
     x_lo = float(min(cum.min(), 0.0))
     x_hi = float(max(cum.max(), 0.0))
@@ -1214,7 +1259,9 @@ def _shap_waterfall_chart_from_source(
     domain = (x_lo - pad, x_hi + pad)
 
     chart = ferrum.Chart(plot_df).mark_shap_waterfall(
-        sample_idx=sample_idx, max_display=max_display, x_scale_domain=domain,
+        sample_idx=sample_idx,
+        max_display=max_display,
+        x_scale_domain=domain,
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -1232,16 +1279,15 @@ def _pdp_center_curves(df: pl.DataFrame) -> pl.DataFrame:
     each (feature, sample) has its own grid; the smallest grid value is
     the anchor.
     """
-    anchor = (
-        df.group_by(["feature", "sample_id"], maintain_order=True)
-          .agg(pl.col("pd_value").first().alias("_pd_anchor"))
+    anchor = df.group_by(["feature", "sample_id"], maintain_order=True).agg(
+        pl.col("pd_value").first().alias("_pd_anchor")
     )
     return (
         df.join(anchor, on=["feature", "sample_id"], how="left")
-          .with_columns(
-              (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
-          )
-          .drop("_pd_anchor")
+        .with_columns(
+            (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
+        )
+        .drop("_pd_anchor")
     )
 
 
@@ -1261,14 +1307,14 @@ def _pdp_split_kind_both(df: pl.DataFrame) -> pl.DataFrame:
     """
     avg_only = (
         df.filter(pl.col("sample_id") == -1)
-          .select(["feature", "feature_value", "pd_value"])
-          .rename({"pd_value": "_pd_avg_value"})
+        .select(["feature", "feature_value", "pd_value"])
+        .rename({"pd_value": "_pd_avg_value"})
     )
     df = df.with_columns(
         pl.when(pl.col("sample_id") >= 0)
-          .then(pl.col("pd_value"))
-          .otherwise(None)
-          .alias("_pd_ice_value"),
+        .then(pl.col("pd_value"))
+        .otherwise(None)
+        .alias("_pd_ice_value"),
     )
     df = df.join(avg_only, on=["feature", "feature_value"], how="left")
     return df.filter(pl.col("sample_id") >= 0)
@@ -1307,7 +1353,9 @@ def _pdp_chart_from_source(
     import ferrum
 
     df = source.partial_dependence(
-        features, grid_resolution=grid_resolution, kind=kind,
+        features,
+        grid_resolution=grid_resolution,
+        kind=kind,
     )
     # Sort by (feature, sample_id, feature_value) so each polyline's
     # rows are contiguous and monotonic in feature_value within its
@@ -1329,7 +1377,9 @@ def _pdp_chart_from_source(
     chart = (
         ferrum.Chart(df)
         .mark_pdp(
-            kind=kind, ice_alpha=ice_alpha, center=center,
+            kind=kind,
+            ice_alpha=ice_alpha,
+            center=center,
             color_field=None,  # one feature per facet — color is redundant
         )
         .facet(col="feature")
@@ -1432,8 +1482,10 @@ def _learning_curve_chart_from_source(
         title=ferrum.Title("Learning curve", subtitle=subtitle),
     )
     chart = _direct_label_endpoint(
-        chart, label_field="split",
-        x_col="train_size", y_col="mean_score",
+        chart,
+        label_field="split",
+        x_col="train_size",
+        y_col="mean_score",
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -1475,15 +1527,19 @@ def _validation_curve_chart_from_source(
         ferrum.Chart(df)
         .encode(color=ferrum.Color("split", legend=None))
         .mark_validation_curve(
-            log_scale=is_log, ci_style=ci_style, param_label=param,
+            log_scale=is_log,
+            ci_style=ci_style,
+            param_label=param,
         )
     )
     chart = chart.properties(
         title=ferrum.Title(f"Validation curve — {param}", subtitle=subtitle),
     )
     chart = _direct_label_endpoint(
-        chart, label_field="split",
-        x_col="param_value", y_col="mean_score",
+        chart,
+        label_field="split",
+        x_col="param_value",
+        y_col="mean_score",
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -1508,11 +1564,7 @@ def _cv_scores_chart_from_source(
     if split != "both":
         df = df.filter(pl.col("split") == split)
     if kind == "bar":
-        df = (
-            df.group_by("split")
-            .agg(pl.col("score").mean())
-            .sort("split")
-        )
+        df = df.group_by("split").agg(pl.col("score").mean()).sort("split")
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     if theme is not None:
         chart = chart.theme(theme)
@@ -1538,7 +1590,8 @@ def _alpha_selection_chart_from_source(
     df = source.alpha_selection(alphas, cv=cv, scoring=scoring)
     df = _dedupe_aggregated(df, "alpha")
     chart = ferrum.Chart(df).mark_alpha_selection(
-        log_scale=log_scale, highlight_best=highlight_best,
+        log_scale=log_scale,
+        highlight_best=highlight_best,
     )
     if theme is not None:
         chart = chart.theme(theme)
@@ -1617,14 +1670,20 @@ def _intercluster_distance_chart_from_source(
         ferrum.Chart(df)
         .mark_intercluster_distance()
         .encode(
-            x=X("x", scale={
-                "type": "linear",
-                "domain": [x_lo - x_pad, x_hi + x_pad],
-            }),
-            y=Y("y", scale={
-                "type": "linear",
-                "domain": [y_lo - y_pad, y_hi + y_pad],
-            }),
+            x=X(
+                "x",
+                scale={
+                    "type": "linear",
+                    "domain": [x_lo - x_pad, x_hi + x_pad],
+                },
+            ),
+            y=Y(
+                "y",
+                scale={
+                    "type": "linear",
+                    "domain": [y_lo - y_pad, y_hi + y_pad],
+                },
+            ),
         )
     )
     if theme is not None:
@@ -1676,7 +1735,8 @@ def _rank1d_chart_from_dataframe(
         x_domain = [0.0, max_score * 1.05 if max_score > 0.0 else 1.0]
 
     chart = ferrum.Chart(df).mark_rank1d(
-        orient=orient, color_field=color_field,
+        orient=orient,
+        color_field=color_field,
     )
     if orient == "horizontal":
         chart = chart.encode(
@@ -1712,9 +1772,12 @@ def _rank2d_chart_from_dataframe(
     del algorithm
     if annot and "correlation_fmt" not in df.columns:
         df = df.with_columns(
-            pl.col("correlation").map_elements(
-                lambda v: f"{v:.2f}", return_dtype=pl.Utf8,
-            ).alias("correlation_fmt"),
+            pl.col("correlation")
+            .map_elements(
+                lambda v: f"{v:.2f}",
+                return_dtype=pl.Utf8,
+            )
+            .alias("correlation_fmt"),
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     if theme is not None:
@@ -1733,13 +1796,13 @@ def _coerce_to_polars(data: Any) -> pl.DataFrame:
     arr = np.asarray(data, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
-    return pl.DataFrame({
-        f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])
-    })
+    return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
 
 
 def _resolve_pc_features(
-    df: pl.DataFrame, features: list[str] | None, hue: str | None,
+    df: pl.DataFrame,
+    features: list[str] | None,
+    hue: str | None,
 ) -> list[str]:
     """Resolve the parallel-coordinates feature list and validate it exists."""
     if features is None:
@@ -1756,7 +1819,9 @@ def _resolve_pc_features(
 
 
 def _apply_pc_rescale(
-    df: pl.DataFrame, features: list[str], rescale: str | None,
+    df: pl.DataFrame,
+    features: list[str],
+    rescale: str | None,
 ) -> pl.DataFrame:
     """Apply per-feature minmax / zscore rescale (or pass through on None)."""
     if rescale is None:
@@ -1784,8 +1849,7 @@ def _apply_pc_rescale(
             )
         return df
     raise ValueError(
-        f"parallel_coordinates(rescale={rescale!r}) — expected "
-        "'minmax', 'zscore', or None."
+        f"parallel_coordinates(rescale={rescale!r}) — expected 'minmax', 'zscore', or None."
     )
 
 
@@ -1827,10 +1891,14 @@ def _parallel_coords_chart_from_dataframe(
     )
     # Preserve feature order so the ordinal x scale lays out features in
     # the user-supplied (or default) sequence rather than alphabetical.
-    long = long.with_columns(
-        pl.col("feature").cast(pl.Enum(features)),
-    ).sort("sample_id", "feature").with_columns(
-        pl.col("feature").cast(pl.Utf8),
+    long = (
+        long.with_columns(
+            pl.col("feature").cast(pl.Enum(features)),
+        )
+        .sort("sample_id", "feature")
+        .with_columns(
+            pl.col("feature").cast(pl.Utf8),
+        )
     )
 
     if hue is not None:
@@ -1887,47 +1955,54 @@ def _decision_boundary_chart_from_source(
 
     feat_idx = _resolve_decision_boundary_features(source, features)
     grid_info = _build_decision_boundary_grid(
-        source, feat_idx, grid_resolution, proba=proba,
+        source,
+        feat_idx,
+        grid_resolution,
+        proba=proba,
     )
 
     if not (scatter and source.y is not None):
         # Pure-boundary path: no overlay, no padding columns, no row mixing.
-        grid_df = pl.DataFrame({
-            "x": [v - grid_info["dx"] / 2 for v in grid_info["flat_x"]],
-            "x2": [v + grid_info["dx"] / 2 for v in grid_info["flat_x"]],
-            "y": [v - grid_info["dy"] / 2 for v in grid_info["flat_y"]],
-            "y2": [v + grid_info["dy"] / 2 for v in grid_info["flat_y"]],
-            "z": [float(v) for v in grid_info["z"]],
-        })
+        grid_df = pl.DataFrame(
+            {
+                "x": [v - grid_info["dx"] / 2 for v in grid_info["flat_x"]],
+                "x2": [v + grid_info["dx"] / 2 for v in grid_info["flat_x"]],
+                "y": [v - grid_info["dy"] / 2 for v in grid_info["flat_y"]],
+                "y2": [v + grid_info["dy"] / 2 for v in grid_info["flat_y"]],
+                "z": [float(v) for v in grid_info["z"]],
+            }
+        )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
         if theme is not None:
             chart = chart.theme(theme)
         return chart
 
     from ferrum.layer import Layer
+
     unified = _build_decision_boundary_unified(source, grid_info)
     chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
-    chart = chart.layer(Layer(
-        mark="point",
-        encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
-        mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
-    ))
+    chart = chart.layer(
+        Layer(
+            mark="point",
+            encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
+            mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
 
 
 def _resolve_decision_boundary_features(
-    source: Any, features: tuple,
+    source: Any,
+    features: tuple,
 ) -> tuple[int, int]:
     feat_idx = tuple(
-        source.feature_names.index(f) if isinstance(f, str) else int(f)
-        for f in features
+        source.feature_names.index(f) if isinstance(f, str) else int(f) for f in features
     )
     if len(feat_idx) != 2:
         raise ValueError(
-            "decision_boundary_chart requires exactly 2 features; got "
-            f"{len(feat_idx)}."
+            f"decision_boundary_chart requires exactly 2 features; got {len(feat_idx)}."
         )
     return feat_idx  # type: ignore[return-value]
 
@@ -1951,10 +2026,14 @@ def _build_decision_boundary_grid(
     pad_x = (x_col.max() - x_col.min()) * 0.05
     pad_y = (y_col.max() - y_col.min()) * 0.05
     xs = np.linspace(
-        x_col.min() - pad_x, x_col.max() + pad_x, int(grid_resolution),
+        x_col.min() - pad_x,
+        x_col.max() + pad_x,
+        int(grid_resolution),
     )
     ys = np.linspace(
-        y_col.min() - pad_y, y_col.max() + pad_y, int(grid_resolution),
+        y_col.min() - pad_y,
+        y_col.max() + pad_y,
+        int(grid_resolution),
     )
     dx = float(xs[1] - xs[0]) if len(xs) > 1 else 1.0
     dy = float(ys[1] - ys[0]) if len(ys) > 1 else 1.0
@@ -2016,21 +2095,28 @@ def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
     nulls_grid = [None] * n_grid
     nulls_scatter = [None] * n_scatter
 
-    return pl.DataFrame({
-        "x": [v - dx / 2 for v in flat_x] + nulls_scatter,
-        "x2": [v + dx / 2 for v in flat_x] + nulls_scatter,
-        "y": [v - dy / 2 for v in flat_y] + nulls_scatter,
-        "y2": [v + dy / 2 for v in flat_y] + nulls_scatter,
-        "z": [float(v) for v in z] + nulls_scatter,
-        "scatter_x": nulls_grid + [float(v) for v in x_col],
-        "scatter_y": nulls_grid + [float(v) for v in y_col],
-        "scatter_z": nulls_grid + [float(v) for v in scatter_z],
-    }, schema={
-        "x": pl.Float64, "x2": pl.Float64, "y": pl.Float64, "y2": pl.Float64,
-        "z": pl.Float64,
-        "scatter_x": pl.Float64, "scatter_y": pl.Float64,
-        "scatter_z": pl.Float64,
-    })
+    return pl.DataFrame(
+        {
+            "x": [v - dx / 2 for v in flat_x] + nulls_scatter,
+            "x2": [v + dx / 2 for v in flat_x] + nulls_scatter,
+            "y": [v - dy / 2 for v in flat_y] + nulls_scatter,
+            "y2": [v + dy / 2 for v in flat_y] + nulls_scatter,
+            "z": [float(v) for v in z] + nulls_scatter,
+            "scatter_x": nulls_grid + [float(v) for v in x_col],
+            "scatter_y": nulls_grid + [float(v) for v in y_col],
+            "scatter_z": nulls_grid + [float(v) for v in scatter_z],
+        },
+        schema={
+            "x": pl.Float64,
+            "x2": pl.Float64,
+            "y": pl.Float64,
+            "y2": pl.Float64,
+            "z": pl.Float64,
+            "scatter_x": pl.Float64,
+            "scatter_y": pl.Float64,
+            "scatter_z": pl.Float64,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2066,7 +2152,9 @@ def _cluster_diagnostics_chart(
     for k in ks:
         if method == "kmeans":
             m = KMeans(
-                n_clusters=int(k), n_init=int(n_init), random_state=seed,
+                n_clusters=int(k),
+                n_init=int(n_init),
+                random_state=seed,
             ).fit(X_np)
             inertia = float(m.inertia_)
             labels = m.labels_
@@ -2081,11 +2169,13 @@ def _cluster_diagnostics_chart(
                 mask = labels == cluster_id
                 centroid = X_np[mask].mean(axis=0)
                 inertia += float(np.sum((X_np[mask] - centroid) ** 2))
-        rows.append({
-            "k": int(k),
-            "inertia": inertia,
-            "silhouette": float(silhouette_score(X_np, labels)),
-        })
+        rows.append(
+            {
+                "k": int(k),
+                "inertia": inertia,
+                "silhouette": float(silhouette_score(X_np, labels)),
+            }
+        )
     df = pl.DataFrame(rows)
     elbow = ferrum.Chart(df).mark_line().encode(x="k", y="inertia")
     sil = ferrum.Chart(df).mark_line().encode(x="k", y="silhouette")

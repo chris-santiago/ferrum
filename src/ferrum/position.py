@@ -1,28 +1,48 @@
 """Position-adjustment value classes: Identity, Dodge, Jitter, Stack."""
+
 from __future__ import annotations
 from typing import Optional
 
 
 # ---- Eligibility matrix ------------------------------------------------------
 
-_DODGE_ELIGIBLE = frozenset([
-    "bar", "point", "box", "boxplot", "boxen", "swarm", "violin",
-    "errorbar", "errorband", "ribbon",
-    # Composite marks that desugar to bar/area underneath:
-    "histogram", "density",
-])
+_DODGE_ELIGIBLE = frozenset(
+    [
+        "bar",
+        "point",
+        "box",
+        "boxplot",
+        "boxen",
+        "swarm",
+        "violin",
+        "errorbar",
+        "errorband",
+        "ribbon",
+        # Composite marks that desugar to bar/area underneath:
+        "histogram",
+        "density",
+    ]
+)
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])
-_STACK_ELIGIBLE = frozenset([
-    # Rect-style marks: y maps to segment TOP (renderer draws base→top).
-    "bar", "area", "ribbon",
-    # Annotation-style marks (Schwabish SB-followup 2026-05-12): y maps
-    # to segment MIDPOINT so a same-data overlay lands at the visual
-    # centre of each stacked-bar segment (e.g. per-segment count text
-    # on class_prediction_error_chart).
-    "text", "point", "rule", "tick",
-    # Composite marks that desugar to bar/area underneath:
-    "histogram", "density",
-])
+_STACK_ELIGIBLE = frozenset(
+    [
+        # Rect-style marks: y maps to segment TOP (renderer draws base→top).
+        "bar",
+        "area",
+        "ribbon",
+        # Annotation-style marks (Schwabish SB-followup 2026-05-12): y maps
+        # to segment MIDPOINT so a same-data overlay lands at the visual
+        # centre of each stacked-bar segment (e.g. per-segment count text
+        # on class_prediction_error_chart).
+        "text",
+        "point",
+        "rule",
+        "tick",
+        # Composite marks that desugar to bar/area underneath:
+        "histogram",
+        "density",
+    ]
+)
 
 
 # ---- Valid-value sets --------------------------------------------------------
@@ -33,6 +53,7 @@ _VALID_STACK_ANCHORS = {"top", "mid"}
 
 
 # ---- Value classes -----------------------------------------------------------
+
 
 class Identity:
     """Explicit no-op position adjustment.
@@ -123,11 +144,7 @@ class Dodge:
 
     def __eq__(self, other) -> bool:
         """Return True if *other* is a ``Dodge`` with identical fields."""
-        return (
-            isinstance(other, Dodge)
-            and self.by == other.by
-            and self.padding == other.padding
-        )
+        return isinstance(other, Dodge) and self.by == other.by and self.padding == other.padding
 
     def __hash__(self) -> int:
         """Return a stable hash for use in sets and dict keys."""
@@ -179,9 +196,7 @@ class Jitter:
         seed: Optional[int] = None,
     ) -> None:
         if axis not in _VALID_JITTER_AXES:
-            raise ValueError(
-                f"Jitter: axis must be 'x'|'y'|'both'; got '{axis}'"
-            )
+            raise ValueError(f"Jitter: axis must be 'x'|'y'|'both'; got '{axis}'")
         if width <= 0.0:
             raise ValueError(f"Jitter: width must be > 0; got {width}")
         object.__setattr__(self, "axis", axis)
@@ -271,13 +286,9 @@ class Stack:
         anchor: str = "top",
     ) -> None:
         if offset not in _VALID_STACK_OFFSETS:
-            raise ValueError(
-                f"Stack: offset must be 'zero'|'normalize'|'center'; got '{offset}'"
-            )
+            raise ValueError(f"Stack: offset must be 'zero'|'normalize'|'center'; got '{offset}'")
         if anchor not in _VALID_STACK_ANCHORS:
-            raise ValueError(
-                f"Stack: anchor must be 'top'|'mid'; got '{anchor}'"
-            )
+            raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{anchor}'")
         object.__setattr__(self, "by", by)
         object.__setattr__(self, "offset", offset)
         object.__setattr__(self, "anchor", anchor)
@@ -313,6 +324,7 @@ class Stack:
 
 # ---- Eligibility validator ---------------------------------------------------
 
+
 def validate_position_eligibility(mark_name: str, position) -> None:
     """Raise ``TypeError`` if ``mark_name`` does not accept ``position``.
 
@@ -337,6 +349,5 @@ def validate_position_eligibility(mark_name: str, position) -> None:
         raise TypeError(f"unknown position adjustment: {type(position).__name__}")
     if mark_name not in eligible:
         raise TypeError(
-            f"mark_{mark_name} does not accept {kind}; "
-            f"eligible marks: {sorted(eligible)}"
+            f"mark_{mark_name} does not accept {kind}; eligible marks: {sorted(eligible)}"
         )

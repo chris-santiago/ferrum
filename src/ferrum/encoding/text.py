@@ -1,4 +1,5 @@
 """Text and tooltip encoding channels (Text, Detail, Tooltip, Href, ...)."""
+
 from __future__ import annotations
 
 from ferrum.encoding.base import ChannelBase

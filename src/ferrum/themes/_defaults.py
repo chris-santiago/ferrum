@@ -1,4 +1,5 @@
 """Built-in theme defaults and process-default theme controls."""
+
 from __future__ import annotations
 
 import contextvars
@@ -7,7 +8,8 @@ from ferrum.themes import Theme, default as _ferrum_default
 
 
 _default_theme: contextvars.ContextVar[Theme] = contextvars.ContextVar(
-    "_ferrum_default_theme", default=_ferrum_default,
+    "_ferrum_default_theme",
+    default=_ferrum_default,
 )
 
 

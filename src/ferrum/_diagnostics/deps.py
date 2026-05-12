@@ -4,6 +4,7 @@ Each `require_*` function is called as the first line of any ModelSource
 method that needs the corresponding third-party library. `import ferrum`
 and `ModelSource.__init__` never call these helpers.
 """
+
 from __future__ import annotations
 
 from types import ModuleType

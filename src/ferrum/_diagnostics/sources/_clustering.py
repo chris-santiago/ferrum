@@ -1,4 +1,5 @@
 """Phase 10f — clustering / manifold diagnostics (silhouette, PCA variance, embeddings, intercluster distance)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -53,17 +54,19 @@ class ClusteringMixin:
             vals = sv[mask]
             order = np.argsort(-vals)
             for i, val in zip(idxs[order], vals[order]):
-                rows.append({
-                    "sample_id": int(i),
-                    "y_position": int(y_pos),
-                    # cluster is rendered as a categorical color channel;
-                    # serialize as Utf8 to match every other 10b/10c
-                    # categorical diagnostic schema (ROC class, confusion
-                    # actual/predicted) and avoid the renderer's
-                    # continuous-scale fallback for low-cardinality ints.
-                    "cluster": str(int(c)),
-                    "silhouette_value": float(val),
-                })
+                rows.append(
+                    {
+                        "sample_id": int(i),
+                        "y_position": int(y_pos),
+                        # cluster is rendered as a categorical color channel;
+                        # serialize as Utf8 to match every other 10b/10c
+                        # categorical diagnostic schema (ROC class, confusion
+                        # actual/predicted) and avoid the renderer's
+                        # continuous-scale fallback for low-cardinality ints.
+                        "cluster": str(int(c)),
+                        "silhouette_value": float(val),
+                    }
+                )
                 y_pos += 1
         df = pl.DataFrame(rows)
         self._cache[key] = df
@@ -83,11 +86,13 @@ class ClusteringMixin:
         if n_components is not None:
             evr = evr[: int(n_components)]
         cum = np.cumsum(evr)
-        df = pl.DataFrame({
-            "component": list(range(1, len(evr) + 1)),
-            "explained_variance_ratio": [float(x) for x in evr],
-            "cumulative_variance_ratio": [float(x) for x in cum],
-        })
+        df = pl.DataFrame(
+            {
+                "component": list(range(1, len(evr) + 1)),
+                "explained_variance_ratio": [float(x) for x in evr],
+                "cumulative_variance_ratio": [float(x) for x in cum],
+            }
+        )
         self._cache[key] = df
         return df
 
@@ -117,7 +122,9 @@ class ClusteringMixin:
         if method == "umap":
             umap = require_umap("embeddings")
             reducer = umap.UMAP(
-                n_components=n_components, random_state=seed, **method_kwargs,
+                n_components=n_components,
+                random_state=seed,
+                **method_kwargs,
             )
             emb = reducer.fit_transform(X_np)
         elif method == "tsne":
@@ -125,19 +132,22 @@ class ClusteringMixin:
             from sklearn.manifold import TSNE
 
             emb = TSNE(
-                n_components=n_components, random_state=seed, **method_kwargs,
+                n_components=n_components,
+                random_state=seed,
+                **method_kwargs,
             ).fit_transform(X_np)
         elif method == "pca":
             require_sklearn("embeddings(pca)")
             from sklearn.decomposition import PCA
 
             emb = PCA(
-                n_components=n_components, random_state=seed, **method_kwargs,
+                n_components=n_components,
+                random_state=seed,
+                **method_kwargs,
             ).fit_transform(X_np)
         else:
             raise ValueError(
-                f"ModelSource.embeddings(method={method!r}) — expected "
-                "'umap', 'tsne', or 'pca'."
+                f"ModelSource.embeddings(method={method!r}) — expected 'umap', 'tsne', or 'pca'."
             )
         emb = np.asarray(emb, dtype=np.float64)
         if self._y is not None:
@@ -145,8 +155,7 @@ class ClusteringMixin:
         else:
             label_arr = np.zeros(emb.shape[0])
         data: dict[str, Any] = {
-            f"dim_{i}": [float(v) for v in emb[:, i]]
-            for i in range(emb.shape[1])
+            f"dim_{i}": [float(v) for v in emb[:, i]] for i in range(emb.shape[1])
         }
         data["label"] = label_arr.tolist()
         df = pl.DataFrame(data)
@@ -166,7 +175,9 @@ class ClusteringMixin:
         count). Requires the wrapped model to expose ``cluster_centers_``.
         """
         key = self._cache_key(
-            "intercluster_distance", k=int(k), embed_method=method,
+            "intercluster_distance",
+            k=int(k),
+            embed_method=method,
         )
         if key in self._cache:
             return self._cache[key]
@@ -180,34 +191,37 @@ class ClusteringMixin:
             from sklearn.manifold import MDS
 
             xy = MDS(
-                n_components=2, random_state=seed, normalized_stress="auto",
+                n_components=2,
+                random_state=seed,
+                normalized_stress="auto",
             ).fit_transform(centers[:k])
         elif method == "tsne":
             from sklearn.manifold import TSNE
 
             xy = TSNE(
-                n_components=2, random_state=seed,
+                n_components=2,
+                random_state=seed,
                 perplexity=max(1, min(5, int(k) - 1)),
             ).fit_transform(centers[:k])
         else:
             raise ValueError(
-                f"ModelSource.intercluster_distance(method={method!r}) — "
-                "expected 'mds' or 'tsne'."
+                f"ModelSource.intercluster_distance(method={method!r}) — expected 'mds' or 'tsne'."
             )
         if "labels_" in self._capabilities:
             labels = np.asarray(self._model.labels_)
             sizes = np.bincount(labels.astype(int), minlength=int(k))[: int(k)]
         else:
             sizes = np.ones(int(k), dtype=int)
-        df = pl.DataFrame({
-            # cluster routes through a categorical color scale (one
-            # color per cluster id); serialize as Utf8 — same Int64 →
-            # continuous-scale gotcha as silhouette.cluster.
-            "cluster": [str(i) for i in range(int(k))],
-            "x": [float(v) for v in xy[:, 0]],
-            "y": [float(v) for v in xy[:, 1]],
-            "size": [int(s) for s in sizes],
-        })
+        df = pl.DataFrame(
+            {
+                # cluster routes through a categorical color scale (one
+                # color per cluster id); serialize as Utf8 — same Int64 →
+                # continuous-scale gotcha as silhouette.cluster.
+                "cluster": [str(i) for i in range(int(k))],
+                "x": [float(v) for v in xy[:, 0]],
+                "y": [float(v) for v in xy[:, 1]],
+                "size": [int(s) for s in sizes],
+            }
+        )
         self._cache[key] = df
         return df
-

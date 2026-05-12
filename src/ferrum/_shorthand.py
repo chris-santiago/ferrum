@@ -7,6 +7,7 @@ Supports (per spec §3.2 Channel shorthand strings):
 - "agg()"                → (None, None, "agg")  (e.g. count())
 - "agg(fieldname):Q"     → (fieldname, "Q", "agg")
 """
+
 from __future__ import annotations
 
 import re
@@ -79,9 +80,7 @@ def parse_shorthand(s: str) -> Tuple[Optional[str], Optional[str], Optional[str]
 
     type_ = m.group("type")
     if type_ is not None and type_ not in _VALID_TYPES:
-        raise ValueError(
-            f"unknown type {type_!r} in {s!r}; expected one of Q, N, O, T"
-        )
+        raise ValueError(f"unknown type {type_!r} in {s!r}; expected one of Q, N, O, T")
 
     agg = m.group("agg")
     if agg is not None:

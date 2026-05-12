@@ -1,4 +1,5 @@
 """Coordinate-system declarations: CoordFlip (functional), others planned for Phase 11+."""
+
 from __future__ import annotations
 
 
@@ -59,9 +60,7 @@ class CoordPolar:
     """
 
     def __init__(self) -> None:
-        raise NotImplementedError(
-            "CoordPolar is planned for Phase 11+."
-        )
+        raise NotImplementedError("CoordPolar is planned for Phase 11+.")
 
 
 class CoordGeo:
@@ -74,9 +73,7 @@ class CoordGeo:
     """
 
     def __init__(self) -> None:
-        raise NotImplementedError(
-            "CoordGeo is planned for Phase 11+."
-        )
+        raise NotImplementedError("CoordGeo is planned for Phase 11+.")
 
 
 class CoordFixed:
@@ -89,6 +86,4 @@ class CoordFixed:
     """
 
     def __init__(self) -> None:
-        raise NotImplementedError(
-            "CoordFixed is planned for Phase 11+."
-        )
+        raise NotImplementedError("CoordFixed is planned for Phase 11+.")

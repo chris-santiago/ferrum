@@ -13,6 +13,7 @@ Mixins are method-only and assume these attributes exist at
 the bottom of the MRO so it always runs first when ``ModelSource``
 is instantiated.
 """
+
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -22,10 +23,19 @@ import polars as pl
 
 
 _PROTOCOL_ATTRS: tuple[str, ...] = (
-    "predict", "predict_proba", "decision_function", "transform",
-    "fit_transform", "fit_predict", "score",
-    "feature_importances_", "coef_", "explained_variance_ratio_",
-    "cluster_centers_", "labels_", "classes_",
+    "predict",
+    "predict_proba",
+    "decision_function",
+    "transform",
+    "fit_transform",
+    "fit_predict",
+    "score",
+    "feature_importances_",
+    "coef_",
+    "explained_variance_ratio_",
+    "cluster_centers_",
+    "labels_",
+    "classes_",
 )
 
 
@@ -41,12 +51,10 @@ def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, "pl.Series | None"]:
         # Route through ferrum's existing input-normalization to a pyarrow Table,
         # then convert to polars.
         from ferrum._coerce import to_arrow_table
+
         X_df = pl.from_arrow(to_arrow_table(X))
         if not isinstance(X_df, pl.DataFrame):
-            raise TypeError(
-                f"Could not coerce X to a polars DataFrame; "
-                f"got {type(X_df).__name__}"
-            )
+            raise TypeError(f"Could not coerce X to a polars DataFrame; got {type(X_df).__name__}")
 
     y_ser: pl.Series | None = None
     if y is not None:
@@ -56,9 +64,7 @@ def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, "pl.Series | None"]:
             y_ser = pl.Series("y", y)
         elif isinstance(y, pl.DataFrame):
             if y.width != 1:
-                raise ValueError(
-                    f"y DataFrame must have exactly 1 column; got {y.width}"
-                )
+                raise ValueError(f"y DataFrame must have exactly 1 column; got {y.width}")
             y_ser = y.to_series()
         else:
             y_ser = pl.Series("y", list(y))
@@ -89,12 +95,9 @@ class BaseSource:
         self._model = model
         self._X, self._y = _coerce_X_y(X, y)
         self._feature_names: list[str] = (
-            list(feature_names) if feature_names is not None
-            else list(self._X.columns)
+            list(feature_names) if feature_names is not None else list(self._X.columns)
         )
-        self._class_names: list[str] | None = (
-            list(class_names) if class_names is not None else None
-        )
+        self._class_names: list[str] | None = list(class_names) if class_names is not None else None
         self._sample_weight = sample_weight
         self._random_state = random_state
 
@@ -190,6 +193,7 @@ class BaseSource:
         cache identity across calls (e.g. for an ndarray of
         ``train_sizes``) should normalize to a tuple before calling.
         """
+
         def _hashable(v):
             try:
                 hash(v)

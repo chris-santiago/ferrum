@@ -11,6 +11,7 @@ mixin contributes domain methods that use those bits via ``self``.
 External callers still import from ``ferrum._diagnostics.source``
 (re-export shim) — this package is the implementation home.
 """
+
 from __future__ import annotations
 
 from ._base import BaseSource

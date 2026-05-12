@@ -1,4 +1,5 @@
 """Facet encoding channels (Facet, FacetRow, FacetCol)."""
+
 from __future__ import annotations
 
 from ferrum.encoding.base import ChannelBase
@@ -36,7 +37,7 @@ class Facet(ChannelBase):
     """
 
     _channel_name = "facet"
-    _renders_in_phase_8a = True   # rendered via Phase 6 facet pipeline
+    _renders_in_phase_8a = True  # rendered via Phase 6 facet pipeline
     _honored_kwargs = frozenset(["type", "title"])
 
 

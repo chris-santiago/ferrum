@@ -1,4 +1,5 @@
 """Joint distribution convenience functions (jointplot)."""
+
 from __future__ import annotations
 from typing import Any
 
@@ -10,14 +11,21 @@ _VALID_MARGINAL_KINDS = {"hist", "kde", "rug", "box"}
 
 
 def jointplot(
-    data: Any, *,
-    x: str, y: str, hue: Any = None,
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    hue: Any = None,
     kind: str = "scatter",
     marginal_kind: str = "hist",
-    ratio: int = 5, space: float = 0.05,
-    xlim: Any = None, ylim: Any = None,
-    joint_kws: Any = None, marginal_kws: Any = None,
-    height: float | None = None, theme: Any = None,
+    ratio: int = 5,
+    space: float = 0.05,
+    xlim: Any = None,
+    ylim: Any = None,
+    joint_kws: Any = None,
+    marginal_kws: Any = None,
+    height: float | None = None,
+    theme: Any = None,
     **encode_kwargs: Any,
 ) -> JointChart:
     """Joint-distribution plot with marginals.
@@ -129,6 +137,7 @@ def jointplot(
         scatter = Chart(data).mark_point(**jk).encode(**enc_center)
         fit = Chart(data).mark_smooth(method="lm", ci=None).encode(x=x, y=y)
         from ferrum.figure.regression import _merge_layers
+
         center = _merge_layers(scatter, fit)
 
     # Build top marginal (over x).

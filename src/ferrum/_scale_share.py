@@ -9,6 +9,7 @@ each chart with a fixed scale dict (``{"type": ..., "domain": [...]}``)
 inserted on the channel.  Letting the Rust renderer fill in the range from
 the cell's pixel geometry keeps this module free of layout knowledge.
 """
+
 from __future__ import annotations
 
 from typing import Any, Iterable, Optional
@@ -80,6 +81,7 @@ def _classify_field(data, field: str) -> Optional[str]:
     # Lazy import polars to avoid hard-coupling this module to polars
     # initialization order; ferrum already requires polars at runtime.
     import polars as pl
+
     if dtype.is_numeric():
         return "linear"
     if dtype in (pl.Datetime, pl.Date, pl.Time):
@@ -181,8 +183,7 @@ def inject_scale(chart, channel: str, scale_dict: dict):
             _Layer(
                 mark=layer.mark,
                 encoding={
-                    k: (_set_on(v) if k == channel else v)
-                    for k, v in layer.encoding.items()
+                    k: (_set_on(v) if k == channel else v) for k, v in layer.encoding.items()
                 },
                 transforms=layer.transforms,
                 mark_kwargs=layer.mark_kwargs,

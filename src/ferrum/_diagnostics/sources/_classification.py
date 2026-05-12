@@ -1,4 +1,5 @@
 """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -29,7 +30,9 @@ class ClassificationCurvesMixin:
         curve under ``class="<average>"``.
         """
         key = self._cache_key(
-            "roc_curve", average=average, drop_intermediate=drop_intermediate,
+            "roc_curve",
+            average=average,
+            drop_intermediate=drop_intermediate,
         )
         if key in self._cache:
             return self._cache[key]
@@ -41,7 +44,7 @@ class ClassificationCurvesMixin:
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         y_true = np.asarray(self._y.to_numpy())
-        classes = [c[len("proba_"):] for c in proba_cols]
+        classes = [c[len("proba_") :] for c in proba_cols]
         n_classes = len(classes)
 
         rows: list[dict] = []
@@ -51,39 +54,55 @@ class ClassificationCurvesMixin:
         if n_classes == 2:
             y_score = proba_df[proba_cols[1]].to_numpy()
             fpr, tpr, thr = _sk_roc_curve(
-                y_true, y_score, drop_intermediate=drop_intermediate,
+                y_true,
+                y_score,
+                drop_intermediate=drop_intermediate,
             )
             auc = float(roc_auc_score(y_true, y_score))
             for f, t, h in zip(fpr, tpr, thr):
-                rows.append({
-                    "fpr": float(f), "tpr": float(t),
-                    "threshold": float(h), "class": classes[1], "auc": auc,
-                })
+                rows.append(
+                    {
+                        "fpr": float(f),
+                        "tpr": float(t),
+                        "threshold": float(h),
+                        "class": classes[1],
+                        "auc": auc,
+                    }
+                )
         else:
             for i, cls in enumerate(classes):
-                y_bin = (
-                    y_true == _coerce_class_label(cls, y_true.dtype)
-                ).astype(int)
+                y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
                 y_score = proba_df[proba_cols[i]].to_numpy()
                 fpr, tpr, thr = _sk_roc_curve(
-                    y_bin, y_score, drop_intermediate=drop_intermediate,
+                    y_bin,
+                    y_score,
+                    drop_intermediate=drop_intermediate,
                 )
                 try:
                     auc = float(roc_auc_score(y_bin, y_score))
                 except ValueError:
                     auc = float("nan")
                 for f, t, h in zip(fpr, tpr, thr):
-                    rows.append({
-                        "fpr": float(f), "tpr": float(t),
-                        "threshold": float(h), "class": str(cls), "auc": auc,
-                    })
+                    rows.append(
+                        {
+                            "fpr": float(f),
+                            "tpr": float(t),
+                            "threshold": float(h),
+                            "class": str(cls),
+                            "auc": auc,
+                        }
+                    )
 
             if average in ("micro", "macro", "weighted"):
-                rows.extend(_compute_avg_roc(
-                    y_true,
-                    proba_df[proba_cols].to_numpy(),
-                    classes, average, drop_intermediate,
-                ))
+                rows.extend(
+                    _compute_avg_roc(
+                        y_true,
+                        proba_df[proba_cols].to_numpy(),
+                        classes,
+                        average,
+                        drop_intermediate,
+                    )
+                )
 
         df = pl.DataFrame(rows)
         self._cache[key] = df
@@ -126,7 +145,7 @@ class ClassificationCurvesMixin:
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         y_true = np.asarray(self._y.to_numpy())
-        classes = [c[len("proba_"):] for c in proba_cols]
+        classes = [c[len("proba_") :] for c in proba_cols]
         n_classes = len(classes)
 
         if n_classes == 2:
@@ -138,7 +157,8 @@ class ClassificationCurvesMixin:
             rows = _compute_avg_pr(
                 y_true,
                 proba_df[proba_cols].to_numpy(),
-                classes, average,
+                classes,
+                average,
             )
         else:
             rows = _pr_rows_per_class(y_true, proba_df, proba_cols, classes)
@@ -161,7 +181,9 @@ class ClassificationCurvesMixin:
         over ``y_score`` to count rows per bin.
         """
         key = self._cache_key(
-            "calibration_curve", n_bins=n_bins, strategy=strategy,
+            "calibration_curve",
+            n_bins=n_bins,
+            strategy=strategy,
         )
         if key in self._cache:
             return self._cache[key]
@@ -169,21 +191,21 @@ class ClassificationCurvesMixin:
         from sklearn.calibration import calibration_curve as _ccurve
 
         if self._y is None:
-            raise ValueError(
-                "ModelSource.calibration_curve() requires y to be provided."
-            )
+            raise ValueError("ModelSource.calibration_curve() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         if len(proba_cols) != 2:
             raise ValueError(
-                "calibration_curve() is binary-classifier only; "
-                f"got {len(proba_cols)} classes."
+                f"calibration_curve() is binary-classifier only; got {len(proba_cols)} classes."
             )
         y_true = np.asarray(self._y.to_numpy())
         y_score = proba_df[proba_cols[1]].to_numpy()
 
         frac_pos, mean_pred = _ccurve(
-            y_true, y_score, n_bins=n_bins, strategy=strategy,
+            y_true,
+            y_score,
+            n_bins=n_bins,
+            strategy=strategy,
         )
 
         if strategy == "uniform":
@@ -198,16 +220,16 @@ class ClassificationCurvesMixin:
         bin_idx = np.clip(np.digitize(y_score, edges[1:-1]), 0, n_bins - 1)
         counts_all = np.bincount(bin_idx, minlength=n_bins)
         centers = edges[:-1] + np.diff(edges) / 2.0
-        used_bins = np.array([
-            int(np.argmin(np.abs(centers - mp))) for mp in mean_pred
-        ], dtype=int)
+        used_bins = np.array([int(np.argmin(np.abs(centers - mp))) for mp in mean_pred], dtype=int)
         counts = counts_all[used_bins] if used_bins.size else np.empty(0, dtype=int)
 
-        df = pl.DataFrame({
-            "mean_predicted": [float(x) for x in mean_pred],
-            "fraction_positive": [float(x) for x in frac_pos],
-            "count": [int(x) for x in counts],
-        })
+        df = pl.DataFrame(
+            {
+                "mean_predicted": [float(x) for x in mean_pred],
+                "fraction_positive": [float(x) for x in frac_pos],
+                "count": [int(x) for x in counts],
+            }
+        )
         self._cache[key] = df
         return df
 
@@ -220,20 +242,16 @@ class ClassificationCurvesMixin:
             return self._cache[key]
 
         if self._y is None:
-            raise ValueError(
-                "ModelSource.cumulative_gain() requires y to be provided."
-            )
+            raise ValueError("ModelSource.cumulative_gain() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         y_true = np.asarray(self._y.to_numpy())
-        classes = [c[len("proba_"):] for c in proba_cols]
+        classes = [c[len("proba_") :] for c in proba_cols]
         n = len(y_true)
 
         rows: list[dict] = []
         for i, cls in enumerate(classes):
-            y_bin = (
-                y_true == _coerce_class_label(cls, y_true.dtype)
-            ).astype(int)
+            y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
             order = np.argsort(-proba_df[proba_cols[i]].to_numpy())
             cum_pos = np.cumsum(y_bin[order])
             total_pos = max(int(cum_pos[-1]), 1) if n else 1
@@ -242,11 +260,13 @@ class ClassificationCurvesMixin:
             xs = np.concatenate([[0.0], pct_pop])
             ys = np.concatenate([[0.0], gain])
             for pp, g in zip(xs, ys):
-                rows.append({
-                    "percent_population": float(pp),
-                    "gain": float(g),
-                    "class": str(cls),
-                })
+                rows.append(
+                    {
+                        "percent_population": float(pp),
+                        "gain": float(g),
+                        "class": str(cls),
+                    }
+                )
 
         rows.append({"percent_population": 0.0, "gain": 0.0, "class": "baseline"})
         rows.append({"percent_population": 1.0, "gain": 1.0, "class": "baseline"})
@@ -264,20 +284,16 @@ class ClassificationCurvesMixin:
             return self._cache[key]
 
         if self._y is None:
-            raise ValueError(
-                "ModelSource.lift_curve() requires y to be provided."
-            )
+            raise ValueError("ModelSource.lift_curve() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         y_true = np.asarray(self._y.to_numpy())
-        classes = [c[len("proba_"):] for c in proba_cols]
+        classes = [c[len("proba_") :] for c in proba_cols]
         n = len(y_true)
 
         rows: list[dict] = []
         for i, cls in enumerate(classes):
-            y_bin = (
-                y_true == _coerce_class_label(cls, y_true.dtype)
-            ).astype(int)
+            y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
             base_rate = float(y_bin.mean()) if n else 0.0
             if base_rate == 0.0:
                 continue
@@ -288,11 +304,13 @@ class ClassificationCurvesMixin:
             lift = cum_rate / base_rate
             pct_pop = denom / n
             for pp, lv in zip(pct_pop, lift):
-                rows.append({
-                    "percent_population": float(pp),
-                    "lift": float(lv),
-                    "class": str(cls),
-                })
+                rows.append(
+                    {
+                        "percent_population": float(pp),
+                        "lift": float(lv),
+                        "class": str(cls),
+                    }
+                )
 
         rows.append({"percent_population": 0.0, "lift": 1.0, "class": "baseline"})
         rows.append({"percent_population": 1.0, "lift": 1.0, "class": "baseline"})
@@ -319,16 +337,16 @@ class ClassificationCurvesMixin:
         ``.split()`` method to override.
         """
         key = self._cache_key(
-            "discrimination_threshold", n_thresholds=n_thresholds, cv=cv,
+            "discrimination_threshold",
+            n_thresholds=n_thresholds,
+            cv=cv,
         )
         if key in self._cache:
             return self._cache[key]
         require_sklearn("discrimination_threshold")
 
         if self._y is None:
-            raise ValueError(
-                "ModelSource.discrimination_threshold() requires y to be provided."
-            )
+            raise ValueError("ModelSource.discrimination_threshold() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
         if len(proba_cols) != 2:
@@ -338,18 +356,25 @@ class ClassificationCurvesMixin:
             )
         y_true = np.asarray(self._y.to_numpy())
         positive_class = _coerce_class_label(
-            proba_cols[1][len("proba_"):], y_true.dtype,
+            proba_cols[1][len("proba_") :],
+            y_true.dtype,
         )
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
             y_score = proba_df[proba_cols[1]].to_numpy()
             df = self._sweep_thresholds(
-                y_true, y_score, thresholds, positive_class,
+                y_true,
+                y_score,
+                thresholds,
+                positive_class,
             )
         else:
             df = self._discrimination_threshold_cv(
-                cv, y_true, thresholds, positive_class,
+                cv,
+                y_true,
+                thresholds,
+                positive_class,
             )
 
         self._cache[key] = df
@@ -365,11 +390,14 @@ class ClassificationCurvesMixin:
         """Cross-validated threshold sweep — average per-fold metrics."""
         from sklearn.base import clone
         from sklearn.model_selection import KFold
+
         X_np = self._X.to_numpy()
         splitter = (
-            cv if hasattr(cv, "split")
+            cv
+            if hasattr(cv, "split")
             else KFold(
-                n_splits=int(cv), shuffle=True,
+                n_splits=int(cv),
+                shuffle=True,
                 random_state=self._random_state or 0,
             )
         )
@@ -377,18 +405,25 @@ class ClassificationCurvesMixin:
         for tr, te in splitter.split(X_np):
             m = clone(self._model).fit(X_np[tr], y_true[tr])
             s = _score_fold(m, X_np[te])
-            fold_dfs.append(self._sweep_thresholds(
-                y_true[te], s, thresholds, positive_class,
-            ))
+            fold_dfs.append(
+                self._sweep_thresholds(
+                    y_true[te],
+                    s,
+                    thresholds,
+                    positive_class,
+                )
+            )
         return (
             pl.concat(fold_dfs, how="vertical")
             .group_by("threshold")
-            .agg([
-                pl.col("precision").mean(),
-                pl.col("recall").mean(),
-                pl.col("f1").mean(),
-                pl.col("queue_rate").mean(),
-            ])
+            .agg(
+                [
+                    pl.col("precision").mean(),
+                    pl.col("recall").mean(),
+                    pl.col("f1").mean(),
+                    pl.col("queue_rate").mean(),
+                ]
+            )
             .sort("threshold")
         )
 
@@ -408,9 +443,7 @@ class ClassificationCurvesMixin:
         from sklearn.metrics import confusion_matrix as _cm
 
         if self._y is None:
-            raise ValueError(
-                "ModelSource.confusion_matrix() requires y to be provided."
-            )
+            raise ValueError("ModelSource.confusion_matrix() requires y to be provided.")
         y_true = np.asarray(self._y.to_numpy())
         X_np = self._X.to_numpy()
         y_pred = np.asarray(self._model.predict(X_np))
@@ -428,12 +461,14 @@ class ClassificationCurvesMixin:
             for j, p in enumerate(labels):
                 val = float(cm[i, j])
                 fmt = f"{val:.2f}" if normalize is not None else f"{int(val)}"
-                rows.append({
-                    "actual": str(a),
-                    "predicted": str(p),
-                    "value": val,
-                    "value_fmt": fmt,
-                })
+                rows.append(
+                    {
+                        "actual": str(a),
+                        "predicted": str(p),
+                        "value": val,
+                        "value_fmt": fmt,
+                    }
+                )
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
@@ -452,18 +487,22 @@ class ClassificationCurvesMixin:
         for t in thresholds:
             y_pred = (y_score >= t).astype(int)
             p, r, f1, _ = precision_recall_fscore_support(
-                y_true_bin, y_pred, average="binary", zero_division=0,
+                y_true_bin,
+                y_pred,
+                average="binary",
+                zero_division=0,
             )
             queue_rate = float((y_score >= t).mean()) if y_score.size else 0.0
-            rows.append({
-                "threshold": float(t),
-                "precision": float(p),
-                "recall": float(r),
-                "f1": float(f1),
-                "queue_rate": queue_rate,
-            })
+            rows.append(
+                {
+                    "threshold": float(t),
+                    "precision": float(p),
+                    "recall": float(r),
+                    "f1": float(f1),
+                    "queue_rate": queue_rate,
+                }
+            )
         return pl.DataFrame(rows)
-
 
 
 def _coerce_class_label(label_str: str, target_dtype) -> object:
@@ -492,8 +531,13 @@ def _pr_rows_binary(y_true, proba_df, proba_cols, classes) -> list[dict]:
     ap = float(average_precision_score(y_true, y_score))
     thresholds_padded = np.concatenate([thr, [float("nan")]])
     return [
-        {"precision": float(pi), "recall": float(ri),
-         "threshold": float(ti), "class": classes[1], "ap": ap}
+        {
+            "precision": float(pi),
+            "recall": float(ri),
+            "threshold": float(ti),
+            "class": classes[1],
+            "ap": ap,
+        }
         for pi, ri, ti in zip(p, r, thresholds_padded)
     ]
 
@@ -504,9 +548,7 @@ def _pr_rows_per_class(y_true, proba_df, proba_cols, classes) -> list[dict]:
 
     rows: list[dict] = []
     for i, cls in enumerate(classes):
-        y_bin = (
-            y_true == _coerce_class_label(cls, y_true.dtype)
-        ).astype(int)
+        y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
         y_score = proba_df[proba_cols[i]].to_numpy()
         p, r, thr = precision_recall_curve(y_bin, y_score)
         try:
@@ -515,10 +557,15 @@ def _pr_rows_per_class(y_true, proba_df, proba_cols, classes) -> list[dict]:
             ap = float("nan")
         thresholds_padded = np.concatenate([thr, [float("nan")]])
         for pi, ri, ti in zip(p, r, thresholds_padded):
-            rows.append({
-                "precision": float(pi), "recall": float(ri),
-                "threshold": float(ti), "class": str(cls), "ap": ap,
-            })
+            rows.append(
+                {
+                    "precision": float(pi),
+                    "recall": float(ri),
+                    "threshold": float(ti),
+                    "class": str(cls),
+                    "ap": ap,
+                }
+            )
     return rows
 
 
@@ -557,8 +604,13 @@ def _compute_avg_pr(y_true, y_score_matrix, classes, average):
         ap = float(average_precision_score(y_bin, y_score_matrix, average="micro"))
         thresholds_padded = np.concatenate([thr, [float("nan")]])
         return [
-            {"precision": float(pi), "recall": float(ri),
-             "threshold": float(ti), "class": "micro", "ap": ap}
+            {
+                "precision": float(pi),
+                "recall": float(ri),
+                "threshold": float(ti),
+                "class": "micro",
+                "ap": ap,
+            }
             for pi, ri, ti in zip(p, r, thresholds_padded)
         ]
     # macro / weighted: interpolate precision at a shared recall grid.
@@ -579,8 +631,13 @@ def _compute_avg_pr(y_true, y_score_matrix, classes, average):
     precision_avg = (np.array(precisions).T * weights).sum(axis=1)
     ap = float(average_precision_score(y_bin, y_score_matrix, average=average))
     return [
-        {"precision": float(p), "recall": float(r),
-         "threshold": float("nan"), "class": average, "ap": ap}
+        {
+            "precision": float(p),
+            "recall": float(r),
+            "threshold": float("nan"),
+            "class": average,
+            "ap": ap,
+        }
         for p, r in zip(precision_avg, grid)
     ]
 
@@ -593,13 +650,13 @@ def _compute_avg_roc(y_true, y_score_matrix, classes, average, drop_intermediate
     y_bin = label_binarize(y_true, classes=coerced_classes)
     if average == "micro":
         fpr, tpr, thr = roc_curve(
-            y_bin.ravel(), y_score_matrix.ravel(),
+            y_bin.ravel(),
+            y_score_matrix.ravel(),
             drop_intermediate=drop_intermediate,
         )
         auc = float(roc_auc_score(y_bin, y_score_matrix, average="micro"))
         return [
-            {"fpr": float(f), "tpr": float(t), "threshold": float(h),
-             "class": "micro", "auc": auc}
+            {"fpr": float(f), "tpr": float(t), "threshold": float(h), "class": "micro", "auc": auc}
             for f, t, h in zip(fpr, tpr, thr)
         ]
     grid = np.linspace(0.0, 1.0, 100)
@@ -615,9 +672,6 @@ def _compute_avg_roc(y_true, y_score_matrix, classes, average, drop_intermediate
     tpr_avg = (np.array(tprs).T * weights).sum(axis=1)
     auc = float(roc_auc_score(y_bin, y_score_matrix, average=average))
     return [
-        {"fpr": float(f), "tpr": float(t), "threshold": float("nan"),
-         "class": average, "auc": auc}
+        {"fpr": float(f), "tpr": float(t), "threshold": float("nan"), "class": average, "auc": auc}
         for f, t in zip(grid, tpr_avg)
     ]
-
-

@@ -1,4 +1,5 @@
 """Positional encoding channels (X, Y, X2, Y2, errors, polar)."""
+
 from __future__ import annotations
 
 from ferrum.encoding.base import ChannelBase

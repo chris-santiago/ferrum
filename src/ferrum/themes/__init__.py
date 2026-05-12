@@ -1,4 +1,5 @@
 """Theme class, built-in named themes, and default-theme controls."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -71,31 +72,60 @@ area_opacity, opacity : optional
 
     __slots__ = ("_props",)
 
-    _KNOWN_KEYS: frozenset[str] = frozenset({
-        # Canvas
-        "background", "background_color", "padding",
-        # Typography
-        "font_family", "font_weight", "font_color", "font_size",
-        "title_font_family", "title_font_size", "title_font_weight",
-        "title_color", "title_anchor", "title_offset",
-        "label_font_family", "label_color",
-        # Grid
-        "grid", "grid_color", "grid_width", "grid_dash", "grid_opacity",
-        # Axes
-        "axis_line", "axis_line_color", "axis_line_width",
-        "tick_color", "tick_size", "tick_width",
-        # Marks
-        "mark_color", "point_size", "point_opacity",
-        "line_stroke_width", "bar_corner_radius", "area_opacity", "opacity",
-        # Palette
-        "color_scheme",
-        # Strip
-        "strip_background_color",
-        # Legend
-        "legend_orient", "legend_direction", "legend_title_font_size",
-        # Spacing
-        "axis_title_padding", "column_padding", "row_padding",
-    })
+    _KNOWN_KEYS: frozenset[str] = frozenset(
+        {
+            # Canvas
+            "background",
+            "background_color",
+            "padding",
+            # Typography
+            "font_family",
+            "font_weight",
+            "font_color",
+            "font_size",
+            "title_font_family",
+            "title_font_size",
+            "title_font_weight",
+            "title_color",
+            "title_anchor",
+            "title_offset",
+            "label_font_family",
+            "label_color",
+            # Grid
+            "grid",
+            "grid_color",
+            "grid_width",
+            "grid_dash",
+            "grid_opacity",
+            # Axes
+            "axis_line",
+            "axis_line_color",
+            "axis_line_width",
+            "tick_color",
+            "tick_size",
+            "tick_width",
+            # Marks
+            "mark_color",
+            "point_size",
+            "point_opacity",
+            "line_stroke_width",
+            "bar_corner_radius",
+            "area_opacity",
+            "opacity",
+            # Palette
+            "color_scheme",
+            # Strip
+            "strip_background_color",
+            # Legend
+            "legend_orient",
+            "legend_direction",
+            "legend_title_font_size",
+            # Spacing
+            "axis_title_padding",
+            "column_padding",
+            "row_padding",
+        }
+    )
 
     def __init__(self, **kwargs: Any) -> None:
         unknown = set(kwargs) - self._KNOWN_KEYS
@@ -198,9 +228,17 @@ solarized_light = _builtins.solarized_light
 solarized_dark = _builtins.solarized_dark
 
 __all__ = [
-    "Theme", "default", "minimal", "dark", "publication", "economist",
-    "fivethirtyeight", "solarized_light", "solarized_dark",
+    "Theme",
+    "default",
+    "minimal",
+    "dark",
+    "publication",
+    "economist",
+    "fivethirtyeight",
+    "solarized_light",
+    "solarized_dark",
 ]
 
 from ferrum.themes._defaults import set_default_theme, get_default_theme, theme_context  # noqa: E402
+
 __all__ += ["set_default_theme", "get_default_theme", "theme_context"]

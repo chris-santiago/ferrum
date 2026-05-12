@@ -14,6 +14,7 @@ across the FFI boundary; a small regression test in
 ``tests/test_metrics_fmt_parity.py`` asserts byte-equality of the two
 emissions on a known fixture so any future format change is caught.
 """
+
 from __future__ import annotations
 
 

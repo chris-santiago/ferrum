@@ -1,4 +1,5 @@
 """Output orchestration: save, show, _repr_*_."""
+
 from __future__ import annotations
 
 import tempfile
@@ -10,8 +11,9 @@ if TYPE_CHECKING:
     from ferrum.chart import Chart
 
 
-def save_chart(chart: "Chart", path: Union[str, Path], *,
-               format: str | None = None, **render_kwargs) -> None:
+def save_chart(
+    chart: "Chart", path: Union[str, Path], *, format: str | None = None, **render_kwargs
+) -> None:
     """Save a chart to disk as SVG or PNG.
 
     The output format is derived from ``path``'s file extension when
@@ -60,17 +62,13 @@ def save_chart(chart: "Chart", path: Union[str, Path], *,
         path.write_bytes(chart.show_png(**render_kwargs))
     elif fmt in ("html", "json"):
         raise NotImplementedError(
-            f"save({fmt!r}) is planned for Phase 11+. "
-            f"Use 'svg' or 'png' today."
+            f"save({fmt!r}) is planned for Phase 11+. Use 'svg' or 'png' today."
         )
     elif fmt == "":
-        raise ValueError(
-            f"save({str(path)!r}) requires a format= or a path with extension."
-        )
+        raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
     else:
         raise ValueError(
-            f"unknown extension {fmt!r}; supported: svg, png. "
-            f"(html, json planned for Phase 11+.)"
+            f"unknown extension {fmt!r}; supported: svg, png. (html, json planned for Phase 11+.)"
         )
 
 
@@ -99,6 +97,7 @@ def show_chart(chart: "Chart") -> None:
     if _is_jupyter():
         try:
             from IPython.display import display, SVG
+
             display(SVG(chart.show_svg()))
             return
         except Exception:
@@ -114,9 +113,11 @@ def _is_jupyter() -> bool:
     """Return True when running inside a Jupyter kernel (ZMQ or terminal shell)."""
     try:
         from IPython import get_ipython
+
         ip = get_ipython()
         return ip is not None and ip.__class__.__name__ in (
-            "ZMQInteractiveShell", "TerminalInteractiveShell"
+            "ZMQInteractiveShell",
+            "TerminalInteractiveShell",
         )
     except ImportError:
         return False

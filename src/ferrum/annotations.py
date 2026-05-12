@@ -1,4 +1,5 @@
 """Reference-line, rectangle, and text annotation helpers."""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -8,8 +9,9 @@ import polars as pl
 from ferrum.chart import Chart
 
 
-def annotate_hline(y: float, *, label: Optional[str] = None,
-                   stroke: Optional[str] = None, stroke_dash=None) -> Chart:
+def annotate_hline(
+    y: float, *, label: Optional[str] = None, stroke: Optional[str] = None, stroke_dash=None
+) -> Chart:
     """Horizontal reference line at a fixed y position.
 
     Returns a single-mark ``Chart`` suitable for ``|`` / ``&`` concatenation
@@ -48,8 +50,9 @@ def annotate_hline(y: float, *, label: Optional[str] = None,
     return Chart(df).mark_rule(**kwargs).encode(y="_y")
 
 
-def annotate_vline(x: float, *, label: Optional[str] = None,
-                   stroke: Optional[str] = None, stroke_dash=None) -> Chart:
+def annotate_vline(
+    x: float, *, label: Optional[str] = None, stroke: Optional[str] = None, stroke_dash=None
+) -> Chart:
     """Vertical reference line at a fixed x position.
 
     Returns a single-mark ``Chart`` suitable for ``|`` / ``&`` concatenation
@@ -87,9 +90,16 @@ def annotate_vline(x: float, *, label: Optional[str] = None,
     return Chart(df).mark_rule(**kwargs).encode(x="_x")
 
 
-def annotate_rect(x1: float, x2: float, y1: float, y2: float, *,
-                  fill: Optional[str] = None, opacity: float = 0.1,
-                  label: Optional[str] = None) -> Chart:
+def annotate_rect(
+    x1: float,
+    x2: float,
+    y1: float,
+    y2: float,
+    *,
+    fill: Optional[str] = None,
+    opacity: float = 0.1,
+    label: Optional[str] = None,
+) -> Chart:
     """Shaded rectangle region spanning (x1, y1) to (x2, y2).
 
     Returns a ``mark_rect`` annotation chart for ``|`` / ``&`` concatenation
@@ -132,10 +142,19 @@ def annotate_rect(x1: float, x2: float, y1: float, y2: float, *,
     return Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
 
 
-def annotate_text(x: float, y: float, text: str, *, dx: float = 0, dy: float = 0,
-                  align: str = "center", baseline: str = "middle",
-                  font_size: Optional[float] = None, color: Optional[str] = None,
-                  angle: Optional[float] = None) -> Chart:
+def annotate_text(
+    x: float,
+    y: float,
+    text: str,
+    *,
+    dx: float = 0,
+    dy: float = 0,
+    align: str = "center",
+    baseline: str = "middle",
+    font_size: Optional[float] = None,
+    color: Optional[str] = None,
+    angle: Optional[float] = None,
+) -> Chart:
     """Free-floating text annotation at a fixed (x, y) position.
 
     Returns a ``mark_text`` chart for ``|`` / ``&`` concatenation composition;
@@ -261,26 +280,18 @@ def _apply_metric_label(
 
     x_col = x_col_override or _resolve_field(base._encoding.get("x"))
     y_col = y_col_override or _resolve_field(base._encoding.get("y"))
-    color_col = color_col_override or _resolve_field(
-        base._encoding.get("color")
-    )
+    color_col = color_col_override or _resolve_field(base._encoding.get("color"))
     if x_col is None or y_col is None:
-        raise ValueError(
-            f"{type(label).__name__} requires x and y encodings on the base chart"
-        )
+        raise ValueError(f"{type(label).__name__} requires x and y encodings on the base chart")
     tbl = to_arrow_table(base._data)
     if x_col not in tbl.column_names or y_col not in tbl.column_names:
-        raise ValueError(
-            f"{type(label).__name__}: column {x_col!r} or {y_col!r} missing from data"
-        )
+        raise ValueError(f"{type(label).__name__}: column {x_col!r} or {y_col!r} missing from data")
     x_arr = np.asarray(tbl.column(x_col).to_pylist(), dtype=float)
     y_arr = np.asarray(tbl.column(y_col).to_pylist(), dtype=float)
     n = len(x_arr)
     labels_col: list[Optional[str]] = [None] * n
 
-    y_range = (
-        float(np.nanmax(y_arr) - np.nanmin(y_arr)) if y_arr.size else 1.0
-    )
+    y_range = float(np.nanmax(y_arr) - np.nanmin(y_arr)) if y_arr.size else 1.0
     y_top = float(np.nanmax(y_arr)) if y_arr.size else 1.0
     stagger_step = max(y_range * 0.06, 1e-9)
     label_y_col: list[Optional[float]] = [None] * n
@@ -306,11 +317,7 @@ def _apply_metric_label(
         labels_col[global_idx] = text
         label_y_col[global_idx] = y_top
 
-    base_pl = (
-        base._data
-        if isinstance(base._data, pl.DataFrame)
-        else pl.from_arrow(tbl)
-    )
+    base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
     augmented = base_pl.with_columns(
         pl.Series("_label_text", labels_col, dtype=pl.Utf8),
         pl.Series("_label_y", label_y_col, dtype=pl.Float64),
@@ -392,6 +399,7 @@ class OutlierLabel:
 
     def __radd__(self, base: Chart) -> Chart:
         from ferrum._coerce import to_arrow_table
+
         if not isinstance(base, Chart):
             return NotImplemented
         x_col = _resolve_field(base._encoding.get("x"))
@@ -423,11 +431,7 @@ class OutlierLabel:
                 labels_col[int(i)] = str(label_lookup[int(i)])
             else:
                 labels_col[int(i)] = str(values[int(i)])
-        base_pl = (
-            base._data
-            if isinstance(base._data, pl.DataFrame)
-            else pl.from_arrow(tbl)
-        )
+        base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
         augmented = base_pl.with_columns(pl.Series(label_col_name, labels_col))
         base_aug = base._clone()
         base_aug._data = augmented
@@ -476,7 +480,9 @@ def _apply_metric_label_explicit(
     else:
         label_obj = BrierLabel(position=pos_lit, format=fmt, prefix=prefix_str)
     return _apply_metric_label(
-        base, label_obj, metric_fn=metric_fn,
+        base,
+        label_obj,
+        metric_fn=metric_fn,
         x_col_override=x_col,
         y_col_override=y_col,
         color_col_override=color_col,
@@ -505,8 +511,13 @@ def annotate_arrow(
     if stroke is not None:
         seg_kwargs["stroke"] = stroke
     arrow_chart = (
-        Chart(df).mark_segment(**seg_kwargs).encode(
-            x="_x1", y="_y1", x2="_x2", y2="_y2",
+        Chart(df)
+        .mark_segment(**seg_kwargs)
+        .encode(
+            x="_x1",
+            y="_y1",
+            x2="_x2",
+            y2="_y2",
         )
     )
     if label is None:

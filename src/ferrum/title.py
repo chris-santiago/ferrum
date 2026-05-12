@@ -1,4 +1,5 @@
 """Two-line title value class — spec §3.19, Schwabish SB1."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -57,8 +58,12 @@ class Title:
         if self.anchor != "start":
             out["anchor"] = self.anchor
         for field_name in (
-            "offset", "font_size", "font_weight", "color",
-            "subtitle_font_size", "subtitle_color",
+            "offset",
+            "font_size",
+            "font_weight",
+            "color",
+            "subtitle_font_size",
+            "subtitle_color",
         ):
             value = getattr(self, field_name)
             if value is not None:

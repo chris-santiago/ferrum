@@ -1,9 +1,16 @@
 """Categorical convenience functions (catplot)."""
+
 from __future__ import annotations
 from typing import Any
 
 from ferrum import (
-    Aggregate, AggregateOp, Chart, CoordFlip, Dodge, Identity, Jitter,
+    Aggregate,
+    AggregateOp,
+    Chart,
+    CoordFlip,
+    Dodge,
+    Identity,
+    Jitter,
 )
 
 
@@ -11,13 +18,23 @@ _VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "cou
 
 
 def catplot(
-    data: Any, *,
-    x: Any = None, y: Any = None,
-    hue: Any = None, col: Any = None, row: Any = None,
+    data: Any,
+    *,
+    x: Any = None,
+    y: Any = None,
+    hue: Any = None,
+    col: Any = None,
+    row: Any = None,
     kind: str = "strip",
-    order: Any = None, hue_order: Any = None, orient: Any = None,
-    dodge: bool = False, jitter: bool = True, native_scale: bool = False,
-    ci: Any = 95, n_boot: int = 1000, seed: int | None = None,
+    order: Any = None,
+    hue_order: Any = None,
+    orient: Any = None,
+    dodge: bool = False,
+    jitter: bool = True,
+    native_scale: bool = False,
+    ci: Any = 95,
+    n_boot: int = 1000,
+    seed: int | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -107,14 +124,12 @@ def catplot(
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
     if kind not in _VALID_KINDS:
-        raise ValueError(
-            f"catplot: kind must be one of {sorted(_VALID_KINDS)}; got {kind!r}"
-        )
+        raise ValueError(f"catplot: kind must be one of {sorted(_VALID_KINDS)}; got {kind!r}")
 
     # Determine the categorical and value axes. By default x is categorical,
     # y is value; orient="h" flips to y categorical / x value (and we add
     # CoordFlip to the chart).
-    horizontal = (orient == "h")
+    horizontal = orient == "h"
     cat_field = x if not horizontal else y
     val_field = y if not horizontal else x
 

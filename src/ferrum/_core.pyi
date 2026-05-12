@@ -1,17 +1,30 @@
 from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union
 
 DataTypeStr = Literal[
-    "Q", "N", "O", "T",
-    "quantitative", "nominal", "ordinal", "temporal",
+    "Q",
+    "N",
+    "O",
+    "T",
+    "quantitative",
+    "nominal",
+    "ordinal",
+    "temporal",
 ]
 MarkStr = Literal[
-    "point", "line", "bar", "area", "rule", "text", "tick", "rect",
-    "polygon", "image", "ribbon",
+    "point",
+    "line",
+    "bar",
+    "area",
+    "rule",
+    "text",
+    "tick",
+    "rect",
+    "polygon",
+    "image",
+    "ribbon",
 ]
 
-
 def process_batch(data: Any) -> Any: ...
-
 
 class EncodingSpec:
     field: str
@@ -19,7 +32,6 @@ class EncodingSpec:
     def __init__(self, field: str, type_: Optional[DataTypeStr] = None) -> None: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
-
 
 class ChartSpec:
     mark: str
@@ -63,7 +75,6 @@ class ChartSpec:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-
 # ---------- Scales (Phase 4) ----------
 
 class LinearScale:
@@ -86,7 +97,6 @@ class LinearScale:
     def nice(self) -> "LinearScale": ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
-
 
 class LogScale:
     domain: list[float]
@@ -111,7 +121,6 @@ class LogScale:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-
 class TimeScale:
     domain: list[float]
     range: list[float]
@@ -132,7 +141,6 @@ class TimeScale:
     def nice(self) -> "TimeScale": ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
-
 
 class SymlogScale:
     domain: list[float]
@@ -157,7 +165,6 @@ class SymlogScale:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-
 class OrdinalScale:
     domain: list[str]
     range: list[float]
@@ -176,7 +183,6 @@ class OrdinalScale:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-
 class ThresholdScale:
     domain: list[float]
     range: list[float]
@@ -192,7 +198,6 @@ class ThresholdScale:
     def nice(self) -> "ThresholdScale": ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
-
 
 class QuantileScale:
     domain: list[float]
@@ -211,7 +216,6 @@ class QuantileScale:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-
 # ---------- Stat engine transforms (Phase 5) ----------
 
 class Bin:
@@ -229,13 +233,18 @@ class Bin:
     ) -> None: ...
 
 class Bin2D:
-    def __init__(self, x: str, y: str, *,
-                 bins_x: Union[str, int, float] = "sturges",
-                 bins_y: Union[str, int, float] = "sturges",
-                 extent_x: Optional[Tuple[float, float]] = None,
-                 extent_y: Optional[Tuple[float, float]] = None,
-                 cumulative: bool = False,
-                 name: Optional[str] = None) -> None: ...
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bins_x: Union[str, int, float] = "sturges",
+        bins_y: Union[str, int, float] = "sturges",
+        extent_x: Optional[Tuple[float, float]] = None,
+        extent_y: Optional[Tuple[float, float]] = None,
+        cumulative: bool = False,
+        name: Optional[str] = None,
+    ) -> None: ...
 
 class BoxStats:
     def __init__(
@@ -252,7 +261,7 @@ class Kde:
         self,
         field: str,
         *,
-        bandwidth: object = "scott",   # str ("scott"|"silverman") or float
+        bandwidth: object = "scott",  # str ("scott"|"silverman") or float
         n: int = 512,
         extent: Optional[Tuple[float, float]] = None,
         cumulative: bool = False,
@@ -344,7 +353,7 @@ class Violin:
         field: str,
         *,
         groupby: List[str] = ...,
-        bandwidth: object = "scott",   # str ("scott"|"silverman") or float
+        bandwidth: object = "scott",  # str ("scott"|"silverman") or float
         n: int = 256,
         width: float = 0.4,
         name: Optional[str] = None,
@@ -400,23 +409,27 @@ class Swarm:
         name: Optional[str] = None,
     ) -> None: ...
 
-
 class Linkage:
-    def __init__(self, *,
-                 method: str = "ward",
-                 metric: str = "euclidean",
-                 axis: str = "rows",
-                 z_score: str | None = None,
-                 standard_scale: str | None = None,
-                 name: str | None = None) -> None: ...
-
+    def __init__(
+        self,
+        *,
+        method: str = "ward",
+        metric: str = "euclidean",
+        axis: str = "rows",
+        z_score: str | None = None,
+        standard_scale: str | None = None,
+        name: str | None = None,
+    ) -> None: ...
 
 class Reorder:
-    def __init__(self, by: str, *,
-                 drop_index: bool = True,
-                 from_: Optional[str] = None,
-                 name: Optional[str] = None) -> None: ...
-
+    def __init__(
+        self,
+        by: str,
+        *,
+        drop_index: bool = True,
+        from_: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
 
 class Unpivot:
     def __init__(
@@ -428,7 +441,6 @@ class Unpivot:
         value_name: str = "value",
         name: str | None = None,
     ) -> None: ...
-
 
 class LetterValue:
     def __init__(
@@ -442,7 +454,6 @@ class LetterValue:
         name: Optional[str] = None,
     ) -> None: ...
 
-
 class Logistic:
     def __init__(
         self,
@@ -455,7 +466,6 @@ class Logistic:
         tol: float = 1e-8,
         name: Optional[str] = None,
     ) -> None: ...
-
 
 class Glm:
     def __init__(
@@ -472,7 +482,6 @@ class Glm:
         name: Optional[str] = None,
     ) -> None: ...
 
-
 class Robust:
     def __init__(
         self,
@@ -488,7 +497,6 @@ class Robust:
         name: Optional[str] = None,
     ) -> None: ...
 
-
 def compute_layout(
     spec,
     *,
@@ -502,8 +510,6 @@ def compute_layout(
     legend_orient: str = "right",
     label_angle: float | None = None,
 ) -> dict: ...
-
-
 def render_svg(
     spec: ChartSpec,
     data: Any,
@@ -512,8 +518,6 @@ def render_svg(
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
 ) -> str: ...
-
-
 def render_png(
     spec: ChartSpec,
     data: Any,
@@ -523,7 +527,6 @@ def render_png(
     config: Optional[dict] = None,
 ) -> bytes: ...
 
-
 # ---------- SVG compositor (Phase 8a Task 11) ----------
 
 def compose_svg_horizontal(
@@ -532,14 +535,12 @@ def compose_svg_horizontal(
     spacing: float = 10.0,
     align: Literal["top", "center", "bottom"] = "top",
 ) -> str: ...
-
 def compose_svg_vertical(
     svgs: list[str],
     *,
     spacing: float = 10.0,
     align: Literal["left", "center", "right"] = "left",
 ) -> str: ...
-
 def compose_svg_grid(
     cells: list[str | None],
     *,
@@ -552,7 +553,6 @@ def compose_svg_grid(
     share_y: list[list[int]] = ...,
 ) -> str: ...
 
-
 # ---------- Continuous color schemes (Phase 8b Task 37) ----------
 
 class ContinuousScheme:
@@ -563,7 +563,6 @@ class ContinuousScheme:
 
 def Gradient(stops: list[tuple[float, str]]) -> ContinuousScheme: ...
 
-
 # ---------- Diagnostics (Phase 10g Task 35) ----------
 
 class _KendallResult(TypedDict):
@@ -573,6 +572,5 @@ class _KendallResult(TypedDict):
     n_tied_x: int
     n_tied_y: int
     n_tied_both: int
-
 
 def kendall_tau_b(x: Sequence[float], y: Sequence[float]) -> _KendallResult: ...

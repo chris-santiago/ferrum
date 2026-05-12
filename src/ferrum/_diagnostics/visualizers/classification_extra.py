@@ -4,6 +4,7 @@ Houses visualizers that don't naturally cluster with the curve-based ones
 in ``classification.py``: threshold sweep, per-class error stack, and the
 model-free class-balance bar.
 """
+
 from __future__ import annotations
 
 from collections import Counter
@@ -77,7 +78,8 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         dt = self._source.discrimination_threshold(
-            n_thresholds=self.n_thresholds, cv=self.cv,
+            n_thresholds=self.n_thresholds,
+            cv=self.cv,
         )
         f1 = dt["f1"].to_numpy()
         idx = int(np.argmax(f1)) if f1.size else 0
@@ -141,15 +143,15 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         cm = self._source.confusion_matrix(normalize=None)
-        n_correct = float(
-            cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum()
-        )
+        n_correct = float(cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum())
         n_total = float(cm["value"].sum())
         self._metrics["accuracy"] = n_correct / max(n_total, 1.0)
 
     def _build_chart(self) -> Any:
         return _class_prediction_error_chart_from_source(
-            self._source, normalize=self.normalize, theme=self.theme,
+            self._source,
+            normalize=self.normalize,
+            theme=self.theme,
         )
 
 
@@ -200,9 +202,7 @@ class ClassBalanceVisualizer(FerrumVisualizer):
     def fit(self, X: Any, y: Any = None) -> "ClassBalanceVisualizer":
         if y is None:
             if X is None:
-                raise TypeError(
-                    "ClassBalanceVisualizer.fit() needs either fit(X, y) or fit(y)."
-                )
+                raise TypeError("ClassBalanceVisualizer.fit() needs either fit(X, y) or fit(y).")
             y = X
 
         if isinstance(y, pl.Series):
@@ -221,7 +221,8 @@ class ClassBalanceVisualizer(FerrumVisualizer):
         self._metrics["imbalance_ratio"] = float(max_n) / float(max(min_n, 1))
 
         self._chart = _class_balance_chart_from_dataframe(
-            self._y, theme=self.theme,
+            self._y,
+            theme=self.theme,
         )
         self._fitted = True
         return self

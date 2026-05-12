@@ -10,6 +10,7 @@ the six per-domain mixins — when you add a public method to any
 mixin it joins the multi-model dispatch surface with no further
 bookkeeping.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -124,8 +125,15 @@ class ComparedModelSource:
             method = name
             return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
         if name in (
-            "_X", "_y", "_feature_names", "_class_names", "_capabilities",
-            "X", "y", "feature_names", "capabilities",
+            "_X",
+            "_y",
+            "_feature_names",
+            "_class_names",
+            "_capabilities",
+            "X",
+            "y",
+            "feature_names",
+            "capabilities",
         ):
             return getattr(next(iter(self._sources.values())), name)
         if name in ("_model", "model"):

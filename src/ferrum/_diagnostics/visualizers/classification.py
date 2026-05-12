@@ -1,4 +1,5 @@
 """10b/10c classification visualizers — ROC, PR, Calibration, ConfusionMatrix, ClassificationReport."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -82,6 +83,7 @@ class ROCVisualizer(FerrumVisualizer):
 
     def score(self, X: Any, y: Any) -> float:
         from sklearn.metrics import roc_auc_score
+
         if hasattr(self.model, "predict_proba"):
             proba = self.model.predict_proba(X)
             if proba.shape[1] == 2:
@@ -186,11 +188,17 @@ class CalibrationVisualizer(FerrumVisualizer):
             if isinstance(m, dict):
                 # Dict-of-models form.
                 self._source = ferrum.ModelSource.compare(
-                    m, X, y, random_state=self.random_state,
+                    m,
+                    X,
+                    y,
+                    random_state=self.random_state,
                 )
             else:
                 self._source = ferrum.ModelSource(
-                    m, X, y, random_state=self.random_state,
+                    m,
+                    X,
+                    y,
+                    random_state=self.random_state,
                 )
         else:
             # Positional N-model overlay.
@@ -201,7 +209,9 @@ class CalibrationVisualizer(FerrumVisualizer):
             else:
                 self._source = ferrum.ModelSource.compare(
                     {f"model_{i}": m for i, m in enumerate(self._models)},
-                    X, y, random_state=self.random_state,
+                    X,
+                    y,
+                    random_state=self.random_state,
                 )
         self._materialize()
         self._chart = self._build_chart()
@@ -210,16 +220,14 @@ class CalibrationVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         cal = self._source.calibration_curve(
-            n_bins=self.n_bins, strategy=self.strategy,
+            n_bins=self.n_bins,
+            strategy=self.strategy,
         )
         # When the source is a ComparedModelSource the frame carries one
         # row per (model, bin). Per-model calibration_error then
         # surfaces as a dict in the repr via the dispatched mean.
-        diff = (
-            cal["fraction_positive"].to_numpy()
-            - cal["mean_predicted"].to_numpy()
-        )
-        self._metrics["calibration_error"] = float(np.mean(diff ** 2))
+        diff = cal["fraction_positive"].to_numpy() - cal["mean_predicted"].to_numpy()
+        self._metrics["calibration_error"] = float(np.mean(diff**2))
 
     def _build_chart(self) -> Any:
         return _calibration_chart_from_source(
@@ -280,15 +288,15 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         # documents this; the comment lives here so a future reader of
         # the code doesn't "fix" it by passing self.normalize through.
         cm = self._source.confusion_matrix(normalize=None)
-        n_correct = float(
-            cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum()
-        )
+        n_correct = float(cm.filter(pl.col("actual") == pl.col("predicted"))["value"].sum())
         n_total = float(cm["value"].sum())
         self._metrics["accuracy"] = n_correct / max(n_total, 1.0)
 
     def _build_chart(self) -> Any:
         return _confusion_chart_from_source(
-            self._source, normalize=self.normalize, theme=self.theme,
+            self._source,
+            normalize=self.normalize,
+            theme=self.theme,
         )
 
 
@@ -329,6 +337,7 @@ class ClassificationReportVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         from ..deps import require_sklearn
+
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 

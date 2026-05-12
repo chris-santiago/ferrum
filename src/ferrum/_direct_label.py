@@ -8,6 +8,7 @@ composite helper that mirrors the augmented-DataFrame pattern used by
 :func:`ferrum.annotations._apply_metric_label` so labels share the
 base chart's ``_data`` and overlay cleanly via ``+``.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -92,18 +93,14 @@ def _direct_label_endpoint(
         if not mask.any():
             continue
         masked_x = x_all[mask]
-        idx_in_mask = int(
-            np.argmax(masked_x) if position == "end" else np.argmin(masked_x)
-        )
+        idx_in_mask = int(np.argmax(masked_x) if position == "end" else np.argmin(masked_x))
         global_idx = int(np.where(mask)[0][idx_in_mask])
         ep_x = float(masked_x[idx_in_mask])
         ep_y = float(y_all[global_idx]) if y_all is not None else 0.0
         series_endpoints.append((str(series), global_idx, ep_x, ep_y))
 
     y_range = (
-        float(np.nanmax(y_all) - np.nanmin(y_all))
-        if (y_all is not None and y_all.size)
-        else 1.0
+        float(np.nanmax(y_all) - np.nanmin(y_all)) if (y_all is not None and y_all.size) else 1.0
     )
     stagger_step = max(y_range * 0.05, 1e-9)
     stagger_threshold = stagger_step * 0.8
@@ -112,7 +109,8 @@ def _direct_label_endpoint(
     # Process endpoints in descending y order so the highest sits at its
     # natural position and subsequent labels stagger downward.
     for series, global_idx, ep_x, ep_y in sorted(
-        series_endpoints, key=lambda t: -t[3],
+        series_endpoints,
+        key=lambda t: -t[3],
     ):
         target_y = ep_y
         # Push down if too close to a previously placed label.
@@ -122,11 +120,7 @@ def _direct_label_endpoint(
         labels_col[global_idx] = series
         label_y_col[global_idx] = target_y
 
-    base_pl = (
-        chart._data
-        if isinstance(chart._data, pl.DataFrame)
-        else pl.from_arrow(tbl)
-    )
+    base_pl = chart._data if isinstance(chart._data, pl.DataFrame) else pl.from_arrow(tbl)
     augmented = base_pl.with_columns(
         pl.Series("_direct_label_text", labels_col, dtype=pl.Utf8),
         pl.Series("_direct_label_y", label_y_col, dtype=pl.Float64),
@@ -135,8 +129,10 @@ def _direct_label_endpoint(
 
     chart_aug = chart._clone()
     chart_aug._data = augmented
-    return chart_aug.layer(Layer(
-        mark="text",
-        encoding={"x": x_col, "y": "_direct_label_y", "text": "_direct_label_text"},
-        mark_kwargs={"align": "right", "dx": -4},
-    ))
+    return chart_aug.layer(
+        Layer(
+            mark="text",
+            encoding={"x": x_col, "y": "_direct_label_y", "text": "_direct_label_text"},
+            mark_kwargs={"align": "right", "dx": -4},
+        )
+    )

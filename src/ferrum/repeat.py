@@ -9,6 +9,7 @@ The placeholders are resolved by ``RepeatChart.expand()`` into concrete field
 names based on the chart's ``row=`` / ``column=`` / ``layer=`` lists.  JSON
 serialisation (via ``to_repeat_dict``) emits ``{"$repeat": "<axis>"}``.
 """
+
 from __future__ import annotations
 from typing import Final
 
@@ -43,9 +44,7 @@ class _RepeatPlaceholder:
         return f"Repeat.{self._field}"
 
     def __setattr__(self, name: str, value) -> None:
-        raise AttributeError(
-            f"_RepeatPlaceholder is immutable; cannot set {name!r}"
-        )
+        raise AttributeError(f"_RepeatPlaceholder is immutable; cannot set {name!r}")
 
     def __eq__(self, other) -> bool:
         """Return True when *other* is the same placeholder axis."""
@@ -85,5 +84,5 @@ class Repeat:
     """
 
     column: Final[_RepeatPlaceholder] = _RepeatPlaceholder("column")
-    row:    Final[_RepeatPlaceholder] = _RepeatPlaceholder("row")
-    layer:  Final[_RepeatPlaceholder] = _RepeatPlaceholder("layer")
+    row: Final[_RepeatPlaceholder] = _RepeatPlaceholder("row")
+    layer: Final[_RepeatPlaceholder] = _RepeatPlaceholder("layer")

@@ -24,6 +24,7 @@ The ``_resolve_source`` helper in this module accepts a fitted model,
 an explicit ``ferrum.ModelSource``, or a dict of named models for
 ``ComparedModelSource`` (multi-model comparison).
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -110,16 +111,21 @@ def _resolve_source(
     if compare is not None:
         if not isinstance(compare, dict):
             raise TypeError(
-                f"compare= must be dict[str, model] or None; got "
-                f"{type(compare).__name__}."
+                f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
             )
         models = {"base": model_or_source, **compare}
         return ferrum.ModelSource.compare(
-            models, X, y, random_state=random_state,
+            models,
+            X,
+            y,
+            random_state=random_state,
         )
     if isinstance(model_or_source, dict):
         return ferrum.ModelSource.compare(
-            model_or_source, X, y, random_state=random_state,
+            model_or_source,
+            X,
+            y,
+            random_state=random_state,
         )
     if isinstance(model_or_source, ferrum.ModelSource):
         return model_or_source
@@ -203,8 +209,10 @@ def residuals_chart(
         panel_list: Any = None
     elif panels == "auto":
         panel_list = [
-            "residuals_vs_fitted", "qq",
-            "scale_location", "residuals_vs_leverage",
+            "residuals_vs_fitted",
+            "qq",
+            "scale_location",
+            "residuals_vs_leverage",
         ]
     else:
         panel_list = list(panels)
@@ -288,7 +296,11 @@ def roc_chart(
     >>> fm.roc_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(
-        model_or_source, X, y, random_state=random_state, compare=compare,
+        model_or_source,
+        X,
+        y,
+        random_state=random_state,
+        compare=compare,
     )
     return _roc_chart_from_source(
         source,
@@ -376,7 +388,11 @@ def pr_chart(
     >>> fm.pr_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(
-        model_or_source, X, y, random_state=random_state, compare=compare,
+        model_or_source,
+        X,
+        y,
+        random_state=random_state,
+        compare=compare,
     )
     return _pr_chart_from_source(
         source,
@@ -455,11 +471,19 @@ def calibration_chart(
     >>> fm.calibration_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(
-        model_or_source, X, y, random_state=random_state, compare=compare,
+        model_or_source,
+        X,
+        y,
+        random_state=random_state,
+        compare=compare,
     )
     return _calibration_chart_from_source(
-        source, n_bins=n_bins, strategy=strategy,
-        annotate_brier=annotate_brier, subtitle=subtitle, theme=theme,
+        source,
+        n_bins=n_bins,
+        strategy=strategy,
+        annotate_brier=annotate_brier,
+        subtitle=subtitle,
+        theme=theme,
     )
 
 
@@ -630,7 +654,10 @@ def confusion_matrix_chart(
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _confusion_chart_from_source(
-        source, normalize=normalize, annotate=annotate, theme=theme,
+        source,
+        normalize=normalize,
+        annotate=annotate,
+        theme=theme,
     )
 
 
@@ -981,10 +1008,12 @@ def shap_chart(
     >>> fm.shap_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
     import warnings
+
     warnings.warn(
         "shap_chart(kind=...) is deprecated; use shap_beeswarm_chart / "
         "shap_bar_chart / shap_waterfall_chart instead.",
-        DeprecationWarning, stacklevel=2,
+        DeprecationWarning,
+        stacklevel=2,
     )
 
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
@@ -1006,9 +1035,7 @@ def shap_chart(
         )
     if kind == "waterfall":
         if sample_idx is None:
-            raise ValueError(
-                "shap_chart(kind='waterfall') requires sample_idx=<int>."
-            )
+            raise ValueError("shap_chart(kind='waterfall') requires sample_idx=<int>.")
         return _shap_waterfall_chart_from_source(
             source,
             sample_idx=sample_idx,
@@ -1017,9 +1044,7 @@ def shap_chart(
             background=background,
             theme=theme,
         )
-    raise ValueError(
-        f"shap_chart(kind={kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'."
-    )
+    raise ValueError(f"shap_chart(kind={kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'.")
 
 
 def pdp_chart(
@@ -1093,7 +1118,9 @@ def pdp_chart(
     >>> fm.pdp_chart(GradientBoostingRegressor().fit(X_train, y_train), X_test, features=["age", "income"])
     """
     _require(
-        "pdp_chart", "features", features,
+        "pdp_chart",
+        "features",
+        features,
         hint="pass a list of column names or indices",
     )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
@@ -1338,15 +1365,22 @@ def validation_curve_chart(
     >>> fm.validation_curve_chart(Ridge(), X_train, y_train, param="alpha", values=[0.01, 0.1, 1, 10])
     """
     _require(
-        "validation_curve_chart", "values", values,
+        "validation_curve_chart",
+        "values",
+        values,
         hint="pass an explicit list of values to sweep for the given param",
     )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
-        source, param, values,
-        cv=cv, scoring=scoring,
-        log_scale=log_scale, ci_style=ci_style,
-        subtitle=subtitle, theme=theme,
+        source,
+        param,
+        values,
+        cv=cv,
+        scoring=scoring,
+        log_scale=log_scale,
+        ci_style=ci_style,
+        subtitle=subtitle,
+        theme=theme,
     )
 
 
@@ -1409,8 +1443,12 @@ def cv_scores_chart(
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _cv_scores_chart_from_source(
-        source, cv=cv, scoring=scoring,
-        kind=kind, split=split, theme=theme,
+        source,
+        cv=cv,
+        scoring=scoring,
+        kind=kind,
+        split=split,
+        theme=theme,
     )
 
 
@@ -1480,14 +1518,20 @@ def alpha_selection_chart(
     >>> fm.alpha_selection_chart(Ridge(), X_train, y_train, alphas=[0.001, 0.01, 0.1, 1, 10, 100])
     """
     _require(
-        "alpha_selection_chart", "alphas", alphas,
+        "alpha_selection_chart",
+        "alphas",
+        alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
     )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(
-        source, alphas,
-        cv=cv, scoring=scoring,
-        log_scale=log_scale, highlight_best=highlight_best, theme=theme,
+        source,
+        alphas,
+        cv=cv,
+        scoring=scoring,
+        log_scale=log_scale,
+        highlight_best=highlight_best,
+        theme=theme,
     )
 
 
@@ -1645,8 +1689,13 @@ def cluster_diagnostics(
             "'elbow', 'silhouette', 'both'."
         )
     return _cluster_diagnostics_chart(
-        X, ks=ks, method=method, scoring=scoring,
-        n_init=n_init, random_state=random_state, theme=theme,
+        X,
+        ks=ks,
+        method=method,
+        scoring=scoring,
+        n_init=n_init,
+        random_state=random_state,
+        theme=theme,
     )
 
 
@@ -1721,7 +1770,10 @@ def intercluster_distance_chart(
                 "cluster_centers_."
             )
     return _intercluster_distance_chart_from_source(
-        source, k=int(k), method=method, theme=theme,
+        source,
+        k=int(k),
+        method=method,
+        theme=theme,
     )
 
 
@@ -1812,22 +1864,31 @@ def rank_chart(
     import warnings
 
     warnings.warn(
-        "rank_chart(rank=...) is deprecated; use rank1d_chart / "
-        "rank2d_chart instead.",
+        "rank_chart(rank=...) is deprecated; use rank1d_chart / rank2d_chart instead.",
         DeprecationWarning,
         stacklevel=2,
     )
     if rank == "1d":
         return rank1d_chart(
-            data_or_source, X, y,
-            algorithm=algorithm, top_k=top_k, orient=orient,
-            color_field=color_field, random_state=random_state, theme=theme,
+            data_or_source,
+            X,
+            y,
+            algorithm=algorithm,
+            top_k=top_k,
+            orient=orient,
+            color_field=color_field,
+            random_state=random_state,
+            theme=theme,
         )
     if rank == "2d":
         return rank2d_chart(
-            data_or_source, X, y,
-            algorithm=algorithm, annot=annot,
-            random_state=random_state, theme=theme,
+            data_or_source,
+            X,
+            y,
+            algorithm=algorithm,
+            annot=annot,
+            random_state=random_state,
+            theme=theme,
         )
     raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
 
@@ -1876,16 +1937,24 @@ def rank1d_chart(
         df = data_or_source.rank1d(algorithm=algo)
     elif algo == "covariance":
         source = _resolve_source(
-            data_or_source, X, y, random_state=random_state,
+            data_or_source,
+            X,
+            y,
+            random_state=random_state,
         )
         df = source.rank1d(algorithm=algo)
     else:
         from ferrum._diagnostics.stats import rank1d_compute
+
         data = data_or_source if X is None else X
         df = rank1d_compute(data, algorithm=algo)
     return _rank1d_chart_from_dataframe(
-        df, algorithm=algo, orient=orient, top_k=top_k,
-        color_field=color_field, theme=theme,
+        df,
+        algorithm=algo,
+        orient=orient,
+        top_k=top_k,
+        color_field=color_field,
+        theme=theme,
     )
 
 
@@ -1929,10 +1998,14 @@ def rank2d_chart(
         df = data_or_source.rank2d(algorithm=algo)
     else:
         from ferrum._diagnostics.stats import rank2d_compute
+
         data = data_or_source if X is None else X
         df = rank2d_compute(data, algorithm=algo)
     return _rank2d_chart_from_dataframe(
-        df, algorithm=algo, annot=annot, theme=theme,
+        df,
+        algorithm=algo,
+        annot=annot,
+        theme=theme,
     )
 
 
@@ -1993,8 +2066,12 @@ def parallel_coordinates_chart(
     >>> fm.parallel_coordinates_chart(X_df, hue="species", rescale="minmax")
     """
     return _parallel_coords_chart_from_dataframe(
-        data, features=features, hue=hue, rescale=rescale,
-        alpha=alpha, theme=theme,
+        data,
+        features=features,
+        hue=hue,
+        rescale=rescale,
+        alpha=alpha,
+        theme=theme,
     )
 
 
@@ -2076,4 +2153,3 @@ def decision_boundary_chart(
         scatter=bool(scatter),
         theme=theme,
     )
-

@@ -33,6 +33,7 @@ either has no ``**kwargs`` parameter or calls
 ``validate_user_mark_kwargs`` in its body — preventing silent-drop
 regressions from being reintroduced.
 """
+
 from __future__ import annotations
 
 

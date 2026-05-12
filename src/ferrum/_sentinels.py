@@ -16,6 +16,7 @@ caller. Both chart-builder code (``_diagnostics/charts.py``) and mark
 methods (``chart.py: mark_silhouette``, ``mark_shap_beeswarm``, …) reach
 for the same helpers.
 """
+
 from __future__ import annotations
 
 import polars as pl

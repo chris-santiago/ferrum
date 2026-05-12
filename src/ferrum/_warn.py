@@ -1,6 +1,7 @@
 """Warn-once registry: each (channel, kwarg) tuple emits at most one
 UserWarning per process. Tests use reset_warnings() to clear state.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -37,8 +38,7 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
         return
     _seen.add(key)
     msg = message or (
-        f"{channel}({kwarg}=...) is accepted but not yet honored; "
-        f"planned for a future Phase."
+        f"{channel}({kwarg}=...) is accepted but not yet honored; planned for a future Phase."
     )
     warnings.warn(msg, UserWarning, stacklevel=3)
 

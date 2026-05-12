@@ -18,6 +18,7 @@ injects a one-non-null-row column (see
 ``ferrum._diagnostics.charts._inject_constant``); the desugar references
 that column by name. No new Rust marks or transforms.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -66,25 +67,29 @@ def desugar_residuals(
         point_enc["color"] = color_field
     layers: list = [_Layer(mark="point", encoding=point_enc)]
     if reference_line:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={"y": "_ref_zero"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-        ))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={"y": "_ref_zero"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+            )
+        )
     if cook_threshold is not None:
-        layers.append(_Layer(
-            mark="point",
-            encoding={
-                "x": "_cook_outlier_x",
-                "y": "_cook_outlier_y",
-            },
-            mark_kwargs={
-                "fill": "#e15759",  # tableau red
-                "stroke": "#000000",
-                "stroke_width": 1.0,
-                "size": 80.0,
-            },
-        ))
+        layers.append(
+            _Layer(
+                mark="point",
+                encoding={
+                    "x": "_cook_outlier_x",
+                    "y": "_cook_outlier_y",
+                },
+                mark_kwargs={
+                    "fill": "#e15759",  # tableau red
+                    "stroke": "#000000",
+                    "stroke_width": 1.0,
+                    "size": 80.0,
+                },
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -119,21 +124,25 @@ def desugar_prediction_error(
     # points visible.
     layers: list = [_Layer(mark="point", encoding=point_enc)]
     if ci is not None or reference_band:
-        layers.append(_Layer(
-            mark="ribbon",
-            encoding={
-                "x": "y_true",
-                "y": "_pe_band_lo",
-                "y2": "_pe_band_hi",
-            },
-            mark_kwargs={"opacity": 0.2},
-        ))
+        layers.append(
+            _Layer(
+                mark="ribbon",
+                encoding={
+                    "x": "y_true",
+                    "y": "_pe_band_lo",
+                    "y2": "_pe_band_hi",
+                },
+                mark_kwargs={"opacity": 0.2},
+            )
+        )
     if identity_line:
-        layers.append(_Layer(
-            mark="line",
-            encoding={"x": "y_true", "y": "y_true"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-        ))
+        layers.append(
+            _Layer(
+                mark="line",
+                encoding={"x": "y_true", "y": "y_true"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -171,22 +180,28 @@ def desugar_roc(
         line_enc["color"] = color_field
     layers: list = [_Layer(mark="line", encoding=line_enc)]
     if reference_line:
-        layers.append(_Layer(
-            mark="line",
-            encoding={"x": "fpr", "y": "fpr"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-        ))
+        layers.append(
+            _Layer(
+                mark="line",
+                encoding={"x": "fpr", "y": "fpr"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+            )
+        )
     if annotate_auc:
         text_enc: dict[str, Any] = {
-            "x": "_auc_label_x", "y": "_auc_label_y", "text": "_auc_label",
+            "x": "_auc_label_x",
+            "y": "_auc_label_y",
+            "text": "_auc_label",
         }
         if color_field is not None:
             text_enc["color"] = color_field
-        layers.append(_Layer(
-            mark="text",
-            encoding=text_enc,
-            mark_kwargs={"align": "left"},
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding=text_enc,
+                mark_kwargs={"align": "left"},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -225,35 +240,43 @@ def desugar_pr(
         # Iso-F lines are rendered as a separate line layer grouped by
         # `_iso_f` (Utf8 string of the F-score). The chart builder appends
         # one row per (F, recall_step) point along each iso curve.
-        layers.append(_Layer(
-            mark="line",
-            encoding={
-                "x": "_iso_recall",
-                "y": "_iso_precision",
-                "color": "_iso_f",
-            },
-            mark_kwargs={"stroke_dash": [2, 4], "opacity": 0.6},
-        ))
-        layers.append(_Layer(
-            mark="text",
-            encoding={
-                "x": "_iso_label_x",
-                "y": "_iso_label_y",
-                "text": "_iso_label",
-            },
-            mark_kwargs={"align": "left", "font_size": 9.0},
-        ))
+        layers.append(
+            _Layer(
+                mark="line",
+                encoding={
+                    "x": "_iso_recall",
+                    "y": "_iso_precision",
+                    "color": "_iso_f",
+                },
+                mark_kwargs={"stroke_dash": [2, 4], "opacity": 0.6},
+            )
+        )
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={
+                    "x": "_iso_label_x",
+                    "y": "_iso_label_y",
+                    "text": "_iso_label",
+                },
+                mark_kwargs={"align": "left", "font_size": 9.0},
+            )
+        )
     if annotate_ap:
         text_enc: dict[str, Any] = {
-            "x": "_ap_label_x", "y": "_ap_label_y", "text": "_ap_label",
+            "x": "_ap_label_x",
+            "y": "_ap_label_y",
+            "text": "_ap_label",
         }
         if color_field is not None:
             text_enc["color"] = color_field
-        layers.append(_Layer(
-            mark="text",
-            encoding=text_enc,
-            mark_kwargs={"align": "left"},
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding=text_enc,
+                mark_kwargs={"align": "left"},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -283,7 +306,8 @@ def desugar_calibration(
     """
     del n_bins, strategy
     line_enc: dict[str, Any] = {
-        "x": "mean_predicted", "y": "fraction_positive",
+        "x": "mean_predicted",
+        "y": "fraction_positive",
     }
     if color_field is not None:
         line_enc["color"] = color_field
@@ -291,17 +315,24 @@ def desugar_calibration(
     transforms: list = []
     if reference_line:
         from ferrum import ReferenceLine
-        transforms.append(ReferenceLine(
-            "mean_predicted", "fraction_positive",
-            x=(0.0, 1.0), y=(0.0, 1.0),
-            name="calibration_ref",
-        ))
-        layers.append(_Layer(
-            mark="line",
-            encoding={"x": "mean_predicted", "y": "fraction_positive"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-            data_source="calibration_ref",
-        ))
+
+        transforms.append(
+            ReferenceLine(
+                "mean_predicted",
+                "fraction_positive",
+                x=(0.0, 1.0),
+                y=(0.0, 1.0),
+                name="calibration_ref",
+            )
+        )
+        layers.append(
+            _Layer(
+                mark="line",
+                encoding={"x": "mean_predicted", "y": "fraction_positive"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+                data_source="calibration_ref",
+            )
+        )
     return ("__layered__", transforms, None, None, layers)
 
 
@@ -323,9 +354,15 @@ def desugar_gain(
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
         line_enc["color"] = color_field
-    return ("__layered__", [], None, None, [
-        _Layer(mark="line", encoding=line_enc),
-    ])
+    return (
+        "__layered__",
+        [],
+        None,
+        None,
+        [
+            _Layer(mark="line", encoding=line_enc),
+        ],
+    )
 
 
 def desugar_lift(
@@ -346,9 +383,15 @@ def desugar_lift(
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
         line_enc["color"] = color_field
-    return ("__layered__", [], None, None, [
-        _Layer(mark="line", encoding=line_enc),
-    ])
+    return (
+        "__layered__",
+        [],
+        None,
+        None,
+        [
+            _Layer(mark="line", encoding=line_enc),
+        ],
+    )
 
 
 def desugar_discrimination_threshold(
@@ -382,21 +425,24 @@ def desugar_discrimination_threshold(
     """
     del metrics, n_thresholds  # informational; data is pre-melted
     layers: list = [
-        _Layer(mark="line",
-               encoding={"x": "threshold", "y": "value", "color": "metric"}),
+        _Layer(mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}),
     ]
     if threshold_line:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={"x": "_threshold_best"},
-            mark_kwargs={"stroke_dash": [4, 4], "opacity": 0.6},
-        ))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={"x": "_threshold_best"},
+                mark_kwargs={"stroke_dash": [4, 4], "opacity": 0.6},
+            )
+        )
     if optimum_label:
-        layers.append(_Layer(
-            mark="text",
-            encoding={"x": "_optimum_x", "y": "_optimum_y", "text": "_optimum_text"},
-            mark_kwargs={"align": "left", "dx": 4, "dy": -4},
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={"x": "_optimum_x", "y": "_optimum_y", "text": "_optimum_text"},
+                mark_kwargs={"align": "left", "dx": 4, "dy": -4},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -431,10 +477,12 @@ def desugar_confusion(
         ),
     ]
     if annotate:
-        layers.append(_Layer(
-            mark="text",
-            encoding={"x": "predicted", "y": "actual", "text": "value_fmt"},
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={"x": "predicted", "y": "actual", "text": "value_fmt"},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -568,11 +616,13 @@ def desugar_shap_beeswarm(
         ),
     ]
     if zero_line:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={"x": "_ref_zero"},
-            mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
-        ))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={"x": "_ref_zero"},
+                mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -598,12 +648,18 @@ def desugar_shap_bar(
 
         return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
 
-    return ("__layered__", [], None, None, [
-        _Layer(
-            mark="bar",
-            encoding={"x": _x_channel("abs_mean_shap"), "y": "feature"},
-        ),
-    ])
+    return (
+        "__layered__",
+        [],
+        None,
+        None,
+        [
+            _Layer(
+                mark="bar",
+                encoding={"x": _x_channel("abs_mean_shap"), "y": "feature"},
+            ),
+        ],
+    )
 
 
 def desugar_shap_waterfall(
@@ -636,17 +692,23 @@ def desugar_shap_waterfall(
 
         return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
 
-    return ("__layered__", [], None, None, [
-        _Layer(
-            mark="bar",
-            encoding={
-                "x": _x_channel("x0"),
-                "x2": "x1",
-                "y": "feature",
-                "color": "shap_sign",
-            },
-        ),
-    ])
+    return (
+        "__layered__",
+        [],
+        None,
+        None,
+        [
+            _Layer(
+                mark="bar",
+                encoding={
+                    "x": _x_channel("x0"),
+                    "x2": "x1",
+                    "y": "feature",
+                    "color": "shap_sign",
+                },
+            ),
+        ],
+    )
 
 
 def desugar_pdp(
@@ -689,9 +751,15 @@ def desugar_pdp(
         line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
         if color_field is not None:
             line_enc["color"] = color_field
-        return ("__layered__", [], None, None, [
-            _Layer(mark="line", encoding=line_enc),
-        ])
+        return (
+            "__layered__",
+            [],
+            None,
+            None,
+            [
+                _Layer(mark="line", encoding=line_enc),
+            ],
+        )
 
     from ferrum.encoding import Y as _Y
 
@@ -705,16 +773,22 @@ def desugar_pdp(
         }
         if color_field is not None:
             line_enc["color"] = color_field
-        return ("__layered__", [], None, None, [
-            _Layer(
-                mark="line",
-                encoding=line_enc,
-                mark_kwargs={
-                    "detail": "_sample_id_str",
-                    "opacity": float(ice_alpha),
-                },
-            ),
-        ])
+        return (
+            "__layered__",
+            [],
+            None,
+            None,
+            [
+                _Layer(
+                    mark="line",
+                    encoding=line_enc,
+                    mark_kwargs={
+                        "detail": "_sample_id_str",
+                        "opacity": float(ice_alpha),
+                    },
+                ),
+            ],
+        )
 
     if kind == "both":
         # ICE layer: y = _pd_ice_value (null on average row → skipped).
@@ -727,30 +801,34 @@ def desugar_pdp(
         if color_field is not None:
             ice_enc["color"] = color_field
         avg_enc: dict[str, Any] = {
-            "x": "feature_value", "y": "_pd_avg_value",
+            "x": "feature_value",
+            "y": "_pd_avg_value",
         }
         if color_field is not None:
             avg_enc["color"] = color_field
-        return ("__layered__", [], None, None, [
-            _Layer(
-                mark="line",
-                encoding=ice_enc,
-                mark_kwargs={
-                    "detail": "_sample_id_str",
-                    "opacity": float(ice_alpha),
-                },
-            ),
-            _Layer(
-                mark="line",
-                encoding=avg_enc,
-                mark_kwargs={"stroke_width": 2.5},
-            ),
-        ])
+        return (
+            "__layered__",
+            [],
+            None,
+            None,
+            [
+                _Layer(
+                    mark="line",
+                    encoding=ice_enc,
+                    mark_kwargs={
+                        "detail": "_sample_id_str",
+                        "opacity": float(ice_alpha),
+                    },
+                ),
+                _Layer(
+                    mark="line",
+                    encoding=avg_enc,
+                    mark_kwargs={"stroke_width": 2.5},
+                ),
+            ],
+        )
 
-    raise ValueError(
-        f"mark_pdp(kind={kind!r}) — expected 'average', 'individual', or "
-        "'both'."
-    )
+    raise ValueError(f"mark_pdp(kind={kind!r}) — expected 'average', 'individual', or 'both'.")
 
 
 # --- 10e: model selection / CV curves --------------------------------
@@ -804,7 +882,10 @@ def desugar_learning_curve(
         ci_layer = _Layer(
             mark="ribbon",
             encoding={
-                "x": x_axis, "y": y_axis, "y2": "upper", "color": color_field,
+                "x": x_axis,
+                "y": y_axis,
+                "y2": "upper",
+                "color": color_field,
             },
             mark_kwargs={"opacity": 0.3},
         )
@@ -812,20 +893,23 @@ def desugar_learning_curve(
         ci_layer = _Layer(
             mark="rule",
             encoding={
-                "x": x_axis, "y": y_axis, "y2": "upper", "color": color_field,
+                "x": x_axis,
+                "y": y_axis,
+                "y2": "upper",
+                "color": color_field,
             },
         )
     else:
         raise ValueError(
-            f"mark_learning_curve(ci_style={ci_style!r}) — expected "
-            "'band' or 'errorbar'."
+            f"mark_learning_curve(ci_style={ci_style!r}) — expected 'band' or 'errorbar'."
         )
     line_enc: dict[str, Any] = {
-        "x": "train_size", "y": "mean_score", "color": color_field,
+        "x": "train_size",
+        "y": "mean_score",
+        "color": color_field,
     }
     layers = [ci_layer, _Layer(mark="line", encoding=line_enc)]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_validation_curve(
@@ -866,7 +950,10 @@ def desugar_validation_curve(
         ci_layer = _Layer(
             mark="ribbon",
             encoding={
-                "x": x_ch, "y": y_axis, "y2": "upper", "color": color_field,
+                "x": x_ch,
+                "y": y_axis,
+                "y2": "upper",
+                "color": color_field,
             },
             mark_kwargs={"opacity": 0.3},
         )
@@ -874,21 +961,21 @@ def desugar_validation_curve(
         ci_layer = _Layer(
             mark="rule",
             encoding={
-                "x": x_ch, "y": y_axis, "y2": "upper", "color": color_field,
+                "x": x_ch,
+                "y": y_axis,
+                "y2": "upper",
+                "color": color_field,
             },
         )
     else:
         raise ValueError(
-            f"mark_validation_curve(ci_style={ci_style!r}) — expected "
-            "'band' or 'errorbar'."
+            f"mark_validation_curve(ci_style={ci_style!r}) — expected 'band' or 'errorbar'."
         )
     layers = [
         ci_layer,
-        _Layer(mark="line",
-               encoding={"x": "param_value", "y": "mean_score", "color": color_field}),
+        _Layer(mark="line", encoding={"x": "param_value", "y": "mean_score", "color": color_field}),
     ]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_cv_scores(
@@ -926,30 +1013,27 @@ def desugar_cv_scores(
             if isinstance(y_val, str):
                 enc["y"] = Y(y_val, title="score")
                 layers = [replace(first, encoding=enc), *layers[1:]]
-        return (prefix, transforms, _ig1, _ig2,
-                _apply(layers, user_kw))
+        return (prefix, transforms, _ig1, _ig2, _apply(layers, user_kw))
     if kind == "bar":
         layers = [
-            _Layer(mark="bar",
-                   encoding={"x": "split", "y": Y("score", title="score"),
-                             "color": "split"}),
+            _Layer(
+                mark="bar",
+                encoding={"x": "split", "y": Y("score", title="score"), "color": "split"},
+            ),
         ]
-        return ("__layered__", [], None, None,
-                _apply(layers, user_kw))
+        return ("__layered__", [], None, None, _apply(layers, user_kw))
     if kind == "strip":
         from ferrum.position import Jitter
 
         layers = [
-            _Layer(mark="point",
-                   encoding={"x": "split", "y": Y("score", title="score"),
-                             "color": "split"},
-                   position=Jitter(axis="x", width=0.3, seed=42)),
+            _Layer(
+                mark="point",
+                encoding={"x": "split", "y": Y("score", title="score"), "color": "split"},
+                position=Jitter(axis="x", width=0.3, seed=42),
+            ),
         ]
-        return ("__layered__", [], None, None,
-                _apply(layers, user_kw))
-    raise ValueError(
-        f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'."
-    )
+        return ("__layered__", [], None, None, _apply(layers, user_kw))
+    raise ValueError(f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'.")
 
 
 def desugar_alpha_selection(
@@ -979,17 +1063,17 @@ def desugar_alpha_selection(
     user_kw = _validate("alpha_selection", mark_kwargs)
     x_ch = _log_x_channel("alpha", log_scale)
     layers: list = [
-        _Layer(mark="line",
-               encoding={"x": x_ch, "y": Y("mean_score", title="score")}),
+        _Layer(mark="line", encoding={"x": x_ch, "y": Y("mean_score", title="score")}),
     ]
     if highlight_best:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={"x": "_best_alpha"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-        ))
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={"x": "_best_alpha"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+            )
+        )
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_class_prediction_error(
@@ -1031,11 +1115,13 @@ def desugar_class_prediction_error(
         ),
     ]
     if show_counts:
-        layers.append(_Layer(
-            mark="text",
-            encoding={"x": "predicted", "y": "value", "text": "_count_text"},
-            position=text_stack,
-        ))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={"x": "predicted", "y": "value", "text": "_count_text"},
+                position=text_stack,
+            )
+        )
     return ("__layered__", [], None, None, layers)
 
 
@@ -1076,13 +1162,14 @@ def desugar_silhouette(
         rect_enc["color"] = color_field
     layers: list = [_Layer(mark="rect", encoding=rect_enc)]
     if zero_line:
-        layers.append(_Layer(
-            mark="rule",
-            encoding={"x": "_ref_zero"},
-            mark_kwargs={"stroke_dash": [4, 4]},
-        ))
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+        layers.append(
+            _Layer(
+                mark="rule",
+                encoding={"x": "_ref_zero"},
+                mark_kwargs={"stroke_dash": [4, 4]},
+            )
+        )
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_pca_scree(
@@ -1125,8 +1212,7 @@ def desugar_pca_scree(
                 encoding={
                     "x": X("component", title="component"),
                     "x2": "_x_axis_anchor",
-                    "y": Y("cumulative_variance_ratio",
-                           title="explained variance ratio"),
+                    "y": Y("cumulative_variance_ratio", title="explained variance ratio"),
                     # x2/y2 here are scale-resolution hints — mark_line
                     # ignores both when drawing, but
                     # scale_resolve::build_axis_scale unions the paired
@@ -1157,14 +1243,12 @@ def desugar_pca_scree(
                 encoding={
                     "x": X("_pca_bar_x_lo", title="component"),
                     "x2": "_pca_bar_x_hi",
-                    "y": Y("_pca_bar_y_lo",
-                           title="explained variance ratio"),
+                    "y": Y("_pca_bar_y_lo", title="explained variance ratio"),
                     "y2": "_pca_bar_y_hi",
                 },
             ),
         ]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_pca_scree_with_threshold(
@@ -1185,13 +1269,18 @@ def desugar_pca_scree_with_threshold(
     # the second validation is a no-op for well-formed inputs.
     _validate("pca_scree", mark_kwargs)
     prefix, transforms, _ig1, _ig2, layers = desugar_pca_scree(
-        x_field, y_field, cumulative_line=cumulative_line, **mark_kwargs,
+        x_field,
+        y_field,
+        cumulative_line=cumulative_line,
+        **mark_kwargs,
     )
-    layers = list(layers) + [_Layer(
-        mark="rule",
-        encoding={"y": "_threshold_line"},
-        mark_kwargs={"stroke_dash": [4, 4]},
-    )]
+    layers = list(layers) + [
+        _Layer(
+            mark="rule",
+            encoding={"y": "_threshold_line"},
+            mark_kwargs={"stroke_dash": [4, 4]},
+        )
+    ]
     return (prefix, transforms, _ig1, _ig2, layers)
 
 
@@ -1231,12 +1320,13 @@ def desugar_intercluster_distance(
         point_enc["color"] = color_field
     layers: list = [_Layer(mark="point", encoding=point_enc)]
     if label_clusters:
-        layers.append(_Layer(
-            mark="text",
-            encoding={"x": "x", "y": "y", "text": "cluster"},
-        ))
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={"x": "x", "y": "y", "text": "cluster"},
+            )
+        )
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_rank1d(
@@ -1258,9 +1348,7 @@ def desugar_rank1d(
     del x_field, y_field
 
     if orient not in ("horizontal", "vertical"):
-        raise ValueError(
-            f"mark_rank1d(orient={orient!r}) — expected 'horizontal' or 'vertical'."
-        )
+        raise ValueError(f"mark_rank1d(orient={orient!r}) — expected 'horizontal' or 'vertical'.")
     user_kw = _validate("rank1d", mark_kwargs)
     if orient == "horizontal":
         enc: dict[str, Any] = {"x": "score", "y": "feature"}
@@ -1269,8 +1357,7 @@ def desugar_rank1d(
     if color_field is not None:
         enc["color"] = color_field
     layers: list = [_Layer(mark="bar", encoding=enc)]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_rank2d(
@@ -1295,18 +1382,23 @@ def desugar_rank2d(
 
     user_kw = _validate("rank2d", mark_kwargs)
     rect_enc: dict[str, Any] = {
-        "x": "feature_x", "y": "feature_y", "color": color_field,
+        "x": "feature_x",
+        "y": "feature_y",
+        "color": color_field,
     }
     layers: list = [_Layer(mark="rect", encoding=rect_enc)]
     if annot:
-        layers.append(_Layer(
-            mark="text",
-            encoding={
-                "x": "feature_x", "y": "feature_y", "text": text_field,
-            },
-        ))
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+        layers.append(
+            _Layer(
+                mark="text",
+                encoding={
+                    "x": "feature_x",
+                    "y": "feature_y",
+                    "text": text_field,
+                },
+            )
+        )
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_parallel_coordinates(
@@ -1336,16 +1428,17 @@ def desugar_parallel_coordinates(
     line_enc: dict[str, Any] = {"x": "feature", "y": "value"}
     if color_field is not None:
         line_enc["color"] = color_field
-    layers: list = [_Layer(
-        mark="line",
-        encoding=line_enc,
-        mark_kwargs={
-            "detail": "sample_id",
-            "opacity": float(alpha),
-        },
-    )]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    layers: list = [
+        _Layer(
+            mark="line",
+            encoding=line_enc,
+            mark_kwargs={
+                "detail": "sample_id",
+                "opacity": float(alpha),
+            },
+        )
+    ]
+    return ("__layered__", [], None, None, _apply(layers, user_kw))
 
 
 def desugar_decision_boundary(
@@ -1374,11 +1467,13 @@ def desugar_decision_boundary(
         _Layer(
             mark="rect",
             encoding={
-                "x": "x", "x2": "x2", "y": "y", "y2": "y2",
+                "x": "x",
+                "x2": "x2",
+                "y": "y",
+                "y2": "y2",
                 "color": color_field,
             },
             mark_kwargs={"opacity": 0.5},
         ),
     ]
-    return ("__layered__", [], None, None,
-            _apply(layers, user_kw))
+    return ("__layered__", [], None, None, _apply(layers, user_kw))

@@ -1,4 +1,5 @@
 """Base classes for encoding channels (internal)."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Optional
@@ -19,7 +20,11 @@ def _scale_to_dict(scale: Any) -> Any:
     # Import here to avoid circular imports at module load time.
     try:
         from ferrum._core import (  # type: ignore[attr-defined]
-            LogScale, LinearScale, TimeScale, SymlogScale, OrdinalScale,
+            LogScale,
+            LinearScale,
+            TimeScale,
+            SymlogScale,
+            OrdinalScale,
         )
     except ImportError:
         return scale  # can't convert, pass through and let Rust raise
@@ -89,6 +94,7 @@ class ChannelBase:
         # The placeholder rides through encoding verbatim; RepeatChart.expand()
         # replaces it with a concrete field name at expand time.
         from ferrum.repeat import _RepeatPlaceholder
+
         if field is not None and not isinstance(field, (str, _RepeatPlaceholder)):
             raise TypeError(
                 f"{self.__class__.__name__}: field must be str, _RepeatPlaceholder, or None, "
@@ -105,8 +111,16 @@ class ChannelBase:
     def _validate(self) -> None:
         """Enforce kwarg-value constraints; subclasses may override."""
         type_ = self._kwargs.get("type")
-        if type_ is not None and type_ not in ("Q", "N", "O", "T",
-                                                 "quantitative", "nominal", "ordinal", "temporal"):
+        if type_ is not None and type_ not in (
+            "Q",
+            "N",
+            "O",
+            "T",
+            "quantitative",
+            "nominal",
+            "ordinal",
+            "temporal",
+        ):
             raise ValueError(
                 f"{self.__class__.__name__}(type={type_!r}): "
                 f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
@@ -121,8 +135,7 @@ class ChannelBase:
         # Rust's json_round helper (which calls json.dumps) can serialize them.
         if (v := self._kwargs.get("scale")) is not None:
             out["scale"] = _scale_to_dict(v)
-        for k in ("title", "axis", "legend", "sort", "stack",
-                  "impute", "scheme", "format"):
+        for k in ("title", "axis", "legend", "sort", "stack", "impute", "scheme", "format"):
             if k == "legend" and "legend" in self._kwargs:
                 # Schwabish SB3 (2026-05-11): distinguish "legend not
                 # specified" from "legend explicitly suppressed".
@@ -150,6 +163,7 @@ class ChannelBase:
         bin_arg = self._kwargs.get("bin")
         if bin_arg:
             from ferrum import Bin
+
             if isinstance(bin_arg, dict):
                 out.append(Bin(self.field, **bin_arg))
             elif isinstance(bin_arg, bool):
@@ -160,7 +174,10 @@ class ChannelBase:
         agg = self._kwargs.get("aggregate")
         if agg:
             from ferrum import Aggregate, AggregateOp
-            out.append(Aggregate([AggregateOp(self.field or "", agg, f"{agg}_{self.field or 'all'}")]))
+
+            out.append(
+                Aggregate([AggregateOp(self.field or "", agg, f"{agg}_{self.field or 'all'}")])
+            )
         return out
 
     def __repr__(self) -> str:
@@ -173,11 +190,18 @@ class ChannelBase:
         """Return True if *other* is the same channel class, field, and kwargs."""
         if not isinstance(other, ChannelBase):
             return NotImplemented
-        return (self.__class__ == other.__class__
-                and self.field == other.field
-                and self._kwargs == other._kwargs)
+        return (
+            self.__class__ == other.__class__
+            and self.field == other.field
+            and self._kwargs == other._kwargs
+        )
 
     def __hash__(self) -> int:
         """Return a hash based on class, field, and kwargs."""
-        return hash((self.__class__, self.field,
-                     tuple(sorted((k, repr(v)) for k, v in self._kwargs.items()))))
+        return hash(
+            (
+                self.__class__,
+                self.field,
+                tuple(sorted((k, repr(v)) for k, v in self._kwargs.items())),
+            )
+        )

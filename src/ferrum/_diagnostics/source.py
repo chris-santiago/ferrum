@@ -13,6 +13,7 @@ this module path preserves every existing
 ``from ferrum._diagnostics.source import ...`` site without
 churn — the per-domain reorganization is purely internal.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -154,9 +155,7 @@ class ModelSource(
                 f"{sorted(unknown)}. "
                 f"Accepted kwargs: {sorted(_ACCEPTED_COMPARE_KWARGS)}"
             )
-        sources = {
-            name: cls(model, X, y, **kwargs) for name, model in models.items()
-        }
+        sources = {name: cls(model, X, y, **kwargs) for name, model in models.items()}
         return ComparedModelSource(sources)
 
 
