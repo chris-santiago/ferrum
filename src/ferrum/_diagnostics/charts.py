@@ -1685,3 +1685,70 @@ def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
         "scatter_x": pl.Float64, "scatter_y": pl.Float64,
         "scatter_z": pl.Float64,
     })
+
+
+# ---------------------------------------------------------------------------
+# 10f builders — sweep-k cluster diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _cluster_diagnostics_chart(
+    X: Any,
+    *,
+    ks: Any,
+    method: str,
+    scoring: str,
+    n_init: int,
+    random_state: int | None,
+    theme: Any,
+):
+    """Build the elbow / silhouette / both panel(s) for cluster_diagnostics.
+
+    Unlike the other builders, this one sweeps the clusterer over the
+    requested ``ks`` rather than wrapping a single fitted ``ModelSource``.
+    See ``ferrum.cluster_diagnostics`` for the user-facing parameter docs.
+    """
+    import ferrum
+    import numpy as np
+    from sklearn.cluster import KMeans, AgglomerativeClustering
+    from sklearn.metrics import silhouette_score
+
+    X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    X_np = np.ascontiguousarray(X_np, dtype=np.float64)
+    seed = 0 if random_state is None else int(random_state)
+    rows: list[dict] = []
+    for k in ks:
+        if method == "kmeans":
+            m = KMeans(
+                n_clusters=int(k), n_init=int(n_init), random_state=seed,
+            ).fit(X_np)
+            inertia = float(m.inertia_)
+            labels = m.labels_
+        else:  # hierarchical
+            m = AgglomerativeClustering(n_clusters=int(k), linkage="ward").fit(X_np)
+            labels = m.labels_
+            # AgglomerativeClustering doesn't expose inertia_; compute
+            # manually as the sum of squared distances from each sample
+            # to its cluster centroid (the same definition KMeans uses).
+            inertia = 0.0
+            for cluster_id in np.unique(labels):
+                mask = labels == cluster_id
+                centroid = X_np[mask].mean(axis=0)
+                inertia += float(np.sum((X_np[mask] - centroid) ** 2))
+        rows.append({
+            "k": int(k),
+            "inertia": inertia,
+            "silhouette": float(silhouette_score(X_np, labels)),
+        })
+    df = pl.DataFrame(rows)
+    elbow = ferrum.Chart(df).mark_line().encode(x="k", y="inertia")
+    sil = ferrum.Chart(df).mark_line().encode(x="k", y="silhouette")
+    if scoring == "elbow":
+        chart = elbow
+    elif scoring == "silhouette":
+        chart = sil
+    else:
+        chart = elbow | sil
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
