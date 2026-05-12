@@ -492,15 +492,15 @@ def clustermap(
         )
     )
 
+    from ferrum._layer import _Layer
+
     # Column dendrogram (top): reads col_link_segments and draws diagonal
     # segments. mark_segment requires x, y, x2, y2 in encoding.
-    col_dendro_layer = {
-        "mark": "segment",
-        "encoding": {"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
-        "transforms": [],
-        "mark_style": {},
-        "data_source": "col_link_segments",
-    }
+    col_dendro_layer = _Layer(
+        mark="segment",
+        encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
+        data_source="col_link_segments",
+    )
     col_dendro = Chart(data).transform(col_link)
     col_dendro._mark = None
     col_dendro._layers = [col_dendro_layer]
@@ -508,13 +508,11 @@ def clustermap(
 
     # Row dendrogram (left): reads row_link_segments, rotated via CoordFlip.
     from ferrum import CoordFlip
-    row_dendro_layer = {
-        "mark": "segment",
-        "encoding": {"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
-        "transforms": [],
-        "mark_style": {},
-        "data_source": "row_link_segments",
-    }
+    row_dendro_layer = _Layer(
+        mark="segment",
+        encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
+        data_source="row_link_segments",
+    )
     row_dendro = Chart(data).transform(row_link)
     row_dendro._mark = None
     row_dendro._layers = [row_dendro_layer]

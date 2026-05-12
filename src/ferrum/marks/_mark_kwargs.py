@@ -93,47 +93,35 @@ def apply_user_mark_kwargs(layers: list, user_kwargs: dict) -> list:
     kwargs that don't apply to a given mark type, so spreading across all
     layers is safe even when only one layer can use the kwarg.
 
-    Accepts a list of either ``_Layer`` instances or legacy dict shapes
-    and returns a list of the same shape.
-
     Parameters
     ----------
-    layers : list
-        Layer descriptors as returned by a desugar function — either
-        ``ferrum._layer._Layer`` instances or dicts with an optional
-        ``"mark_kwargs"`` key.
+    layers : list[_Layer]
+        Layer descriptors as returned by a desugar function.
     user_kwargs : dict
         Validated user-supplied kwargs (from ``validate_user_mark_kwargs``).
 
     Returns
     -------
-    list
+    list[_Layer]
         New list of layers with ``mark_kwargs`` updated.  The input list
         and its members are not mutated.
 
     Examples
     --------
-    >>> layers = [{"mark": "ribbon", "encoding": {}, "mark_kwargs": {"opacity": 0.3}}]
-    >>> apply_user_mark_kwargs(layers, {"opacity": 0.8})
-    [{'mark': 'ribbon', 'encoding': {}, 'mark_kwargs': {'opacity': 0.8}}]
+    >>> from ferrum._layer import _Layer
+    >>> layers = [_Layer(mark="ribbon", mark_kwargs={"opacity": 0.3})]
+    >>> apply_user_mark_kwargs(layers, {"opacity": 0.8})[0].mark_kwargs
+    {'opacity': 0.8}
     """
     if not user_kwargs:
         return layers
     from dataclasses import replace
-    from ferrum._layer import _Layer
 
     merged: list = []
     for layer in layers:
-        if isinstance(layer, _Layer):
-            existing = dict(layer.mark_kwargs or {})
-            existing.update(user_kwargs)  # user wins
-            merged.append(replace(layer, mark_kwargs=existing))
-        else:
-            existing = dict(layer.get("mark_kwargs") or {})
-            existing.update(user_kwargs)
-            new_layer = dict(layer)
-            new_layer["mark_kwargs"] = existing
-            merged.append(new_layer)
+        existing = dict(layer.mark_kwargs or {})
+        existing.update(user_kwargs)  # user wins
+        merged.append(replace(layer, mark_kwargs=existing))
     return merged
 
 

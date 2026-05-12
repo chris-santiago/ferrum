@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
-from ferrum._layer import _Layer, _layer_get
+from ferrum._layer import _Layer
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase
@@ -3834,9 +3834,8 @@ class Chart:
         out = []
         for layer in (self._layers or []):
             encoding_dict: dict = {}
-            layer_encoding = _layer_get(layer, "encoding") or {}
             for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
-                ch = layer_encoding.get(axis)
+                ch = layer.encoding.get(axis)
                 if ch is None:
                     continue
                 if hasattr(ch, "to_encoding_spec_dict"):
@@ -3855,32 +3854,28 @@ class Chart:
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
-            mark_kwargs = _layer_get(layer, "mark_kwargs") or {}
             layer_dict: dict = {
-                "mark": _layer_get(layer, "mark", "point"),
+                "mark": layer.mark or "point",
                 "encoding": encoding_dict,
             }
             # Wire format to Rust's coerce_layers preserves the legacy
             # ``mark_style`` key.
-            if mark_kwargs:
-                layer_dict["mark_style"] = dict(mark_kwargs)
+            if layer.mark_kwargs:
+                layer_dict["mark_style"] = dict(layer.mark_kwargs)
             # data_source: composite-mark layers may pull from a named transform
             # output instead of the final pipeline batch. Only emit when set.
-            data_source = _layer_get(layer, "data_source")
-            if data_source is not None:
-                layer_dict["data_source"] = data_source
+            if layer.data_source is not None:
+                layer_dict["data_source"] = layer.data_source
             # Serialize transforms: PyO3 objects need round-tripping through ChartSpec JSON.
-            raw_transforms = _layer_get(layer, "transforms") or []
-            if raw_transforms:
-                layer_dict["transforms"] = Chart._transforms_to_json_list(raw_transforms)
+            if layer.transforms:
+                layer_dict["transforms"] = Chart._transforms_to_json_list(layer.transforms)
             # Phase 9c — per-layer position adjustment. Serialize value classes
-            # via ``to_spec_dict``; allow already-dict payloads to pass through.
-            position = _layer_get(layer, "position")
-            if position is not None:
+            # via ``to_spec_dict``.
+            if layer.position is not None:
                 layer_dict["position"] = (
-                    position.to_spec_dict()
-                    if hasattr(position, "to_spec_dict")
-                    else position
+                    layer.position.to_spec_dict()
+                    if hasattr(layer.position, "to_spec_dict")
+                    else layer.position
                 )
             out.append(layer_dict)
         return out

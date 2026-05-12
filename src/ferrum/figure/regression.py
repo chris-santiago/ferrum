@@ -34,26 +34,26 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
         seen_ids.add(key)
         shared_transforms.append(t)
 
-    # Build scatter layer dict.
-    scatter_layer = {
-        "mark": s_resolved._mark,
-        "encoding": dict(s_resolved._encoding),
-        "transforms": [],
-        "mark_style": dict(s_resolved._mark_kwargs),
-        "position": s_resolved._position,
-    }
+    from ferrum._layer import _Layer
+
+    # Build scatter layer.
+    scatter_layer = _Layer(
+        mark=s_resolved._mark,
+        encoding=dict(s_resolved._encoding),
+        mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
+        position=s_resolved._position,
+    )
 
     # Collect fit layers (may be single-mark or multi-layer).
     if f_resolved._layers is not None:
         fit_layers = list(f_resolved._layers)
     else:
-        fit_layers = [{
-            "mark": f_resolved._mark,
-            "encoding": dict(f_resolved._encoding),
-            "transforms": [],
-            "mark_style": dict(f_resolved._mark_kwargs),
-            "position": f_resolved._position,
-        }]
+        fit_layers = [_Layer(
+            mark=f_resolved._mark,
+            encoding=dict(f_resolved._encoding),
+            mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
+            position=f_resolved._position,
+        )]
 
     new._mark = None
     new._layers = [scatter_layer] + fit_layers
@@ -335,16 +335,17 @@ def residplot(
         # Build layered chart manually to control transform placement.
         chart = chart._clone()
         chart._transforms = [resid_transform, loess_transform]
+        from ferrum._layer import _Layer
         chart._layers = [
-            {
-                "mark": "point",
-                "encoding": dict(enc),  # {"x": "x", "y": "residual", maybe color}
-            },
-            {
-                "mark": "line",
-                "encoding": {"x": "x", "y": "y"},
-                "data_source": "lowess",
-            },
+            _Layer(
+                mark="point",
+                encoding=dict(enc),  # {"x": "x", "y": "residual", maybe color}
+            ),
+            _Layer(
+                mark="line",
+                encoding={"x": "x", "y": "y"},
+                data_source="lowess",
+            ),
         ]
         chart._mark = None  # signals layered mode in to_spec
 
