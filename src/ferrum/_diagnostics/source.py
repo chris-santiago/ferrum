@@ -1335,12 +1335,7 @@ class ModelSource:
         key = self._cache_key("pca_variance", n_components=n_components)
         if key in self._cache:
             return self._cache[key]
-        if "explained_variance_ratio_" not in self._capabilities:
-            raise AttributeError(
-                "ModelSource.pca_variance() requires the wrapped model to "
-                "expose 'explained_variance_ratio_' (e.g. sklearn PCA, "
-                "TruncatedSVD)."
-            )
+        self._require_capability("explained_variance_ratio_", "pca_variance")
         evr = np.asarray(self._model.explained_variance_ratio_, dtype=np.float64)
         if n_components is not None:
             evr = evr[: int(n_components)]
@@ -1433,11 +1428,7 @@ class ModelSource:
         if key in self._cache:
             return self._cache[key]
         require_sklearn("intercluster_distance")
-        if "cluster_centers_" not in self._capabilities:
-            raise AttributeError(
-                "ModelSource.intercluster_distance() requires the wrapped "
-                "model to expose 'cluster_centers_'."
-            )
+        self._require_capability("cluster_centers_", "intercluster_distance")
         centers = np.asarray(self._model.cluster_centers_, dtype=np.float64)
         if centers.shape[0] < int(k):
             k = centers.shape[0]
