@@ -318,6 +318,21 @@ All positional and appearance channels accept:
 > Channel kwargs honored in 8a: `type`, `bin`, `aggregate`, `scale`, `title`.
 > Other kwargs (`axis`, `legend`, `sort`, `stack`, `impute`, `scheme`, `format`,
 > `formatType`) are accepted, stored typed on `EncodingSpec`, and warn-once.
+>
+> **2026-05-11 (Phase 9, P1.5):** "one-time `UserWarning` per (channel,
+> render call)" is implemented as **one-time per channel, process-wide**
+> via `ferrum._warn.warn_once`. The stricter dedupe is the practical
+> interpretation: notebook re-renders of the same chart should not stack
+> dozens of identical warnings, and per-render dedupe would degrade to a
+> per-process registry whose lifetime users can't reason about anyway.
+> Tests reset the registry via `ferrum._warn.reset_warnings()` between
+> cases; in user code the warning fires the first time a channel is
+> accepted-but-not-rendered after import. Phase 9 still drops several
+> of the listed channels (Fill, Stroke, FillOpacity, StrokeOpacity,
+> StrokeWidth, StrokeDash, Angle, Text, Detail, Tooltip, TooltipField,
+> Href, Description, Key, XError, YError, XError2, YError2, Theta,
+> Radius); X2, Y2, and the existing `text` slot now render and were
+> moved to the honored set.
 
 ---
 
