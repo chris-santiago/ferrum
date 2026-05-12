@@ -8,7 +8,7 @@ def test_facet_with_col_only():
     df = pl.DataFrame({"a": [1, 2, 3], "species": ["s1", "s2", "s1"]})
     c = Chart(df).mark_point().encode(x="a", y="a").facet(col="species")
     assert c._facet is not None
-    assert c._facet["field"] == "species"
+    assert c._facet.field == "species"
 
 
 def test_facet_with_row_and_col_grid():
@@ -16,21 +16,21 @@ def test_facet_with_row_and_col_grid():
     c = Chart(df).mark_point().encode(x="a", y="a").facet(row="year", col="species")
     assert c._facet is not None
     # grid mode produces a different shape than wrap; assert mode-distinguishing field
-    assert c._facet.get("mode_kind") == "grid"
+    assert c._facet.mode_kind == "grid"
 
 
 def test_facet_with_explicit_field_is_wrap():
     df = pl.DataFrame({"a": [1, 2], "grp": ["g1", "g2"]})
     c = Chart(df).mark_point().encode(x="a", y="a").facet(field="grp", ncols=2)
-    assert c._facet["mode_kind"] == "wrap"
-    assert c._facet["ncols"] == 2
+    assert c._facet.mode_kind == "wrap"
+    assert c._facet.ncols == 2
 
 
 def test_facet_with_row_only_is_wrap():
     df = pl.DataFrame({"a": [1], "year": ["2024"]})
     c = Chart(df).mark_point().encode(x="a", y="a").facet(row="year")
-    assert c._facet["mode_kind"] == "wrap"
-    assert c._facet["field"] == "year"
+    assert c._facet.mode_kind == "wrap"
+    assert c._facet.field == "year"
 
 
 def test_facet_no_args_raises():

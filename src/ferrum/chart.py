@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
@@ -32,6 +33,22 @@ _RENDERER_HONORED_CHANNELS = (
 _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Facet:
+    """Internal facet spec — frozen dataclass replacing the legacy dict shape.
+
+    ``mode_kind`` is the tagged-union discriminator: ``"wrap"`` uses ``field``;
+    ``"grid"`` uses ``row`` and ``col``. Other fields are sizing hints honored
+    by ``_build_facet_dict()`` when serialising to the Rust ``FacetSpec``.
+    """
+    mode_kind: str
+    field: Optional[str] = None
+    row: Optional[str] = None
+    col: Optional[str] = None
+    ncols: Optional[int] = None
+    nrows: Optional[int] = None
 
 
 @functools.cache
@@ -3667,34 +3684,21 @@ class Chart:
         """
         new = self._clone()
         if field is not None:
-            new._facet = {
-                "field": field,
-                "mode_kind": "wrap",
-                "ncols": ncols,
-                "nrows": nrows,
-            }
+            new._facet = _Facet(
+                mode_kind="wrap", field=field, ncols=ncols, nrows=nrows,
+            )
         elif row is not None and col is not None:
-            new._facet = {
-                "row": row,
-                "col": col,
-                "mode_kind": "grid",
-                "nrows": nrows,
-                "ncols": ncols,
-            }
+            new._facet = _Facet(
+                mode_kind="grid", row=row, col=col, nrows=nrows, ncols=ncols,
+            )
         elif col is not None:
-            new._facet = {
-                "field": col,
-                "mode_kind": "wrap",
-                "ncols": ncols,
-                "nrows": nrows,
-            }
+            new._facet = _Facet(
+                mode_kind="wrap", field=col, ncols=ncols, nrows=nrows,
+            )
         elif row is not None:
-            new._facet = {
-                "field": row,
-                "mode_kind": "wrap",
-                "nrows": nrows,
-                "ncols": ncols,
-            }
+            new._facet = _Facet(
+                mode_kind="wrap", field=row, nrows=nrows, ncols=ncols,
+            )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
         return new
@@ -3909,20 +3913,17 @@ class Chart:
     def _build_facet_dict(self) -> dict:
         """Convert internal _facet to the JSON dict Rust's FacetSpec expects."""
         f = self._facet
-        mode_kind = f.get("mode_kind", "wrap")
-        if mode_kind == "wrap":
-            field = f["field"]
-            ncols = f.get("ncols") or 1  # u32 required; default 1
-            return {"field": field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
-        else:  # grid
-            # Rust FacetSpec has a single `field`. Use col as primary, row for nrows.
-            field = f.get("col", f.get("field", ""))
-            nrows = f.get("nrows") or 1
-            ncols = f.get("ncols") or 1
-            return {
-                "field": field,
-                "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
-            }
+        if f.mode_kind == "wrap":
+            ncols = f.ncols or 1  # u32 required; default 1
+            return {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+        # grid: Rust FacetSpec has a single `field`. Use col as primary, row for nrows.
+        field = f.col if f.col is not None else (f.field or "")
+        nrows = f.nrows or 1
+        ncols = f.ncols or 1
+        return {
+            "field": field,
+            "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
+        }
 
     # ---- Properties ----
 
