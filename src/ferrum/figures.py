@@ -469,7 +469,6 @@ def gain_chart(
     X: Any = None,
     y: Any = None,
     *,
-    direct_labels: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -478,7 +477,11 @@ def gain_chart(
 
     Plots the fraction of positive cases captured vs. the fraction of
     samples scored, one curve per class. Useful for evaluating the
-    benefit of targeting a top-ranked subset.
+    benefit of targeting a top-ranked subset. The categorical legend
+    is replaced with endpoint-anchored direct labels — unconditional,
+    matching the learning_curve / validation_curve / lift sibling
+    figures (Schwabish C8 audit-rework, 2026-05-12). Use
+    ``Chart(df).mark_gain(...)`` directly to keep the legend.
 
     Parameters
     ----------
@@ -491,10 +494,6 @@ def gain_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
-    direct_labels : bool, default True
-        Replace the categorical legend with endpoint-anchored class
-        labels via ``_direct_label_endpoint``. Pass ``False`` to fall
-        back to the standard legend.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
@@ -514,9 +513,7 @@ def gain_chart(
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
-    return _gain_chart_from_source(
-        source, direct_labels=direct_labels, subtitle=subtitle, theme=theme,
-    )
+    return _gain_chart_from_source(source, subtitle=subtitle, theme=theme)
 
 
 def lift_chart(
@@ -524,7 +521,6 @@ def lift_chart(
     X: Any = None,
     y: Any = None,
     *,
-    direct_labels: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -533,7 +529,10 @@ def lift_chart(
 
     Plots the ratio of positive-hit rate in the scored top-n vs. random
     baseline, one curve per class. Values above 1 indicate the model
-    outperforms random selection at that depth.
+    outperforms random selection at that depth. The categorical legend
+    is replaced with endpoint-anchored direct labels — unconditional
+    (Schwabish C8 audit-rework, 2026-05-12). Use
+    ``Chart(df).mark_lift(...)`` directly to keep the legend.
 
     Parameters
     ----------
@@ -546,10 +545,6 @@ def lift_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
-    direct_labels : bool, default True
-        Replace the categorical legend with endpoint-anchored class
-        labels via ``_direct_label_endpoint``. Pass ``False`` to fall
-        back to the standard legend.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
@@ -569,9 +564,7 @@ def lift_chart(
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
-    return _lift_chart_from_source(
-        source, direct_labels=direct_labels, subtitle=subtitle, theme=theme,
-    )
+    return _lift_chart_from_source(source, subtitle=subtitle, theme=theme)
 
 
 # --- 10c: classification matrices ------------------------------------

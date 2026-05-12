@@ -738,16 +738,18 @@ def _calibration_chart_from_source(
 def _gain_chart_from_source(
     source: Any,
     *,
-    direct_labels: bool = True,
     subtitle: str | None = None,
     theme: Any = None,
 ):
     """Build a cumulative-gain chart from a ModelSource.
 
-    Schwabish SB-followup (2026-05-12): when ``direct_labels=True``
-    (default), replaces the categorical color legend with endpoint-
-    anchored direct labels via ``_direct_label_endpoint`` and adds a
-    ``Cumulative gain`` active title.
+    Replaces the categorical color legend with endpoint-anchored
+    direct labels via ``_direct_label_endpoint`` and adds a
+    ``Cumulative gain`` active title — unconditional, matching the
+    learning_curve / validation_curve / lift sibling figures
+    (Schwabish C8 audit-rework, 2026-05-12). Chart-API users who
+    want a categorical legend can call ``Chart(df).mark_gain(...)``
+    directly without going through this builder.
     """
     import ferrum
     from ferrum._direct_label import _direct_label_endpoint
@@ -755,13 +757,13 @@ def _gain_chart_from_source(
     df = source.cumulative_gain()
     color_field = _color_field_for(df, "class")
     chart = ferrum.Chart(df)
-    if direct_labels and color_field is not None:
+    if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
     chart = chart.mark_gain(color_field=color_field)
     chart = chart.properties(
         title=ferrum.Title("Cumulative gain", subtitle=subtitle),
     )
-    if direct_labels and color_field is not None:
+    if color_field is not None:
         chart = _direct_label_endpoint(
             chart, label_field=color_field,
             x_col="percent_population", y_col="gain",
@@ -774,14 +776,14 @@ def _gain_chart_from_source(
 def _lift_chart_from_source(
     source: Any,
     *,
-    direct_labels: bool = True,
     subtitle: str | None = None,
     theme: Any = None,
 ):
     """Build a lift chart from a ModelSource.
 
-    Schwabish SB-followup (2026-05-12): direct labels + legend
-    suppression + ``Lift`` active title — mirrors ``_gain_chart_from_source``.
+    Direct labels + legend suppression + ``Lift`` active title —
+    unconditional, matching ``_gain_chart_from_source`` (Schwabish C8
+    audit-rework, 2026-05-12).
     """
     import ferrum
     from ferrum._direct_label import _direct_label_endpoint
@@ -789,11 +791,11 @@ def _lift_chart_from_source(
     df = source.lift_curve()
     color_field = _color_field_for(df, "class")
     chart = ferrum.Chart(df)
-    if direct_labels and color_field is not None:
+    if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
     chart = chart.mark_lift(color_field=color_field)
     chart = chart.properties(title=ferrum.Title("Lift", subtitle=subtitle))
-    if direct_labels and color_field is not None:
+    if color_field is not None:
         chart = _direct_label_endpoint(
             chart, label_field=color_field,
             x_col="percent_population", y_col="lift",
