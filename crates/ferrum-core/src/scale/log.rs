@@ -1,7 +1,105 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{validate_continuous_pair, Scale};
+use super::core::validate_continuous_pair;
+use super::ticks::nice_ticks;
+
+#[derive(Debug, Clone, PartialEq)]
+struct LogScaleData {
+    domain: [f64; 2],
+    range: [f64; 2],
+    base: f64,
+    clamp: bool,
+}
+
+impl LogScaleData {
+    fn scale(&self, x: f64) -> f64 {
+        if x.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let neg = d0 < 0.0;
+        let sign = if neg { -1.0 } else { 1.0 };
+        if (x * sign) <= 0.0 && !self.clamp { return f64::NAN; }
+        let log_base = self.base.ln();
+        let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
+        let ld0 = (d0 * sign).ln() / log_base;
+        let ld1 = (d1 * sign).ln() / log_base;
+        let t = (lx - ld0) / (ld1 - ld0);
+        let mapped = r0 + t * (r1 - r0);
+        if self.clamp {
+            let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+            mapped.clamp(lo, hi)
+        } else if (x * sign) < (d0 * sign).min(d1 * sign) || (x * sign) > (d0 * sign).max(d1 * sign) {
+            f64::NAN
+        } else {
+            mapped
+        }
+    }
+
+    fn invert(&self, y: f64) -> f64 {
+        if y.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let neg = d0 < 0.0;
+        let sign = if neg { -1.0 } else { 1.0 };
+        let log_base = self.base.ln();
+        let ld0 = (d0 * sign).ln() / log_base;
+        let ld1 = (d1 * sign).ln() / log_base;
+        let t = (y - r0) / (r1 - r0);
+        let lmapped = ld0 + t * (ld1 - ld0);
+        let mapped = sign * self.base.powf(lmapped);
+        if self.clamp {
+            let (lo, hi) = if d0 <= d1 { (d0, d1) } else { (d1, d0) };
+            mapped.clamp(lo, hi)
+        } else if y < r0.min(r1) || y > r0.max(r1) {
+            f64::NAN
+        } else {
+            mapped
+        }
+    }
+
+    fn ticks(&self, count: usize) -> Vec<f64> {
+        let neg = self.domain[0] < 0.0;
+        let sign: f64 = if neg { -1.0 } else { 1.0 };
+        let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
+        let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
+        let log_base = self.base.ln();
+        let lo_exp = (lo.ln() / log_base).floor() as i64;
+        let hi_exp = (hi.ln() / log_base).ceil() as i64;
+        let span_decades = (hi_exp - lo_exp).max(1) as usize;
+        if span_decades >= count {
+            let mut out: Vec<f64> = (lo_exp..=hi_exp)
+                .map(|e| sign * self.base.powi(e as i32))
+                .filter(|t| (t.abs() >= lo) && (t.abs() <= hi))
+                .collect();
+            if self.domain[0] > self.domain[1] { out.reverse(); }
+            out
+        } else {
+            let lvals = nice_ticks(lo.ln() / log_base, hi.ln() / log_base, count);
+            let mut out: Vec<f64> = lvals.into_iter().map(|lv| sign * self.base.powf(lv)).collect();
+            if self.domain[0] > self.domain[1] { out.reverse(); }
+            out
+        }
+    }
+
+    fn nice(self) -> Self {
+        let neg = self.domain[0] < 0.0;
+        let sign: f64 = if neg { -1.0 } else { 1.0 };
+        let log_base = self.base.ln();
+        let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
+        let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
+        let lo_exp = (lo.ln() / log_base).floor();
+        let hi_exp = (hi.ln() / log_base).ceil();
+        let new_lo = sign * self.base.powf(lo_exp);
+        let new_hi = sign * self.base.powf(hi_exp);
+        let new_domain = if self.domain[0] <= self.domain[1] {
+            [new_lo, new_hi]
+        } else {
+            [new_hi, new_lo]
+        };
+        Self { domain: new_domain, range: self.range, base: self.base, clamp: self.clamp }
+    }
+}
 
 /// Continuous logarithmic scale.
 ///
@@ -33,46 +131,33 @@ use super::core::{validate_continuous_pair, Scale};
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LogScale(Scale, Option<f64>);
+pub struct LogScale(LogScaleData, Option<f64>);
 
 impl LogScale {
     /// Rust-side constructor (no Python validation overhead).
     pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, base: f64, clamp: bool, nice: bool) -> Self {
-        let mut s = super::core::Scale::Log {
+        let mut d = LogScaleData {
             domain: [domain[0], domain[1]],
             range:  [range[0],  range[1]],
             base,
             clamp,
         };
-        if nice { s = s.nice(); }
-        LogScale(s, None)
+        if nice { d = d.nice(); }
+        LogScale(d, None)
     }
 
-    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
-        self.0.scale_f64(x)
-    }
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.0.scale(x) }
 
-    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
-        self.0.ticks(Some(count))
-    }
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
-    pub(crate) fn range_pair(&self) -> [f64; 2] {
-        match &self.0 {
-            super::core::Scale::Log { range, .. } => *range,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
 
     pub(crate) fn repr_string(&self) -> String {
-        match &self.0 {
-            Scale::Log { domain, range, base, clamp } => format!(
-                "LogScale(domain=[{}, {}], range=[{}, {}], base={}, clamp={})",
-                domain[0], domain[1], range[0], range[1], base, if *clamp { "True" } else { "False" }
-            ),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        let LogScaleData { domain, range, base, clamp } = &self.0;
+        format!(
+            "LogScale(domain=[{}, {}], range=[{}, {}], base={}, clamp={})",
+            domain[0], domain[1], range[0], range[1], base, if *clamp { "True" } else { "False" }
+        )
     }
 }
 
@@ -104,26 +189,26 @@ impl LogScale {
                 "log scale domain endpoints must have the same sign",
             ));
         }
-        let mut s = Scale::Log {
+        let mut d = LogScaleData {
             domain: [domain[0], domain[1]],
             range:  [range[0],  range[1]],
             base,
             clamp,
         };
         if nice {
-            s = s.nice();
+            d = d.nice();
         }
-        Ok(LogScale(s, padding))
+        Ok(LogScale(d, padding))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
-    fn scale(&self, x: f64) -> f64 { self.0.scale_f64(x) }
+    fn scale(&self, x: f64) -> f64 { self.0.scale(x) }
     /// Invert a range coordinate ``y`` back to the domain.
-    fn invert(&self, y: f64) -> f64 { self.0.invert_f64(y) }
+    fn invert(&self, y: f64) -> f64 { self.0.invert(y) }
 
     /// Return approximately ``count`` tick values spaced logarithmically within the domain.
     #[pyo3(signature = (count = 10))]
-    fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(Some(count)) }
+    fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to the nearest power of ``base``.
     fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1) }
@@ -135,43 +220,69 @@ impl LogScale {
 
     /// Input domain as ``[min, max]``.
     #[getter]
-    fn domain(&self) -> Vec<f64> {
-        match &self.0 {
-            Scale::Log { domain, .. } => domain.to_vec(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
 
     /// Output range as ``[lo, hi]`` pixel coordinates.
     #[getter]
-    fn range(&self) -> Vec<f64> {
-        match &self.0 {
-            Scale::Log { range, .. } => range.to_vec(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn range(&self) -> Vec<f64> { self.0.range.to_vec() }
 
     /// Logarithm base (default 10.0).
     #[getter]
-    fn base(&self) -> f64 {
-        match &self.0 {
-            Scale::Log { base, .. } => *base,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
-    }
+    fn base(&self) -> f64 { self.0.base }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
-    fn clamp(&self) -> bool {
-        match &self.0 {
-            Scale::Log { clamp, .. } => *clamp,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
+    fn clamp(&self) -> bool { self.0.clamp }
+
+    fn __repr__(&self) -> String { self.repr_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool) -> LogScaleData {
+        LogScaleData { domain, range, base, clamp }
+    }
+
+    #[test]
+    fn log_scale_basic_decades() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!((s.scale(1.0) - 0.0).abs() < 1e-12);
+        assert!((s.scale(10.0) - 1.0).abs() < 1e-12);
+        assert!((s.scale(1000.0) - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn log_inversion_round_trip() {
+        let s = d([1.0, 1_000_000.0], [0.0, 6.0], 10.0, false);
+        for x in [1.0, 10.0, 100.0, 12345.0, 999999.0] {
+            let y = s.scale(x);
+            let back = s.invert(y);
+            assert!((back / x - 1.0).abs() < 1e-9, "round-trip failed at x={x}: got {back}");
         }
     }
 
-    fn __repr__(&self) -> String { self.repr_string() }
+    #[test]
+    fn log_negative_domain_supported() {
+        let s = d([-1000.0, -1.0], [0.0, 3.0], 10.0, false);
+        let y = s.scale(-10.0);
+        let back = s.invert(y);
+        assert!((back / -10.0 - 1.0).abs() < 1e-9, "negative round-trip failed: got {back}");
+    }
+
+    #[test]
+    fn log_ticks_one_per_decade() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        let t = s.ticks(4);
+        assert!(t.len() >= 3, "got {} ticks: {t:?}", t.len());
+    }
+
+    #[test]
+    fn log_nice_rounds_to_decades() {
+        let s = d([3.0, 700.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - 1.0).abs() < 1e-9);
+        assert!((n.domain[1] - 1000.0).abs() < 1e-9);
+    }
 }

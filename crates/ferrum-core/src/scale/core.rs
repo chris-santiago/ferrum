@@ -13,7 +13,6 @@ use super::ticks::{nice_step, nice_ticks};
 /// the last variant has migrated.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Scale {
-    Log     { domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool },
     Symlog  { domain: [f64; 2], range: [f64; 2], constant: f64, clamp: bool },
     Ordinal    { domain: Vec<String>, range: Vec<f64>, padding: f64 },
     Threshold  { domain: Vec<f64>, range: Vec<f64> },
@@ -59,28 +58,6 @@ impl Scale {
 
     pub(crate) fn scale_f64(&self, x: f64) -> f64 {
         match self {
-            Scale::Log { domain, range, base, clamp } => {
-                if x.is_nan() { return f64::NAN; }
-                let [d0, d1] = *domain;
-                let [r0, r1] = *range;
-                let neg = d0 < 0.0;
-                let sign = if neg { -1.0 } else { 1.0 };
-                if (x * sign) <= 0.0 && !*clamp { return f64::NAN; }
-                let log_base = base.ln();
-                let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
-                let ld0 = (d0 * sign).ln() / log_base;
-                let ld1 = (d1 * sign).ln() / log_base;
-                let t = (lx - ld0) / (ld1 - ld0);
-                let mapped = r0 + t * (r1 - r0);
-                if *clamp {
-                    let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
-                    mapped.clamp(lo, hi)
-                } else if (x * sign) < (d0 * sign).min(d1 * sign) || (x * sign) > (d0 * sign).max(d1 * sign) {
-                    f64::NAN
-                } else {
-                    mapped
-                }
-            }
             Scale::Symlog { domain, range, constant, clamp } => {
                 if x.is_nan() { return f64::NAN; }
                 let [d0, d1] = *domain;
@@ -113,27 +90,6 @@ impl Scale {
 
     pub(crate) fn invert_f64(&self, y: f64) -> f64 {
         match self {
-            Scale::Log { domain, range, base, clamp } => {
-                if y.is_nan() { return f64::NAN; }
-                let [d0, d1] = *domain;
-                let [r0, r1] = *range;
-                let neg = d0 < 0.0;
-                let sign = if neg { -1.0 } else { 1.0 };
-                let log_base = base.ln();
-                let ld0 = (d0 * sign).ln() / log_base;
-                let ld1 = (d1 * sign).ln() / log_base;
-                let t = (y - r0) / (r1 - r0);
-                let lmapped = ld0 + t * (ld1 - ld0);
-                let mapped = sign * base.powf(lmapped);
-                if *clamp {
-                    let (lo, hi) = if d0 <= d1 { (d0, d1) } else { (d1, d0) };
-                    mapped.clamp(lo, hi)
-                } else if y < r0.min(r1) || y > r0.max(r1) {
-                    f64::NAN
-                } else {
-                    mapped
-                }
-            }
             Scale::Symlog { domain, range, constant, clamp } => {
                 if y.is_nan() { return f64::NAN; }
                 let [d0, d1] = *domain;
@@ -159,30 +115,6 @@ impl Scale {
 
     pub(crate) fn ticks(&self, count: Option<usize>) -> Vec<f64> {
         match self {
-            Scale::Log { domain, base, .. } => {
-                let n = count.unwrap_or(10);
-                let neg = domain[0] < 0.0;
-                let sign: f64 = if neg { -1.0 } else { 1.0 };
-                let lo = (domain[0] * sign).min(domain[1] * sign);
-                let hi = (domain[0] * sign).max(domain[1] * sign);
-                let log_base = base.ln();
-                let lo_exp = (lo.ln() / log_base).floor() as i64;
-                let hi_exp = (hi.ln() / log_base).ceil() as i64;
-                let span_decades = (hi_exp - lo_exp).max(1) as usize;
-                if span_decades >= n {
-                    let mut out: Vec<f64> = (lo_exp..=hi_exp)
-                        .map(|e| sign * base.powi(e as i32))
-                        .filter(|t| (t.abs() >= lo) && (t.abs() <= hi))
-                        .collect();
-                    if domain[0] > domain[1] { out.reverse(); }
-                    out
-                } else {
-                    let lvals = nice_ticks(lo.ln() / log_base, hi.ln() / log_base, n);
-                    let mut out: Vec<f64> = lvals.into_iter().map(|lv| sign * base.powf(lv)).collect();
-                    if domain[0] > domain[1] { out.reverse(); }
-                    out
-                }
-            }
             Scale::Symlog { domain, .. } => {
                 nice_ticks(domain[0], domain[1], count.unwrap_or(10))
             }
@@ -204,23 +136,6 @@ impl Scale {
 
     pub(crate) fn nice(self) -> Self {
         match self {
-            Scale::Log { domain, range, base, clamp } => {
-                let neg = domain[0] < 0.0;
-                let sign: f64 = if neg { -1.0 } else { 1.0 };
-                let log_base = base.ln();
-                let lo = (domain[0] * sign).min(domain[1] * sign);
-                let hi = (domain[0] * sign).max(domain[1] * sign);
-                let lo_exp = (lo.ln() / log_base).floor();
-                let hi_exp = (hi.ln() / log_base).ceil();
-                let new_lo = sign * base.powf(lo_exp);
-                let new_hi = sign * base.powf(hi_exp);
-                let new_domain = if domain[0] <= domain[1] {
-                    [new_lo, new_hi]
-                } else {
-                    [new_hi, new_lo]
-                };
-                Scale::Log { domain: new_domain, range, base, clamp }
-            }
             Scale::Symlog { domain, range, constant, clamp } => {
                 let step = nice_step(domain[0], domain[1], 10);
                 if !step.is_finite() || step == 0.0 {
@@ -428,52 +343,6 @@ mod tests {
     fn test_validate_continuous_pair_rejects_non_finite() {
         assert!(validate_continuous_pair(&[0.0, f64::NAN], &[0.0, 1.0]).is_err());
         assert!(validate_continuous_pair(&[0.0, 10.0], &[f64::INFINITY, 1.0]).is_err());
-    }
-
-    #[test]
-    fn test_log_scale_basic_decades() {
-        let s = Scale::Log { domain: [1.0, 1000.0], range: [0.0, 3.0], base: 10.0, clamp: false };
-        assert!((s.scale_f64(1.0) - 0.0).abs() < 1e-12);
-        assert!((s.scale_f64(10.0) - 1.0).abs() < 1e-12);
-        assert!((s.scale_f64(1000.0) - 3.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_log_inversion_round_trip() {
-        let s = Scale::Log { domain: [1.0, 1_000_000.0], range: [0.0, 6.0], base: 10.0, clamp: false };
-        for x in [1.0, 10.0, 100.0, 12345.0, 999999.0] {
-            let y = s.scale_f64(x);
-            let back = s.invert_f64(y);
-            assert!((back / x - 1.0).abs() < 1e-9, "round-trip failed at x={x}: got {back}");
-        }
-    }
-
-    #[test]
-    fn test_log_negative_domain_supported() {
-        let s = Scale::Log { domain: [-1000.0, -1.0], range: [0.0, 3.0], base: 10.0, clamp: false };
-        let y = s.scale_f64(-10.0);
-        let back = s.invert_f64(y);
-        assert!((back / -10.0 - 1.0).abs() < 1e-9, "negative round-trip failed: got {back}");
-    }
-
-    #[test]
-    fn test_log_ticks_one_per_decade() {
-        let s = Scale::Log { domain: [1.0, 1000.0], range: [0.0, 3.0], base: 10.0, clamp: false };
-        let t = s.ticks(Some(4));
-        assert!(t.len() >= 3, "got {} ticks: {t:?}", t.len());
-    }
-
-    #[test]
-    fn test_log_nice_rounds_to_decades() {
-        let s = Scale::Log { domain: [3.0, 700.0], range: [0.0, 1.0], base: 10.0, clamp: false };
-        let n = s.nice();
-        match n {
-            Scale::Log { domain, .. } => {
-                assert!((domain[0] - 1.0).abs() < 1e-9);
-                assert!((domain[1] - 1000.0).abs() < 1e-9);
-            }
-            _ => panic!("unexpected variant"),
-        }
     }
 
     #[test]
