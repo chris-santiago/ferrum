@@ -256,6 +256,54 @@ class TestRepeatChart:
         with pytest.raises(ValueError, match="Repeat.row but row="):
             rc.expand()
 
+    def test_layer_only_produces_single_layered_cell(self, iris_like):
+        # layer-only repeat: one cell, N layers stacked.
+        tpl = fe.Chart(iris_like).mark_point().encode(x="sepal_length", y=Repeat.layer)
+        rc = fe.RepeatChart(tpl, layer=["sepal_width", "petal_length"])
+        cells = rc.expand()
+        assert len(cells) == 1
+        row_field, col_field, chart = cells[0]
+        assert row_field is None and col_field is None
+        # Two layers: one for each layer field. _layers stores them.
+        assert chart._layers is not None
+        assert len(chart._layers) == 2
+
+    def test_layer_with_column_produces_layered_cells(self, iris_like):
+        # column + layer: 1-D wrap, each cell layered over the layer fields.
+        tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y=Repeat.layer)
+        rc = fe.RepeatChart(
+            tpl, column=["sepal_length", "sepal_width"], layer=["petal_length", "species"]
+        )
+        cells = rc.expand()
+        assert len(cells) == 2
+        for row_field, col_field, chart in cells:
+            assert row_field is None
+            assert chart._layers is not None
+            assert len(chart._layers) == 2
+
+    def test_layer_with_grid_produces_layered_cells(self, iris_like):
+        tpl = fe.Chart(iris_like).mark_point().encode(
+            x=Repeat.column, y=Repeat.row, color=Repeat.layer
+        )
+        rc = fe.RepeatChart(
+            tpl,
+            row=["sepal_length", "sepal_width"],
+            column=["sepal_length", "sepal_width"],
+            layer=["species", "petal_length"],
+        )
+        cells = rc.expand()
+        assert len(cells) == 4
+        for row_field, col_field, chart in cells:
+            assert chart._layers is not None
+            assert len(chart._layers) == 2
+
+    def test_layer_without_setting_raises(self, iris_like):
+        # template references Repeat.layer but layer= not set
+        tpl = fe.Chart(iris_like).mark_point().encode(x="sepal_length", y=Repeat.layer)
+        rc = fe.RepeatChart(tpl, column=["sepal_length"])
+        with pytest.raises(ValueError, match="Repeat.layer but layer="):
+            rc.expand()
+
 
 class TestClusterMapChart:
     @pytest.fixture

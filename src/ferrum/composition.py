@@ -511,80 +511,103 @@ class RepeatChart(_ChartLike):
     def expand(self) -> list:
         """Materialize the template into fully-resolved chart cells.
 
-        2-D grid (both *row* and *column* set): iterates every
-        ``(row_field, col_field)`` pair; respects *corner* and *diagonal*.
+        Cell iteration shape:
 
-        1-D wrap (only one of *row* or *column* set): walks the single
-        field list, producing ``(field, None, chart)`` for row-only and
-        ``(None, field, chart)`` for column-only.  Wrap geometry is
-        applied by :meth:`show_svg`, driven by ``columns``.
+        - 2-D grid (both *row* and *column* set): ``len(row) × len(column)``
+          cells, optionally filtered by *corner*; *diagonal* substitutes
+          the template on ``row_field == col_field`` cells.
+        - 1-D wrap (only one of *row* or *column* set): the populated
+          field list, paired with ``None`` on the missing axis.  Geometry
+          is applied by :meth:`show_svg` driven by ``columns``.
+        - Layer-only (``layer=`` set, *row* and *column* both ``None``):
+          a single cell containing all layers.
+
+        When ``layer=`` is set, each cell becomes a layered ``Chart``
+        with one layer per element in ``self.layer`` (substituted into
+        every ``Repeat.layer`` placeholder).  Diagonal cells skip
+        layering — the diagonal template already defines that cell.
 
         Returns
         -------
         list of tuple
             Each element is ``(row_field, col_field, Chart)`` with all
-            ``Repeat.*`` placeholders replaced by concrete field names.
-            For 1-D layouts the unused axis is ``None``.
+            ``Repeat.*`` placeholders replaced.  For 1-D and layer-only
+            layouts the unused axis is ``None``.
 
         Raises
         ------
         ValueError
-            If *diagonal* is set but ``row != column`` (asymmetric repeat).
-            The diagonal template only makes sense on a symmetric n×n grid
-            where each diagonal cell has ``row_field == col_field``.
+            If *diagonal* is set but ``row != column`` (asymmetric
+            repeat), or if the template references a ``Repeat.*``
+            placeholder for an axis that was not populated.
+        """
+        return [
+            (row_field, col_field, self._make_cell(row_field, col_field))
+            for row_field, col_field in self._cell_coordinates()
+        ]
+
+    def _cell_coordinates(self) -> list:
+        """Compute ``(row_field, col_field)`` pairs for every cell.
+
+        Either entry is ``None`` when the corresponding axis is unset
+        (1-D wrap) or both are ``None`` (layer-only).
         """
         if self.row is not None and self.column is not None:
-            return self._expand_grid()
-        return self._expand_wrap()
-
-    def _expand_grid(self) -> list:
-        """Materialize a 2-D row × column repeat."""
-        rows = self.row or []
-        cols = self.column or []
-        if self.diagonal is not None and self.row != self.column:
-            raise ValueError(
-                "RepeatChart: diagonal= requires row == column "
-                "(diagonal cells only exist on a symmetric grid); "
-                f"got row={self.row!r}, column={self.column!r}"
-            )
-        use_diagonal_match = (
-            self.diagonal is not None and len(rows) == len(cols)
-        )
-        out = []
-        for ri, row_field in enumerate(rows):
-            for ci, col_field in enumerate(cols):
-                if self.corner and ri < ci:
-                    continue
-                source = self.template
-                if use_diagonal_match and row_field == col_field:
-                    source = self.diagonal
-                cell = self._resolve_template(source, row_field, col_field)
-                out.append((row_field, col_field, cell))
-        return out
-
-    def _expand_wrap(self) -> list:
-        """Materialize a 1-D row-only or column-only repeat."""
+            if self.diagonal is not None and self.row != self.column:
+                raise ValueError(
+                    "RepeatChart: diagonal= requires row == column "
+                    "(diagonal cells only exist on a symmetric grid); "
+                    f"got row={self.row!r}, column={self.column!r}"
+                )
+            coords = []
+            for ri, row_field in enumerate(self.row):
+                for ci, col_field in enumerate(self.column):
+                    if self.corner and ri < ci:
+                        continue
+                    coords.append((row_field, col_field))
+            return coords
         if self.column is not None:
-            return [
-                (None, f, self._resolve_template(self.template, None, f))
-                for f in self.column
+            return [(None, f) for f in self.column]
+        if self.row is not None:
+            return [(f, None) for f in self.row]
+        # layer-only: __init__ already ruled out the all-None axes case.
+        return [(None, None)]
+
+    def _make_cell(self, row_field: Optional[str], col_field: Optional[str]):
+        """Build the chart for one cell, layering across ``self.layer`` if set."""
+        use_diagonal = (
+            self.diagonal is not None
+            and self.row is not None
+            and self.column is not None
+            and row_field == col_field
+        )
+        if use_diagonal:
+            # Diagonal cells are intentional overrides; skip layering.
+            return self._resolve_template(self.diagonal, row_field, col_field)
+        if self.layer is not None:
+            layers = [
+                self._resolve_template(
+                    self.template, row_field, col_field, layer_field=lf
+                )
+                for lf in self.layer
             ]
-        # row-only (column is None — __init__ ruled out the all-None case)
-        return [
-            (f, None, self._resolve_template(self.template, f, None))
-            for f in self.row or []
-        ]
+            result = layers[0]
+            for nxt in layers[1:]:
+                result = result + nxt
+            return result
+        return self._resolve_template(self.template, row_field, col_field)
 
     def _resolve_template(
         self,
         source,
         row_field: Optional[str],
         col_field: Optional[str],
+        layer_field: Optional[str] = None,
     ):
         """Clone source (a Chart) and substitute Repeat placeholders in encoding.
 
-        Either field may be ``None`` when the corresponding axis is unset
-        on a 1-D wrap layout; ``_concrete_field`` raises if the template
+        Any of the field arguments may be ``None`` when the corresponding
+        axis is unset; ``_concrete_field`` raises if the template
         actually references the missing axis.
         """
         from ferrum.repeat import _RepeatPlaceholder
@@ -593,12 +616,16 @@ class RepeatChart(_ChartLike):
         new = source._clone()
         for axis, ch in list(new._encoding.items()):
             if isinstance(ch, _RepeatPlaceholder):
-                concrete = self._concrete_field(ch.field, row_field, col_field)
+                concrete = self._concrete_field(
+                    ch.field, row_field, col_field, layer_field
+                )
                 from ferrum.chart import _channel_class_for
                 cls = _channel_class_for(axis) or _channel_class_for("x")
                 new._encoding[axis] = cls(concrete)
             elif isinstance(ch, ChannelBase) and isinstance(ch.field, _RepeatPlaceholder):
-                concrete = self._concrete_field(ch.field.field, row_field, col_field)
+                concrete = self._concrete_field(
+                    ch.field.field, row_field, col_field, layer_field
+                )
                 new._encoding[axis] = ch.__class__(concrete)
         return new
 
@@ -607,12 +634,14 @@ class RepeatChart(_ChartLike):
         placeholder_axis: str,
         row_field: Optional[str],
         col_field: Optional[str],
+        layer_field: Optional[str] = None,
     ) -> str:
         """Map a Repeat placeholder axis name to the concrete field string.
 
         Raises ``ValueError`` if the template references a placeholder for
         an axis that was not populated on the ``RepeatChart`` (e.g.
-        ``Repeat.row`` in a column-only 1-D repeat).
+        ``Repeat.row`` in a column-only 1-D repeat, or ``Repeat.layer``
+        without ``layer=``).
         """
         if placeholder_axis == "column":
             if col_field is None:
@@ -629,14 +658,12 @@ class RepeatChart(_ChartLike):
                 )
             return row_field
         if placeholder_axis == "layer":
-            # Legacy: layer placeholder substitutes the row field on the
-            # 2-D grid path. P2.5c reshapes this for true layered repeats.
-            if row_field is None:
+            if layer_field is None:
                 raise ValueError(
                     "RepeatChart: template uses Repeat.layer but "
-                    "row= was not set"
+                    "layer= was not set"
                 )
-            return row_field
+            return layer_field
         raise ValueError(f"unknown Repeat placeholder axis '{placeholder_axis}'")
 
     def theme(self, t):
