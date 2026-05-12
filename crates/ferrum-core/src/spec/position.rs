@@ -14,6 +14,17 @@ pub enum JitterAxis { X, Y, Both }
 #[serde(rename_all = "snake_case")]
 pub enum StackOffset { Zero, Normalize, Center }
 
+/// Schwabish SB-followup (audit C6, 2026-05-12): controls whether a
+/// stacked layer's y output lands at the segment ``Top`` (rect-style
+/// marks: bar, area, ribbon, rect — draw from base→top) or the segment
+/// ``Mid`` (annotation-style marks: text, point, rule, tick — anchor at
+/// the visual centre of each segment so per-segment labels read cleanly).
+/// Set by the composite-mark desugar; the renderer is mark-agnostic.
+/// Default ``Top`` keeps pre-Schwabish stack semantics byte-identical.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StackAnchor { Top, Mid }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PositionAdjust {
@@ -36,12 +47,15 @@ pub enum PositionAdjust {
         by: Option<String>,
         #[serde(default = "default_stack_offset")]
         offset: StackOffset,
+        #[serde(default = "default_stack_anchor")]
+        anchor: StackAnchor,
     },
 }
 
 fn default_padding() -> f64 { 0.05 }
 fn default_jitter_width() -> f64 { 0.4 }
 fn default_stack_offset() -> StackOffset { StackOffset::Zero }
+fn default_stack_anchor() -> StackAnchor { StackAnchor::Top }
 
 #[cfg(test)]
 mod tests {
@@ -76,11 +90,41 @@ mod tests {
 
     #[test]
     fn stack_normalize_round_trip() {
-        let p = PositionAdjust::Stack { by: Some("hue".into()), offset: StackOffset::Normalize };
+        let p = PositionAdjust::Stack {
+            by: Some("hue".into()),
+            offset: StackOffset::Normalize,
+            anchor: StackAnchor::Top,
+        };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""offset":"normalize""#));
         let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, p);
+    }
+
+    #[test]
+    fn stack_anchor_mid_round_trip() {
+        let p = PositionAdjust::Stack {
+            by: Some("actual".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Mid,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""anchor":"mid""#));
+        let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, p);
+    }
+
+    #[test]
+    fn stack_anchor_default_when_absent() {
+        // Pre-Schwabish-C6 JSON (no anchor field) must deserialize to Top.
+        let json = r#"{"type":"stack","offset":"zero"}"#;
+        let parsed: PositionAdjust = serde_json::from_str(json).unwrap();
+        match parsed {
+            PositionAdjust::Stack { anchor, .. } => {
+                assert_eq!(anchor, StackAnchor::Top);
+            }
+            _ => panic!("expected Stack"),
+        }
     }
 
     #[test]
@@ -115,9 +159,10 @@ mod tests {
         let json = r#"{"type":"stack"}"#;
         let parsed: PositionAdjust = serde_json::from_str(json).unwrap();
         match parsed {
-            PositionAdjust::Stack { offset, by } => {
+            PositionAdjust::Stack { offset, by, anchor } => {
                 assert_eq!(offset, StackOffset::Zero);
                 assert!(by.is_none());
+                assert_eq!(anchor, StackAnchor::Top);
             }
             _ => panic!("expected Stack"),
         }

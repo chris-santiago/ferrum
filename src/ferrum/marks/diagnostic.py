@@ -994,30 +994,33 @@ def desugar_class_prediction_error(
     switches to a per-bar 100% stack via the Stack position adjustment.
 
     Schwabish SB-followup (2026-05-12): ``show_counts=True`` (default)
-    appends a same-data ``mark_text`` layer with the same Stack
-    adjustment. The renderer's Stack pass maps text-mark y values to
-    the segment MIDPOINT (versus the segment TOP for the bar layer),
-    so each count label lands at the visual centre of its stacked
-    segment without any Python-side cumsum duplication. Data must
-    carry a ``_count_text`` Utf8 column (the chart builder formats it
-    from ``value``; null on empty segments).
+    appends a same-data ``mark_text`` layer. The text layer carries
+    its own Stack adjustment with ``anchor="mid"`` so the renderer
+    maps each row's y to the segment MIDPOINT (the bar layer's Stack
+    uses default ``anchor="top"``). C6 audit-rework (2026-05-12)
+    moved this decision into the position spec; the renderer is
+    mark-agnostic. Data must carry a ``_count_text`` Utf8 column
+    (the chart builder formats it from ``value``; null on empty
+    segments).
     """
     del x_field, y_field
     from ferrum.position import Stack
 
-    stack = Stack(by=color_field, offset="normalize" if normalize else "zero")
+    offset = "normalize" if normalize else "zero"
+    bar_stack = Stack(by=color_field, offset=offset)  # anchor="top" by default
+    text_stack = Stack(by=color_field, offset=offset, anchor="mid")
     layers: list = [
         _Layer(
             mark="bar",
             encoding={"x": "predicted", "y": "value", "color": color_field},
-            position=stack,
+            position=bar_stack,
         ),
     ]
     if show_counts:
         layers.append(_Layer(
             mark="text",
             encoding={"x": "predicted", "y": "value", "text": "_count_text"},
-            position=stack,
+            position=text_stack,
         ))
     return ("__layered__", [], None, None, layers)
 

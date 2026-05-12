@@ -29,6 +29,7 @@ _STACK_ELIGIBLE = frozenset([
 
 _VALID_JITTER_AXES = {"x", "y", "both"}
 _VALID_STACK_OFFSETS = {"zero", "normalize", "center"}
+_VALID_STACK_ANCHORS = {"top", "mid"}
 
 
 # ---- Value classes -----------------------------------------------------------
@@ -219,8 +220,10 @@ class Jitter:
 class Stack:
     """Vertical accumulation of marks grouped by a channel.
 
-    Eligible marks: ``bar``, ``area``, ``ribbon``, ``histogram``,
-    ``density``.
+    Eligible marks: rect-style (``bar``, ``area``, ``ribbon``,
+    ``histogram``, ``density``) and annotation-style (``text``,
+    ``point``, ``rule``, ``tick``). The latter sit on top of a
+    stacked layer to label segments.
 
     Parameters
     ----------
@@ -233,12 +236,22 @@ class Stack:
         - ``"zero"`` — standard cumulative stack from y = 0.
         - ``"normalize"`` — 100 % stack; each x-bin scales to a total of 1.
         - ``"center"`` — streamgraph; symmetric around y = 0.
+    anchor : {"top", "mid"}, default "top"
+        Where each row's y output lands within its segment. ``"top"``
+        (default) returns the segment top so rect-style marks (bar,
+        area, ribbon) draw from ``__stack_y_base__`` to ``y``.
+        ``"mid"`` returns the segment midpoint so an annotation mark
+        (``mark_text``, ``mark_point``, …) sits at the visual centre
+        of each stacked segment — used by composite marks like
+        ``mark_class_prediction_error(show_counts=True)`` to land
+        per-segment count labels without duplicating cumsum logic
+        in Python.
 
     Raises
     ------
     ValueError
         If ``offset`` is not one of ``"zero"``, ``"normalize"``,
-        ``"center"``.
+        ``"center"`` or ``anchor`` is not one of ``"top"``, ``"mid"``.
 
     Examples
     --------
@@ -248,19 +261,30 @@ class Stack:
     ... )
     """
 
-    __slots__ = ("by", "offset")
+    __slots__ = ("by", "offset", "anchor")
 
-    def __init__(self, by: Optional[str] = None, *, offset: str = "zero") -> None:
+    def __init__(
+        self,
+        by: Optional[str] = None,
+        *,
+        offset: str = "zero",
+        anchor: str = "top",
+    ) -> None:
         if offset not in _VALID_STACK_OFFSETS:
             raise ValueError(
                 f"Stack: offset must be 'zero'|'normalize'|'center'; got '{offset}'"
             )
+        if anchor not in _VALID_STACK_ANCHORS:
+            raise ValueError(
+                f"Stack: anchor must be 'top'|'mid'; got '{anchor}'"
+            )
         object.__setattr__(self, "by", by)
         object.__setattr__(self, "offset", offset)
+        object.__setattr__(self, "anchor", anchor)
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""
-        d: dict = {"type": "stack", "offset": self.offset}
+        d: dict = {"type": "stack", "offset": self.offset, "anchor": self.anchor}
         if self.by is not None:
             d["by"] = self.by
         return d
@@ -271,7 +295,7 @@ class Stack:
 
     def __repr__(self) -> str:
         """Return a constructor-style string representation."""
-        return f"Stack(by={self.by!r}, offset={self.offset!r})"
+        return f"Stack(by={self.by!r}, offset={self.offset!r}, anchor={self.anchor!r})"
 
     def __eq__(self, other) -> bool:
         """Return True if *other* is a ``Stack`` with identical fields."""
@@ -279,11 +303,12 @@ class Stack:
             isinstance(other, Stack)
             and self.by == other.by
             and self.offset == other.offset
+            and self.anchor == other.anchor
         )
 
     def __hash__(self) -> int:
         """Return a stable hash for use in sets and dict keys."""
-        return hash(("Stack", self.by, self.offset))
+        return hash(("Stack", self.by, self.offset, self.anchor))
 
 
 # ---- Eligibility validator ---------------------------------------------------

@@ -197,8 +197,24 @@ class TestStack:
         assert s.to_spec_dict() == {
             "type": "stack",
             "offset": "normalize",
+            "anchor": "top",
             "by": "hue",
         }
+
+    def test_to_spec_dict_anchor_mid(self):
+        # Schwabish C6 audit-rework (2026-05-12): anchor="mid" routes
+        # annotation marks (text/point/rule/tick) to segment midpoints.
+        s = Stack(by="actual", offset="zero", anchor="mid")
+        assert s.to_spec_dict() == {
+            "type": "stack",
+            "offset": "zero",
+            "anchor": "mid",
+            "by": "actual",
+        }
+
+    def test_invalid_anchor_errors(self):
+        with pytest.raises(ValueError, match="anchor"):
+            Stack(anchor="diagonal")
 
     def test_invalid_offset_errors(self):
         with pytest.raises(ValueError, match="offset"):

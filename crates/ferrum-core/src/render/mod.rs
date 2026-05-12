@@ -368,7 +368,6 @@ pub fn render_svg(
                     layer.position.as_ref(),
                     &scales,
                     &layer.encoding,
-                    layer.mark,
                 )?;
                 &adjusted_owned
             } else {
