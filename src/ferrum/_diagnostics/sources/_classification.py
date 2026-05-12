@@ -120,7 +120,6 @@ class ClassificationCurvesMixin:
         if key in self._cache:
             return self._cache[key]
         require_sklearn("pr_curve")
-        from sklearn.metrics import precision_recall_curve, average_precision_score
 
         if self._y is None:
             raise ValueError("ModelSource.pr_curve() requires y to be provided.")
@@ -130,43 +129,19 @@ class ClassificationCurvesMixin:
         classes = [c[len("proba_"):] for c in proba_cols]
         n_classes = len(classes)
 
-        rows: list[dict] = []
         if n_classes == 2:
-            y_score = proba_df[proba_cols[1]].to_numpy()
-            p, r, thr = precision_recall_curve(y_true, y_score)
-            ap = float(average_precision_score(y_true, y_score))
-            thresholds_padded = np.concatenate([thr, [float("nan")]])
-            for pi, ri, ti in zip(p, r, thresholds_padded):
-                rows.append({
-                    "precision": float(pi), "recall": float(ri),
-                    "threshold": float(ti), "class": classes[1], "ap": ap,
-                })
+            rows = _pr_rows_binary(y_true, proba_df, proba_cols, classes)
         elif average in ("micro", "macro", "weighted"):
             # Multiclass + average requested: return ONLY the summary curve.
             # The user has explicitly opted into a single-curve view, so the
             # per-class one-vs-rest rows would just be visual noise.
-            rows.extend(_compute_avg_pr(
+            rows = _compute_avg_pr(
                 y_true,
                 proba_df[proba_cols].to_numpy(),
                 classes, average,
-            ))
+            )
         else:
-            for i, cls in enumerate(classes):
-                y_bin = (
-                    y_true == _coerce_class_label(cls, y_true.dtype)
-                ).astype(int)
-                y_score = proba_df[proba_cols[i]].to_numpy()
-                p, r, thr = precision_recall_curve(y_bin, y_score)
-                try:
-                    ap = float(average_precision_score(y_bin, y_score))
-                except ValueError:
-                    ap = float("nan")
-                thresholds_padded = np.concatenate([thr, [float("nan")]])
-                for pi, ri, ti in zip(p, r, thresholds_padded):
-                    rows.append({
-                        "precision": float(pi), "recall": float(ri),
-                        "threshold": float(ti), "class": str(cls), "ap": ap,
-                    })
+            rows = _pr_rows_per_class(y_true, proba_df, proba_cols, classes)
 
         df = pl.DataFrame(rows)
         self._cache[key] = df
@@ -373,48 +348,49 @@ class ClassificationCurvesMixin:
                 y_true, y_score, thresholds, positive_class,
             )
         else:
-            from sklearn.base import clone
-            from sklearn.model_selection import KFold
-            X_np = self._X.to_numpy()
-            splitter = (
-                cv if hasattr(cv, "split")
-                else KFold(
-                    n_splits=int(cv), shuffle=True,
-                    random_state=self._random_state or 0,
-                )
-            )
-            fold_dfs: list[pl.DataFrame] = []
-            for tr, te in splitter.split(X_np):
-                m = clone(self._model).fit(X_np[tr], y_true[tr])
-                if hasattr(m, "predict_proba"):
-                    s = np.asarray(m.predict_proba(X_np[te]), dtype=np.float64)[:, 1]
-                elif hasattr(m, "decision_function"):
-                    raw = np.asarray(
-                        m.decision_function(X_np[te]), dtype=np.float64,
-                    )
-                    s = 1.0 / (1.0 + np.exp(-raw))
-                else:
-                    raise AttributeError(
-                        "discrimination_threshold(cv=...) requires the wrapped "
-                        "model to implement 'predict_proba' or 'decision_function'."
-                    )
-                fold_dfs.append(self._sweep_thresholds(
-                    y_true[te], s, thresholds, positive_class,
-                ))
-            df = (
-                pl.concat(fold_dfs, how="vertical")
-                .group_by("threshold")
-                .agg([
-                    pl.col("precision").mean(),
-                    pl.col("recall").mean(),
-                    pl.col("f1").mean(),
-                    pl.col("queue_rate").mean(),
-                ])
-                .sort("threshold")
+            df = self._discrimination_threshold_cv(
+                cv, y_true, thresholds, positive_class,
             )
 
         self._cache[key] = df
         return df
+
+    def _discrimination_threshold_cv(
+        self,
+        cv: Any,
+        y_true: np.ndarray,
+        thresholds: np.ndarray,
+        positive_class: object,
+    ) -> pl.DataFrame:
+        """Cross-validated threshold sweep — average per-fold metrics."""
+        from sklearn.base import clone
+        from sklearn.model_selection import KFold
+        X_np = self._X.to_numpy()
+        splitter = (
+            cv if hasattr(cv, "split")
+            else KFold(
+                n_splits=int(cv), shuffle=True,
+                random_state=self._random_state or 0,
+            )
+        )
+        fold_dfs: list[pl.DataFrame] = []
+        for tr, te in splitter.split(X_np):
+            m = clone(self._model).fit(X_np[tr], y_true[tr])
+            s = _score_fold(m, X_np[te])
+            fold_dfs.append(self._sweep_thresholds(
+                y_true[te], s, thresholds, positive_class,
+            ))
+        return (
+            pl.concat(fold_dfs, how="vertical")
+            .group_by("threshold")
+            .agg([
+                pl.col("precision").mean(),
+                pl.col("recall").mean(),
+                pl.col("f1").mean(),
+                pl.col("queue_rate").mean(),
+            ])
+            .sort("threshold")
+        )
 
     def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
         """Confusion matrix in long form: one row per (actual, predicted) cell.
@@ -505,6 +481,58 @@ def _coerce_class_label(label_str: str, target_dtype) -> object:
         except ValueError:
             return label_str
     return label_str
+
+
+def _pr_rows_binary(y_true, proba_df, proba_cols, classes) -> list[dict]:
+    """Per-row PR curve for a binary classifier on the positive class."""
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+
+    y_score = proba_df[proba_cols[1]].to_numpy()
+    p, r, thr = precision_recall_curve(y_true, y_score)
+    ap = float(average_precision_score(y_true, y_score))
+    thresholds_padded = np.concatenate([thr, [float("nan")]])
+    return [
+        {"precision": float(pi), "recall": float(ri),
+         "threshold": float(ti), "class": classes[1], "ap": ap}
+        for pi, ri, ti in zip(p, r, thresholds_padded)
+    ]
+
+
+def _pr_rows_per_class(y_true, proba_df, proba_cols, classes) -> list[dict]:
+    """Per-row PR curves for a multiclass classifier (one-vs-rest)."""
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+
+    rows: list[dict] = []
+    for i, cls in enumerate(classes):
+        y_bin = (
+            y_true == _coerce_class_label(cls, y_true.dtype)
+        ).astype(int)
+        y_score = proba_df[proba_cols[i]].to_numpy()
+        p, r, thr = precision_recall_curve(y_bin, y_score)
+        try:
+            ap = float(average_precision_score(y_bin, y_score))
+        except ValueError:
+            ap = float("nan")
+        thresholds_padded = np.concatenate([thr, [float("nan")]])
+        for pi, ri, ti in zip(p, r, thresholds_padded):
+            rows.append({
+                "precision": float(pi), "recall": float(ri),
+                "threshold": float(ti), "class": str(cls), "ap": ap,
+            })
+    return rows
+
+
+def _score_fold(model, X_te: np.ndarray) -> np.ndarray:
+    """Return positive-class scores for one CV fold's held-out X."""
+    if hasattr(model, "predict_proba"):
+        return np.asarray(model.predict_proba(X_te), dtype=np.float64)[:, 1]
+    if hasattr(model, "decision_function"):
+        raw = np.asarray(model.decision_function(X_te), dtype=np.float64)
+        return 1.0 / (1.0 + np.exp(-raw))
+    raise AttributeError(
+        "discrimination_threshold(cv=...) requires the wrapped "
+        "model to implement 'predict_proba' or 'decision_function'."
+    )
 
 
 def _compute_avg_pr(y_true, y_score_matrix, classes, average):

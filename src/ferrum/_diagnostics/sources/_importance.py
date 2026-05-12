@@ -47,42 +47,11 @@ class FeatureImportanceMixin:
             return self._cache[key]
 
         if method == "builtin":
-            if "feature_importances_" in self._capabilities:
-                imp = np.asarray(
-                    self._model.feature_importances_, dtype=np.float64,
-                )
-            elif "coef_" in self._capabilities:
-                coef = np.asarray(self._model.coef_, dtype=np.float64)
-                imp = (
-                    np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
-                )
-            else:
-                raise AttributeError(
-                    "ModelSource.importances(method='builtin') requires the "
-                    "wrapped model to expose 'feature_importances_' or "
-                    f"'coef_'. Got {type(self._model).__name__!r} which "
-                    "exposes neither."
-                )
-            std = np.zeros_like(imp)
+            imp, std = self._importances_builtin()
         elif method == "permutation":
-            require_sklearn("importances(permutation)")
-            from sklearn.inspection import permutation_importance
-
-            if self._y is None:
-                raise ValueError(
-                    "ModelSource.importances(method='permutation') requires "
-                    "y to be provided."
-                )
-            X_np = self._X.to_numpy()
-            y_np = np.asarray(self._y.to_numpy())
-            result = permutation_importance(
-                self._model, X_np, y_np,
-                n_repeats=n_repeats,
-                scoring=scoring,
-                random_state=rs if rs is not None else 0,
+            imp, std = self._importances_permutation(
+                n_repeats=n_repeats, scoring=scoring, random_state=rs,
             )
-            imp = np.asarray(result.importances_mean, dtype=np.float64)
-            std = np.asarray(result.importances_std, dtype=np.float64)
         else:
             raise ValueError(
                 f"ModelSource.importances(method={method!r}) — expected "
@@ -102,6 +71,58 @@ class FeatureImportanceMixin:
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
+
+    def _importances_builtin(self) -> tuple[np.ndarray, np.ndarray]:
+        """Read importance from the wrapped model's `feature_importances_` or
+        `coef_` attribute. ``std`` is zero — sklearn's built-in attribute
+        exposes no per-feature variance.
+        """
+        if "feature_importances_" in self._capabilities:
+            imp = np.asarray(
+                self._model.feature_importances_, dtype=np.float64,
+            )
+        elif "coef_" in self._capabilities:
+            coef = np.asarray(self._model.coef_, dtype=np.float64)
+            imp = (
+                np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+            )
+        else:
+            raise AttributeError(
+                "ModelSource.importances(method='builtin') requires the "
+                "wrapped model to expose 'feature_importances_' or "
+                f"'coef_'. Got {type(self._model).__name__!r} which "
+                "exposes neither."
+            )
+        return imp, np.zeros_like(imp)
+
+    def _importances_permutation(
+        self,
+        *,
+        n_repeats: int,
+        scoring: Any,
+        random_state: int | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compute permutation importance with per-feature std across repeats."""
+        require_sklearn("importances(permutation)")
+        from sklearn.inspection import permutation_importance
+
+        if self._y is None:
+            raise ValueError(
+                "ModelSource.importances(method='permutation') requires "
+                "y to be provided."
+            )
+        X_np = self._X.to_numpy()
+        y_np = np.asarray(self._y.to_numpy())
+        result = permutation_importance(
+            self._model, X_np, y_np,
+            n_repeats=n_repeats,
+            scoring=scoring,
+            random_state=random_state if random_state is not None else 0,
+        )
+        return (
+            np.asarray(result.importances_mean, dtype=np.float64),
+            np.asarray(result.importances_std, dtype=np.float64),
+        )
 
     def shap_values(
         self,
@@ -216,7 +237,6 @@ class FeatureImportanceMixin:
         if key in self._cache:
             return self._cache[key]
         require_sklearn("partial_dependence")
-        from sklearn.inspection import partial_dependence as _sk_pd
 
         feature_idxs = [
             self._feature_names.index(f) if isinstance(f, str) else f
@@ -225,40 +245,57 @@ class FeatureImportanceMixin:
         X_np = self._X.to_numpy()
         rows: list[dict] = []
         for f_idx in feature_idxs:
-            fname = self._feature_names[f_idx]
-            # sklearn returns "individual" of shape (n_outputs, n_samples,
-            # n_grid) when kind in ("individual", "both"); we use a single
-            # output (binary class index 1 / regression scalar) by indexing
-            # [0]. For "average" the shape is (n_outputs, n_grid).
-            r = _sk_pd(
-                self._model,
-                X_np,
-                features=[f_idx],
-                grid_resolution=grid_resolution,
-                kind=kind,
-            )
-            grid = r["grid_values"][0]
-            if kind in ("average", "both"):
-                avg = np.asarray(r["average"])[0]
-                for v, p in zip(grid, avg):
-                    rows.append({
-                        "feature": str(fname),
-                        "feature_value": float(v),
-                        "pd_value": float(p),
-                        "sample_id": -1,
-                    })
-            if kind in ("individual", "both"):
-                individual = np.asarray(r["individual"])[0]
-                n_samples, n_grid = individual.shape
-                for s in range(n_samples):
-                    for v, p in zip(grid, individual[s]):
-                        rows.append({
-                            "feature": str(fname),
-                            "feature_value": float(v),
-                            "pd_value": float(p),
-                            "sample_id": int(s),
-                        })
+            fname = str(self._feature_names[f_idx])
+            rows.extend(self._pd_rows_for_feature(
+                f_idx, fname, X_np, grid_resolution=grid_resolution, kind=kind,
+            ))
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
+
+    def _pd_rows_for_feature(
+        self,
+        f_idx: int,
+        fname: str,
+        X_np: np.ndarray,
+        *,
+        grid_resolution: int,
+        kind: str,
+    ) -> list[dict]:
+        """Build partial-dependence rows for a single feature.
+
+        sklearn returns ``individual`` of shape ``(n_outputs, n_samples,
+        n_grid)`` when ``kind in ("individual", "both")``; this method
+        uses a single output (binary class index 1 / regression scalar)
+        by indexing ``[0]``. For ``"average"`` the shape is
+        ``(n_outputs, n_grid)``.
+        """
+        from sklearn.inspection import partial_dependence as _sk_pd
+
+        r = _sk_pd(
+            self._model,
+            X_np,
+            features=[f_idx],
+            grid_resolution=grid_resolution,
+            kind=kind,
+        )
+        grid = r["grid_values"][0]
+        rows: list[dict] = []
+        if kind in ("average", "both"):
+            avg = np.asarray(r["average"])[0]
+            rows.extend(
+                {"feature": fname, "feature_value": float(v),
+                 "pd_value": float(p), "sample_id": -1}
+                for v, p in zip(grid, avg)
+            )
+        if kind in ("individual", "both"):
+            individual = np.asarray(r["individual"])[0]
+            n_samples, _ = individual.shape
+            for s in range(n_samples):
+                rows.extend(
+                    {"feature": fname, "feature_value": float(v),
+                     "pd_value": float(p), "sample_id": int(s)}
+                    for v, p in zip(grid, individual[s])
+                )
+        return rows
 
