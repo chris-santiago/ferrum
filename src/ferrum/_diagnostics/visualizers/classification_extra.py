@@ -225,13 +225,3 @@ class ClassBalanceVisualizer(FerrumVisualizer):
         )
         self._fitted = True
         return self
-
-    def _materialize(self) -> None:  # pragma: no cover - bypassed by fit()
-        raise NotImplementedError(
-            "ClassBalanceVisualizer overrides fit() — _materialize unused."
-        )
-
-    def _build_chart(self) -> Any:  # pragma: no cover - bypassed by fit()
-        raise NotImplementedError(
-            "ClassBalanceVisualizer overrides fit() — _build_chart unused."
-        )
