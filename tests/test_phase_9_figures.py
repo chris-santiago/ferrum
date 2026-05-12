@@ -318,6 +318,28 @@ class TestLmplot:
         with pytest.raises(ValueError, match="method"):
             fe.lmplot(reg_data, x="x", y="y", method="bogus")
 
+    def test_scatter_kws_forwarded(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", scatter_kws={"opacity": 0.3})
+        d = json.loads(chart.to_spec().to_json())
+        point_layer = next(
+            (l for l in d["layers"] if l.get("mark") == "point"), None,
+        )
+        assert point_layer is not None
+        assert point_layer.get("mark_style", {}).get("opacity") == 0.3
+
+    def test_line_kws_forwarded(self, reg_data):
+        chart = fe.lmplot(
+            reg_data, x="x", y="y",
+            line_kws={"stroke_width": 4}, show_metrics=False,
+        )
+        d = json.loads(chart.to_spec().to_json())
+        layers = d.get("layers", [])
+        line_layer = next(
+            (l for l in layers if l.get("mark") == "line"), None,
+        )
+        assert line_layer is not None
+        assert line_layer.get("mark_style", {}).get("stroke_width") == 4
+
     def test_renders_e2e(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="lm", ci=None)
         svg = chart.show_svg()
