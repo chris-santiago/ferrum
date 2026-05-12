@@ -29,6 +29,20 @@ from __future__ import annotations
 from typing import Any
 
 
+def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
+    """Raise ``ValueError`` when a required figure-function argument is ``None``.
+
+    Centralizes the "required, no usable default" check that previously
+    lived inline at each figure-function entry point. ``hint`` describes
+    what the user must pass (e.g. "an explicit list of values to sweep").
+    """
+    if value is None:
+        raise ValueError(
+            f"{func_name}({arg_name}=...) is required — {hint}.",
+        )
+    return value
+
+
 def _resolve_source(
     model_or_source: Any,
     X: Any = None,
@@ -1015,10 +1029,10 @@ def pdp_chart(
     """
     from ferrum._diagnostics.charts import _pdp_chart_from_source
 
-    if features is None:
-        raise ValueError(
-            "pdp_chart requires features=<list of column names or indices>."
-        )
+    _require(
+        "pdp_chart", "features", features,
+        hint="pass a list of column names or indices",
+    )
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _pdp_chart_from_source(
         source,
@@ -1244,11 +1258,10 @@ def validation_curve_chart(
     >>> from sklearn.linear_model import Ridge
     >>> fm.validation_curve_chart(Ridge(), X_train, y_train, param="alpha", values=[0.01, 0.1, 1, 10])
     """
-    if values is None:
-        raise ValueError(
-            "validation_curve_chart(values=...) is required — pass an explicit "
-            "list of values to sweep for the given param."
-        )
+    _require(
+        "validation_curve_chart", "values", values,
+        hint="pass an explicit list of values to sweep for the given param",
+    )
     from ferrum._diagnostics.charts import _validation_curve_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
@@ -1388,11 +1401,10 @@ def alpha_selection_chart(
     >>> from sklearn.linear_model import Ridge
     >>> fm.alpha_selection_chart(Ridge(), X_train, y_train, alphas=[0.001, 0.01, 0.1, 1, 10, 100])
     """
-    if alphas is None:
-        raise ValueError(
-            "alpha_selection_chart(alphas=...) is required — pass an explicit "
-            "list of regularization-strength values to sweep."
-        )
+    _require(
+        "alpha_selection_chart", "alphas", alphas,
+        hint="pass an explicit list of regularization-strength values to sweep",
+    )
     from ferrum._diagnostics.charts import _alpha_selection_chart_from_source
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(
