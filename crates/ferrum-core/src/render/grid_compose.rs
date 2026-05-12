@@ -6,7 +6,8 @@
 //! Chart.properties). Coordinate-system rebinding within the SVG body is out
 //! of scope for Phase 9.
 
-use crate::render::compositor::{parse_svg_root, strip_font_defs, uniquify_clip_ids, CompositorError};
+use crate::render::compositor::{parse_svg_root, write_cell, write_svg_open, CompositorError};
+#[cfg(test)]
 use crate::render::svg::fmt_f;
 
 /// An owned representation of a parsed SVG cell, used so we can collect
@@ -78,13 +79,7 @@ pub fn compose_svg_grid(
         .sum::<usize>()
         + 256;
     let mut out = String::with_capacity(capacity);
-    out.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        fmt_f(total_w),
-        fmt_f(total_h),
-        fmt_f(total_w),
-        fmt_f(total_h),
-    ));
+    write_svg_open(&mut out, total_w, total_h);
 
     // Second pass: emit cells with translate transforms.
     let mut first_emitted = false;
@@ -94,20 +89,10 @@ pub fn compose_svg_grid(
         for c in 0..cols {
             let idx = r * cols + c;
             if let Some(cell) = &owned[idx] {
-                out.push_str(&format!(
-                    r#"<g transform="translate({},{})">"#,
-                    fmt_f(x_offset),
-                    fmt_f(y_offset),
-                ));
-                let body = if !first_emitted {
-                    first_emitted = true;
-                    uniquify_clip_ids(&cell.body, idx)
-                } else {
-                    uniquify_clip_ids(&strip_font_defs(&cell.body), idx)
-                };
-                out.push_str(&body);
-                out.push_str("</g>");
-                let _ = (cell.width, cell.height); // suppress dead-code warning
+                let is_first = !first_emitted;
+                first_emitted = true;
+                write_cell(&mut out, x_offset, y_offset, idx, &cell.body, is_first);
+                let _ = (cell.width, cell.height); // unused per-cell dims (F22 will consume)
             }
             x_offset += col_widths[c] + if c + 1 < cols { spacing } else { 0.0 };
         }

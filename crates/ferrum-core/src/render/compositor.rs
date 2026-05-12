@@ -158,6 +158,44 @@ pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Shared emission helpers
+// ---------------------------------------------------------------------------
+
+/// Emit the outer `<svg ...>` opening tag with width/height/viewBox set
+/// to the same `(w, h)` dimensions. The doc-comment in [`parse_svg_root`]
+/// notes that attribute order matters for the round-trip; this helper
+/// is the single source of truth for that order.
+pub(crate) fn write_svg_open(out: &mut String, w: f64, h: f64) {
+    out.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
+        fmt_f(w), fmt_f(h), fmt_f(w), fmt_f(h),
+    ));
+}
+
+/// Emit a per-cell `<g transform="translate(x,y)">…</g>` wrapper, with
+/// `body` first passed through [`strip_font_defs`] when `is_first` is
+/// false (font-face defs should appear only in the first emitted cell)
+/// and then through [`uniquify_clip_ids`] for clipPath collision safety.
+///
+/// `idx` is the cell's global index (used to namespace the clip IDs).
+/// Composers must pass `is_first = true` exactly once per output —
+/// either for the first cell when no holes precede it (1D composers)
+/// or for the first non-`None` cell (grid composer).
+pub(crate) fn write_cell(out: &mut String, x: f64, y: f64, idx: usize, body: &str, is_first: bool) {
+    out.push_str(&format!(
+        r#"<g transform="translate({},{})">"#,
+        fmt_f(x), fmt_f(y),
+    ));
+    let intermediate: std::borrow::Cow<'_, str> = if is_first {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(strip_font_defs(body))
+    };
+    out.push_str(&uniquify_clip_ids(&intermediate, idx));
+    out.push_str("</g>");
+}
+
+// ---------------------------------------------------------------------------
 // Public compose functions
 // ---------------------------------------------------------------------------
 
@@ -185,13 +223,7 @@ pub fn compose_svg_horizontal(
 
     let mut out =
         String::with_capacity(svgs.iter().map(|s| s.len()).sum::<usize>() + 256);
-    out.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        fmt_f(total_width),
-        fmt_f(max_height),
-        fmt_f(total_width),
-        fmt_f(max_height),
-    ));
+    write_svg_open(&mut out, total_width, max_height);
 
     let mut x_offset = 0.0_f64;
     for (i, p) in parsed.iter().enumerate() {
@@ -200,14 +232,7 @@ pub fn compose_svg_horizontal(
             VerticalAlign::Center => (max_height - p.height) / 2.0,
             VerticalAlign::Bottom => max_height - p.height,
         };
-        out.push_str(&format!(
-            r#"<g transform="translate({},{})">"#,
-            fmt_f(x_offset),
-            fmt_f(y_offset),
-        ));
-        let intermediate = if i == 0 { p.body.to_string() } else { strip_font_defs(p.body) };
-        out.push_str(&uniquify_clip_ids(&intermediate, i));
-        out.push_str("</g>");
+        write_cell(&mut out, x_offset, y_offset, i, p.body, i == 0);
         x_offset += p.width + spacing;
     }
     out.push_str("</svg>");
@@ -238,13 +263,7 @@ pub fn compose_svg_vertical(
 
     let mut out =
         String::with_capacity(svgs.iter().map(|s| s.len()).sum::<usize>() + 256);
-    out.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        fmt_f(max_width),
-        fmt_f(total_height),
-        fmt_f(max_width),
-        fmt_f(total_height),
-    ));
+    write_svg_open(&mut out, max_width, total_height);
 
     let mut y_offset = 0.0_f64;
     for (i, p) in parsed.iter().enumerate() {
@@ -253,14 +272,7 @@ pub fn compose_svg_vertical(
             HorizontalAlign::Center => (max_width - p.width) / 2.0,
             HorizontalAlign::Right => max_width - p.width,
         };
-        out.push_str(&format!(
-            r#"<g transform="translate({},{})">"#,
-            fmt_f(x_offset),
-            fmt_f(y_offset),
-        ));
-        let intermediate = if i == 0 { p.body.to_string() } else { strip_font_defs(p.body) };
-        out.push_str(&uniquify_clip_ids(&intermediate, i));
-        out.push_str("</g>");
+        write_cell(&mut out, x_offset, y_offset, i, p.body, i == 0);
         y_offset += p.height + spacing;
     }
     out.push_str("</svg>");
