@@ -1,9 +1,11 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::residuals;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -50,12 +52,20 @@ pub(crate) struct SmoothSpec {
     /// Schwabish SB-followup (2026-05-12): when ``true``, append nullable
     /// ``_metrics_text`` (Utf8) and ``_metrics_y`` (Float64) columns with
     /// a single non-null row holding ``"R² {r2}\nRMSE {rmse}\nMAE {mae}"``
-    /// and the anchor y position. Supported on BOTH outputs:
-    /// - ``Residuals``: anchor at the max-``x`` input row; ``_metrics_y``
-    ///   at the max residual (rides the top of the residual scatter).
-    /// - ``Fitted``: anchor at the rightmost grid point; ``_metrics_y``
-    ///   at the max fitted y (sits high in the chart, top-right corner).
-    ///   Metrics are computed against the RAW (pre-aggregation) input.
+    /// and the anchor y position. Allowed on BOTH outputs (Fitted and
+    /// Residuals); the VISUAL intent is identical — anchor the text at
+    /// the rightmost finite x of the output and at the highest finite y
+    /// of the respective output column, so the text sits in the
+    /// top-right corner of the rendered geometry. The y differs by
+    /// path only because the y axis itself differs between the two
+    /// output modes:
+    /// - ``Residuals``: anchor at the rightmost finite ``x`` input row;
+    ///   ``_metrics_y`` at the max finite residual (top of the residual
+    ///   scatter, near y=0).
+    /// - ``Fitted``: anchor at the rightmost finite grid x; ``_metrics_y``
+    ///   at the max finite fitted y (top of the fit curve). Metrics are
+    ///   computed against the RAW (pre-aggregation) input regardless of
+    ///   ``x_bins``.
     /// Designed for a same-data ``mark_text`` overlay reading both columns.
     #[serde(default)]
     pub inject_metrics: bool,
@@ -98,21 +108,32 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
         })
         .collect();
 
-    // Schwabish SB-followup (2026-05-12): when ``inject_metrics`` is
-    // set on the Fitted path, compute R²/RMSE/MAE against the RAW
-    // input (pre-aggregation) so the metrics reflect the spread of
-    // the actual data points, not the binned summary. Mirrors the
-    // residuals_fit convention.
-    let metrics_input: Option<(&[f64], &[f64])> = if spec.inject_metrics {
-        Some((&xs_raw, &ys_raw))
+    // Schwabish SB-followup (2026-05-12): when ``inject_metrics`` is set
+    // on the Fitted path, compute R²/RMSE/MAE against the RAW input
+    // (pre-aggregation) so the metrics reflect the spread of the actual
+    // data points, not the binned summary. Mirrors the residuals_fit
+    // convention. The predictor is rebuilt here (rather than threaded
+    // through ``lm_fit`` / ``loess_fit``) so those fit functions stay
+    // focused on "fit a curve over a grid" — see SB-followup C4 rework
+    // (2026-05-12).
+    let metrics = if spec.inject_metrics {
+        let predictor = build_predictor(spec, &xs, &ys);
+        let resids: Vec<f64> = xs_raw.iter().zip(ys_raw.iter())
+            .map(|(&xi, &yi)| {
+                let yhat = predictor(xi);
+                if yhat.is_nan() { f64::NAN } else { yi - yhat }
+            })
+            .collect();
+        Some(residuals::compute(&ys_raw, &resids))
     } else {
         None
     };
+
     match spec.method {
-        SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics_input),
+        SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Loess => loess_fit(
             &xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed,
-            metrics_input,
+            metrics,
         ),
     }
 }
@@ -179,114 +200,14 @@ fn median(v: &[f64]) -> f64 {
     if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
 }
 
-/// Compute R²/RMSE/MAE from observed y values and their residuals.
-///
-/// Filters out non-finite residuals before aggregation. Returns
-/// ``(r2, rmse, mae)``. ``r2`` is 0 when ``y_obs`` has zero variance.
-///
-/// Sibling crates::transform::robust calls this via
-/// ``compute_residual_metrics_pub`` so the formatting stays
-/// byte-identical between Smooth and Robust residual paths.
-pub(crate) fn compute_residual_metrics_pub(ys_obs: &[f64], resids: &[f64]) -> (f64, f64, f64) {
-    compute_residual_metrics(ys_obs, resids)
-}
-
-fn compute_residual_metrics(ys_obs: &[f64], resids: &[f64]) -> (f64, f64, f64) {
-    let n_total = ys_obs.len() as f64;
-    if n_total == 0.0 {
-        return (0.0, 0.0, 0.0);
-    }
-    let mean_y = ys_obs.iter().sum::<f64>() / n_total;
-    let ss_tot: f64 = ys_obs.iter().map(|y| (y - mean_y).powi(2)).sum();
-    let mut ss_res = 0.0;
-    let mut sum_abs = 0.0;
-    let mut n_valid = 0.0;
-    for r in resids {
-        if r.is_finite() {
-            ss_res += r * r;
-            sum_abs += r.abs();
-            n_valid += 1.0;
-        }
-    }
-    let r2 = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
-    let denom = if n_valid > 0.0 { n_valid } else { 1.0 };
-    let rmse = (ss_res / denom).sqrt();
-    let mae = sum_abs / denom;
-    (r2, rmse, mae)
-}
-
-/// Emit a residuals RecordBatch with the canonical ``[x, residual]``
-/// columns. Schwabish SB-followup (2026-05-12) opt-in extras:
-///
-/// - ``inject_zero_ref=true`` appends a nullable ``_ref_zero`` Float64
-///   column with one ``0.0`` on the first row (rest ``null``), enabling
-///   a single-rule overlay without further Python-side injection.
-/// - ``metrics=Some((r2, rmse, mae))`` appends ``_metrics_text`` (Utf8)
-///   and ``_metrics_y`` (Float64) with one non-null row at the anchor
-///   (max ``x``).
-fn build_residuals_batch(
-    xs: Vec<f64>, resid: Vec<f64>,
-    inject_zero_ref: bool,
-    metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
-    let n = xs.len();
-    let mut fields = vec![
-        Field::new("x",        DataType::Float64, true),
-        Field::new("residual", DataType::Float64, true),
-    ];
-    let mut cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(xs.clone())),
-        Arc::new(Float64Array::from(resid.clone())),
-    ];
-
-    if inject_zero_ref {
-        let mut col: Vec<Option<f64>> = vec![None; n];
-        if n > 0 {
-            col[0] = Some(0.0);
-        }
-        fields.push(Field::new("_ref_zero", DataType::Float64, true));
-        cols.push(Arc::new(Float64Array::from(col)));
-    }
-
-    if let Some((r2, rmse, mae)) = metrics {
-        // Anchor = row with max x. Skip non-finite x's.
-        let anchor_idx = xs
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| x.is_finite())
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i);
-        let max_resid = resid
-            .iter()
-            .filter(|r| r.is_finite())
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let max_resid = if max_resid.is_finite() { max_resid } else { 0.0 };
-
-        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
-        let mut text_col: Vec<Option<String>> = vec![None; n];
-        let mut y_col: Vec<Option<f64>> = vec![None; n];
-        if let Some(i) = anchor_idx {
-            text_col[i] = Some(text);
-            y_col[i] = Some(max_resid);
-        }
-        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
-        cols.push(Arc::new(StringArray::from(text_col)));
-        fields.push(Field::new("_metrics_y", DataType::Float64, true));
-        cols.push(Arc::new(Float64Array::from(y_col)));
-    }
-
-    let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
-}
-
-fn residuals_fit(
-    spec: &SmoothSpec,
-    xs_fit: &[f64], ys_fit: &[f64],
-    xs_input: &[f64], ys_input: &[f64],
-) -> PyResult<RecordBatch> {
-    // Fit the chosen model on (xs_fit, ys_fit); then evaluate at xs_input and subtract.
-    let predictor: Box<dyn Fn(f64) -> f64> = match spec.method {
+/// Build a point-predictor closure for the chosen smoothing method,
+/// fitted on `(xs_fit, ys_fit)`. Returns NaN for any query point that
+/// the underlying fit cannot evaluate (e.g. zero-variance x for OLS,
+/// rank-deficient local window for LOESS). Shared between
+/// `residuals_fit` and the Fitted+metrics path in `apply()` so the
+/// residual computation is byte-identical across both call sites.
+fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn Fn(f64) -> f64> {
+    match spec.method {
         SmoothMethod::Lm => {
             let n = xs_fit.len() as f64;
             let mean_x = xs_fit.iter().sum::<f64>() / n;
@@ -310,7 +231,58 @@ fn residuals_fit(
             let degree = spec.degree;
             Box::new(move |x: f64| loess_at_point(&xs_clone, &ys_clone, x, k, degree))
         }
-    };
+    }
+}
+
+/// Emit a residuals RecordBatch with the canonical ``[x, residual]``
+/// columns. Schwabish SB-followup (2026-05-12) opt-in extras:
+///
+/// - ``inject_zero_ref=true`` appends a nullable ``_ref_zero`` Float64
+///   column with one ``0.0`` on the first row (rest ``null``), enabling
+///   a single-rule overlay without further Python-side injection.
+/// - ``metrics=Some((r2, rmse, mae))`` appends ``_metrics_text`` (Utf8)
+///   and ``_metrics_y`` (Float64) with one non-null row at the anchor
+///   (max ``x``).
+///
+/// Both column-emission helpers live in
+/// `crate::transform::residuals` so the schema invariant
+/// (`_ref_zero`, `_metrics_text`, `_metrics_y`) is owned in one place
+/// and shared with `transform::robust::build_residuals_batch`.
+fn build_residuals_batch(
+    xs: Vec<f64>, resid: Vec<f64>,
+    inject_zero_ref: bool,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    let n = xs.len();
+    let mut fields = vec![
+        Field::new("x",        DataType::Float64, true),
+        Field::new("residual", DataType::Float64, true),
+    ];
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(xs.clone())),
+        Arc::new(Float64Array::from(resid.clone())),
+    ];
+
+    if inject_zero_ref {
+        residuals::append_zero_ref_column(&mut fields, &mut cols, n);
+    }
+
+    if let Some(m) = metrics {
+        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, m);
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
+}
+
+fn residuals_fit(
+    spec: &SmoothSpec,
+    xs_fit: &[f64], ys_fit: &[f64],
+    xs_input: &[f64], ys_input: &[f64],
+) -> PyResult<RecordBatch> {
+    // Fit the chosen model on (xs_fit, ys_fit); then evaluate at xs_input and subtract.
+    let predictor = build_predictor(spec, xs_fit, ys_fit);
     let mut out_x = Vec::with_capacity(xs_input.len());
     let mut out_r = Vec::with_capacity(xs_input.len());
     for (&xi, &yi) in xs_input.iter().zip(ys_input.iter()) {
@@ -320,7 +292,7 @@ fn residuals_fit(
         out_r.push(r);
     }
     let metrics = if spec.inject_metrics {
-        Some(compute_residual_metrics(ys_input, &out_r))
+        Some(residuals::compute(ys_input, &out_r))
     } else {
         None
     };
@@ -366,11 +338,15 @@ fn all_nan_output(spec: &SmoothSpec) -> PyResult<RecordBatch> {
 /// so a chart-side ``mark_text`` overlay can render the OLS / LOESS
 /// summary in the chart's top-right corner without duplicating the
 /// fit computation in Python.
+///
+/// Metric-column emission delegates to
+/// `crate::transform::residuals::append_metrics_columns` so the
+/// schema and text-format invariant is shared across smooth.rs and
+/// robust.rs.
 fn build_smooth_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,
     metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
-    let n = x.len();
     let mut fields = vec![
         Field::new("x",        DataType::Float64, true),
         Field::new("y",        DataType::Float64, true),
@@ -384,29 +360,8 @@ fn build_smooth_batch(
         Arc::new(Float64Array::from(hi)),
     ];
 
-    if let Some((r2, rmse, mae)) = metrics {
-        // Anchor at the rightmost finite grid x; y at the max finite y
-        // (top of the fit curve) so the text sits high in the panel.
-        let anchor_idx = x.iter().enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i);
-        let max_y = y.iter().copied()
-            .filter(|v| v.is_finite())
-            .fold(f64::NEG_INFINITY, f64::max);
-        let anchor_y = if max_y.is_finite() { max_y } else { 0.0 };
-
-        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
-        let mut text_col: Vec<Option<String>> = vec![None; n];
-        let mut y_col:    Vec<Option<f64>>    = vec![None; n];
-        if let Some(i) = anchor_idx {
-            text_col[i] = Some(text);
-            y_col[i]    = Some(anchor_y);
-        }
-        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
-        cols.push(Arc::new(StringArray::from(text_col)));
-        fields.push(Field::new("_metrics_y", DataType::Float64, true));
-        cols.push(Arc::new(Float64Array::from(y_col)));
+    if let Some(m) = metrics {
+        residuals::append_metrics_columns(&mut fields, &mut cols, &x, &y, m);
     }
 
     let schema = Arc::new(Schema::new(fields));
@@ -415,7 +370,7 @@ fn build_smooth_batch(
 
 fn lm_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
-    metrics_input: Option<(&[f64], &[f64])>,
+    metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
     let n = xs.len();
     let mean_x: f64 = xs.iter().sum::<f64>() / n as f64;
@@ -459,13 +414,6 @@ fn lm_fit(
             }
         }
     };
-
-    let metrics = metrics_input.map(|(xs_m, ys_m)| {
-        let resids: Vec<f64> = xs_m.iter().zip(ys_m.iter())
-            .map(|(x, y)| y - (alpha + beta * x))
-            .collect();
-        compute_residual_metrics(ys_m, &resids)
-    });
 
     build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
@@ -523,7 +471,7 @@ fn inv_normal_cdf(p: f64) -> f64 {
 fn loess_fit(
     xs: &[f64], ys: &[f64], grid: &[f64],
     bandwidth: f64, degree: u8, ci: Option<f64>, n_grid: usize, seed: u64,
-    metrics_input: Option<(&[f64], &[f64])>,
+    metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
     let n = xs.len();
     let k = ((bandwidth * n as f64).ceil() as usize).max((degree as usize) + 1);
@@ -537,13 +485,6 @@ fn loess_fit(
         None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
         Some(level) => loess_bootstrap_ci(xs, ys, grid, k, degree, level, seed),
     };
-
-    let metrics = metrics_input.map(|(xs_m, ys_m)| {
-        let resids: Vec<f64> = xs_m.iter().zip(ys_m.iter())
-            .map(|(x, y)| y - loess_at_point(xs, ys, *x, k, degree))
-            .collect();
-        compute_residual_metrics(ys_m, &resids)
-    });
 
     build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
@@ -788,6 +729,9 @@ impl PySmooth {
                 "Smooth: inject_zero_ref requires output='residuals'",
             ));
         }
+        // inject_metrics is allowed on both Fitted and Residuals — see
+        // SB-followup 2026-05-12 (3a rework). Top-right anchor semantics
+        // are documented on SmoothSpec.inject_metrics.
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
             method, ci, bandwidth, degree, n, seed,
@@ -803,9 +747,10 @@ impl PySmooth {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?})",
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, name={:?})",
                 s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.n, s.seed,
                 s.x_bins, s.x_estimator, s.output,
+                s.inject_zero_ref, s.inject_metrics, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),

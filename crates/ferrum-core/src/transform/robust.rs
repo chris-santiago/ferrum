@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::logistic::inv_normal_cdf;
+use crate::transform::residuals;
 use crate::transform::smooth::SmoothOutput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -362,7 +363,9 @@ fn build_nan_fitted(n_grid: usize) -> PyResult<RecordBatch> {
 /// ``smooth::build_residuals_batch`` — emits optional ``_ref_zero`` /
 /// ``_metrics_text`` / ``_metrics_y`` columns when the corresponding
 /// inject flag is set. The metrics computation needs the original
-/// ``y_obs`` to derive R² / RMSE / MAE.
+/// ``y_obs`` to derive R² / RMSE / MAE; delegates column emission to
+/// `crate::transform::residuals` so the schema + text-format invariant
+/// is owned in one home (post-C4 rework, 2026-05-12).
 fn build_residuals_batch(
     xs: Vec<f64>, resid: Vec<f64>, ys_obs: &[f64],
     inject_zero_ref: bool, inject_metrics: bool,
@@ -378,40 +381,12 @@ fn build_residuals_batch(
     ];
 
     if inject_zero_ref {
-        let mut col: Vec<Option<f64>> = vec![None; n];
-        if n > 0 {
-            col[0] = Some(0.0);
-        }
-        fields.push(Field::new("_ref_zero", DataType::Float64, true));
-        cols.push(Arc::new(Float64Array::from(col)));
+        residuals::append_zero_ref_column(&mut fields, &mut cols, n);
     }
 
     if inject_metrics {
-        let (r2, rmse, mae) =
-            crate::transform::smooth::compute_residual_metrics_pub(ys_obs, &resid);
-        let anchor_idx = xs
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| x.is_finite())
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i);
-        let max_resid = resid
-            .iter()
-            .filter(|r| r.is_finite())
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let max_resid = if max_resid.is_finite() { max_resid } else { 0.0 };
-
-        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
-        let mut text_col: Vec<Option<String>> = vec![None; n];
-        let mut y_col: Vec<Option<f64>> = vec![None; n];
-        if let Some(i) = anchor_idx {
-            text_col[i] = Some(text);
-            y_col[i] = Some(max_resid);
-        }
-        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
-        cols.push(Arc::new(arrow::array::StringArray::from(text_col)));
-        fields.push(Field::new("_metrics_y", DataType::Float64, true));
-        cols.push(Arc::new(Float64Array::from(y_col)));
+        let metrics = residuals::compute(ys_obs, &resid);
+        residuals::append_metrics_columns(&mut fields, &mut cols, &xs, &resid, metrics);
     }
 
     let schema = Arc::new(Schema::new(fields));
@@ -545,8 +520,9 @@ impl PyRobust {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Robust(s) => format!(
-                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?})",
+                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, name={:?})",
                 s.x, s.y, s.n_grid, s.ci, s.huber_c, s.max_iter, s.tol, s.output,
+                s.inject_zero_ref, s.inject_metrics, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
