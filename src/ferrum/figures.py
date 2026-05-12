@@ -175,6 +175,12 @@ def residuals_chart(
         ``"single"`` returns just the residuals-vs-fitted panel. Pass an
         explicit list such as ``["residuals_vs_fitted", "qq"]`` to
         customize the panel set.
+    annotate_metrics : bool, default True
+        Overlay a top-right corner annotation showing R²/RMSE/MAE
+        computed from the fit. Pass ``False`` to render the residual
+        scatter alone.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; does not affect deterministic
         residuals computation.
@@ -260,6 +266,8 @@ def roc_chart(
         When ``True``, injects one text label per class showing the AUC
         value to 3 decimal places, anchored in the lower-right corner
         of the plot.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay. Keys become model labels.
         ``model_or_source`` is treated as the base model (label
@@ -345,6 +353,8 @@ def pr_chart(
         When ``True``, overlays F-score iso-contours at
         F={0.2, 0.4, 0.6, 0.8} so users can read off combined
         precision-recall quality directly from the chart.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay. Keys become model labels.
         ``model_or_source`` is treated as the base model (label
@@ -481,6 +491,12 @@ def gain_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
+    direct_labels : bool, default True
+        Replace the categorical legend with endpoint-anchored class
+        labels via ``_direct_label_endpoint``. Pass ``False`` to fall
+        back to the standard legend.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -530,6 +546,12 @@ def lift_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
+    direct_labels : bool, default True
+        Replace the categorical legend with endpoint-anchored class
+        labels via ``_direct_label_endpoint``. Pass ``False`` to fall
+        back to the standard legend.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -771,8 +793,19 @@ def shap_beeswarm_chart(
     class. ``per_class=False`` (default) renders a single panel using
     the first class (the only group on regression and binary).
 
-    See :func:`shap_chart` for shared parameter docstring (this function
-    is the dedicated sibling for ``kind="beeswarm"``).
+    See :func:`shap_chart` for the shared parameter docstring
+    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    ``background``, ``per_class``, ``random_state``, ``theme``) — this
+    function is the dedicated sibling for ``kind="beeswarm"``.
+
+    Parameters specific to beeswarm
+    -------------------------------
+    zero_line : bool, default True
+        Overlay a dashed vertical reference rule at ``shap_value = 0``
+        so the sign of each feature's contribution is immediately
+        legible. Automatically skipped on the multi-panel
+        ``per_class`` path (each facet would need its own sentinel
+        column). Pass ``False`` to suppress.
 
     Returns
     -------
@@ -1198,6 +1231,8 @@ def learning_curve_chart(
     ci_style : {"band", "errorbar"}, default "band"
         Visual style of the confidence interval. ``"band"`` draws a
         shaded ribbon; ``"errorbar"`` draws error bars.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1277,6 +1312,8 @@ def validation_curve_chart(
         log scale when ``max(values) / min(non-zero values) > 100``.
     ci_style : {"band", "errorbar"}, default "band"
         Visual style of the confidence interval.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
