@@ -2121,6 +2121,7 @@ class Chart:
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
         n_thresholds: int = 50,
         threshold_line: bool = False,
+        optimum_label: bool = True,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -2143,6 +2144,13 @@ class Chart:
         threshold_line : bool, optional
             Whether to draw a vertical rule at the optimal threshold.  Default
             is ``False``.
+        optimum_label : bool, optional
+            Whether to overlay a text annotation at the F1-optimum point
+            showing ``"max F1 = {f1:.3f} @ t={threshold:.2f}"``.
+            Default ``True`` (Schwabish C7 audit-rework, 2026-05-12).
+            The mark's data_transform injects ``_optimum_x`` /
+            ``_optimum_y`` / ``_optimum_text`` sentinel columns from
+            the long-form data; the desugar emits a ``mark_text`` layer.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -2162,6 +2170,39 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_discrimination_threshold
+
+        def _disc_threshold_prep(df):
+            import polars as pl
+            if "threshold" not in df.columns or "metric" not in df.columns:
+                return df
+            n = df.height
+            if n == 0:
+                return df
+            # Find F1-optimum row from the long-form data. ``f1`` lives
+            # as a ``metric`` value with ``value`` carrying the score.
+            f1_rows = df.filter(pl.col("metric") == "f1")
+            if f1_rows.height == 0:
+                return df
+            best_idx = int(f1_rows["value"].arg_max() or 0)
+            best_t = float(f1_rows["threshold"][best_idx])
+            best_f1 = float(f1_rows["value"][best_idx])
+            new_cols = []
+            if threshold_line:
+                col = [best_t] + [None] * (n - 1)
+                new_cols.append(pl.Series("_threshold_best", col, dtype=pl.Float64))
+            if optimum_label:
+                opt_x = [best_t] + [None] * (n - 1)
+                opt_y = [best_f1] + [None] * (n - 1)
+                opt_text = [
+                    f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"
+                ] + [None] * (n - 1)
+                new_cols.extend([
+                    pl.Series("_optimum_x", opt_x, dtype=pl.Float64),
+                    pl.Series("_optimum_y", opt_y, dtype=pl.Float64),
+                    pl.Series("_optimum_text", opt_text, dtype=pl.Utf8),
+                ])
+            return df.with_columns(new_cols) if new_cols else df
+
         return self._set_composite_mark(
             "discrimination_threshold",
             desugar_discrimination_threshold,
@@ -2169,10 +2210,12 @@ class Chart:
                 "metrics": metrics,
                 "n_thresholds": n_thresholds,
                 "threshold_line": threshold_line,
+                "optimum_label": optimum_label,
                 **mark_kwargs,
             },
             placeholder="point",
             position=position,
+            data_transform=_disc_threshold_prep,
         )
 
     def mark_confusion(

@@ -358,6 +358,7 @@ def desugar_discrimination_threshold(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     n_thresholds: int = 50,
     threshold_line: bool = False,
+    optimum_label: bool = True,
 ) -> tuple:
     """Discrimination-threshold sweep mark.
 
@@ -365,12 +366,19 @@ def desugar_discrimination_threshold(
     figure builder is responsible for unpivoting
     ``ModelSource.discrimination_threshold()`` output into this shape.
 
-    When ``threshold_line=True`` the chart builder injects a
-    ``_threshold_best`` column with one non-null row at the F1-best
-    threshold (argmax of the ``f1`` series in the un-melted source
-    output). The desugar emits a vertical ``mark_rule`` layer on
-    ``x=_threshold_best``; Rust's mark_rule renders one vertical span
-    per non-null row, so exactly one rule appears.
+    When ``threshold_line=True`` the data must carry a sentinel
+    ``_threshold_best`` column (one non-null row at the F1-best
+    threshold). The desugar emits a vertical ``mark_rule`` layer on
+    ``x=_threshold_best``.
+
+    When ``optimum_label=True`` the data must also carry
+    ``_optimum_x`` / ``_optimum_y`` / ``_optimum_text`` sentinel columns
+    (one non-null row at the F1-best point with the caption
+    ``"max F1 = {f1:.3f} @ t={threshold:.2f}"``). The desugar emits a
+    ``mark_text`` layer reading those columns. Column injection lives in
+    ``Chart.mark_discrimination_threshold``'s ``data_transform`` so the
+    feature works for both chart-API and figure-function entry points
+    (Schwabish C7 audit-rework, 2026-05-12).
     """
     del metrics, n_thresholds  # informational; data is pre-melted
     layers: list = [
@@ -382,6 +390,12 @@ def desugar_discrimination_threshold(
             mark="rule",
             encoding={"x": "_threshold_best"},
             mark_kwargs={"stroke_dash": [4, 4], "opacity": 0.6},
+        ))
+    if optimum_label:
+        layers.append(_Layer(
+            mark="text",
+            encoding={"x": "_optimum_x", "y": "_optimum_y", "text": "_optimum_text"},
+            mark_kwargs={"align": "left", "dx": 4, "dy": -4},
         ))
     return ("__layered__", [], None, None, layers)
 
