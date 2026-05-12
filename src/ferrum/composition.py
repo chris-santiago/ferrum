@@ -395,8 +395,6 @@ class JointChart:
             row_ratios=[marginal_share, center_share],
             col_ratios=[center_share, marginal_share],
             spacing=self.spacing,
-            share_x=[[2, 0]],
-            share_y=[[2, 3]],
         )
 
     def show_png(self) -> bytes:
@@ -689,8 +687,6 @@ class RepeatChart:
             row_ratios=[1.0] * n_rows,
             col_ratios=[1.0] * n_cols,
             spacing=self.spacing,
-            share_x=[],
-            share_y=[],
         )
 
     def show_png(self) -> bytes:
@@ -895,8 +891,6 @@ class ClusterMapChart:
             row_ratios=[d, h],
             col_ratios=[d, h],
             spacing=self.spacing,
-            share_x=[[1, 3]],
-            share_y=[[2, 3]],
         )
 
     def show_png(self) -> bytes:

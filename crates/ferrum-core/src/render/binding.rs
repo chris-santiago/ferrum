@@ -571,14 +571,6 @@ pub fn compose_svg_vertical_py(
 /// spacing : float, default 10.0
 ///     Gap in pixels between adjacent cells (applied both horizontally and
 ///     vertically).
-/// share_x : list[list[int]], default []
-///     Groups of cell indices whose x-axes should share the same scale
-///     range. Reserved for future alignment; currently accepted but not
-///     applied.
-/// share_y : list[list[int]], default []
-///     Groups of cell indices whose y-axes should share the same scale
-///     range. Reserved for future alignment; currently accepted but not
-///     applied.
 ///
 /// Returns
 /// -------
@@ -596,13 +588,21 @@ pub fn compose_svg_vertical_py(
 /// -----
 /// Used internally by ``RepeatChart`` and the figure-level ``pairplot`` /
 /// ``clustermap`` combinators. Each cell is embedded via a nested
-/// ``<g transform="translate(...)">`` preserving its internal coordinate
-/// system.
+/// ``<g transform="translate(...)">`` (native fit) or
+/// ``<svg viewBox preserveAspectRatio="none">`` (scaled fit) preserving
+/// its internal coordinate system.
+///
+/// Axis sharing (the prior `share_x` / `share_y` parameters) belongs at
+/// the Python layer pre-render: shared scales are computed before each
+/// cell renders so the resulting SVGs already align. The compositor sees
+/// opaque SVG strings and has no scale metadata to enforce sharing
+/// against; the parameters were never functional. Use
+/// `Chart.encode(x=fr.X(field, scale=...))` with a shared scale spec at
+/// composition time, or `JointChart`/`ClusterMapChart`'s `axis(show=False)`
+/// suppression for marginal/dendrogram cells.
 #[pyfunction]
 #[pyo3(name = "compose_svg_grid")]
-#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0,
-                     share_x = Vec::<Vec<usize>>::new(), share_y = Vec::<Vec<usize>>::new()))]
-#[allow(unused_variables)]
+#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0))]
 pub fn compose_svg_grid_py(
     cells: Vec<Option<String>>,
     rows: usize,
@@ -610,8 +610,6 @@ pub fn compose_svg_grid_py(
     row_ratios: Vec<f64>,
     col_ratios: Vec<f64>,
     spacing: f64,
-    share_x: Vec<Vec<usize>>,
-    share_y: Vec<Vec<usize>>,
 ) -> PyResult<String> {
     crate::render::grid_compose::compose_svg_grid(
         &cells,
