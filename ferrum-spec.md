@@ -1248,11 +1248,13 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
 >   multi-model charts get one `BrierLabel` per model from the bin-level
 >   reliability data.
 > - `residuals_chart`: new `annotate_metrics=True` kwarg (default on).
->   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on the
->   single-panel layout (`panels="single"` or `panels=None`). The 4-panel
->   `panels="auto"` layout skips the corner annotation — the residuals-vs-
->   fitted panel still benefits from the descriptive Schwabish-style
->   information density.
+>   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on
+>   the residuals-vs-fitted view in both the single-panel and the 4-panel
+>   `panels="auto"` layouts. Implementation shares a pair of helpers —
+>   `_inject_metrics_corner` (data augmentation) and
+>   `_overlay_metrics_corner` (chart overlay) — so the orchestration
+>   (which panels get the corner) stays separate from the implementation
+>   (how to render it).
 > - `importance_chart`: new `show_values=True` kwarg (default on). Emits
 >   the formatted importance value at each bar's end via a same-data
 >   `mark_text` overlay.

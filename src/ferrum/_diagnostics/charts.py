@@ -83,6 +83,77 @@ def _r2_score(y_true, y_pred) -> float:
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
 
+def _inject_metrics_corner(
+    df: pl.DataFrame, *, kind: str = "studentized",
+) -> pl.DataFrame:
+    """Augment a residuals DataFrame with ``_metrics_text`` and ``_metrics_y``.
+
+    Reads ``y_true`` / ``y_pred`` to compute R² / RMSE / MAE, then writes
+    the formatted corner string on the single row with the largest
+    ``y_pred`` (other rows null, so ``mark_text`` skips them). ``_metrics_y``
+    anchors the text to the top of the residual-axis range so the
+    annotation lands in the top-right corner of the plot.
+
+    Schwabish SB3 (2026-05-11). Used by both the single-panel residuals
+    chart and the residuals-vs-fitted cell of the 4-panel layout; the
+    column is harmless on the other panels (their renderers do not read
+    it). ``kind`` selects ``studentized_residual`` vs ``residual`` for
+    the y-anchor — must match what ``mark_residuals`` will render so the
+    text lands at the correct corner.
+    """
+    import numpy as np
+
+    if df.height == 0:
+        return df
+    y_col = (
+        "studentized_residual"
+        if kind in ("studentized", "scaled")
+        else "residual"
+    )
+    y_true = np.asarray(df["y_true"].to_list(), dtype=float)
+    y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
+    r2 = _r2_score(y_true, y_pred)
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    corner_text = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
+
+    n = df.height
+    anchor_idx = int(np.argmax(y_pred))
+    text_col: list[str | None] = [None] * n
+    text_col[anchor_idx] = corner_text
+    resid_arr = np.asarray(df[y_col].to_list(), dtype=float)
+    y_col_vals: list[float | None] = [None] * n
+    y_col_vals[anchor_idx] = float(np.max(resid_arr))
+    return df.with_columns(
+        pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
+        pl.Series("_metrics_y", y_col_vals, dtype=pl.Float64),
+    )
+
+
+def _overlay_metrics_corner(chart):
+    """Add a same-data ``mark_text`` overlay reading the injected columns.
+
+    Assumes ``chart._data`` already carries ``_metrics_text`` / ``_metrics_y``
+    (see :func:`_inject_metrics_corner`). The overlay layer reuses
+    ``chart._data`` so ``+`` produces a true layer rather than the
+    HConcat fallback.
+
+    Schwabish SB3 (2026-05-11). Returns the original chart unchanged
+    when the columns are absent, so callers can invoke unconditionally.
+    """
+    import ferrum
+
+    data = chart._data
+    if data is None or "_metrics_text" not in data.columns:
+        return chart
+    text_layer = (
+        ferrum.Chart(data)
+        .mark_text(align="right", dx=-4, dy=4)
+        .encode(x="y_pred", y="_metrics_y", text="_metrics_text")
+    )
+    return chart + text_layer
+
+
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
     """Sort the frame ascending by `col` so a downstream ``mark_line`` over
     that column draws a monotonic polyline.
@@ -109,61 +180,34 @@ def _residuals_chart_from_source(
 ):
     """Build a residuals diagnostic chart from a ModelSource.
 
-    Schwabish SB3 (2026-05-11): single-panel charts emit a ``Residuals``
-    title and, when ``annotate_metrics=True``, overlay a top-right
-    corner annotation with R²/RMSE/MAE. Multi-panel layouts skip the
-    corner annotation but still get the title.
+    Schwabish SB3 (2026-05-11): the corner R²/RMSE/MAE annotation rides
+    on the residuals-vs-fitted view in both single-panel and 4-panel
+    layouts. ``_inject_metrics_corner`` augments the shared DataFrame
+    once at the top of this function; the single-panel chart and the
+    ``residuals_vs_fitted`` cell of the 4-panel grid then call
+    ``_overlay_metrics_corner`` which detects the injected columns and
+    adds a same-data ``mark_text`` layer. The other 4-panel cells (QQ,
+    scale-location, residuals-vs-leverage) inherit the extra columns but
+    do not reference them, so their renderers are unaffected.
     """
-    import numpy as np
-
     import ferrum
+
     df = source.predictions()
+    if annotate_metrics:
+        df = _inject_metrics_corner(df, kind=kind)
+
     if panels in (None, "single"):
         if cook_threshold is not None:
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
-
-        y_col = (
-            "studentized_residual"
-            if kind in ("studentized", "scaled")
-            else "residual"
-        )
-        if annotate_metrics:
-            y_true = np.asarray(df["y_true"].to_list(), dtype=float)
-            y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
-            r2 = _r2_score(y_true, y_pred)
-            rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-            mae = float(np.mean(np.abs(y_true - y_pred)))
-            corner_text = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
-            n = df.height
-            pred_arr = np.asarray(df["y_pred"].to_list(), dtype=float)
-            anchor_idx = int(np.argmax(pred_arr))
-            text_col: list[str | None] = [None] * n
-            text_col[anchor_idx] = corner_text
-            resid_arr = np.asarray(df[y_col].to_list(), dtype=float)
-            corner_y_col: list[float | None] = [None] * n
-            corner_y_col[anchor_idx] = float(np.max(resid_arr))
-            df = df.with_columns(
-                pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
-                pl.Series("_metrics_y", corner_y_col, dtype=pl.Float64),
-            )
-
         chart = ferrum.Chart(df).mark_residuals(
             kind=kind, cook_threshold=cook_threshold,
         )
         chart = chart.properties(
             title=ferrum.Title("Residuals", subtitle=subtitle),
         )
-        if annotate_metrics:
-            # mark_residuals augments ``chart._data`` with ``_ref_zero``;
-            # reuse the post-injection DataFrame so the text layer shares
-            # data identity with the base layer and ``+`` produces a real
-            # overlay rather than the HConcat fallback.
-            text_layer = (
-                ferrum.Chart(chart._data)
-                .mark_text(align="right", dx=-4, dy=4)
-                .encode(x="y_pred", y="_metrics_y", text="_metrics_text")
-            )
-            chart = chart + text_layer
+        # ``_overlay_metrics_corner`` is a no-op when the injected
+        # columns are absent, so the call is unconditional.
+        chart = _overlay_metrics_corner(chart)
         if theme is not None:
             chart = chart.theme(theme)
         return chart
@@ -208,10 +252,18 @@ def _residuals_panel(
     if name == "residuals_vs_fitted":
         if cook_threshold is not None:
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
-            return ferrum.Chart(df).mark_residuals(
+            chart = ferrum.Chart(df).mark_residuals(
                 kind=kind, cook_threshold=cook_threshold,
             )
-        return ferrum.Chart(df).mark_residuals(kind=kind)
+        else:
+            chart = ferrum.Chart(df).mark_residuals(kind=kind)
+        # Schwabish SB3: detect the ``_metrics_text``/``_metrics_y``
+        # columns injected upstream by ``_inject_metrics_corner`` and
+        # overlay the corner annotation. No-op when the columns are
+        # absent, so an externally-built panel (e.g. a user invoking
+        # ``_residuals_panel`` directly without metrics injection)
+        # renders identically to the pre-SB3 behavior.
+        return _overlay_metrics_corner(chart)
 
     if name == "qq":
         return ferrum.Chart(df).mark_qq().encode(x="studentized_residual")
