@@ -69,8 +69,9 @@ def residuals_chart(
 
     Plots residuals vs. fitted values. Optional Cook's distance
     highlighting marks observations whose leverage-adjusted influence
-    exceeds a user-supplied threshold. Multi-panel layout (QQ,
-    scale-location, leverage) is reserved for Phase 10h.
+    exceeds a user-supplied threshold. ``panels="auto"`` returns the
+    canonical 4-panel diagnostic layout (residuals-vs-fitted, QQ,
+    scale-location, residuals-vs-leverage) as a 2x2 grid.
 
     Parameters
     ----------
@@ -93,10 +94,12 @@ def residuals_chart(
         distance is only defined for estimators that expose ``coef_``;
         non-linear models surface ``NaN`` and produce no outliers.
     panels : "auto", None, "single", or list of str, default "auto"
-        Panel selection. ``"auto"`` and ``None`` ship the single
-        residuals-vs-fitted panel (Phase 10a behavior). Pass an
+        Panel selection. ``"auto"`` ships the canonical 4-panel layout
+        — ``residuals_vs_fitted``, ``qq``, ``scale_location``, and
+        ``residuals_vs_leverage`` — laid out as a 2x2 grid. ``None`` or
+        ``"single"`` returns just the residuals-vs-fitted panel. Pass an
         explicit list such as ``["residuals_vs_fitted", "qq"]`` to
-        force a multi-panel layout (Phase 10h).
+        customize the panel set.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; does not affect deterministic
         residuals computation.
@@ -120,7 +123,10 @@ def residuals_chart(
     if panels in (None, "single"):
         panel_list: Any = None
     elif panels == "auto":
-        panel_list = None  # 10a auto == single; 10h expands this to 2x2
+        panel_list = [
+            "residuals_vs_fitted", "qq",
+            "scale_location", "residuals_vs_leverage",
+        ]
     else:
         panel_list = list(panels)
     return _residuals_chart_from_source(

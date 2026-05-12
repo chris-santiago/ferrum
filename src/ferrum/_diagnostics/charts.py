@@ -123,8 +123,17 @@ def _residuals_chart_from_source(
         return chart
 
     # Multi-panel path: each panel injects its own outlier columns with
-    # the right x-axis encoding for that panel's coordinate system.
+    # the right x-axis encoding for that panel's coordinate system. The
+    # leverage panel depends on hat-matrix quantities; for non-linear
+    # estimators ModelSource.predictions emits NaN for every leverage row,
+    # in which case we silently drop the panel rather than crashing on
+    # "no usable values for field 'leverage'".
     panel_list = panels if isinstance(panels, list) else ["residuals_vs_fitted"]
+    if (
+        "residuals_vs_leverage" in panel_list
+        and df["leverage"].is_nan().all()
+    ):
+        panel_list = [p for p in panel_list if p != "residuals_vs_leverage"]
     charts = [
         _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold)
         for name in panel_list
