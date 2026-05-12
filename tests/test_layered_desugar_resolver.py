@@ -3,7 +3,7 @@ Uses a fake desugar so we don't depend on any composite mark being implemented y
 import polars as pl
 import pytest
 import ferrum as fe
-from ferrum._layer import _Layer
+from ferrum._layer import _Layer, _PendingMark
 
 
 def _fake_layered_desugar(x_field, y_field, **_kwargs):
@@ -23,7 +23,7 @@ def df():
 
 def test_layered_sentinel_produces_multi_layer_spec(df):
     chart = fe.Chart(df)
-    chart._pending_stat_mark = ("__fake__", {}, _fake_layered_desugar)
+    chart._pending_stat_mark = _PendingMark("__fake__", {}, _fake_layered_desugar)
     spec = chart.encode(x="x", y="y")._build_spec()
     assert spec.layers is not None, "expected multi-layer ChartSpec"
     assert len(spec.layers) == 2
@@ -33,7 +33,7 @@ def test_layered_sentinel_produces_multi_layer_spec(df):
 
 def test_layered_layer_carries_mark_kwargs(df):
     chart = fe.Chart(df)
-    chart._pending_stat_mark = ("__fake__", {}, _fake_layered_desugar)
+    chart._pending_stat_mark = _PendingMark("__fake__", {}, _fake_layered_desugar)
     spec = chart.encode(x="x", y="y")._build_spec()
     point_layer = spec.layers[1]
     assert point_layer.mark_kwargs is not None
@@ -48,7 +48,7 @@ def test_layered_layer_carries_data_source_when_set(df):
         ]
         return ("__layered__", [], None, None, layers)
     chart = fe.Chart(df)
-    chart._pending_stat_mark = ("__fake__", {}, desugar_with_named_source)
+    chart._pending_stat_mark = _PendingMark("__fake__", {}, desugar_with_named_source)
     spec = chart.encode(x="x", y="y")._build_spec()
     assert spec.layers[0].data_source == "box"
 
@@ -61,7 +61,7 @@ def test_layered_encoding_y2_supported(df):
         ]
         return ("__layered__", [], None, None, layers)
     chart = fe.Chart(df)
-    chart._pending_stat_mark = ("__fake__", {}, desugar_with_y2)
+    chart._pending_stat_mark = _PendingMark("__fake__", {}, desugar_with_y2)
     spec = chart.encode(x="x", y="y")._build_spec()
     json = spec.to_json()
     assert '"y2"' in json or "y2" in json

@@ -20,3 +20,17 @@ class _Layer:
     mark_kwargs: Optional[dict] = None
     data_source: Optional[str] = None
     position: Any = None
+
+
+@dataclass(frozen=True)
+class _PendingMark:
+    """Sentinel stored on ``Chart._pending_stat_mark`` when a composite or
+    diagnostic ``mark_*()`` is called before ``.encode()``.
+
+    ``Chart._resolve_pending`` calls ``desugar_fn(x_field, y_field, **kwargs)``
+    once the encoding is known and threads the result back into the chart's
+    transforms / layers / encoding.
+    """
+    kind: str
+    kwargs: dict
+    desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], tuple]

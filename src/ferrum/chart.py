@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
-from ferrum._layer import _Layer
+from ferrum._layer import _Layer, _PendingMark
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase
@@ -214,7 +214,7 @@ class Chart:
         "_data", "_mark", "_mark_kwargs", "_encoding", "_transforms",
         "_facet", "_coord", "_theme", "_layers",
         "_width", "_height", "_title", "_description",
-        "_pending_stat_mark",  # (kind, kwargs) when mark_* called before .encode()
+        "_pending_stat_mark",  # _PendingMark when mark_* called before .encode()
         "_position",           # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
         "_axis_x", "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
     )
@@ -241,7 +241,7 @@ class Chart:
         self._height = height
         self._title = title
         self._description = description
-        self._pending_stat_mark: Optional[tuple] = None  # (kind, kwargs)
+        self._pending_stat_mark: Optional[_PendingMark] = None
         self._position = None
         self._axis_x: Optional[bool] = None
         self._axis_y: Optional[bool] = None
@@ -285,7 +285,9 @@ class Chart:
         """
         if self._pending_stat_mark is None:
             return self
-        kind, kwargs, desugar_fn = self._pending_stat_mark
+        kind = self._pending_stat_mark.kind
+        kwargs = self._pending_stat_mark.kwargs
+        desugar_fn = self._pending_stat_mark.desugar_fn
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         x_field = (
@@ -379,7 +381,7 @@ class Chart:
                     new._data = data_transform(new._data)
             except ImportError:
                 pass
-        new._pending_stat_mark = (name, dict(kwargs), desugar_fn)
+        new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn)
         new._position = position
         return new
 
