@@ -57,7 +57,6 @@ impl TimeScale {
         self.time_ticks(count)
     }
 
-    /// Pixel-range pair `[lo, hi]` of the underlying scale.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
         self.0.range
     }

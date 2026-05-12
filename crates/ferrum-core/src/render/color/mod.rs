@@ -1,7 +1,6 @@
 //! Color subsystem: categorical (8a) + continuous (8b).
 pub(crate) mod categorical;
 pub(crate) mod continuous;
-pub(crate) mod scheme;
 
 // Re-export the public-ish API that 8a callers use.
 // Glob re-export preserves all 8a public items (Color, ColorParseError,
@@ -9,4 +8,3 @@ pub(crate) mod scheme;
 // requiring enumeration.
 pub use categorical::*;
 pub use continuous::{ContinuousScheme, NamedContinuous};
-pub use scheme::Scheme;

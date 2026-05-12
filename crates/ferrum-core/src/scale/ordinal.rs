@@ -103,7 +103,6 @@ impl OrdinalScale {
         ((r_hi - r_lo) / self.0.domain.len() as f64).abs()
     }
 
-    /// Pixel-range endpoints `[lo, hi]` of the underlying scale.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
         [
             *self.0.range.first().unwrap(),
