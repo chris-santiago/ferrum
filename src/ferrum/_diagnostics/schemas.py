@@ -101,6 +101,10 @@ SCHEMA_SHAP_VALUES = pl.Schema({
     "shap_value": pl.Float64,
     "feature_value": pl.Float64,
     "feature_value_normalized": pl.Float64,
+    # class_label is "target" on regression sources, the positive-class
+    # name on binary classifiers, and one row per class on multi-class
+    # classifiers. Added 2026-05-12 (P3.11, D15 — multi-class SHAP overlay).
+    "class_label": pl.Utf8,
 })
 
 # Phase 10e — model selection / CV curves

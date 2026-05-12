@@ -202,7 +202,14 @@ ModelSource(model, X, y=None, *, feature_names=None, class_names=None,
 - `.cumulative_gain()` — `percent_population`, `gain`, `class`
 - `.lift_curve()` — `percent_population`, `lift`, `class`
 - `.importances(*, method="builtin", n_repeats=30, scoring=None, random_state=None)` — `feature`, `importance`, `std`, `rank`
-- `.shap_values(*, background=None, max_evals=500)` — `sample_id`, `feature`, `shap_value`, `feature_value`, `feature_value_normalized`
+- `.shap_values(*, background=None, max_evals=500)` — `sample_id`, `feature`, `shap_value`, `feature_value`, `feature_value_normalized`, `class_label`
+
+> **2026-05-12 (P3.11, D15):** `shap_values()` always includes a `class_label`
+> column. Regression sources emit `class_label="target"` on every row.
+> Binary classifiers emit the positive-class name (single value, schema
+> unchanged in shape). Multi-class classifiers emit one row per
+> `(sample, feature, class)` — total height `n_samples * n_features * n_classes`.
+> See `mark_shap_*(per_class=...)` for the chart-side overlay hook.
 - `.partial_dependence(features, *, grid_resolution=100, kind="average")` — `feature`, `feature_value`, `pd_value`, `sample_id` (if `kind="individual"`)
 - `.silhouette(k)` — `sample_id`, `cluster`, `silhouette_value`
 - `.embeddings(*, method="umap", n_components=2, **method_kwargs)` — `dim_0`, `dim_1`, (`dim_2`), `label`

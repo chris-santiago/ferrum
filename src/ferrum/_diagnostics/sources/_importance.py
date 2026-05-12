@@ -130,11 +130,19 @@ class FeatureImportanceMixin:
         background: Any = None,
         max_evals: int = 500,
     ) -> pl.DataFrame:
-        """Long-form SHAP values per (sample, feature).
+        """Long-form SHAP values per (sample, feature, class).
 
         Returns a DataFrame with ``sample_id``, ``feature``, ``shap_value``,
-        ``feature_value``, ``feature_value_normalized``. The explainer is
-        auto-picked by model capability:
+        ``feature_value``, ``feature_value_normalized``, ``class_label``.
+
+        - Regression: ``class_label`` is the constant ``"target"`` on every row.
+        - Binary classifiers: ``class_label`` is the positive-class name on
+          every row; SHAP values are for the positive class.
+        - Multi-class classifiers: one row per (sample, feature, class);
+          ``class_label`` carries the class name. The result has
+          ``n_samples * n_features * n_classes`` rows total.
+
+        Explainer is auto-picked by model capability:
 
         - ``coef_``: ``shap.LinearExplainer`` (deterministic, fast).
         - ``feature_importances_``: ``shap.TreeExplainer`` (deterministic
@@ -142,10 +150,6 @@ class FeatureImportanceMixin:
         - otherwise: ``shap.KernelExplainer`` (model-agnostic; uses the
           first ``min(50, N)`` rows of X as the background unless an
           explicit ``background`` array is passed).
-
-        For multi-class classifiers the underlying ``shap_values`` returns
-        a list of arrays — Phase 10d uses class 1 for binary and class 0
-        otherwise. Multi-class SHAP overlay is a Phase 10h follow-up.
         """
         key = self._cache_key(
             "shap_values",
@@ -169,14 +173,9 @@ class FeatureImportanceMixin:
             )
             explainer = shap.KernelExplainer(self._model.predict, bg)
 
-        sv = explainer.shap_values(X_np)
-        if isinstance(sv, list):
-            sv = sv[1] if len(sv) == 2 else sv[0]
-        sv = np.asarray(sv, dtype=np.float64)
-        # Some shap versions return a 3D array (n_samples, n_features, n_classes)
-        # for multi-class TreeExplainer; collapse to the positive-class slice.
-        if sv.ndim == 3:
-            sv = sv[..., 1] if sv.shape[2] == 2 else sv[..., 0]
+        sv_raw = explainer.shap_values(X_np)
+        sv_by_class = _split_shap_by_class(sv_raw, self._model)
+        class_labels = _shap_class_labels(self._model, len(sv_by_class))
 
         f_mean = X_np.mean(axis=0)
         f_std_raw = X_np.std(axis=0)
@@ -189,10 +188,12 @@ class FeatureImportanceMixin:
             {
                 "sample_id": int(s),
                 "feature": str(self._feature_names[f]),
-                "shap_value": float(sv[s, f]),
+                "shap_value": float(sv_by_class[c][s, f]),
                 "feature_value": float(X_np[s, f]),
                 "feature_value_normalized": float(f_norm[s, f]),
+                "class_label": class_labels[c],
             }
+            for c in range(len(sv_by_class))
             for s in range(n_samples)
             for f in range(n_features)
         ]
@@ -299,3 +300,52 @@ class FeatureImportanceMixin:
                 )
         return rows
 
+
+def _split_shap_by_class(sv_raw: Any, model: Any) -> list[np.ndarray]:
+    """Normalize SHAP output into a list of ``(n_samples, n_features)`` arrays,
+    one per class.
+
+    Upstream ``shap`` returns one of three shapes:
+
+    - ``np.ndarray`` of shape ``(n_samples, n_features)`` — single class
+      (regression, or a collapsed-to-positive binary).
+    - ``list[np.ndarray]`` of K arrays each ``(n_samples, n_features)`` —
+      one per class (older multi-class TreeExplainer / KernelExplainer).
+    - ``np.ndarray`` of shape ``(n_samples, n_features, K)`` — newer
+      multi-class TreeExplainer.
+
+    For binary classifiers the per-class outputs are equal-and-opposite
+    in sign (SHAP sums to zero across classes), so binary models route
+    through the positive-class slice as a single-element list for schema
+    uniformity.
+    """
+    is_binary = (
+        hasattr(model, "classes_") and len(model.classes_) == 2
+    )
+    if isinstance(sv_raw, list):
+        if is_binary:
+            return [np.asarray(sv_raw[1], dtype=np.float64)]
+        return [np.asarray(c, dtype=np.float64) for c in sv_raw]
+    arr = np.asarray(sv_raw, dtype=np.float64)
+    if arr.ndim == 3:
+        if is_binary:
+            return [arr[..., 1]]
+        return [arr[..., c] for c in range(arr.shape[2])]
+    return [arr]
+
+
+def _shap_class_labels(model: Any, n_arrays: int) -> list[str]:
+    """Return one class-label string per SHAP-values array.
+
+    Regression / non-classifier models without a ``classes_`` attribute
+    return ``["target"]``. Binary classifiers collapse to a single
+    positive-class label. Multi-class classifiers return one label per
+    class in model-class order.
+    """
+    if not hasattr(model, "classes_"):
+        return ["target"] * n_arrays
+    classes = list(model.classes_)
+    if n_arrays == 1:
+        # Binary classifier collapsed to positive class.
+        return [str(classes[-1])]
+    return [str(c) for c in classes[:n_arrays]]

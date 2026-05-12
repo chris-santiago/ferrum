@@ -176,9 +176,31 @@ def test_shap_values_schema():
     assert set(sv.columns) == {
         "sample_id", "feature", "shap_value",
         "feature_value", "feature_value_normalized",
+        "class_label",
     }
     assert sv["feature"].n_unique() == 5
+    # Regression: class_label is "target" on every row.
+    assert sv["class_label"].unique().to_list() == ["target"]
     assert sv.height == sv["sample_id"].n_unique() * sv["feature"].n_unique()
+
+
+def test_shap_values_multiclass_schema():
+    """Multi-class classifiers emit one row per (sample, feature, class)."""
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    sv = source.shap_values()
+    assert set(sv.columns) == {
+        "sample_id", "feature", "shap_value",
+        "feature_value", "feature_value_normalized",
+        "class_label",
+    }
+    n_features = sv["feature"].n_unique()
+    n_samples = sv["sample_id"].n_unique()
+    n_classes = sv["class_label"].n_unique()
+    assert n_classes == 3
+    assert sv.height == n_samples * n_features * n_classes
 
 
 def test_shap_values_caches():
