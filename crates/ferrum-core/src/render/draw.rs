@@ -169,20 +169,13 @@ pub fn color_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpe
 }
 
 pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
-    match mark {
-        Mark::Point => super::marks::point::draw(ctx, out),
-        Mark::Line  => super::marks::line::draw(ctx, out),
-        Mark::Area  => super::marks::area::draw(ctx, out),
-        Mark::Bar   => super::marks::bar::draw(ctx, out),
-        Mark::Rect  => super::marks::rect::draw(ctx, out),
-        Mark::Rule  => super::marks::rule::draw(ctx, out),
-        Mark::Text  => super::marks::text::draw(ctx, out),
-        Mark::Tick  => super::marks::tick::draw(ctx, out),
-        Mark::Polygon => super::marks::polygon::draw(ctx, out),
-        Mark::Image => super::marks::image::draw(ctx, out),
-        Mark::Ribbon => super::marks::ribbon::draw(ctx, out),
-        Mark::Segment => super::marks::segment::draw(ctx, out),
+    use crate::spec::mark::for_each_mark;
+    macro_rules! arm {
+        ($($V:ident => $m:ident,)*) => {
+            match mark { $( Mark::$V => super::marks::$m::draw(ctx, out), )* }
+        };
     }
+    for_each_mark!(arm)
 }
 
 #[cfg(test)]

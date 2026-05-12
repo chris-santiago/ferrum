@@ -19,22 +19,40 @@ pub enum Mark {
     Segment,
 }
 
+/// Single source of truth for the 12 primitive `Mark` variants. Mirrors the
+/// `for_each_transform!` pattern in `transform/core.rs` — every site that
+/// enumerates marks (as_str, from_str, render::draw::dispatch_mark) drives
+/// off this table. The lowercase form is encoded as the second column so
+/// it doubles as both the serde tag and the `render::marks` submodule name.
+#[macro_export]
+macro_rules! for_each_mark {
+    ($mac:ident) => {
+        $mac! {
+            Point   => point,
+            Line    => line,
+            Bar     => bar,
+            Area    => area,
+            Rule    => rule,
+            Text    => text,
+            Tick    => tick,
+            Rect    => rect,
+            Polygon => polygon,
+            Image   => image,
+            Ribbon  => ribbon,
+            Segment => segment,
+        }
+    };
+}
+pub use for_each_mark;
+
 impl Mark {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Mark::Point => "point",
-            Mark::Line => "line",
-            Mark::Bar => "bar",
-            Mark::Area => "area",
-            Mark::Rule => "rule",
-            Mark::Text => "text",
-            Mark::Tick => "tick",
-            Mark::Rect => "rect",
-            Mark::Polygon => "polygon",
-            Mark::Image => "image",
-            Mark::Ribbon => "ribbon",
-            Mark::Segment => "segment",
+        macro_rules! arm {
+            ($($V:ident => $name:ident,)*) => {
+                match self { $( Mark::$V => stringify!($name), )* }
+            };
         }
+        for_each_mark!(arm)
     }
 }
 
@@ -62,21 +80,15 @@ impl std::error::Error for ParseMarkError {}
 impl FromStr for Mark {
     type Err = ParseMarkError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "point" => Ok(Mark::Point),
-            "line" => Ok(Mark::Line),
-            "bar" => Ok(Mark::Bar),
-            "area" => Ok(Mark::Area),
-            "rule" => Ok(Mark::Rule),
-            "text" => Ok(Mark::Text),
-            "tick" => Ok(Mark::Tick),
-            "rect" => Ok(Mark::Rect),
-            "polygon" => Ok(Mark::Polygon),
-            "image" => Ok(Mark::Image),
-            "ribbon" => Ok(Mark::Ribbon),
-            "segment" => Ok(Mark::Segment),
-            other => Err(ParseMarkError(other.to_string())),
+        macro_rules! arm {
+            ($($V:ident => $name:ident,)*) => {
+                match s {
+                    $( s if s == stringify!($name) => Ok(Mark::$V), )*
+                    other => Err(ParseMarkError(other.to_string())),
+                }
+            };
         }
+        for_each_mark!(arm)
     }
 }
 
