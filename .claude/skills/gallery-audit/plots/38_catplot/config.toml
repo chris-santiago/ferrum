@@ -1,0 +1,7 @@
+plot_type = "Categorical strip plot (catplot default)"
+dataset = "seaborn.load_dataset('tips'), x='day', y='total_bill'"
+width = 640
+height = 480
+panels = ["ferrum", "seaborn"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.catplot(kind='strip') is the default kind; rows 09/12 already exercise kind=box/bar."

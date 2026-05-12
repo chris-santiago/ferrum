@@ -1,0 +1,7 @@
+plot_type = "Cook's distance (influence diagnostic)"
+dataset = "load_diabetes (regression), LinearRegression, 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.CooksDistanceVisualizer available; studentized residuals vs leverage with Cook's threshold."

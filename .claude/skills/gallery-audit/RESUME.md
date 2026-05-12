@@ -6,9 +6,9 @@ be wired up.
 
 ## How to read this file
 
-For each of the 12 rows, the status is one of:
+For each row, the status is one of:
 
-- **WIRED** — `config.toml` + all four panel scripts exist; row runs end-to-end.
+- **WIRED** — `config.toml` + all panel scripts exist; row runs end-to-end.
 - **READY** — ferrum API exists; comparator panels not yet written. Pick up here.
 - **PARTIAL** — ferrum API exists but a default may be missing; the audit itself
   will surface this — write the panels and run.
@@ -38,6 +38,28 @@ the TODO.md as the recipe.
 | 14_validation_curve | Validation curve | **WIRED** | 3 panels rendering. Added after Task 28 (`ferrum.validation_curve_chart`, commit `cf6858a`). |
 | 15_cv_scores | Per-fold CV scores | **WIRED** | 2 panels (ferrum + yellowbrick — no sklearn equivalent). Added after Task 28 (`ferrum.cv_scores_chart`). |
 | 16_alpha_selection | Alpha selection | **WIRED** | 2 panels (ferrum + yellowbrick using RidgeCV; no sklearn equivalent). Added after Task 28 (`ferrum.alpha_selection_chart`). |
+| 17_class_prediction_error | Class prediction error | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 18_decision_boundary | Decision boundary | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 19_discrimination_threshold | Discrimination threshold | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 20_gain | Gain curve | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 21_intercluster_distance | Intercluster distance | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 22_lift | Lift curve | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 23_parallel_coordinates | Parallel coordinates | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 24_pca_scree | PCA scree | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 25_rank | Rank 1D/2D | **WIRED** | 2 panels rendering (ferrum + yellowbrick). |
+| 26_shap | SHAP beeswarm | **WIRED** | 2 panels rendering (ferrum + shap). |
+| 27_residplot | Residplot (EDA) | **WIRED** | 2 panels rendering (ferrum + seaborn). |
+| 28_pairplot | Pair plot | **WIRED** | 2 panels rendering (ferrum + seaborn). |
+| 29_clustermap | Cluster heatmap | **WIRED** | 2 panels rendering (ferrum + seaborn). |
+| 30_jointplot | Joint plot | **WIRED** | 2 panels rendering (ferrum + seaborn). |
+| 31_cluster_diagnostics | Cluster diagnostics | **WIRED** | 2 panels rendering (ferrum + yellowbrick). Elbow + silhouette scoring. |
+| 32_silhouette | Per-sample silhouette | **WIRED** | 2 panels (ferrum + yellowbrick). `SilhouetteVisualizer` — per-sample horizontal bars by cluster. |
+| 33_prediction_error | Prediction error | **WIRED** | 3 panels (ferrum + sklearn + yellowbrick). `PredictionErrorVisualizer` — actual-vs-predicted scatter. |
+| 34_cooks_distance | Cook's distance | **WIRED** | 2 panels (ferrum + yellowbrick). `CooksDistanceVisualizer` — influence diagnostic. |
+| 35_manifold | Manifold embedding | **WIRED** | 2 panels (ferrum + yellowbrick). `ManifoldVisualizer` with `method="tsne"`. |
+| 36_classification_report | Classification report | **WIRED** | 2 panels (ferrum + yellowbrick). Precision/recall/F1 per-class heatmap. |
+| 37_class_balance | Class balance | **WIRED** | 2 panels (ferrum + yellowbrick). Per-class label count bars. |
+| 38_catplot | Categorical strip | **WIRED** | 2 panels (ferrum + seaborn). Default `kind="strip"` (box/bar covered by rows 09/12). |
 
 ## Resume protocol
 
@@ -63,10 +85,9 @@ When a new ferrum visualizer lands (or when the user wants to wire up a READY ro
 5. Run the audit. The verdict will tell you whether your new default matches
    what the canonical libraries ship.
 
-## Adding new rows beyond 12
+## Adding new rows
 
-If a new plot type becomes worth comparing (e.g. partial dependence, SHAP
-summary, dendrogram):
+If a new plot type becomes worth comparing:
 
 1. Pick the next free `NN_<slug>/` directory under `plots/`.
 2. Add `config.toml` + `TODO.md` following any existing row as the template.

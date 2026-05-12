@@ -1,0 +1,7 @@
+plot_type = "Prediction error (actual vs predicted)"
+dataset = "load_diabetes (regression), LinearRegression, 30% test split, random_state=0"
+width = 640
+height = 480
+panels = ["ferrum", "sklearn", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.PredictionErrorVisualizer available; scatter of y_true vs y_pred with identity line."

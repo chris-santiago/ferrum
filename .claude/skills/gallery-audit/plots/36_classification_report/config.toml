@@ -1,0 +1,7 @@
+plot_type = "Classification report heatmap"
+dataset = "load_iris, LogisticRegression(max_iter=500), 30% test split, random_state=0"
+width = 600
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.ClassificationReportVisualizer available; precision/recall/F1 per-class heatmap."

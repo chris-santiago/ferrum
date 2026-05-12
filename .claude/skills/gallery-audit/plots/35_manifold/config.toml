@@ -1,0 +1,7 @@
+plot_type = "Manifold embedding scatter (t-SNE)"
+dataset = "load_iris, KMeans(n_clusters=3, random_state=0), method=tsne"
+width = 640
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.ManifoldVisualizer available; default method=umap, using tsne here to avoid optional umap-learn dep."

@@ -1,0 +1,7 @@
+plot_type = "Class balance (target distribution)"
+dataset = "load_breast_cancer target labels"
+width = 600
+height = 400
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.ClassBalanceVisualizer available; bar chart of per-class label counts."

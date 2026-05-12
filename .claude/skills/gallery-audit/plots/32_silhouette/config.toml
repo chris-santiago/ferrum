@@ -1,0 +1,7 @@
+plot_type = "Per-sample silhouette plot"
+dataset = "make_blobs(n_samples=300, centers=4, random_state=0), KMeans(n_clusters=4)"
+width = 640
+height = 480
+panels = ["ferrum", "yellowbrick"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.SilhouetteVisualizer available; horizontal bar per sample, coloured by cluster."
