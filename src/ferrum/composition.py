@@ -851,9 +851,12 @@ class ClusterMapChart:
             ) from e
         d = self.dendrogram_ratio
         h = 1.0 - d
-        # Compositor ignores row_ratios/col_ratios; resize each component so
-        # the heatmap fills (h × h) of the grid and dendrograms occupy the
-        # remaining (d) on the row/col axis they sit beside.
+        # Pre-resize each component so the heatmap fills (h × h) of the grid
+        # and dendrograms occupy the remaining (d) on the row/col axis they
+        # sit beside. Post-F20 the compositor honors row_ratios/col_ratios,
+        # but we still pre-resize because the dendrogram tree topology depends
+        # on the panel viewport at SVG-emit time — letting the compositor
+        # rescale after-the-fact would distort branch positions.
         hm_w = self.heatmap._width or 600.0
         hm_h = self.heatmap._height or 400.0
         dendro_w = hm_w * d / h
