@@ -300,7 +300,7 @@ pub fn resolve_scales_with_outputs(
     // resolved range and produce non-finite pixels downstream.
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
-    let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range)?;
+    let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
 
     // Stack-aware y-axis: when a Stack position adjustment is in play, the
     // y values rendered by mark drawers are the *cumulative* values from
@@ -324,7 +324,7 @@ pub fn resolve_scales_with_outputs(
         }
         None => primary_batch,
     };
-    let y = build_axis_scale("y", y_enc, y2_enc, y_batch, transform_outputs, y_pixel_range)?;
+    let y = build_axis_scale("y", y_enc, y2_enc, y_batch, transform_outputs, y_pixel_range, spec)?;
 
     // Color/size/shape/opacity scales are primary-batch only. These channels
     // do not currently participate in cross-layer scale unification: each is
@@ -499,6 +499,7 @@ fn build_axis_scale(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     pixel_range: (f64, f64),
+    spec: &ChartSpec,
 ) -> Result<ScaleKind, RenderError> {
     // Phase 8b: composite-mark layers (boxplot/errorbar/errorband/etc.) read
     // from named transform outputs whose schemas differ from `__final__`. The
@@ -538,15 +539,26 @@ fn build_axis_scale(
 
     // Numeric / temporal extent.
     //
-    // Back-compat rule: if `primary_batch` contains `enc.field`, the extent is
-    // computed from `primary_batch` alone — single-batch and faceted-panel
-    // semantics are preserved (panels keep their per-panel-filtered domain).
-    //
-    // Phase 8b composite-mark rule: when `primary_batch` does NOT contain the
-    // field (e.g. boxplot's `lower_whisker` lives in the `box` named output,
-    // not in `__final__`), union the field's extent across every batch in
-    // `transform_outputs` that does contain it. The same rule applies
-    // independently to the paired (x2/y2) field.
+    // Extent rule:
+    //   - If `primary_batch` contains the field, use it as the starting
+    //     extent (preserves single-batch / faceted-panel semantics —
+    //     `FINAL_OUTPUT_KEY` is NOT unioned, so per-panel scales remain
+    //     independent when nothing else references a named output).
+    //   - Additionally union the field's extent across every named output
+    //     that some layer references via `data_source`. Required when a
+    //     layer's `data_source` points at a named transform whose output
+    //     extends past the primary batch — e.g. `ReferenceLine` for the
+    //     y=x diagonal in `calibration_chart`, whose endpoints [0, 1] must
+    //     be reachable even when the primary calibration curve sits inside
+    //     (0.05, 0.95).
+    //   - When the field is absent from `primary_batch`, fall back to
+    //     unioning across all named outputs that contain it (Phase 8b
+    //     composite-mark rule — e.g. boxplot whisker fields living in the
+    //     `box` named output).
+    let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
+        Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
+        None => std::collections::HashSet::new(),
+    };
     let combined_min_max = || -> Result<(f64, f64), String> {
         let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
         let mut accumulate = |c: &dyn Array| -> Result<(), String> {
@@ -560,11 +572,16 @@ fn build_axis_scale(
             Ok(())
         };
 
-        // Primary field.
+        let primary_has = primary_batch.column_by_name(&enc.field).is_some();
         if let Some(c) = primary_batch.column_by_name(&enc.field) {
             accumulate(c.as_ref())?;
-        } else {
-            for batch in transform_outputs.values() {
+        }
+        // Union across named outputs referenced by at least one layer's
+        // data_source. When primary lacks the field entirely, fall back to
+        // unioning across every named output that contains it (Phase 8b).
+        for (key, batch) in transform_outputs.iter() {
+            let key_is_referenced = layer_data_sources.contains(key.as_str());
+            if !primary_has || key_is_referenced {
                 if let Some(c) = batch.column_by_name(&enc.field) {
                     accumulate(c.as_ref())?;
                 }
@@ -572,10 +589,13 @@ fn build_axis_scale(
         }
         // Paired (x2/y2) field — same lookup discipline.
         if let Some(p) = paired_enc {
+            let paired_primary_has = primary_batch.column_by_name(&p.field).is_some();
             if let Some(c) = primary_batch.column_by_name(&p.field) {
                 accumulate(c.as_ref())?;
-            } else {
-                for batch in transform_outputs.values() {
+            }
+            for (key, batch) in transform_outputs.iter() {
+                let key_is_referenced = layer_data_sources.contains(key.as_str());
+                if !paired_primary_has || key_is_referenced {
                     if let Some(c) = batch.column_by_name(&p.field) {
                         accumulate(c.as_ref())?;
                     }
@@ -1056,6 +1076,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -1140,6 +1161,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1193,6 +1215,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -1216,6 +1239,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -1239,6 +1263,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -1323,6 +1348,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1377,6 +1403,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1431,6 +1458,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1471,6 +1499,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

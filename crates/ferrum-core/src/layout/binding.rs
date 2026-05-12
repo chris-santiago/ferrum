@@ -106,6 +106,8 @@ pub fn compute_layout(
             tick_labels: y_tick_labels,
             label_angle_override: None,
         },
+        show_x: true,
+        show_y: true,
     };
 
     let groups: Vec<FacetGroup> = facet_groups
@@ -133,7 +135,7 @@ pub fn compute_layout(
 
     let metrics = HeuristicMetrics::default();
     let result = compute_layout_internal(
-        spec, &theme, viewport, &axes, &groups, &entries, None, &metrics,
+        spec, &theme, viewport, &axes, &groups, &entries, None, None, &metrics,
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 

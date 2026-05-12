@@ -186,6 +186,7 @@ pub fn render_svg(
         &prep.facet_groups,
         &prep.legend_entries,
         prep.legend_title.clone(),
+        prep.colorbar.as_ref(),
         &metrics,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
@@ -456,6 +457,7 @@ mod orchestration_tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -550,6 +552,7 @@ mod orchestration_tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec,
@@ -602,6 +605,7 @@ mod png_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -634,6 +638,7 @@ mod png_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -712,6 +717,7 @@ mod golden_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -761,6 +767,7 @@ mod golden_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -794,6 +801,7 @@ mod golden_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -826,6 +834,7 @@ mod golden_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -858,6 +867,7 @@ mod golden_tests {
  mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -898,6 +908,7 @@ mod golden_tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

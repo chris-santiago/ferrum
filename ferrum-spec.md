@@ -660,6 +660,32 @@ Legend(title=None, *, orient="right", direction="vertical", type=None,
 
 Set `legend=None` on any channel to suppress the legend for that channel.
 
+#### `Chart.axis()` — spec-level axis suppression (added 2026-05-11)
+
+```
+Chart.axis(*, x: bool | None = None,
+              y: bool | None = None,
+              show: bool | None = None) -> Chart
+```
+
+Hides (or shows) the chart's x/y axis line, ticks, tick labels, and axis
+title at layout time. Returns a new `Chart`. Mutually exclusive with
+per-channel `Axis(...)` configuration on individual encodings (the per-axis
+`show=False` always wins).
+
+- `x=False` / `y=False` hides the respective axis.
+- `show=False` is shorthand for `axis(x=False, y=False)`.
+- Plot-area pixel rect is unchanged — gutters reserved for axis decorations
+  stay reserved, so compound views can author each child chart at a fixed
+  size and compose with a stable grid.
+
+Used internally by `clustermap()` (dendrogram panels) and `JointChart`
+(marginal panels). Replaces an earlier post-render SVG-regex stripper which
+was theme-color-fragile.
+
+Serializes to two optional booleans on `ChartSpec`: `axis_x: bool | None`,
+`axis_y: bool | None`. Both default to `None` (visible).
+
 ---
 
 ### 3.8 Coordinate Systems

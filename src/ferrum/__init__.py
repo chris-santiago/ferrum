@@ -27,6 +27,7 @@ from ferrum._core import (
     QQ,
     QuantileScale,
     Raster,
+    ReferenceLine,
     Reorder,
     Robust,
     Smooth,
@@ -137,7 +138,7 @@ __all__ = [
     # Phase 1-7 core
     "Aggregate", "AggregateOp", "Bin", "Bin2D", "BoxStats", "ChartSpec", "Contour", "EncodingSpec", "ErrorExtent", "Hex", "Kde", "Kde2D",
     "Glm", "LetterValue", "LinearScale", "Linkage", "Logistic", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",
-    "Outliers", "QQ", "QuantileScale", "Raster", "Reorder", "Robust", "ThresholdScale", "Smooth", "Summary", "Swarm", "Unpivot", "Violin",
+    "Outliers", "QQ", "QuantileScale", "Raster", "ReferenceLine", "Reorder", "Robust", "ThresholdScale", "Smooth", "Summary", "Swarm", "Unpivot", "Violin",
     "compute_layout", "process_batch", "render_png", "render_svg",
     "compose_svg_horizontal", "compose_svg_vertical", "compose_svg_grid",
     # Phase 8a

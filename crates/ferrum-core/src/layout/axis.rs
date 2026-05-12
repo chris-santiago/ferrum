@@ -28,6 +28,13 @@ pub struct AxisInput {
 pub struct AxesInput {
     pub x: AxisInput,
     pub y: AxisInput,
+    /// When false, the x axis line + ticks + labels + title are suppressed
+    /// at layout time. Used by `ChartSpec.axis_x = Some(false)` (i.e.
+    /// `Chart.axis(x=False)`) on clustermap dendrogram panels and JointChart
+    /// marginal panels. Default `true`.
+    pub show_x: bool,
+    /// Y-axis variant of `show_x`. Default `true`.
+    pub show_y: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

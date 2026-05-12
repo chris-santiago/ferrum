@@ -504,6 +504,7 @@ def clustermap(
     col_dendro = Chart(data).transform(col_link)
     col_dendro._mark = None
     col_dendro._layers = [col_dendro_layer]
+    col_dendro = col_dendro.axis(show=False)
 
     # Row dendrogram (left): reads row_link_segments, rotated via CoordFlip.
     from ferrum import CoordFlip
@@ -517,7 +518,7 @@ def clustermap(
     row_dendro = Chart(data).transform(row_link)
     row_dendro._mark = None
     row_dendro._layers = [row_dendro_layer]
-    row_dendro = row_dendro.coord(CoordFlip())
+    row_dendro = row_dendro.coord(CoordFlip()).axis(show=False)
 
     # Dendrogram panels should not show gridlines behind the tree branches.
     # Build a no-grid base theme; if the user supplied a theme, merge on top.

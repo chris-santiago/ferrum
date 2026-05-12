@@ -6,7 +6,7 @@
 //! Chart.properties). Coordinate-system rebinding within the SVG body is out
 //! of scope for Phase 9.
 
-use crate::render::compositor::{parse_svg_root, strip_font_defs, CompositorError};
+use crate::render::compositor::{parse_svg_root, strip_font_defs, uniquify_clip_ids, CompositorError};
 use crate::render::svg::fmt_f;
 
 /// An owned representation of a parsed SVG cell, used so we can collect
@@ -99,13 +99,13 @@ pub fn compose_svg_grid(
                     fmt_f(x_offset),
                     fmt_f(y_offset),
                 ));
-                if !first_emitted {
-                    out.push_str(&cell.body);
+                let body = if !first_emitted {
                     first_emitted = true;
+                    uniquify_clip_ids(&cell.body, idx)
                 } else {
-                    let stripped = strip_font_defs(&cell.body);
-                    out.push_str(&stripped);
-                }
+                    uniquify_clip_ids(&strip_font_defs(&cell.body), idx)
+                };
+                out.push_str(&body);
                 out.push_str("</g>");
                 let _ = (cell.width, cell.height); // suppress dead-code warning
             }

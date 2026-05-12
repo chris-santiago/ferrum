@@ -107,6 +107,7 @@ mod tests {
             coord: None, mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 

@@ -86,6 +86,7 @@ class Chart:
         "_width", "_height", "_title", "_description",
         "_pending_stat_mark",  # (kind, kwargs) when mark_* called before .encode()
         "_position",           # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
+        "_axis_x", "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
     )
 
     def __init__(
@@ -112,6 +113,8 @@ class Chart:
         self._description = description
         self._pending_stat_mark: Optional[tuple] = None  # (kind, kwargs)
         self._position = None
+        self._axis_x: Optional[bool] = None
+        self._axis_y: Optional[bool] = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -130,6 +133,8 @@ class Chart:
         new._description = self._description
         new._pending_stat_mark = self._pending_stat_mark
         new._position = self._position
+        new._axis_x = self._axis_x
+        new._axis_y = self._axis_y
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -3857,6 +3862,70 @@ class Chart:
         new._theme = theme
         return new
 
+    def axis(
+        self,
+        *,
+        x: Optional[bool] = None,
+        y: Optional[bool] = None,
+        show: Optional[bool] = None,
+    ) -> "Chart":
+        """Suppress (or restore) the chart's x/y axis decorations.
+
+        Spec-level axis suppression — when ``x=False`` (or ``y=False``), the
+        corresponding axis line, ticks, tick labels, and axis title are
+        omitted at layout time. The plot area's pixel rect is unchanged
+        (gutters reserved for axis decorations are preserved), so this
+        method is intended for sub-charts whose axes are shared with a
+        neighbouring chart in a compound view: clustermap dendrograms,
+        JointChart marginals, RepeatChart off-diagonal panels.
+
+        Parameters
+        ----------
+        x : bool, optional
+            ``False`` hides the x axis; ``True`` shows it; ``None`` leaves
+            the current setting (default visible).
+        y : bool, optional
+            ``False`` hides the y axis; ``True`` shows it; ``None`` leaves
+            the current setting (default visible).
+        show : bool, optional
+            Shorthand for ``axis(x=show, y=show)``. Mutually exclusive with
+            per-axis ``x``/``y`` arguments.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the requested axis-visibility settings.
+
+        Raises
+        ------
+        ValueError
+            If ``show`` is combined with ``x`` or ``y``.
+
+        Examples
+        --------
+        Hide both axes (e.g. for a dendrogram panel):
+
+        >>> chart.axis(show=False)
+
+        Hide just the x axis (top marginal of a JointChart):
+
+        >>> chart.axis(x=False)
+        """
+        if show is not None and (x is not None or y is not None):
+            raise ValueError(
+                "Chart.axis: pass either show=… OR x=/y=, not both"
+            )
+        new = self._clone()
+        if show is not None:
+            new._axis_x = show
+            new._axis_y = show
+        else:
+            if x is not None:
+                new._axis_x = x
+            if y is not None:
+                new._axis_y = y
+        return new
+
     def coord(self, coord: Any) -> "Chart":
         """Set the coordinate system for this chart.
 
@@ -4089,6 +4158,10 @@ class Chart:
             kw["position"] = resolved._position.to_spec_dict()
         if resolved._title is not None:
             kw["title"] = resolved._title
+        if resolved._axis_x is not None:
+            kw["axis_x"] = resolved._axis_x
+        if resolved._axis_y is not None:
+            kw["axis_y"] = resolved._axis_y
         return ChartSpec(**kw)
 
     def _build_spec(self):

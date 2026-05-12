@@ -70,6 +70,15 @@ pub struct ChartSpec {
     pub position: Option<crate::spec::position::PositionAdjust>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// When `Some(false)`, the x axis (line, ticks, tick labels, title) is
+    /// suppressed entirely — used by clustermap dendrogram panels and
+    /// JointChart marginal panels to keep their cells label-free. `None` /
+    /// `Some(true)` both render the axis normally. Default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_x: Option<bool>,
+    /// Y-axis variant of `axis_x`. Same semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_y: Option<bool>,
 }
 
 #[pymethods]
@@ -87,6 +96,8 @@ impl ChartSpec {
         mark_style = None,                                    // NEW here
         position = None,                                      // Phase 9c
         title = None,                                         // Themes-T2.5: chart-level title
+        axis_x = None,                                        // spec-level axis suppression
+        axis_y = None,
     ))]
     fn new(
         mark: &str,
@@ -107,6 +118,8 @@ impl ChartSpec {
         mark_style: Option<&Bound<'_, PyAny>>,
         position: Option<&Bound<'_, PyAny>>,
         title: Option<String>,
+        axis_x: Option<bool>,
+        axis_y: Option<bool>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -192,7 +205,21 @@ impl ChartSpec {
             mark_style,
             position,
             title,
+            axis_x,
+            axis_y,
         })
+    }
+
+    /// Whether the x axis is hidden via spec-level suppression.
+    #[getter]
+    fn axis_x(&self) -> Option<bool> {
+        self.axis_x
+    }
+
+    /// Whether the y axis is hidden via spec-level suppression.
+    #[getter]
+    fn axis_y(&self) -> Option<bool> {
+        self.axis_y
     }
 
     /// Mark kind string (e.g. ``"point"``, ``"bar"``).
@@ -301,6 +328,8 @@ impl ChartSpec {
                     pyo3::Py::new(py, crate::transform::unpivot::PyUnpivot(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Reorder(_) =>
                     pyo3::Py::new(py, crate::transform::reorder::PyReorder(t.clone()))?.into_any(),
+                crate::transform::core::TransformSpec::ReferenceLine(_) =>
+                    pyo3::Py::new(py, crate::transform::reference_line::PyReferenceLine(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::LetterValue(_) =>
                     pyo3::Py::new(py, crate::transform::letter_value::PyLetterValue(t.clone()))?.into_any(),
                 crate::transform::core::TransformSpec::Logistic(_) =>
@@ -520,6 +549,10 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             out.push(r.0);
             continue;
         }
+        if let Ok(r) = item.extract::<crate::transform::reference_line::PyReferenceLine>() {
+            out.push(r.0);
+            continue;
+        }
         if let Ok(lv) = item.extract::<crate::transform::letter_value::PyLetterValue>() {
             out.push(lv.0);
             continue;
@@ -537,7 +570,7 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
             continue;
         }
         return Err(PyValueError::new_err(format!(
-            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | LetterValue | Logistic | Glm | Robust"
+            "transforms[{i}]: unrecognized transform; expected one of Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | ErrorExtent | BoxStats | Violin | Kde2D | Contour | QQ | Linkage | Raster | Hex | Swarm | Unpivot | Reorder | ReferenceLine | LetterValue | Logistic | Glm | Robust"
         )));
     }
     Ok(out)
@@ -569,6 +602,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -656,6 +690,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -685,6 +720,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -714,6 +750,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");

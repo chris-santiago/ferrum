@@ -134,6 +134,30 @@ pub(crate) fn strip_font_defs(body: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// clipPath id uniquification (cross-cell collision fix)
+// ---------------------------------------------------------------------------
+
+/// Rewrite every `id="ferrum-clip-N"` and `url(#ferrum-clip-N)` reference in
+/// a single child SVG body so each composited cell uses globally-unique IDs.
+///
+/// Each ferrum chart numbers its clipPaths per-panel starting at 0
+/// (`ferrum-clip-0`, `ferrum-clip-1`, ...). When multiple single-panel charts
+/// are composited (JointChart, ClusterMapChart, HConcat/VConcat) they all
+/// define `id="ferrum-clip-0"`, and the SVG renderer silently picks one
+/// definition — clipping every cell by the wrong rect. Prefixing each cell's
+/// IDs with `cellNN-` makes them disjoint while preserving each body's
+/// internal `id` ↔ `url(#id)` references.
+pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
+    let clip_prefix = format!("cell{cell_idx}-ferrum-clip-");
+    let colorbar_prefix = format!("cell{cell_idx}-ferrum-colorbar-");
+    body
+        .replace("id=\"ferrum-clip-", &format!("id=\"{clip_prefix}"))
+        .replace("url(#ferrum-clip-", &format!("url(#{clip_prefix}"))
+        .replace("id=\"ferrum-colorbar-", &format!("id=\"{colorbar_prefix}"))
+        .replace("url(#ferrum-colorbar-", &format!("url(#{colorbar_prefix}"))
+}
+
+// ---------------------------------------------------------------------------
 // Public compose functions
 // ---------------------------------------------------------------------------
 
@@ -181,16 +205,8 @@ pub fn compose_svg_horizontal(
             fmt_f(x_offset),
             fmt_f(y_offset),
         ));
-        // Strip the <defs><style>@font-face ...</style></defs> from all but the first.
-        // `body_owned` is declared before the borrow so it lives long enough.
-        let body_owned;
-        let body: &str = if i == 0 {
-            p.body
-        } else {
-            body_owned = strip_font_defs(p.body);
-            &body_owned
-        };
-        out.push_str(body);
+        let intermediate = if i == 0 { p.body.to_string() } else { strip_font_defs(p.body) };
+        out.push_str(&uniquify_clip_ids(&intermediate, i));
         out.push_str("</g>");
         x_offset += p.width + spacing;
     }
@@ -242,14 +258,8 @@ pub fn compose_svg_vertical(
             fmt_f(x_offset),
             fmt_f(y_offset),
         ));
-        let body_owned;
-        let body: &str = if i == 0 {
-            p.body
-        } else {
-            body_owned = strip_font_defs(p.body);
-            &body_owned
-        };
-        out.push_str(body);
+        let intermediate = if i == 0 { p.body.to_string() } else { strip_font_defs(p.body) };
+        out.push_str(&uniquify_clip_ids(&intermediate, i));
         out.push_str("</g>");
         y_offset += p.height + spacing;
     }

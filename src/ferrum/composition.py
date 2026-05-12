@@ -1,7 +1,6 @@
 """Multi-chart composition primitives (HConcat, VConcat, Joint, Repeat, ClusterMap)."""
 from __future__ import annotations
 
-import re
 from typing import List, Optional
 
 
@@ -11,15 +10,15 @@ from typing import List, Optional
 # Stripping these leaves only data marks (bars/lines/paths). Used by JointChart
 # and ClusterMapChart to clean up shrunken marginals/dendrograms where the
 # original axis labels would otherwise be tiny and overlap unreadably.
-_AXIS_LINE_RE = re.compile(r'<line\s[^/]*stroke="#888888"[^/]*/>')
-_TEXT_RE = re.compile(r'<text\s[^>]*>.*?</text>', re.DOTALL)
-
-
-def _strip_axis_decoration(svg: str) -> str:
-    """Remove axis lines, tick marks, and text from a chart SVG."""
-    svg = _AXIS_LINE_RE.sub('', svg)
-    svg = _TEXT_RE.sub('', svg)
-    return svg
+## (Removed) `_strip_axis_decoration` post-rendering regex.
+##
+## Earlier JointChart / ClusterMapChart relied on a regex pass to remove
+## axis lines and `<text>` elements from marginal/dendrogram SVGs after
+## render. That approach was fragile (theme-color-hardcoded, would also
+## strip data labels) and is now replaced by spec-level suppression:
+## `Chart.axis(show=False)` sets `ChartSpec.axis_x = Some(false)` /
+## `axis_y = Some(false)`, and the Rust layout engine omits the axis
+## layouts entirely.
 
 
 class _CompositeBase:
@@ -385,14 +384,23 @@ class JointChart:
         center_h = self.center._height or 400.0
         marg_h = center_h / self.ratio
         marg_w = center_w / self.ratio
-        top_chart = self.top.properties(width=center_w, height=marg_h) if self.top is not None else None
-        right_chart = self.right.properties(width=marg_w, height=center_h) if self.right is not None else None
-        # Layout per docstring: top-left = top marginal (shares x with center),
-        # top-right = empty, bottom-left = center, bottom-right = right marginal.
-        # Strip marginals' axis decoration — shared axes with center, redundant
-        # at this size.
-        top_svg = _strip_axis_decoration(top_chart.show_svg()) if top_chart is not None else None
-        right_svg = _strip_axis_decoration(right_chart.show_svg()) if right_chart is not None else None
+        # Marginals share their data dimension with the centre cell; the
+        # marginal's own axis decoration is redundant and visually noisy at
+        # marginal size, so suppress it at the spec level via Chart.axis().
+        # Top marginal shares its x-axis with the centre; hide both its
+        # tick band (would duplicate the centre's x-axis labels) AND its
+        # marginal y-axis (count/density on a tiny strip is illegible).
+        # Right marginal shares its y-axis with the centre; same treatment.
+        top_chart = (
+            self.top.properties(width=center_w, height=marg_h).axis(show=False)
+            if self.top is not None else None
+        )
+        right_chart = (
+            self.right.properties(width=marg_w, height=center_h).axis(show=False)
+            if self.right is not None else None
+        )
+        top_svg = top_chart.show_svg() if top_chart is not None else None
+        right_svg = right_chart.show_svg() if right_chart is not None else None
         cells = [top_svg, None, self.center.show_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
@@ -885,14 +893,16 @@ class ClusterMapChart:
         hm_h = self.heatmap._height or 400.0
         dendro_w = hm_w * d / h
         dendro_h = hm_h * d / h
+        # Dendrograms have no meaningful axes (only the tree structure
+        # matters). clustermap() already calls .axis(show=False) on each
+        # dendrogram chart at construction time, so spec-level suppression
+        # is in effect here — no post-render SVG mangling needed.
         col_dendro = (self.col_dendrogram.properties(width=hm_w, height=dendro_h)
                       if self.col_dendrogram is not None else None)
         row_dendro = (self.row_dendrogram.properties(width=dendro_w, height=hm_h)
                       if self.row_dendrogram is not None else None)
-        # Strip dendrogram axis decoration — dendrograms have no meaningful
-        # axes (only the tree structure matters).
-        col_svg = _strip_axis_decoration(col_dendro.show_svg()) if col_dendro is not None else None
-        row_svg = _strip_axis_decoration(row_dendro.show_svg()) if row_dendro is not None else None
+        col_svg = col_dendro.show_svg() if col_dendro is not None else None
+        row_svg = row_dendro.show_svg() if row_dendro is not None else None
         cells = [None, col_svg, row_svg, self.heatmap.show_svg()]
         return compose_svg_grid(
             cells, rows=2, cols=2,

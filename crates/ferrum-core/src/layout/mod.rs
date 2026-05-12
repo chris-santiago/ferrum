@@ -28,7 +28,8 @@ pub use self::axis::{
 pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
-    LegendDirection, LegendEntry, LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
+    ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
+    LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -261,6 +262,7 @@ pub fn compute_layout(
     facet_groups: &[FacetGroup],
     legend_entries: &[LegendEntry],
     legend_title: Option<String>,
+    colorbar: Option<&ColorbarInput>,
     metrics: &dyn TextMetrics,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
@@ -320,17 +322,32 @@ pub fn compute_layout(
         (None, inner)
     };
 
-    // 3. Reserve legend strip.
-    let (legend_layout, inner_after_legend) = legend::layout_legend(
-        legend_entries,
-        theme.legend_orient,
-        inner,
-        theme.label_font_size,
-        metrics,
-        theme.legend_direction,
-        legend_title.as_deref(),
-        theme.legend_title_font_size,
-    );
+    // 3. Reserve legend strip. Continuous color scales emit a colorbar
+    //    instead of categorical entries; both paths consume the same
+    //    legend gutter.
+    let (legend_layout, inner_after_legend) = match colorbar {
+        Some(cb) if legend_entries.is_empty() => legend::layout_colorbar(
+            inner,
+            theme.legend_orient,
+            legend_title.clone(),
+            cb.stops.clone(),
+            cb.tick_labels.clone(),
+            theme.label_font_size,
+            theme.legend_title_font_size,
+            metrics,
+            theme.column_padding,
+        ),
+        _ => legend::layout_legend(
+            legend_entries,
+            theme.legend_orient,
+            inner,
+            theme.label_font_size,
+            metrics,
+            theme.legend_direction,
+            legend_title.as_deref(),
+            theme.legend_title_font_size,
+        ),
+    };
     let legend_dropped = legend_entries
         .len()
         .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
@@ -449,33 +466,41 @@ pub fn compute_layout(
         });
 
         if rect != Rect::ZERO {
-            let y_axis = axis::layout_y_axis(
-                &axes.y,
-                rect,
-                panel_index,
-                theme.label_font_size,
-                theme.title_font_size,
-                theme.axis_title_padding,
-                metrics,
-            );
-            axis_layouts.push(y_axis);
-
-            let (x_axis, xwarn) = axis::layout_x_axis(
-                &axes.x,
-                rect,
-                panel_index,
-                theme.label_font_size,
-                theme.title_font_size,
-                theme.axis_title_padding,
-                metrics,
-            );
-            if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {
-                warnings.push(LayoutWarning::LabelsElided {
-                    axis: axis_layouts.len(),
-                    count,
-                });
+            // Spec-level axis suppression: when `chart.axis(y=False)` is
+            // active, skip emitting the y axis layout entirely. The plot
+            // area is unchanged (gutters remain reserved upstream); this
+            // simply omits axis line + ticks + labels + title.
+            if axes.show_y {
+                let y_axis = axis::layout_y_axis(
+                    &axes.y,
+                    rect,
+                    panel_index,
+                    theme.label_font_size,
+                    theme.title_font_size,
+                    theme.axis_title_padding,
+                    metrics,
+                );
+                axis_layouts.push(y_axis);
             }
-            axis_layouts.push(x_axis);
+
+            if axes.show_x {
+                let (x_axis, xwarn) = axis::layout_x_axis(
+                    &axes.x,
+                    rect,
+                    panel_index,
+                    theme.label_font_size,
+                    theme.title_font_size,
+                    theme.axis_title_padding,
+                    metrics,
+                );
+                if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {
+                    warnings.push(LayoutWarning::LabelsElided {
+                        axis: axis_layouts.len(),
+                        count,
+                    });
+                }
+                axis_layouts.push(x_axis);
+            }
         }
     }
 
@@ -549,6 +574,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -566,6 +592,8 @@ mod tests {
                 tick_labels: vec!["0".into(), "5".into(), "10".into()],
                 label_angle_override: None,
             },
+            show_x: true,
+            show_y: true,
         }
     }
 
@@ -587,6 +615,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             None,
             &m,
         )
@@ -618,6 +647,7 @@ mod tests {
             &[],
             &[],
             None,
+            None,
             &m,
         )
         .unwrap_err();
@@ -641,6 +671,7 @@ mod tests {
             &[],
             &[],
             None,
+            None,
             &m,
         )
         .unwrap_err();
@@ -662,6 +693,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             None,
             &m,
         )
@@ -712,6 +744,7 @@ mod tests {
             &groups,
             &legend,
             None,
+            None,
             &m,
         )
         .unwrap();
@@ -751,6 +784,7 @@ mod tests {
             &groups,
             &[],
             None,
+            None,
             &m,
         )
         .unwrap();
@@ -777,6 +811,7 @@ mod tests {
             &axes,
             &groups,
             &[],
+            None,
             None,
             &m,
         ).unwrap();
@@ -806,6 +841,7 @@ mod tests {
             &axes,
             &[],
             &[],
+            None,
             None,
             &m,
         ).unwrap();

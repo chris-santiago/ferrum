@@ -22,6 +22,7 @@ pub(crate) mod hex;
 pub(crate) mod swarm;
 pub(crate) mod unpivot;
 pub(crate) mod reorder;
+pub(crate) mod reference_line;
 pub(crate) mod linkage;
 pub(crate) mod letter_value;
 pub(crate) mod logistic;

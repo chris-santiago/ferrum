@@ -39,7 +39,7 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 8 — transforms (Rust)
     "Aggregate", "AggregateOp", "Bin", "Bin2D", "BoxStats", "Contour",
     "ErrorExtent", "Hex", "Kde", "Kde2D", "Glm", "LetterValue", "Linkage",
-    "Logistic", "Outliers", "QQ", "Raster", "Reorder", "Robust", "Smooth",
+    "Logistic", "Outliers", "QQ", "Raster", "ReferenceLine", "Reorder", "Robust", "Smooth",
     "Summary", "Swarm", "Unpivot", "Violin",
     # Task 9 — scales + schemes (Rust)
     "LinearScale", "LogScale", "TimeScale", "SymlogScale", "OrdinalScale",

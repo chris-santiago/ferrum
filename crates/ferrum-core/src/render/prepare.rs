@@ -14,7 +14,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
-    AxesInput, AxisInput, AxisOrient, FacetGroup, FacetKey, LegendEntry, SymbolKind,
+    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
+    SymbolKind,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -205,6 +206,10 @@ pub struct PreparedInputs {
     /// Legend title (Themes-T2.5b). Defaults to the color encoding's field
     /// name; None when no categorical color encoding drives a legend.
     pub legend_title: Option<String>,
+    /// Continuous-colorbar input. Built from a Continuous color scale's
+    /// domain + scheme; consumed by `compute_layout` to allocate a colorbar
+    /// in the legend gutter. Mutually exclusive with `legend_entries`.
+    pub colorbar: Option<ColorbarInput>,
     pub warnings: Vec<RenderWarning>,
     /// One entry per layer. Single-layer charts have len() == 1.
     pub layers: Vec<LayerPrepared>,
@@ -347,6 +352,8 @@ pub fn prepare_render_inputs(
             tick_labels: y_tick_labels,
             label_angle_override: None,
         },
+        show_x: spec.axis_x.unwrap_or(true),
+        show_y: spec.axis_y.unwrap_or(true),
     };
 
     let facet_groups = if let Some(fspec) = &spec.facet {
@@ -355,19 +362,38 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
-    let legend_entries = match &provisional_scales.color {
-        Some(super::scale_resolve::ColorScale::Categorical { domain, .. }) => domain
-            .iter()
-            .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
-            .collect(),
-        // Continuous color scales don't produce categorical legend entries.
-        // (A future colorbar artifact would be a separate legend kind.)
-        Some(super::scale_resolve::ColorScale::Continuous { .. }) => Vec::new(),
-        None => Vec::new(),
-    };
+    let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) =
+        match &provisional_scales.color {
+            Some(super::scale_resolve::ColorScale::Categorical { domain, .. }) => {
+                let entries = domain.iter()
+                    .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
+                    .collect();
+                (entries, None)
+            }
+            Some(super::scale_resolve::ColorScale::Continuous { domain, scheme }) => {
+                // Sample the scheme at 11 evenly-spaced positions so the
+                // gradient looks smooth without bloating the SVG. The
+                // renderer emits these as `linearGradient` stops.
+                let n_stops = 11;
+                let stops: Vec<(f64, String)> = (0..n_stops).map(|i| {
+                    let t = i as f64 / (n_stops - 1) as f64;
+                    let color = scheme.sample(t);
+                    (t, super::color::fmt_svg(color))
+                }).collect();
+                // Tick labels: 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
+                let (lo, hi) = *domain;
+                let tick_labels: Vec<String> = (0..5).map(|i| {
+                    let t = i as f64 / 4.0;
+                    let v = lo + t * (hi - lo);
+                    format_colorbar_tick(v, lo, hi)
+                }).collect();
+                (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
+            }
+            None => (Vec::new(), None),
+        };
 
     // Legend title (Themes-T2.5b): default to the color encoding's field name.
-    let legend_title = if !legend_entries.is_empty() {
+    let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
         spec.encoding.color.as_ref().map(|c| c.field.clone())
     } else {
         None
@@ -381,10 +407,37 @@ pub fn prepare_render_inputs(
         facet_groups,
         legend_entries,
         legend_title,
+        colorbar,
         warnings: scale_warnings,
         layers,
         coord_flipped,
     })
+}
+
+/// Format a single colorbar tick value into a short human-readable label.
+/// Picks decimal precision from the domain span so that small ranges still
+/// show enough digits and large ranges don't waste pixels on noise.
+fn format_colorbar_tick(value: f64, lo: f64, hi: f64) -> String {
+    let span = (hi - lo).abs();
+    let precision: usize = if span == 0.0 || !span.is_finite() {
+        2
+    } else if span >= 100.0 {
+        0
+    } else if span >= 10.0 {
+        1
+    } else if span >= 1.0 {
+        2
+    } else {
+        3
+    };
+    let s = format!("{:.*}", precision, value);
+    // Strip trailing zeros / decimal point when the integer form is exact.
+    if s.contains('.') {
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
+        if trimmed.is_empty() { "0".into() } else { trimmed }
+    } else {
+        s
+    }
 }
 
 fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGroup>, RenderError> {
@@ -466,6 +519,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 
@@ -541,6 +595,7 @@ mod tests {
             mark_style: None,
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 

@@ -230,6 +230,7 @@ mod tests {
             mark_style: Some(kwargs),
         position: None,
         title: None,
+        axis_x: None, axis_y: None,
         }
     }
 

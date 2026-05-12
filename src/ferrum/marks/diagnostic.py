@@ -272,6 +272,12 @@ def desugar_calibration(
     pre-sorts data ascending by ``mean_predicted`` so the y=x line is
     monotonic. ``n_bins``/``strategy`` are informational at the mark layer
     (the data is already binned).
+
+    Layer wiring (Phase 8a-compliant). The calibration curve reads from the
+    primary input (one row per (model, bin)).  The y=x reference diagonal
+    reads from a named ``ReferenceLine`` transform that emits exactly two
+    rows for the line endpoints — so the diagonal renders once per chart
+    regardless of how many models are layered on top.
     """
     del n_bins, strategy
     line_enc: dict[str, Any] = {
@@ -280,13 +286,21 @@ def desugar_calibration(
     if color_field is not None:
         line_enc["color"] = color_field
     layers: list[dict] = [{"mark": "line", "encoding": line_enc}]
+    transforms: list = []
     if reference_line:
+        from ferrum import ReferenceLine
+        transforms.append(ReferenceLine(
+            "mean_predicted", "fraction_positive",
+            x=(0.0, 1.0), y=(0.0, 1.0),
+            name="calibration_ref",
+        ))
         layers.append({
             "mark": "line",
-            "encoding": {"x": "mean_predicted", "y": "mean_predicted"},
+            "encoding": {"x": "mean_predicted", "y": "fraction_positive"},
             "mark_kwargs": {"stroke_dash": [4, 4]},
+            "data_source": "calibration_ref",
         })
-    return ("__layered__", [], None, None, layers)
+    return ("__layered__", transforms, None, None, layers)
 
 
 def desugar_gain(

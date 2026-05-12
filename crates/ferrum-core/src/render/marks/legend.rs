@@ -2,7 +2,7 @@
 
 use crate::layout::{LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
 use crate::render::scale_resolve::ColorScale;
-use crate::render::svg::{FillStroke, Stroke, SvgBuffer, TextStyle};
+use crate::render::svg::{fmt_f, FillStroke, Stroke, SvgBuffer, TextStyle};
 
 pub fn draw(
     legend: &LegendLayout,
@@ -35,6 +35,55 @@ pub fn draw(
             },
         };
         out.text(title.x, title.y, &title.text, &title_style);
+    }
+
+    // Continuous colorbar (added 2026-05-11). Renders a vertical gradient
+    // rect with per-tick ticks + labels on its right edge. Mutually
+    // exclusive with categorical entries.
+    if let Some(cb) = &legend.colorbar {
+        // Deterministic gradient ID — one colorbar per chart, so `…-0` is
+        // unique within the chart's own SVG. The grid compositor calls
+        // `uniquify_clip_ids` to prefix `ferrum-colorbar-` (alongside
+        // `ferrum-clip-`) with a per-cell key, so multi-cell composites
+        // (clustermap, JointChart) stay collision-free.
+        let grad_id = "ferrum-colorbar-0".to_string();
+        let mut stops_xml = String::new();
+        // Bottom = min (offset 0%, low position), top = max (offset 100%).
+        // The y1=100%, y2=0% gradient maps offset 0 → bottom of bar.
+        for (pos, color) in &cb.stops {
+            stops_xml.push_str(&format!(
+                "<stop offset=\"{:.4}\" stop-color=\"{}\"/>",
+                pos, color,
+            ));
+        }
+        out.raw(&format!(
+            "<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">{stops_xml}</linearGradient></defs>"
+        ));
+        out.raw(&format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{grad_id})\" stroke=\"{}\" stroke-width=\"0.5\"/>",
+            fmt_f(cb.bar_rect.x),
+            fmt_f(cb.bar_rect.y),
+            fmt_f(cb.bar_rect.w),
+            fmt_f(cb.bar_rect.h),
+            crate::render::color::fmt_svg(theme.axis_line_color),
+        ));
+
+        // Tick marks + labels on the right edge of the bar.
+        let tick_x_start = cb.bar_rect.x + cb.bar_rect.w;
+        let tick_x_end = tick_x_start + 4.0;
+        let label_x = tick_x_end + 4.0;
+        for tick in &cb.ticks {
+            out.line(
+                tick_x_start, tick.y, tick_x_end, tick.y,
+                &Stroke {
+                    stroke: theme.axis_line_color,
+                    stroke_width: theme.axis_line_width,
+                    stroke_dash: None,
+                },
+            );
+            out.text(label_x, tick.y + theme.label_font_size * 0.35,
+                &tick.label, &label_style);
+        }
     }
 
     for entry in &legend.entries {
@@ -96,6 +145,7 @@ mod tests {
                 },
             ],
             title: None,
+            colorbar: None,
         };
         let theme = ThemeInputs::default();
         let mut out = SvgBuffer::new(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, None, false);

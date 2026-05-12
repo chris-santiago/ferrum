@@ -21,6 +21,7 @@ use crate::transform::hex::{self, HexSpec};
 use crate::transform::swarm::{self, SwarmSpec};
 use crate::transform::unpivot::{self, UnpivotSpec};
 use crate::transform::reorder::{self, ReorderSpec};
+use crate::transform::reference_line::{self, ReferenceLineSpec};
 use crate::transform::linkage::{self, LinkageSpec};
 use crate::transform::letter_value::{self, LetterValueSpec};
 use crate::transform::logistic::{self, LogisticSpec};
@@ -53,6 +54,7 @@ pub(crate) enum TransformSpec {
     Swarm(SwarmSpec),
     Unpivot(UnpivotSpec),
     Reorder(ReorderSpec),
+    ReferenceLine(ReferenceLineSpec),
     LetterValue(LetterValueSpec),
     Logistic(LogisticSpec),
     Glm(GlmSpec),
@@ -81,6 +83,7 @@ impl TransformSpec {
             Self::Swarm(s)     => swarm::apply(s, batch),
             Self::Unpivot(s)   => unpivot::apply(s, batch),
             Self::Reorder(s)   => reorder::apply(s, batch),
+            Self::ReferenceLine(s) => reference_line::apply(s, batch),
             Self::LetterValue(s) => letter_value::apply(s, batch),
             Self::Logistic(s) => logistic::apply(s, batch),
             Self::Glm(s)      => glm::apply(s, batch),
@@ -238,6 +241,7 @@ fn spec_name(spec: &TransformSpec) -> Option<&str> {
         TransformSpec::Swarm(s) => s.name.as_deref(),
         TransformSpec::Unpivot(s) => s.name.as_deref(),
         TransformSpec::Reorder(s) => s.name.as_deref(),
+        TransformSpec::ReferenceLine(s) => s.name.as_deref(),
         TransformSpec::LetterValue(s) => s.name.as_deref(),
         TransformSpec::Logistic(s) => s.name.as_deref(),
         TransformSpec::Glm(s) => s.name.as_deref(),

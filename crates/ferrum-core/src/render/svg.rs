@@ -70,6 +70,13 @@ impl SvgBuffer {
         self.buf.push_str("</g>");
     }
 
+    /// Append raw SVG markup. Used for tightly-formatted output that doesn't
+    /// fit a typed helper — e.g. a vertical `linearGradient` for colorbars.
+    /// Callers are responsible for valid SVG (no escaping is performed).
+    pub fn raw(&mut self, fragment: &str) {
+        self.buf.push_str(fragment);
+    }
+
     pub fn rect(&mut self, r: Rect, style: &FillStroke, corner_radius: Option<f64>) {
         self.buf.push_str("<rect");
         push_attr(&mut self.buf, "x", &fmt_f(r.x));
