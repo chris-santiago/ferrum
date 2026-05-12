@@ -13,12 +13,9 @@ pub(crate) mod binding;
 // Spec §6.1 constants.
 pub const LABEL_OVERLAP_TOLERANCE: f64 = 0.10;
 pub const DEFAULT_LABEL_ANGLE: f64 = -45.0;
-pub const DEFAULT_HEURISTIC_K: f64 = 0.6;
 pub const MIN_PANEL_DIM: f64 = 1.0;
-pub const DEFAULT_PADDING: f64 = 8.0;
 pub const DEFAULT_LABEL_FONT_SIZE: f64 = 11.0;
 pub const DEFAULT_TITLE_FONT_SIZE: f64 = 13.0;
-pub const DEFAULT_AXIS_TITLE_PADDING: f64 = 4.0;
 
 use serde::{Deserialize, Serialize};
 

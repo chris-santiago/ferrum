@@ -106,12 +106,6 @@ struct DepthRow {
     level: String,
 }
 
-struct OutlierRow {
-    group: Option<String>,
-    value: f64,
-    is_outlier: bool,
-}
-
 fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(Option<String>, f64)>> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)

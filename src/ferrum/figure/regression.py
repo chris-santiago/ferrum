@@ -113,14 +113,16 @@ def lmplot(
         Include a scatter layer (``mark_point``).  Set to ``False`` to
         show only the fit line.
     scatter_kws : dict, optional
-        Reserved for future use (no-op today). When wired, will forward extra
-        keyword arguments to the scatter ``mark_point`` call.
+        Extra keyword arguments forwarded to the scatter ``mark_point``
+        call (e.g. ``{"opacity": 0.3, "size": 20}``).
     line_kws : dict, optional
-        Reserved for future use (no-op today). When wired, will forward extra
-        keyword arguments to the regression-line mark call.
+        Extra keyword arguments forwarded to the regression-line mark
+        call (e.g. ``{"stroke_width": 3}``).
     truncate : bool, default False
-        Reserved for future line-truncation support (no-op today; the
-        fit line already extends to the data range via the Smooth grid).
+        Reserved — not yet wired to the Rust rendering layer.  The fit
+        line currently clips to the observed data range regardless of
+        this setting.  Rust-side ``x_range`` support is tracked in the
+        design spec (WI-7).
     x_bins : any, optional
         Forwarded as ``x_bins`` to ``mark_smooth`` for binning the
         x-axis before fitting (``method="lm"`` only).
@@ -190,6 +192,11 @@ def lmplot(
         and hue is None
     )
 
+    # truncate: acknowledged but not yet wired to Rust x_range.
+    # True = clip to data range (current Smooth default); False = extend
+    # (needs SmoothSpec.x_range, tracked in design spec WI-7).
+    _ = truncate
+
     # Shared encoding.
     enc: dict = {"x": x, "y": y}
     if hue is not None:
@@ -200,14 +207,16 @@ def lmplot(
     scatter_layer = None
     if scatter:
         s = Chart(data)
+        skw = dict(scatter_kws) if scatter_kws else {}
         if x_jitter is not None:
-            s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)))
+            s = s.mark_point(position=Jitter(axis="x", width=float(x_jitter)), **skw)
         else:
-            s = s.mark_point()
+            s = s.mark_point(**skw)
         s = s.encode(**enc)
         scatter_layer = s
 
     # ---- Fit layer (per method) ----------------------------------------
+    lkw = dict(line_kws) if line_kws else {}
     if method == "lm":
         fit = Chart(data).mark_smooth(
             method="lm", ci=ci_frac, degree=order,
@@ -219,17 +228,18 @@ def lmplot(
     elif method == "logistic":
         fit = Chart(data).transform(
             Logistic(x=x, y=y, n_grid=200, ci=ci_frac, name="logistic")
-        ).mark_line().encode(x=x, y="fitted")
+        ).mark_line(**lkw).encode(x=x, y="fitted")
     elif method == "glm":
         fit = Chart(data).transform(
             Glm(x=x, y=y, family="gaussian", n_grid=200, ci=ci_frac, name="glm")
-        ).mark_line().encode(x=x, y="fitted")
+        ).mark_line(**lkw).encode(x=x, y="fitted")
     elif method == "robust":
         fit = Chart(data).transform(
             Robust(x=x, y=y, n_grid=200, ci=ci_frac, name="robust")
-        ).mark_line().encode(x=x, y="fitted")
+        ).mark_line(**lkw).encode(x=x, y="fitted")
     else:  # pragma: no cover — guarded above
         raise ValueError(f"unreachable: method={method!r}")
+
 
     if hue is not None:
         # Ensure fit also carries color encoding so per-group fits render
@@ -250,7 +260,18 @@ def lmplot(
     else:
         out = _merge_layers(scatter_layer, fit)
 
-    # truncate=True: deferred (line extends to data range by Smooth's grid).
+    # Apply line_kws to smooth-based methods (lm, loess) where line_kws
+    # can't be passed through mark_smooth directly. Non-smooth methods
+    # (logistic, glm, robust) already applied lkw at mark_line construction.
+    if lkw and method in ("lm", "loess") and out._layers:
+        from dataclasses import replace as _dc_replace
+        out._layers = [
+            _dc_replace(layer, mark_kwargs={**(layer.mark_kwargs or {}), **lkw})
+            if getattr(layer, "mark", None) == "line"
+            else layer
+            for layer in out._layers
+        ]
+
     # Faceting.
     if col is not None or row is not None:
         if col is not None and row is not None:
@@ -301,7 +322,7 @@ def residplot(
         ``zero_line=True`` (annotations flow through the Robust
         transform's same opt-in kwargs).
     dropna : bool, default True
-        Reserved for future NaN-dropping logic (no-op today).
+        Drop rows where ``x`` or ``y`` is null before fitting.
     show_metrics : bool, default True
         Schwabish SB-followup (2026-05-12): overlay a top-right corner
         annotation with ``R²`` / ``RMSE`` / ``MAE`` computed inside the
@@ -311,8 +332,10 @@ def residplot(
     zero_line : bool, default True
         Schwabish SB-followup: draw a dashed horizontal reference at
         ``y=0`` via the Rust transform's ``inject_zero_ref=True`` opt-in.
-    label : any, optional
-        Reserved for future legend-label support (no-op today).
+    label : str, optional
+        Legend label for the residual series.  When set, a constant
+        ``_label`` column is injected and mapped to color, producing a
+        single-entry legend.
     color : str or encoding, optional
         Column name or constant color forwarded to ``Chart.encode(color=)``.
     theme : Theme, optional
@@ -335,7 +358,10 @@ def residplot(
 
     >>> fm.residplot(df, x="size", y="tip", robust=True)
     """
-    del dropna, label  # reserved kwargs — not yet honored
+    if dropna:
+        import polars as pl
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = data.drop_nulls(subset=[x, y])
 
     # The Rust Smooth/Robust transforms inject ``_ref_zero``,
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
@@ -355,8 +381,15 @@ def residplot(
             inject_metrics=show_metrics,
         )
 
+    if label is not None:
+        import polars as pl
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = data.with_columns(pl.lit(label).alias("_label"))
+
     chart = Chart(data).transform(resid_transform).mark_point()
     enc: dict = {"x": "x", "y": "residual"}
+    if label is not None and color is None:
+        enc["color"] = "_label"
     if color is not None:
         enc["color"] = color
     enc.update(encode_kwargs)

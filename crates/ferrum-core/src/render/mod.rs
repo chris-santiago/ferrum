@@ -25,9 +25,7 @@ pub use compositor::{
 
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;
-pub const DEFAULT_GRID_ENABLED: bool = true;
 pub const CLIP_ID_PREFIX: &str = "ferrum-clip-";
-pub const INTER_FONT_FAMILY: &str = "Inter";
 
 use serde::{Deserialize, Serialize};
 

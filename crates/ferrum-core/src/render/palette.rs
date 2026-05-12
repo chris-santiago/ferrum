@@ -109,27 +109,9 @@ pub fn categorical_palette(name: &str) -> &'static [Color] {
     }
 }
 
-pub fn categorical_color(category_index: usize) -> Color {
-    OKABE_ITO[category_index % OKABE_ITO.len()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn first_category_is_okabe_orange() {
-        let c = categorical_color(0);
-        assert_eq!(c.red, 0xE6);
-        assert_eq!(c.green, 0x9F);
-        assert_eq!(c.blue, 0x00);
-    }
-
-    #[test]
-    fn overflow_wraps() {
-        let c = categorical_color(8);
-        assert_eq!(c, OKABE_ITO[0]);
-    }
 
     #[test]
     fn categorical_palette_returns_named_palette() {

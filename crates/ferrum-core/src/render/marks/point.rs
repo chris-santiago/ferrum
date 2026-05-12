@@ -213,15 +213,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
-fn scale_value(s: &ScaleKind, v: f64, label: Option<&str>) -> Option<f64> {
-    match s {
-        ScaleKind::Linear(_) | ScaleKind::Time(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) => {
-            s.to_pixel_f64(v)
-        }
-        ScaleKind::Ordinal(_) => label.and_then(|l| s.to_pixel_str(l)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

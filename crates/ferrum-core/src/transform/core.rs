@@ -7,26 +7,26 @@ use serde::{Deserialize, Serialize};
 use crate::transform::context::TransformContext;
 
 use crate::transform::aggregate::AggregateSpec;
-use crate::transform::bin::{self, BinSpec};
-use crate::transform::bin_2d::{self, Bin2DSpec};
-use crate::transform::contour::{self, ContourSpec};
-use crate::transform::error_extent::{self, ErrorExtentSpec};
-use crate::transform::box_stats::{self, BoxStatsSpec};
+use crate::transform::bin::BinSpec;
+use crate::transform::bin_2d::Bin2DSpec;
+use crate::transform::contour::ContourSpec;
+use crate::transform::error_extent::ErrorExtentSpec;
+use crate::transform::box_stats::BoxStatsSpec;
 use crate::transform::kde::KdeSpec;
 use crate::transform::kde_2d::Kde2DSpec;
-use crate::transform::outliers::{self, OutliersSpec};
-use crate::transform::qq::{self, QQSpec};
-use crate::transform::raster::{self, RasterSpec};
-use crate::transform::hex::{self, HexSpec};
-use crate::transform::swarm::{self, SwarmSpec};
-use crate::transform::unpivot::{self, UnpivotSpec};
-use crate::transform::reorder::{self, ReorderSpec};
-use crate::transform::reference_line::{self, ReferenceLineSpec};
-use crate::transform::linkage::{self, LinkageSpec};
-use crate::transform::letter_value::{self, LetterValueSpec};
-use crate::transform::logistic::{self, LogisticSpec};
-use crate::transform::glm::{self, GlmSpec};
-use crate::transform::robust::{self, RobustSpec};
+use crate::transform::outliers::OutliersSpec;
+use crate::transform::qq::QQSpec;
+use crate::transform::raster::RasterSpec;
+use crate::transform::hex::HexSpec;
+use crate::transform::swarm::SwarmSpec;
+use crate::transform::unpivot::UnpivotSpec;
+use crate::transform::reorder::ReorderSpec;
+use crate::transform::reference_line::ReferenceLineSpec;
+use crate::transform::linkage::LinkageSpec;
+use crate::transform::letter_value::LetterValueSpec;
+use crate::transform::logistic::LogisticSpec;
+use crate::transform::glm::GlmSpec;
+use crate::transform::robust::RobustSpec;
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
@@ -123,17 +123,6 @@ impl TransformSpec {
     }
 }
 
-pub(crate) fn apply_transforms(
-    specs: &[TransformSpec],
-    batch: &RecordBatch,
-) -> PyResult<RecordBatch> {
-    let mut current = batch.clone(); // Arrow Arc-clones; cheap
-    for spec in specs {
-        current = spec.apply(&current)?;
-    }
-    Ok(current)
-}
-
 impl TransformSpec {
     pub(crate) fn apply_with_context(
         &self,
@@ -197,18 +186,6 @@ impl TransformSpec {
             Linkage => linkage,
         }
     }
-}
-
-pub(crate) fn apply_transforms_with_context(
-    specs: &[TransformSpec],
-    batch: &RecordBatch,
-    ctx: &TransformContext,
-) -> PyResult<RecordBatch> {
-    let mut current = batch.clone();
-    for spec in specs {
-        current = spec.apply_with_context(&current, ctx)?;
-    }
-    Ok(current)
 }
 
 /// Sentinel key under which the final pipeline output is always published in
@@ -333,7 +310,9 @@ mod tests {
     #[test]
     fn test_apply_transforms_empty_returns_input_unchanged() {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
-        let out = apply_transforms(&[], &batch).unwrap();
+        let ctx = TransformContext::default();
+        let outputs = apply_transforms_named(&[], &batch, &ctx).unwrap();
+        let out = &outputs[FINAL_OUTPUT_KEY];
         assert_eq!(out.num_rows(), 3);
         assert_eq!(out.num_columns(), 1);
         assert_eq!(out.schema().field(0).name(), "x");
@@ -368,7 +347,8 @@ mod tests {
 
         // bin produces UInt64 count, but stat_aggregate requires Float64 for op fields.
         // The pipeline is expected to fail with a clear schema-mismatch error from stat_aggregate.
-        let err = apply_transforms(&pipeline, &batch).unwrap_err();
+        let ctx = TransformContext::default();
+        let err = apply_transforms_named(&pipeline, &batch, &ctx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Float64") || msg.contains("dtype"),
             "expected dtype error from stat_aggregate; got: {msg}");
@@ -401,7 +381,8 @@ mod tests {
                 name: None,
             }),
         ];
-        let err = apply_transforms(&pipeline, &batch).unwrap_err();
+        let ctx = TransformContext::default();
+        let err = apply_transforms_named(&pipeline, &batch, &ctx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'x'") && (msg.contains("not found") || msg.contains("missing")),
             "expected missing-column error; got: {msg}");

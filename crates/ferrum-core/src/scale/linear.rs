@@ -130,7 +130,6 @@ impl LinearScale {
         self.0.ticks(count)
     }
 
-    /// Pixel-range pair `[lo, hi]` of the underlying scale. Used by `ScaleKind::pixel_range`.
     pub(crate) fn range_pair(&self) -> [f64; 2] {
         self.0.range
     }

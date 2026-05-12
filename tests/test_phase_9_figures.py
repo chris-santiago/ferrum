@@ -318,6 +318,28 @@ class TestLmplot:
         with pytest.raises(ValueError, match="method"):
             fe.lmplot(reg_data, x="x", y="y", method="bogus")
 
+    def test_scatter_kws_forwarded(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", scatter_kws={"opacity": 0.3})
+        d = json.loads(chart.to_spec().to_json())
+        point_layer = next(
+            (l for l in d["layers"] if l.get("mark") == "point"), None,
+        )
+        assert point_layer is not None
+        assert point_layer.get("mark_style", {}).get("opacity") == 0.3
+
+    def test_line_kws_forwarded(self, reg_data):
+        chart = fe.lmplot(
+            reg_data, x="x", y="y",
+            line_kws={"stroke_width": 4}, show_metrics=False,
+        )
+        d = json.loads(chart.to_spec().to_json())
+        layers = d.get("layers", [])
+        line_layer = next(
+            (l for l in layers if l.get("mark") == "line"), None,
+        )
+        assert line_layer is not None
+        assert line_layer.get("mark_style", {}).get("stroke_width") == 4
+
     def test_renders_e2e(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="lm", ci=None)
         svg = chart.show_svg()
@@ -377,6 +399,24 @@ class TestResidplot:
         # base (point) + zero_line + metrics + lowess → 4 layers
         assert d.get("layers") is not None
         assert len(d["layers"]) >= 2
+
+    def test_dropna_removes_null_rows(self, reg_data):
+        data_with_nulls = reg_data.with_columns(
+            pl.when(pl.col("x") < 2).then(None).otherwise(pl.col("y")).alias("y")
+        )
+        n_nulls = data_with_nulls.filter(pl.col("y").is_null()).height
+        assert n_nulls > 0
+        chart = fe.residplot(data_with_nulls, x="x", y="y", dropna=True,
+                             show_metrics=False, zero_line=False)
+        # dropna=True should have removed the null rows before the chart
+        # received them. The chart's internal data should have fewer rows.
+        assert chart._data.height == reg_data.height - n_nulls
+
+    def test_label_adds_color_encoding(self, reg_data):
+        chart = fe.residplot(reg_data, x="x", y="y", label="Residuals",
+                             show_metrics=False, zero_line=False)
+        d = json.loads(chart.to_spec().to_json())
+        assert d.get("encoding", {}).get("color", {}).get("field") == "_label"
 
     def test_no_lowess_legacy_single_layer(self, reg_data):
         chart = fe.residplot(

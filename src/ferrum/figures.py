@@ -92,8 +92,7 @@ def _resolve_source(
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ``ModelSource`` or
-    ``ComparedModelSource``.
+    """Resolve a figure-function input into a ``ModelSource`` or ``ComparedModelSource``.
 
     Dispatch order:
     - If ``model_or_source`` is already a ``ComparedModelSource``, return it.
@@ -469,6 +468,7 @@ def gain_chart(
     X: Any = None,
     y: Any = None,
     *,
+    compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -494,6 +494,9 @@ def gain_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
+    compare : dict[str, estimator] or None, default None
+        Multi-model overlay. Keys are display names; values are fitted
+        estimators. Routes through ``_resolve_source`` → ``ComparedModelSource``.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
@@ -512,7 +515,7 @@ def gain_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
     return _gain_chart_from_source(source, subtitle=subtitle, theme=theme)
 
 
@@ -521,6 +524,7 @@ def lift_chart(
     X: Any = None,
     y: Any = None,
     *,
+    compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -545,6 +549,9 @@ def lift_chart(
     y : array-like, optional
         True class labels. Required when ``model_or_source`` is a raw
         estimator.
+    compare : dict[str, estimator] or None, default None
+        Multi-model overlay. Keys are display names; values are fitted
+        estimators. Routes through ``_resolve_source`` → ``ComparedModelSource``.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
@@ -563,7 +570,7 @@ def lift_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
     return _lift_chart_from_source(source, subtitle=subtitle, theme=theme)
 
 
@@ -752,7 +759,6 @@ def importance_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.importance_chart(RandomForestClassifier().fit(X_train, y_train), X_test, y_test)
     """
-
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _importance_chart_from_source(
         source,
@@ -1086,7 +1092,6 @@ def pdp_chart(
     >>> from sklearn.ensemble import GradientBoostingRegressor
     >>> fm.pdp_chart(GradientBoostingRegressor().fit(X_train, y_train), X_test, features=["age", "income"])
     """
-
     _require(
         "pdp_chart", "features", features,
         hint="pass a list of column names or indices",
@@ -1113,6 +1118,7 @@ def discrimination_threshold_chart(
     cv: Any = None,
     threshold_line: bool = False,
     optimum_label: bool = True,
+    compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -1153,6 +1159,9 @@ def discrimination_threshold_chart(
         point showing the threshold and F1 value
         (e.g. ``"max F1 = 0.872 @ t=0.43"``). Composes with
         ``threshold_line``; either can be enabled independently.
+    compare : dict[str, estimator] or None, default None
+        Multi-model overlay. Keys are display names; values are fitted
+        estimators. Routes through ``_resolve_source`` → ``ComparedModelSource``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1169,7 +1178,7 @@ def discrimination_threshold_chart(
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.discrimination_threshold_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
     return _discrimination_threshold_chart_from_source(
         source,
         n_thresholds=n_thresholds,
@@ -1269,7 +1278,7 @@ def validation_curve_chart(
     random_state: int | None = None,
     theme: Any = None,
 ):
-    """Validation curve chart: score vs. a single hyperparameter value.
+    """Plot score vs. a single hyperparameter value.
 
     Sweeps one hyperparameter over a supplied value range and plots
     cross-validated train and validation scores, revealing the bias-
