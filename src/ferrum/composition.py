@@ -258,7 +258,7 @@ class JointChart:
         top=None,
         right=None,
         ratio: int = 5,
-        spacing: float = 0.02,
+        spacing: float = 10.0,
     ) -> None:
         if ratio <= 0:
             raise ValueError(f"ratio must be > 0; got {ratio}")
@@ -496,7 +496,7 @@ class RepeatChart:
         row=None, column=None, layer=None,
         diagonal=None,
         corner: bool = False,
-        spacing: float = 0.02,
+        spacing: float = 10.0,
         columns: Optional[int] = None,
         resolve=None,
     ) -> None:
@@ -775,7 +775,7 @@ class ClusterMapChart:
         row_dendrogram=None,
         col_dendrogram=None,
         dendrogram_ratio: float = 0.2,
-        spacing: float = 0.02,
+        spacing: float = 10.0,
     ) -> None:
         if not (0.0 < dendrogram_ratio < 1.0):
             raise ValueError(

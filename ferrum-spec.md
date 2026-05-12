@@ -815,10 +815,18 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 Compound view with a center plot and optional marginal distribution plots sharing the center's x-axis (top) and y-axis (right). The marginals are independent `Chart` objects, typically `mark_histogram` or `mark_density`.
 
 ```
-JointChart(center, *, top=None, right=None, ratio=5, spacing=0.02)
+JointChart(center, *, top=None, right=None, ratio=5, spacing=10.0)
 ```
 
-`center`: any `Chart`. `top` / `right`: marginal `Chart` objects; x-axis of `top` is shared with center x; y-axis of `right` is shared with center y. `ratio`: size ratio of center panel to each marginal. `spacing`: gap between panels as a fraction of total size.
+`center`: any `Chart`. `top` / `right`: marginal `Chart` objects; x-axis of `top` is shared with center x; y-axis of `right` is shared with center y. `ratio`: size ratio of center panel to each marginal. `spacing`: gap between panels in pixels.
+
+> **2026-05-11 (Phase 9, P2.6):** `spacing` is **pixels**, not a fraction.
+> The original spec described `spacing` as "a fraction of total size" but
+> the Rust grid compositor has always treated the value as pixels —
+> `spacing=0.02` rendered as zero gap (one-fiftieth of a pixel). The
+> default for `JointChart` / `RepeatChart` / `ClusterMapChart` was
+> bumped from `0.02` (effectively zero) to `10.0` to match
+> `HConcatChart` / `VConcatChart`. Affected goldens were re-blessed.
 
 Most users construct `JointChart` via `ferrum.jointplot(...)`.
 

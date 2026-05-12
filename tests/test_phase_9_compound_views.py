@@ -54,7 +54,7 @@ class TestJointChart:
         assert jc.top is None
         assert jc.right is None
         assert jc.ratio == 5
-        assert jc.spacing == 0.02
+        assert jc.spacing == 10.0
 
     def test_construction_with_marginals(self, df_xy):
         center = fe.Chart(df_xy).mark_point().encode(x="x", y="y")
