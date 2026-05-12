@@ -308,6 +308,37 @@ class Chart:
         new._position = position
         return new
 
+    def _set_composite_mark(
+        self,
+        name: str,
+        desugar_fn,
+        kwargs: dict,
+        *,
+        placeholder: str,
+        position=None,
+        data_transform=None,
+    ) -> "Chart":
+        # Shared scaffold for composite/diagnostic mark_* methods. Validates the
+        # position adjustment, clones, sets the placeholder mark (overridden by
+        # layered mode at render time), optionally rewrites the polars data,
+        # and stashes the desugar callable in the 3-tuple _pending_stat_mark
+        # sentinel resolved by _resolve_pending once .encode() is known.
+        if position is not None:
+            from ferrum.position import validate_position_eligibility
+            validate_position_eligibility(name, position)
+        new = self._clone()
+        new._mark = placeholder
+        if data_transform is not None and new._data is not None:
+            try:
+                import polars as pl
+                if isinstance(new._data, pl.DataFrame):
+                    new._data = data_transform(new._data)
+            except ImportError:
+                pass
+        new._pending_stat_mark = (name, dict(kwargs), desugar_fn)
+        new._position = position
+        return new
+
     def mark_point(self, **kwargs) -> "Chart":
         """Render data as points (scatter plot).
 
@@ -882,14 +913,10 @@ class Chart:
         >>> fm.Chart(df).mark_boxplot().encode(x="species", y="val")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("boxplot", position)
         from ferrum.marks.composite import desugar_boxplot
-        new = self._clone()
-        new._mark = "point"  # placeholder; layered mode overrides
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "boxplot",
+            desugar_boxplot,
             {
                 "extent": extent,
                 "size": size,
@@ -898,10 +925,9 @@ class Chart:
                 "horizontal": horizontal,
                 **mark_kwargs,
             },
-            desugar_boxplot,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_boxen(
         self,
@@ -958,14 +984,10 @@ class Chart:
         >>> fm.Chart(df).mark_boxen().encode(x="group", y="val")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("boxen", position)
         from ferrum.marks.composite import desugar_boxen
-        new = self._clone()
-        new._mark = "point"  # placeholder; layered mode overrides
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "boxen",
+            desugar_boxen,
             {
                 "k_depth": k_depth,
                 "k_proportion": k_proportion,
@@ -975,10 +997,9 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_boxen,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
         """Render error bars via the ``ErrorExtent`` transform.
@@ -1015,19 +1036,14 @@ class Chart:
         >>> fm.Chart(df).mark_errorbar(extent="stdev").encode(x="group", y="val")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("errorbar", position)
         from ferrum.marks.composite import desugar_errorbar
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "errorbar",
-            {"extent": extent, "ticks": ticks, **mark_kwargs},
             desugar_errorbar,
+            {"extent": extent, "ticks": ticks, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_errorband(self, *, extent="ci", borders=False, position=None, **mark_kwargs) -> "Chart":
         """Render an error band (ribbon) via the ``ErrorExtent`` transform.
@@ -1062,19 +1078,14 @@ class Chart:
         >>> fm.Chart(df).mark_errorband(extent="ci", borders=True).encode(x="x", y="y")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("errorband", position)
         from ferrum.marks.composite import desugar_errorband
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "errorband",
-            {"extent": extent, "borders": borders, **mark_kwargs},
             desugar_errorband,
+            {"extent": extent, "borders": borders, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_ribbon(self, *, opacity=0.3, interpolate="linear", position=None, **mark_kwargs) -> "Chart":
         """Render a ribbon (filled area between ``y`` and ``y2`` along ``x``).
@@ -1108,19 +1119,14 @@ class Chart:
         >>> fm.Chart(df).mark_ribbon().encode(x="x", y="y_lo", y2="y_hi")
         Chart(mark='ribbon', encoding=['x', 'y', 'y2'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("ribbon", position)
         from ferrum.marks.composite import desugar_ribbon
-        new = self._clone()
-        new._mark = "ribbon"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "ribbon",
-            {"opacity": opacity, "interpolate": interpolate, **mark_kwargs},
             desugar_ribbon,
+            {"opacity": opacity, "interpolate": interpolate, **mark_kwargs},
+            placeholder="ribbon",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_contour(
         self,
@@ -1172,22 +1178,17 @@ class Chart:
         >>> fm.Chart(df).mark_contour(thresholds=4, fill=True).encode(x="x", y="y")
         Chart(mark='polygon', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("contour", position)
         from ferrum.marks.heavy_stat import desugar_contour
-        new = self._clone()
-        new._mark = "polygon"  # placeholder; layered mode overrides
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "contour",
+            desugar_contour,
             {
                 "bandwidth": bandwidth, "thresholds": thresholds, "smooth": smooth,
                 "fill": fill, "cmap": cmap, **mark_kwargs,
             },
-            desugar_contour,
+            placeholder="polygon",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_violin(self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
@@ -1226,19 +1227,14 @@ class Chart:
         >>> fm.Chart(df).mark_violin(inner="quartile").encode(x="group", y="val")
         Chart(mark='polygon', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("violin", position)
         from ferrum.marks.heavy_stat import desugar_violin
-        new = self._clone()
-        new._mark = "polygon"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "violin",
-            {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
             desugar_violin,
+            {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
+            placeholder="polygon",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_qq(self, *, distribution="normal", dequantize=False, line=True, position=None, **mark_kwargs) -> "Chart":
         """Render a quantile-quantile plot.
@@ -1273,12 +1269,7 @@ class Chart:
         >>> fm.Chart(df).mark_qq(distribution="normal").encode(x="val")
         Chart(mark='point', encoding=['x'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("qq", position)
         from ferrum.marks.heavy_stat import desugar_qq
-        new = self._clone()
-        new._mark = "point"
 
         def _resolve_qq(x_field, y_field, **kw):
             # QQ is single-column: use x_field as the sample field. y_field ignored.
@@ -1286,13 +1277,13 @@ class Chart:
                 raise ValueError("mark_qq() requires .encode(x=...) to specify the sample field")
             return desugar_qq(x_field, **kw)
 
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "qq",
-            {"distribution": distribution, "dequantize": dequantize, "line": line, **mark_kwargs},
             _resolve_qq,
+            {"distribution": distribution, "dequantize": dequantize, "line": line, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_raster(
         self,
@@ -1352,22 +1343,17 @@ class Chart:
         >>> fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y")
         Chart(mark='image', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("raster", position)
         from ferrum.marks.heavy_stat import desugar_raster
-        new = self._clone()
-        new._mark = "image"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "raster",
+            desugar_raster,
             {
                 "aggregate": aggregate, "field": field, "cmap": cmap, "resolution": resolution,
                 "blend": blend, "min_count": min_count, "log_scale": log_scale, **mark_kwargs,
             },
-            desugar_raster,
+            placeholder="image",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_hex(
         self,
@@ -1420,22 +1406,17 @@ class Chart:
         >>> fm.Chart(df).mark_hex(bin_size=0.5).encode(x="x", y="y")
         Chart(mark='polygon', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("hex", position)
         from ferrum.marks.heavy_stat import desugar_hex
-        new = self._clone()
-        new._mark = "polygon"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "hex",
+            desugar_hex,
             {
                 "bin_size": bin_size, "aggregate": aggregate, "field": field, "cmap": cmap,
                 "stroke": stroke, "stroke_width": stroke_width, **mark_kwargs,
             },
-            desugar_hex,
+            placeholder="polygon",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_swarm(
         self,
@@ -1488,22 +1469,17 @@ class Chart:
         >>> fm.Chart(df).mark_swarm(size=6).encode(x="group", y="val")
         Chart(mark='point', encoding=['x', 'y'])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("swarm", position)
         from ferrum.marks.heavy_stat import desugar_swarm
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "swarm",
+            desugar_swarm,
             {
                 "size": size, "orient": orient, "spacing": spacing, "side": side,
                 "dodge": dodge, **mark_kwargs,
             },
-            desugar_swarm,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_function(self, fn, *, domain=None, n=200, clip=True, position=None, **mark_kwargs) -> "Chart":
         """Render a mathematical function as a line.
@@ -1650,22 +1626,11 @@ class Chart:
         >>> fm.Chart(src.predictions()).mark_residuals(cook_threshold="auto")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("residuals", position)
         from ferrum.marks.diagnostic import desugar_residuals
         from ferrum._diagnostics.charts import _inject_constant
-        new = self._clone()
-        new._mark = "point"  # placeholder; layered mode overrides
-        if reference_line and new._data is not None:
-            try:
-                import polars as pl
-                if isinstance(new._data, pl.DataFrame):
-                    new._data = _inject_constant(new._data, "_ref_zero", 0.0)
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "residuals",
+            desugar_residuals,
             {
                 "kind": kind,
                 "reference_line": reference_line,
@@ -1673,10 +1638,14 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_residuals,
+            placeholder="point",
+            position=position,
+            data_transform=(
+                (lambda df: _inject_constant(df, "_ref_zero", 0.0))
+                if reference_line
+                else None
+            ),
         )
-        new._position = position
-        return new
 
     def mark_prediction_error(
         self,
@@ -1726,22 +1695,11 @@ class Chart:
         >>> fm.Chart(src.predictions()).mark_prediction_error(ci=0.95)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("prediction_error", position)
         from ferrum.marks.diagnostic import desugar_prediction_error
         from ferrum._diagnostics.charts import _sort_by
-        new = self._clone()
-        new._mark = "point"
-        if identity_line and new._data is not None:
-            try:
-                import polars as pl
-                if isinstance(new._data, pl.DataFrame):
-                    new._data = _sort_by(new._data, "y_true")
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "prediction_error",
+            desugar_prediction_error,
             {
                 "identity_line": identity_line,
                 "ci": ci,
@@ -1749,10 +1707,12 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_prediction_error,
+            placeholder="point",
+            position=position,
+            data_transform=(
+                (lambda df: _sort_by(df, "y_true")) if identity_line else None
+            ),
         )
-        new._position = position
-        return new
 
     def mark_roc(
         self,
@@ -1803,22 +1763,11 @@ class Chart:
         >>> fm.Chart(src.roc_curve()).mark_roc(annotate_auc=True)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("roc", position)
         from ferrum.marks.diagnostic import desugar_roc
         from ferrum._diagnostics.charts import _sort_by
-        new = self._clone()
-        new._mark = "point"
-        if reference_line and new._data is not None:
-            try:
-                import polars as pl
-                if isinstance(new._data, pl.DataFrame):
-                    new._data = _sort_by(new._data, "fpr")
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "roc",
+            desugar_roc,
             {
                 "average": average,
                 "reference_line": reference_line,
@@ -1826,10 +1775,12 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_roc,
+            placeholder="point",
+            position=position,
+            data_transform=(
+                (lambda df: _sort_by(df, "fpr")) if reference_line else None
+            ),
         )
-        new._position = position
-        return new
 
     def mark_pr(
         self,
@@ -1877,14 +1828,10 @@ class Chart:
         >>> fm.Chart(src.pr_curve()).mark_pr(annotate_ap=True)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("pr", position)
         from ferrum.marks.diagnostic import desugar_pr
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "pr",
+            desugar_pr,
             {
                 "average": average,
                 "annotate_ap": annotate_ap,
@@ -1892,10 +1839,9 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_pr,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_calibration(
         self,
@@ -1947,22 +1893,11 @@ class Chart:
         >>> fm.Chart(src.calibration_curve()).mark_calibration(n_bins=15)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("calibration", position)
         from ferrum.marks.diagnostic import desugar_calibration
         from ferrum._diagnostics.charts import _sort_by
-        new = self._clone()
-        new._mark = "point"
-        if reference_line and new._data is not None:
-            try:
-                import polars as pl
-                if isinstance(new._data, pl.DataFrame):
-                    new._data = _sort_by(new._data, "mean_predicted")
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "calibration",
+            desugar_calibration,
             {
                 "n_bins": n_bins,
                 "strategy": strategy,
@@ -1970,10 +1905,14 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_calibration,
+            placeholder="point",
+            position=position,
+            data_transform=(
+                (lambda df: _sort_by(df, "mean_predicted"))
+                if reference_line
+                else None
+            ),
         )
-        new._position = position
-        return new
 
     def mark_gain(
         self,
@@ -2015,23 +1954,18 @@ class Chart:
         >>> fm.Chart(src.cumulative_gain()).mark_gain()
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("gain", position)
         from ferrum.marks.diagnostic import desugar_gain
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "gain",
+            desugar_gain,
             {
                 "reference_lines": reference_lines,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_gain,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_lift(
         self,
@@ -2072,23 +2006,18 @@ class Chart:
         >>> fm.Chart(src.lift_curve()).mark_lift()
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("lift", position)
         from ferrum.marks.diagnostic import desugar_lift
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "lift",
+            desugar_lift,
             {
                 "reference_line": reference_line,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_lift,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_discrimination_threshold(
         self,
@@ -2136,24 +2065,19 @@ class Chart:
         >>> fm.Chart(src.discrimination_threshold()).mark_discrimination_threshold()
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("discrimination_threshold", position)
         from ferrum.marks.diagnostic import desugar_discrimination_threshold
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "discrimination_threshold",
+            desugar_discrimination_threshold,
             {
                 "metrics": metrics,
                 "n_thresholds": n_thresholds,
                 "threshold_line": threshold_line,
                 **mark_kwargs,
             },
-            desugar_discrimination_threshold,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_confusion(
         self,
@@ -2199,24 +2123,19 @@ class Chart:
         >>> fm.Chart(src.confusion_matrix()).mark_confusion(normalize="true")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("confusion", position)
         from ferrum.marks.diagnostic import desugar_confusion
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "confusion",
+            desugar_confusion,
             {
                 "normalize": normalize,
                 "annotate": annotate,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_confusion,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_class_prediction_error(
         self,
@@ -2258,23 +2177,18 @@ class Chart:
         >>> fm.Chart(src.confusion_matrix()).mark_class_prediction_error(normalize=True)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("class_prediction_error", position)
         from ferrum.marks.diagnostic import desugar_class_prediction_error
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "class_prediction_error",
+            desugar_class_prediction_error,
             {
                 "normalize": normalize,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_class_prediction_error,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_importance(
         self,
@@ -2329,14 +2243,10 @@ class Chart:
         >>> fm.Chart(src.importances()).mark_importance(top_k=10)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("importance", position)
         from ferrum.marks.diagnostic import desugar_importance
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "importance",
+            desugar_importance,
             {
                 "orient": orient,
                 "error_bars": error_bars,
@@ -2344,10 +2254,9 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_importance,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_shap_beeswarm(
         self,
@@ -2392,24 +2301,19 @@ class Chart:
         >>> fm.Chart(src.shap_values()).mark_shap_beeswarm(max_display=15)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("shap_beeswarm", position)
         from ferrum.marks.diagnostic import desugar_shap_beeswarm
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "shap_beeswarm",
+            desugar_shap_beeswarm,
             {
                 "max_display": max_display,
                 "color_bar": color_bar,
                 "order": order,
                 **mark_kwargs,
             },
-            desugar_shap_beeswarm,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_shap_bar(
         self,
@@ -2445,19 +2349,14 @@ class Chart:
         >>> fm.Chart(src.shap_values()).mark_shap_bar(max_display=10)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("shap_bar", position)
         from ferrum.marks.diagnostic import desugar_shap_bar
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "shap_bar",
-            {"max_display": max_display, **mark_kwargs},
             desugar_shap_bar,
+            {"max_display": max_display, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_pdp(
         self,
@@ -2508,14 +2407,10 @@ class Chart:
         >>> fm.Chart(src.partial_dependence()).mark_pdp(kind="both", center=True)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("pdp", position)
         from ferrum.marks.diagnostic import desugar_pdp
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "pdp",
+            desugar_pdp,
             {
                 "kind": kind,
                 "ice_alpha": ice_alpha,
@@ -2523,10 +2418,9 @@ class Chart:
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_pdp,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_shap_waterfall(
         self,
@@ -2580,23 +2474,18 @@ class Chart:
                 "mark_shap_waterfall requires sample_idx=<int>; "
                 "pass an integer index (e.g. sample_idx=0) to select the sample to explain."
             )
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("shap_waterfall", position)
         from ferrum.marks.diagnostic import desugar_shap_waterfall
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "shap_waterfall",
+            desugar_shap_waterfall,
             {
                 "sample_idx": sample_idx,
                 "max_display": max_display,
                 **mark_kwargs,
             },
-            desugar_shap_waterfall,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_learning_curve(
         self,
@@ -2638,19 +2527,14 @@ class Chart:
         >>> fm.Chart(src.learning_curve()).mark_learning_curve(ci_style="band")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("learning_curve", position)
         from ferrum.marks.diagnostic import desugar_learning_curve
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "learning_curve",
-            {"ci_style": ci_style, "color_field": color_field, **mark_kwargs},
             desugar_learning_curve,
+            {"ci_style": ci_style, "color_field": color_field, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_validation_curve(
         self,
@@ -2702,14 +2586,10 @@ class Chart:
         ... )
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("validation_curve", position)
         from ferrum.marks.diagnostic import desugar_validation_curve
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "validation_curve",
+            desugar_validation_curve,
             {
                 "log_scale": log_scale,
                 "ci_style": ci_style,
@@ -2717,10 +2597,9 @@ class Chart:
                 "param_label": param_label,
                 **mark_kwargs,
             },
-            desugar_validation_curve,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_cv_scores(
         self,
@@ -2761,19 +2640,14 @@ class Chart:
         >>> fm.Chart(src.cv_scores()).mark_cv_scores(kind="strip", split="test")
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("cv_scores", position)
         from ferrum.marks.diagnostic import desugar_cv_scores
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "cv_scores",
-            {"kind": kind, "split": split, **mark_kwargs},
             desugar_cv_scores,
+            {"kind": kind, "split": split, **mark_kwargs},
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_alpha_selection(
         self,
@@ -2819,46 +2693,35 @@ class Chart:
         >>> fm.Chart(src.alpha_selection()).mark_alpha_selection(log_scale=True)
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("alpha_selection", position)
         from ferrum.marks.diagnostic import desugar_alpha_selection
         from ferrum._diagnostics.charts import _inject_constant
-        new = self._clone()
-        new._mark = "point"
-        if highlight_best and new._data is not None:
-            try:
-                import polars as pl
-                if (
-                    isinstance(new._data, pl.DataFrame)
-                    and "alpha" in new._data.columns
-                    and "mean_score" in new._data.columns
-                ):
-                    agg = (
-                        new._data
-                        .group_by("alpha")
-                        .agg(pl.col("mean_score").first())
-                        .sort("mean_score", descending=True)
-                    )
-                    if agg.height > 0:
-                        best_alpha = float(agg["alpha"][0])
-                        new._data = _inject_constant(
-                            new._data, "_best_alpha", best_alpha,
-                        )
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+
+        def _inject_best_alpha(df):
+            import polars as pl
+            if "alpha" not in df.columns or "mean_score" not in df.columns:
+                return df
+            agg = (
+                df.group_by("alpha")
+                .agg(pl.col("mean_score").first())
+                .sort("mean_score", descending=True)
+            )
+            if agg.height == 0:
+                return df
+            return _inject_constant(df, "_best_alpha", float(agg["alpha"][0]))
+
+        return self._set_composite_mark(
             "alpha_selection",
+            desugar_alpha_selection,
             {
                 "log_scale": log_scale,
                 "highlight_best": highlight_best,
                 "ci_style": ci_style,
                 **mark_kwargs,
             },
-            desugar_alpha_selection,
+            placeholder="point",
+            position=position,
+            data_transform=_inject_best_alpha if highlight_best else None,
         )
-        new._position = position
-        return new
 
     # ---- Marks (clustering / manifold — Phase 10f) ----
 
@@ -2909,46 +2772,42 @@ class Chart:
         >>> fm.Chart(src.silhouette()).mark_silhouette()
         Chart(mark='rect', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("silhouette", position)
         from ferrum.marks.diagnostic import desugar_silhouette
         from ferrum._diagnostics.charts import _inject_constant
-        new = self._clone()
-        new._mark = "rect"
-        if new._data is not None:
-            try:
-                import polars as pl
-                if (
-                    isinstance(new._data, pl.DataFrame)
-                    and "y_position" in new._data.columns
-                    and "silhouette_value" in new._data.columns
-                ):
-                    new._data = new._data.with_columns([
-                        pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
-                        .alias("_silhouette_x_lo"),
-                        pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
-                        .alias("_silhouette_x_hi"),
-                        (pl.col("y_position").cast(pl.Float64) - 0.5)
-                        .alias("_silhouette_y_lo"),
-                        (pl.col("y_position").cast(pl.Float64) + 0.5)
-                        .alias("_silhouette_y_hi"),
-                    ])
-                    if zero_line:
-                        new._data = _inject_constant(new._data, "_ref_zero", 0.0)
-            except ImportError:
-                pass
-        new._pending_stat_mark = (
+
+        def _silhouette_prep(df):
+            import polars as pl
+            if (
+                "y_position" not in df.columns
+                or "silhouette_value" not in df.columns
+            ):
+                return df
+            df = df.with_columns([
+                pl.min_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                .alias("_silhouette_x_lo"),
+                pl.max_horizontal(pl.lit(0.0), pl.col("silhouette_value"))
+                .alias("_silhouette_x_hi"),
+                (pl.col("y_position").cast(pl.Float64) - 0.5)
+                .alias("_silhouette_y_lo"),
+                (pl.col("y_position").cast(pl.Float64) + 0.5)
+                .alias("_silhouette_y_hi"),
+            ])
+            if zero_line:
+                df = _inject_constant(df, "_ref_zero", 0.0)
+            return df
+
+        return self._set_composite_mark(
             "silhouette",
+            desugar_silhouette,
             {
                 "zero_line": zero_line,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_silhouette,
+            placeholder="rect",
+            position=position,
+            data_transform=_silhouette_prep,
         )
-        new._position = position
-        return new
 
     def mark_pca_scree(
         self,
@@ -2995,99 +2854,79 @@ class Chart:
         >>> fm.Chart(src.pca_variance()).mark_pca_scree(threshold_line=0.95)
         Chart(mark='rect', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("pca_scree", position)
         from ferrum.marks.diagnostic import (
             desugar_pca_scree,
             desugar_pca_scree_with_threshold,
         )
         from ferrum._diagnostics.charts import _inject_constant
-        new = self._clone()
-        new._mark = "rect"
-        if new._data is not None:
-            try:
-                import polars as pl
-                if (
-                    isinstance(new._data, pl.DataFrame)
-                    and "component" in new._data.columns
-                    and "explained_variance_ratio" in new._data.columns
-                ):
-                    new._data = new._data.with_columns([
-                        (pl.col("component").cast(pl.Float64) - 0.4)
-                        .alias("_pca_bar_x_lo"),
-                        (pl.col("component").cast(pl.Float64) + 0.4)
-                        .alias("_pca_bar_x_hi"),
-                        pl.lit(0.0).alias("_pca_bar_y_lo"),
-                        pl.col("explained_variance_ratio")
-                        .alias("_pca_bar_y_hi"),
-                    ])
-                    # X-axis anchor: same scale-extension trick as
-                    # _y_axis_anchor — the bar rects sit at
-                    # component ± 0.4 but the line layer's x is the
-                    # bare component column. Without this, bars at
-                    # the first/last component get clipped by the
-                    # narrower x domain.
-                    n_anchor = new._data.height
-                    x_lo = float(new._data["_pca_bar_x_lo"].min() or 0.0)
-                    x_hi = float(new._data["_pca_bar_x_hi"].max() or 0.0)
-                    x_anchor_vals = [x_lo, x_hi] + [None] * max(
-                        0, n_anchor - 2,
-                    )
-                    new._data = new._data.with_columns(
-                        pl.Series(
-                            "_x_axis_anchor", x_anchor_vals[:n_anchor],
-                            dtype=pl.Float64,
-                        ),
-                    )
-                    # Scale-resolution anchor: render/prepare.rs:265
-                    # feeds layer-0's y+y2 into the y-axis domain
-                    # computation. Layer-0 here is the cumulative
-                    # line (y range ≈ [evr[0], sum(evr)]); the bar
-                    # baseline at 0 and any threshold rule (0.95
-                    # default) sit outside that range. Stash both
-                    # anchor values into a y2 column on layer-0 so
-                    # the scale union covers [0, threshold].
-                    anchor_hi = (
-                        max(
-                            float(threshold_line)
-                            if threshold_line is not None
-                            else 0.0,
-                            float(
-                                new._data["cumulative_variance_ratio"]
-                                .max() or 0.0
-                            ),
-                        )
-                    )
-                    n = new._data.height
-                    anchor_vals = [0.0, float(anchor_hi)] + [None] * max(
-                        0, n - 2,
-                    )
-                    new._data = new._data.with_columns(
-                        pl.Series(
-                            "_y_axis_anchor", anchor_vals[:n],
-                            dtype=pl.Float64,
-                        ),
-                    )
-                    if threshold_line is not None:
-                        new._data = _inject_constant(
-                            new._data, "_threshold_line",
-                            float(threshold_line),
-                        )
-            except ImportError:
-                pass
+
+        def _pca_scree_prep(df):
+            import polars as pl
+            if (
+                "component" not in df.columns
+                or "explained_variance_ratio" not in df.columns
+            ):
+                return df
+            df = df.with_columns([
+                (pl.col("component").cast(pl.Float64) - 0.4)
+                .alias("_pca_bar_x_lo"),
+                (pl.col("component").cast(pl.Float64) + 0.4)
+                .alias("_pca_bar_x_hi"),
+                pl.lit(0.0).alias("_pca_bar_y_lo"),
+                pl.col("explained_variance_ratio")
+                .alias("_pca_bar_y_hi"),
+            ])
+            # X-axis anchor: same scale-extension trick as _y_axis_anchor — the
+            # bar rects sit at component ± 0.4 but the line layer's x is the
+            # bare component column. Without this, bars at the first/last
+            # component get clipped by the narrower x domain.
+            n_anchor = df.height
+            x_lo = float(df["_pca_bar_x_lo"].min() or 0.0)
+            x_hi = float(df["_pca_bar_x_hi"].max() or 0.0)
+            x_anchor_vals = [x_lo, x_hi] + [None] * max(0, n_anchor - 2)
+            df = df.with_columns(
+                pl.Series(
+                    "_x_axis_anchor", x_anchor_vals[:n_anchor],
+                    dtype=pl.Float64,
+                ),
+            )
+            # Scale-resolution anchor: render/prepare.rs:265 feeds layer-0's
+            # y+y2 into the y-axis domain computation. Layer-0 here is the
+            # cumulative line (y range ≈ [evr[0], sum(evr)]); the bar baseline
+            # at 0 and any threshold rule (0.95 default) sit outside that
+            # range. Stash both anchor values into a y2 column on layer-0 so
+            # the scale union covers [0, threshold].
+            anchor_hi = max(
+                float(threshold_line) if threshold_line is not None else 0.0,
+                float(df["cumulative_variance_ratio"].max() or 0.0),
+            )
+            n = df.height
+            anchor_vals = [0.0, float(anchor_hi)] + [None] * max(0, n - 2)
+            df = df.with_columns(
+                pl.Series(
+                    "_y_axis_anchor", anchor_vals[:n],
+                    dtype=pl.Float64,
+                ),
+            )
+            if threshold_line is not None:
+                df = _inject_constant(
+                    df, "_threshold_line", float(threshold_line),
+                )
+            return df
+
         fn = (
             desugar_pca_scree_with_threshold
             if threshold_line is not None
             else desugar_pca_scree
         )
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "pca_scree",
-            {"cumulative_line": cumulative_line, **mark_kwargs},
             fn,
+            {"cumulative_line": cumulative_line, **mark_kwargs},
+            placeholder="rect",
+            position=position,
+            data_transform=_pca_scree_prep,
         )
-        new._position = position
-        return new
 
     def mark_intercluster_distance(
         self,
@@ -3129,23 +2968,18 @@ class Chart:
         >>> fm.Chart(src.intercluster_distance()).mark_intercluster_distance()
         Chart(mark='point', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("intercluster_distance", position)
         from ferrum.marks.diagnostic import desugar_intercluster_distance
-        new = self._clone()
-        new._mark = "point"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "intercluster_distance",
+            desugar_intercluster_distance,
             {
                 "label_clusters": label_clusters,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_intercluster_distance,
+            placeholder="point",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_decision_boundary(
         self,
@@ -3188,23 +3022,18 @@ class Chart:
         >>> fm.Chart(src.decision_boundary()).mark_decision_boundary(proba=True)
         Chart(mark='rect', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("decision_boundary", position)
         from ferrum.marks.diagnostic import desugar_decision_boundary
-        new = self._clone()
-        new._mark = "rect"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "decision_boundary",
+            desugar_decision_boundary,
             {
                 "proba": proba,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_decision_boundary,
+            placeholder="rect",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_rank1d(
         self,
@@ -3245,23 +3074,18 @@ class Chart:
         >>> fm.Chart(src.rank1d()).mark_rank1d()
         Chart(mark='bar', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("rank1d", position)
         from ferrum.marks.diagnostic import desugar_rank1d
-        new = self._clone()
-        new._mark = "bar"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "rank1d",
+            desugar_rank1d,
             {
                 "orient": orient,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_rank1d,
+            placeholder="bar",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_rank2d(
         self,
@@ -3307,24 +3131,19 @@ class Chart:
         >>> fm.Chart(src.rank2d()).mark_rank2d(annot=True)
         Chart(mark='rect', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("rank2d", position)
         from ferrum.marks.diagnostic import desugar_rank2d
-        new = self._clone()
-        new._mark = "rect"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "rank2d",
+            desugar_rank2d,
             {
                 "annot": annot,
                 "color_field": color_field,
                 "text_field": text_field,
                 **mark_kwargs,
             },
-            desugar_rank2d,
+            placeholder="rect",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_parallel_coordinates(
         self,
@@ -3370,23 +3189,18 @@ class Chart:
         >>> fm.Chart(df).mark_parallel_coordinates(color_field="sample_id")
         Chart(mark='line', encoding=[])
         """
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-            validate_position_eligibility("parallel_coordinates", position)
         from ferrum.marks.diagnostic import desugar_parallel_coordinates
-        new = self._clone()
-        new._mark = "line"
-        new._pending_stat_mark = (
+        return self._set_composite_mark(
             "parallel_coordinates",
+            desugar_parallel_coordinates,
             {
                 "alpha": alpha,
                 "color_field": color_field,
                 **mark_kwargs,
             },
-            desugar_parallel_coordinates,
+            placeholder="line",
+            position=position,
         )
-        new._position = position
-        return new
 
     def mark_arc(self, **kwargs):
         """Render data as arcs (pie/donut slices).
