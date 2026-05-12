@@ -1355,7 +1355,6 @@ def _discrimination_threshold_chart_from_source(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
-    direct_labels: bool = True,
     optimum_label: bool = True,
     subtitle: str | None = None,
     theme: Any = None,
@@ -1370,13 +1369,9 @@ def _discrimination_threshold_chart_from_source(
     annotation at the F1-optimum point showing the threshold + F1
     value. ``optimum_label`` is independent of the older
     ``threshold_line`` kwarg — when both are set, the chart renders
-    the vertical rule plus the inline text caption. Direct-label
-    wiring (``direct_labels``) is currently a no-op; see the
-    discussion above.
+    the vertical rule plus the inline text caption.
     """
     import ferrum
-
-    del direct_labels  # reserved — see docstring; no-op today
 
     df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
     long_df = df.unpivot(

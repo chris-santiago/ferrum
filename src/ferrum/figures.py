@@ -256,7 +256,7 @@ def roc_chart(
     average : {"macro", "micro", "weighted"} or None, default "macro"
         Averaging method used when ``per_class=False``. Ignored when
         ``per_class=True``.
-    annotate_auc : bool, default False
+    annotate_auc : bool, default True
         When ``True``, injects one text label per class showing the AUC
         value to 3 decimal places, anchored in the lower-right corner
         of the plot.
@@ -337,7 +337,7 @@ def pr_chart(
         ``per_class=True``. Macro and weighted variants interpolate
         per-class precision over a shared recall grid; micro ravels the
         binarized labels into a single curve.
-    annotate_ap : bool, default False
+    annotate_ap : bool, default True
         When ``True``, injects one text label per class near the lower-
         right corner of the plot showing average precision (AP) to 3
         decimal places.
@@ -1086,7 +1086,6 @@ def discrimination_threshold_chart(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
-    direct_labels: bool = True,
     optimum_label: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
@@ -1151,7 +1150,6 @@ def discrimination_threshold_chart(
         metrics=metrics,
         cv=cv,
         threshold_line=threshold_line,
-        direct_labels=direct_labels,
         optimum_label=optimum_label,
         subtitle=subtitle,
         theme=theme,
