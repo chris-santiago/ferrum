@@ -171,14 +171,17 @@ def test_pr_chart_per_class_false_routes_to_macro(multi_source):
     assert "<svg" in svg
     # Verify the underlying DataFrame holds one summary class (the macro
     # summary) rather than several per-class curves.
+    # After legend-label renaming, the single class value carries the AP score.
     classes = set(chart._data["class"].unique().to_list())
-    assert classes == {"macro"}
+    assert len(classes) == 1
+    assert next(iter(classes)).startswith("macro (AP =")
 
 
 def test_pr_chart_per_class_false_micro(multi_source):
     chart = ferrum.pr_chart(multi_source, per_class=False, average="micro")
     classes = set(chart._data["class"].unique().to_list())
-    assert classes == {"micro"}
+    assert len(classes) == 1
+    assert next(iter(classes)).startswith("micro (AP =")
 
 
 def test_calibration_chart_figure_function(binary_source):

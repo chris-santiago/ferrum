@@ -425,6 +425,20 @@ def _roc_chart_from_source(
 
     df = source.roc_curve(average=None if per_class else average)
     color_field = _color_field_for(df, "class")
+
+    if annotate_auc and color_field is not None:
+        groups = df[color_field].unique().to_list()
+        rename_map = {}
+        for g in groups:
+            subset = df.filter(pl.col(color_field) == g)
+            fpr_g = np.asarray(subset["fpr"].to_list(), dtype=float)
+            tpr_g = np.asarray(subset["tpr"].to_list(), dtype=float)
+            auc_val = _trapezoid_auc(fpr_g, tpr_g)
+            rename_map[str(g)] = f"{g} (AUC = {auc_val:.3f})"
+        df = df.with_columns(
+            pl.col(color_field).cast(pl.Utf8).replace(rename_map).alias(color_field)
+        )
+
     chart = ferrum.Chart(df).mark_roc(
         average=None if per_class else average,
         annotate_auc=False,
@@ -538,6 +552,22 @@ def _pr_chart_from_source(
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
         df = _inject_pr_iso_lines(df)
+
+    # Rename color-field values to include per-class AP before legend is built.
+    _pr_color_field = _color_field_for(df, "class")
+    if annotate_ap and _pr_color_field is not None:
+        _curve_df_pre = df.filter(pl.col("precision").is_not_null())
+        _pr_groups = _curve_df_pre[_pr_color_field].unique().to_list()
+        _pr_rename_map = {}
+        for _g in _pr_groups:
+            _subset = _curve_df_pre.filter(pl.col(_pr_color_field) == _g)
+            _recall_g = np.asarray(_subset["recall"].to_list(), dtype=float)
+            _prec_g = np.asarray(_subset["precision"].to_list(), dtype=float)
+            _ap_val = _ap_step(_recall_g, _prec_g)
+            _pr_rename_map[str(_g)] = f"{_g} (AP = {_ap_val:.3f})"
+        df = df.with_columns(
+            pl.col(_pr_color_field).cast(pl.Utf8).replace(_pr_rename_map).alias(_pr_color_field)
+        )
 
     # Inject the positive-class-prevalence baseline as a same-data column
     # (one non-null entry, rest null) so the mark_rule overlay shares
@@ -826,6 +856,12 @@ def _gain_chart_from_source(
 
     df = source.cumulative_gain()
     color_field = _color_field_for(df, "class")
+    if color_field is not None:
+        df = df.with_columns(
+            pl.col(color_field).cast(pl.Utf8).replace({
+                "0": "Class 0", "1": "Class 1", "baseline": "Baseline",
+            }).alias(color_field)
+        )
     chart = ferrum.Chart(df)
     if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
@@ -866,6 +902,12 @@ def _lift_chart_from_source(
 
     df = source.lift_curve()
     color_field = _color_field_for(df, "class")
+    if color_field is not None:
+        df = df.with_columns(
+            pl.col(color_field).cast(pl.Utf8).replace({
+                "0": "Class 0", "1": "Class 1", "baseline": "Baseline",
+            }).alias(color_field)
+        )
     chart = ferrum.Chart(df)
     if color_field is not None:
         chart = chart.encode(color=ferrum.Color(color_field, legend=None))
@@ -1553,6 +1595,9 @@ def _learning_curve_chart_from_source(
 
     df = source.learning_curve(cv=cv, scoring=scoring, train_sizes=train_sizes)
     df = _dedupe_aggregated(df, "train_size", "split")
+    df = df.with_columns(
+        pl.col("split").replace({"train": "Training Score", "test": "Cross-Validation Score"})
+    )
     chart = (
         ferrum.Chart(df)
         .encode(color=ferrum.Color("split", legend=None))
@@ -1607,6 +1652,9 @@ def _validation_curve_chart_from_source(
 
     df = source.validation_curve(param, values, cv=cv, scoring=scoring)
     df = _dedupe_aggregated(df, "param_value", "split")
+    df = df.with_columns(
+        pl.col("split").replace({"train": "Training Score", "test": "Cross-Validation Score"})
+    )
     vals = [float(v) for v in values]
     if log_scale == "auto":
         non_zero = [v for v in vals if v > 0]

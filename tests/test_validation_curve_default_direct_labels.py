@@ -16,8 +16,8 @@ def test_validation_curve_default_emits_direct_labels():
         cv=3,
     )
     svg = chart.show_svg()
-    assert ">train<" in svg
-    assert ">test<" in svg
+    assert ">Training Score<" in svg
+    assert ">Cross-Validation Score<" in svg
     # Legend suppressed — exactly one occurrence per series label
-    assert svg.count(">train<") == 1
-    assert svg.count(">test<") == 1
+    assert svg.count(">Training Score<") == 1
+    assert svg.count(">Cross-Validation Score<") == 1

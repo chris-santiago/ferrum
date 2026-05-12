@@ -10,8 +10,8 @@ def test_learning_curve_default_emits_direct_labels():
         LogisticRegression(max_iter=200), X, y, cv=3,
     )
     svg = chart.show_svg()
-    assert ">train<" in svg
-    assert ">test<" in svg
+    assert ">Training Score<" in svg
+    assert ">Cross-Validation Score<" in svg
 
 
 def test_learning_curve_legend_suppressed_when_direct_labels():
@@ -23,5 +23,5 @@ def test_learning_curve_legend_suppressed_when_direct_labels():
     # With legend suppression, each split label appears exactly once —
     # the direct-label endpoint annotation. Without suppression we'd get
     # one extra occurrence per series for the legend swatch.
-    assert svg.count(">train<") == 1
-    assert svg.count(">test<") == 1
+    assert svg.count(">Training Score<") == 1
+    assert svg.count(">Cross-Validation Score<") == 1
