@@ -1353,6 +1353,7 @@ def _discrimination_threshold_chart_from_source(
     cv: Any = None,
     threshold_line: bool = False,
     direct_labels: bool = True,
+    optimum_label: bool = True,
     subtitle: str | None = None,
     theme: Any = None,
 ):
@@ -1362,15 +1363,13 @@ def _discrimination_threshold_chart_from_source(
     ``(threshold, metric, value)`` for plotting.
 
     Schwabish SB-followup (2026-05-12): adds a ``Discrimination
-    threshold`` active title. Direct-label wiring was considered and
-    rejected — the four default metrics (precision / recall / f1 /
-    queue_rate) cross over each other and converge near
-    ``(threshold=1, value=0)`` and ``(threshold=0, value=1)``, so
-    endpoint labels collapse on top of each other regardless of side.
-    The existing legend is the right affordance for this chart shape;
-    the ``direct_labels`` kwarg is accepted but currently a no-op
-    pending a more appropriate placement strategy (e.g. at each
-    metric's peak y position along the curve).
+    threshold`` active title and, when ``optimum_label=True``, a text
+    annotation at the F1-optimum point showing the threshold + F1
+    value. ``optimum_label`` is independent of the older
+    ``threshold_line`` kwarg — when both are set, the chart renders
+    the vertical rule plus the inline text caption. Direct-label
+    wiring (``direct_labels``) is currently a no-op; see the
+    discussion above.
     """
     import ferrum
 
@@ -1383,16 +1382,33 @@ def _discrimination_threshold_chart_from_source(
         variable_name="metric",
         value_name="value",
     )
-    if threshold_line:
-        # Compute argmax(f1) from the un-melted DataFrame so we get the
-        # exact threshold value (not the per-melted-row value of the F1
-        # series). Inject _threshold_best as a sentinel column on the
-        # long-form frame: one non-null row at the best threshold so
-        # mark_rule renders exactly one vertical line.
+    has_rows = long_df.height > 0
+    if has_rows:
         best_idx = int(df["f1"].arg_max() or 0)
         best_threshold = float(df["threshold"][best_idx])
+        best_f1 = float(df["f1"][best_idx])
+    if threshold_line and has_rows:
+        # Inject _threshold_best as a sentinel column on the long-form
+        # frame: one non-null row at the best threshold so mark_rule
+        # renders exactly one vertical line.
         long_df = _inject_constant(
             long_df, "_threshold_best", best_threshold,
+        )
+    if optimum_label and has_rows:
+        # Inject _optimum_x/_optimum_y/_optimum_text columns sharing
+        # data with the long-form frame so a mark_text overlay reads
+        # same-data and composes via ``+``.
+        n = long_df.height
+        opt_x: list = [None] * n
+        opt_y: list = [None] * n
+        opt_text: list = [None] * n
+        opt_x[0] = best_threshold
+        opt_y[0] = best_f1
+        opt_text[0] = f"max F1 = {best_f1:.3f} @ t={best_threshold:.2f}"
+        long_df = long_df.with_columns(
+            pl.Series("_optimum_x", opt_x, dtype=pl.Float64),
+            pl.Series("_optimum_y", opt_y, dtype=pl.Float64),
+            pl.Series("_optimum_text", opt_text, dtype=pl.Utf8),
         )
     chart = ferrum.Chart(long_df).mark_discrimination_threshold(
         metrics=metrics,
@@ -1402,6 +1418,13 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Discrimination threshold", subtitle=subtitle),
     )
+    if optimum_label and has_rows:
+        optimum_layer = (
+            ferrum.Chart(long_df)
+            .mark_text(align="left", dx=4, dy=-4)
+            .encode(x="_optimum_x", y="_optimum_y", text="_optimum_text")
+        )
+        chart = chart + optimum_layer
     if theme is not None:
         chart = chart.theme(theme)
     return chart

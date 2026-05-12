@@ -1079,6 +1079,7 @@ def discrimination_threshold_chart(
     cv: Any = None,
     threshold_line: bool = False,
     direct_labels: bool = True,
+    optimum_label: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
     theme: Any = None,
@@ -1114,6 +1115,11 @@ def discrimination_threshold_chart(
     threshold_line : bool, default False
         When ``True``, injects a vertical reference rule at the
         threshold that maximises F1.
+    optimum_label : bool, default True
+        When ``True``, overlays a text annotation at the F1-optimum
+        point showing the threshold and F1 value
+        (e.g. ``"max F1 = 0.872 @ t=0.43"``). Composes with
+        ``threshold_line``; either can be enabled independently.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1138,6 +1144,7 @@ def discrimination_threshold_chart(
         cv=cv,
         threshold_line=threshold_line,
         direct_labels=direct_labels,
+        optimum_label=optimum_label,
         subtitle=subtitle,
         theme=theme,
     )
