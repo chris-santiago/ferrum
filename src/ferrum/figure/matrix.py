@@ -81,8 +81,9 @@ def pairplot(
         ``mark_smooth(method="lm")``.
     diag_kind : {"auto", "hist", "kde", None, "none"}, default "auto"
         Mark for the diagonal cells (only when ``vars`` is symmetric).
-        ``"auto"`` resolves to ``"hist"``.  Pass ``None`` or ``"none"``
-        to suppress diagonal marks.
+        ``"auto"`` resolves to ``"kde"`` (KDE is smoother and more informative
+        than histograms for overlapping distributions).  Pass ``None`` or
+        ``"none"`` to suppress diagonal marks.
     markers : any, optional
         Reserved for future point-marker customisation (no-op today).
     height : float or None, optional
@@ -181,8 +182,8 @@ def pairplot(
     diagonal = None
     effective_diag_kind = diag_kind
     if effective_diag_kind == "auto":
-        # auto = histogram by default (cheaper).
-        effective_diag_kind = "hist"
+        # auto = kde by default (smoother, more informative for overlapping distributions).
+        effective_diag_kind = "kde"
     if effective_diag_kind not in (None, "none") and symmetric:
         diag_enc: dict = {"x": Repeat.column}
         if hue is not None:
@@ -195,7 +196,12 @@ def pairplot(
                 hist_kwargs["groupby"] = hue
             diagonal = Chart(data).mark_histogram(**hist_kwargs).encode(**diag_enc)
         elif effective_diag_kind == "kde":
-            diagonal = Chart(data).mark_density().encode(**diag_enc)
+            # When hue is set, thread groupby so Kde emits per-group density
+            # curves preserving the hue column for color encoding.
+            kde_kwargs: dict = {}
+            if hue is not None:
+                kde_kwargs["groupby"] = hue
+            diagonal = Chart(data).mark_density(**kde_kwargs).encode(**diag_enc)
 
     if theme is not None:
         off = off.theme(theme)
@@ -393,7 +399,7 @@ def clustermap(
     *,
     method: str = "ward",
     metric: str = "euclidean",
-    cmap: str = "viridis",
+    cmap: str = "magma",
     z_score: Any = None,
     standard_scale: Any = None,
     figsize: Any = None,
@@ -422,10 +428,11 @@ def clustermap(
     metric : str, default "euclidean"
         Distance metric forwarded to ``Linkage`` (e.g. ``"euclidean"``,
         ``"cosine"``, ``"correlation"``).
-    cmap : str, default "viridis"
-        Color scheme name for the center heatmap (e.g. ``"viridis"``,
-        ``"rdbu"``, ``"blues"``).  Forwarded to the ``Color`` encoding's
-        ``scheme`` scale option.
+    cmap : str, default "magma"
+        Color scheme name for the center heatmap (e.g. ``"magma"``,
+        ``"viridis"``, ``"rdbu"``).  Forwarded to the ``Color`` encoding's
+        ``scheme`` scale option.  ``"magma"`` is preferred for dense heatmaps
+        due to its perceptual uniformity across a wide luminance range.
     z_score : {0, 1, None}, optional
         Standardise data along rows (``0``) or columns (``1``) before
         clustering; forwarded to ``Linkage``.
@@ -529,9 +536,13 @@ def clustermap(
     # the resulting unpivoted long-form preserves the visually-clustered order.
     # `drop_index=False` keeps the data columns intact (we're not dropping a
     # column from the chained batch — the index column lives in `from=` only).
-    from ferrum.encoding import Color as _Color
+    from ferrum.encoding import Color as _Color, X as _X, Y as _Y
 
     _color_enc = _Color("value", scheme=cmap)
+    # Suppress synthetic axis titles (_row_id, column) that bleed through from
+    # the internal unpivot column names — real row-label columns keep their names.
+    _x_enc = _X("column", title="")
+    _y_enc = _Y(id_col, title="" if id_col in ("_row_id", "column") else id_col)
     center = (
         Chart(data)
         .transform(
@@ -542,8 +553,8 @@ def clustermap(
         )
         .mark_rect()
         .encode(
-            x="column",
-            y=id_col,
+            x=_x_enc,
+            y=_y_enc,
             color=_color_enc,
         )
     )
