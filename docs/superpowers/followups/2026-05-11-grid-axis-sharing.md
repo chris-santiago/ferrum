@@ -3,7 +3,14 @@
 **Surfaced:** 2026-05-11 during the rust-coherence-pass (F21 cleanup).
 **Verified:** 2026-05-11 by reading
 `crates/ferrum-core/src/render/binding.rs::compose_svg_grid_py` (pre-F21).
-**Resolved:** _open_.
+**Resolved:** 2026-05-12, Python-pass P2.8 (K16).  Shipped as
+`_ChartLike.share_scale(x="shared", y="shared", ...)` so every
+composition (HConcat / VConcat / Joint / Repeat / ClusterMap) gets
+it for free.  `RepeatChart` additionally supports the same semantics
+at construction time via `resolve={"x": "shared", ...}` (P2.5d).  The
+sketched `Figure.shared(...)` API was discarded — ferrum has no
+`Figure` class and the use cases the section below names are all
+covered by the composition-level method.
 **Severity:** S3 / design gap. Affects JointChart, ClusterMapChart,
 RepeatChart, and any future grid-composed multi-chart figure that
 wants shared x/y axes across cells.
@@ -67,13 +74,40 @@ Today users would have to compute the shared domain in Python and
 pass it as an explicit `scale=fr.LinearScale(domain=[...])` to every
 participating cell.
 
-## Proposed design
+## Proposed design (superseded)
 
-`Chart.share_scale(other_chart, channel="x"|"y"|...)` that pre-renders
-the union extent and injects `scale=fr.LinearScale(domain=union)` into
-both specs, then a `Figure.shared(x=[(r, c), ...])`-style declarative
-API for grid-laid-out charts. Belongs in ferrum's Python composition
-layer, not the Rust compositor. Out of scope for the coherence pass.
+The original sketch proposed `Chart.share_scale(other_chart, channel)`
+plus a `Figure.shared(x=[(r, c), ...])` declarative API.  Both ideas
+were re-examined during P2.8 implementation:
+
+- **Pair-wise `Chart.share_scale(other, channel)`** — dropped.  Charts
+  are immutable, so the call must return a tuple `(new_a, new_b)`,
+  which reads asymmetrically ("a does the sharing to b") at the call
+  site.  Every concrete use case flowed through a composition anyway;
+  the composition-level method covers it.
+- **`Figure.shared(...)`** — dropped.  Ferrum has no `Figure` class,
+  and inventing one for a single method would add a sixth composition
+  type.  `_ChartLike` already owns `save` / `show` / `_repr_*` for all
+  five compositions, so the method lands there.
+
+## Shipped design (2026-05-12)
+
+`_ChartLike.share_scale(**channels)` walks every member chart (and
+every layer of layered cells) via `_scale_share.compute_union_domain`,
+then re-emits the composition with each chart cloned and given an
+explicit `scale={"type": ..., "domain": [...]}` dict on the shared
+channels.  Independent channels are no-ops.  `RepeatChart.share_scale`
+overrides this to merge into its `resolve=` config so the union pass
+runs once at `expand()` time (consistent with `resolve=` at
+construction).
+
+The union-domain primitive lives in `src/ferrum/_scale_share.py`:
+
+- `compute_union_domain(charts, channel) -> dict | None` — handles
+  linear / ordinal / time scale types, polars-typed.
+- `inject_scale(chart, channel, scale_dict) -> Chart` — preserves
+  every other ChannelBase kwarg (type_, aggregate, bin, title, ...),
+  handles single-mark and layered charts symmetrically.
 
 ## Out of scope (for this follow-up)
 

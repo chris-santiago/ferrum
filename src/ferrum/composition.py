@@ -90,6 +90,79 @@ class _ChartLike:
                 f"{type(self).__name__}.save({fmt!r}) is not yet supported"
             )
 
+    def share_scale(self, **channels):
+        """Share scales across this composition's member charts.
+
+        Computes the union domain for each channel marked ``"shared"``
+        and re-emits every member chart with an explicit ``scale=`` dict
+        on that channel, so the participating axes lock to the same
+        ticks.  Channels marked ``"independent"`` (the default for any
+        channel not listed) keep their per-chart domains.
+
+        Parameters
+        ----------
+        **channels : str
+            Channel name → ``"shared"`` | ``"independent"``.  Common
+            channels: ``x``, ``y``, ``color``, ``size``.
+
+        Returns
+        -------
+        _ChartLike
+            A new composition of the same type with the shared scales
+            injected.  No-op (returns ``self``) when no channel is
+            ``"shared"`` or none of the requested channels are bound on
+            any member chart.
+
+        Raises
+        ------
+        ValueError
+            If any value is not ``"shared"`` or ``"independent"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> combined = (chart_a | chart_b).share_scale(x="shared")
+        >>> grid = fm.JointChart(center, top=hist_x, right=hist_y).share_scale(y="shared")
+        """
+        for ch, mode in channels.items():
+            if mode not in ("shared", "independent"):
+                raise ValueError(
+                    f"share_scale: {ch}={mode!r}; "
+                    "expected 'shared' or 'independent'"
+                )
+        shared = [ch for ch, mode in channels.items() if mode == "shared"]
+        if not shared:
+            return self
+        from ferrum._scale_share import compute_union_domain, inject_scale
+
+        member_charts = self.charts
+        scale_dicts = {}
+        for channel in shared:
+            sd = compute_union_domain(member_charts, channel)
+            if sd is not None:
+                scale_dicts[channel] = sd
+        if not scale_dicts:
+            return self
+
+        def _apply(chart):
+            out = chart
+            for ch, sd in scale_dicts.items():
+                out = inject_scale(out, ch, sd)
+            return out
+
+        return self._rebuild_with_charts(_apply)
+
+    def _rebuild_with_charts(self, fn):  # pragma: no cover - abstract
+        """Return a new composition with each member chart transformed by *fn*.
+
+        Subclasses must implement this — it's the seam between the
+        generic ``share_scale`` plumbing on the base and each
+        composition's constructor signature.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _rebuild_with_charts"
+        )
+
 
 class _CompositeBase(_ChartLike):
     """Symmetric list-of-charts container for HConcat / VConcat.
@@ -145,6 +218,9 @@ class _CompositeBase(_ChartLike):
         return type(self)(
             [c.properties(**kwargs) for c in self.charts], spacing=self.spacing
         )
+
+    def _rebuild_with_charts(self, fn):
+        return type(self)([fn(c) for c in self.charts], spacing=self.spacing)
 
 
 class HConcatChart(_CompositeBase):
@@ -352,6 +428,14 @@ class JointChart(_ChartLike):
         return JointChart(
             self.center.properties(**kwargs),
             top=self.top, right=self.right,
+            ratio=self.ratio, spacing=self.spacing,
+        )
+
+    def _rebuild_with_charts(self, fn):
+        return JointChart(
+            fn(self.center),
+            top=(fn(self.top) if self.top is not None else None),
+            right=(fn(self.right) if self.right is not None else None),
             ratio=self.ratio, spacing=self.spacing,
         )
 
@@ -760,6 +844,42 @@ class RepeatChart(_ChartLike):
             columns=self.columns, resolve=self.resolve,
         )
 
+    def share_scale(self, **channels):
+        """Share scales across this repeat's cells by merging into ``resolve=``.
+
+        Equivalent to constructing the chart with ``resolve={...}`` set
+        — both paths run through :meth:`_apply_resolve` at ``expand()``
+        time, so the union-domain computation sees every cell (including
+        each layer of layered cells) exactly once.  Passing the same
+        channel twice with different modes takes the call's value.
+
+        Parameters
+        ----------
+        **channels : str
+            Channel name → ``"shared"`` | ``"independent"``.
+
+        Returns
+        -------
+        RepeatChart
+            A new ``RepeatChart`` with the merged ``resolve=`` config.
+        """
+        for ch, mode in channels.items():
+            if mode not in ("shared", "independent"):
+                raise ValueError(
+                    f"share_scale: {ch}={mode!r}; "
+                    "expected 'shared' or 'independent'"
+                )
+        merged = dict(self.resolve or {})
+        merged.update(channels)
+        return RepeatChart(
+            self.template,
+            row=self.row, column=self.column, layer=self.layer,
+            diagonal=self.diagonal,
+            corner=self.corner, spacing=self.spacing,
+            columns=self.columns,
+            resolve=merged or None,
+        )
+
     def show_svg(self) -> str:
         """Render the repeated grid to an SVG string.
 
@@ -952,6 +1072,19 @@ class ClusterMapChart(_ChartLike):
             self.heatmap.properties(**kwargs),
             row_dendrogram=self.row_dendrogram,
             col_dendrogram=self.col_dendrogram,
+            dendrogram_ratio=self.dendrogram_ratio,
+            spacing=self.spacing,
+        )
+
+    def _rebuild_with_charts(self, fn):
+        return ClusterMapChart(
+            fn(self.heatmap),
+            row_dendrogram=(
+                fn(self.row_dendrogram) if self.row_dendrogram is not None else None
+            ),
+            col_dendrogram=(
+                fn(self.col_dendrogram) if self.col_dendrogram is not None else None
+            ),
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )

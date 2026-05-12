@@ -433,3 +433,120 @@ class TestClusterMapChart:
         themed = cm.theme(fe.themes.default)
         assert themed.heatmap._theme is fe.themes.default
         assert themed.col_dendrogram._theme is fe.themes.default
+
+
+class TestShareScale:
+    """``_ChartLike.share_scale(**channels)`` — K16 / P2.8."""
+
+    def test_rejects_unknown_mode(self):
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+        c = fe.Chart(df).mark_point().encode(x="x", y="y")
+        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+            (c | c).share_scale(x="smart")
+
+    def test_no_shared_channels_returns_self(self):
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+        c = fe.Chart(df).mark_point().encode(x="x", y="y")
+        comp = c | c
+        # All-independent (or empty) should no-op.
+        assert comp.share_scale() is comp
+        assert comp.share_scale(x="independent") is comp
+
+    def test_hconcat_share_x(self):
+        df = pl.DataFrame({
+            "a": [0.0, 1.0, 2.0, 3.0],
+            "b": [10.0, 20.0, 30.0, 40.0],
+            "y": [1, 2, 3, 4],
+        })
+        left = fe.Chart(df).mark_point().encode(x="a", y="y")
+        right = fe.Chart(df).mark_point().encode(x="b", y="y")
+        shared = (left | right).share_scale(x="shared")
+        # Each child must now carry an explicit linear scale spanning [0, 40].
+        for child in shared.charts:
+            scale_kw = child._encoding["x"]
+            scale = scale_kw._kwargs.get("scale") if hasattr(scale_kw, "_kwargs") else None
+            assert isinstance(scale, dict)
+            assert scale["type"] == "linear"
+            assert scale["domain"] == [0.0, 40.0]
+
+    def test_vconcat_share_y(self):
+        df = pl.DataFrame({
+            "x": [1, 2, 3, 4],
+            "low": [0.0, 1.0, 2.0, 3.0],
+            "high": [100.0, 200.0, 300.0, 400.0],
+        })
+        top = fe.Chart(df).mark_point().encode(x="x", y="low")
+        bot = fe.Chart(df).mark_point().encode(x="x", y="high")
+        shared = (top & bot).share_scale(y="shared")
+        for child in shared.charts:
+            scale = child._encoding["y"]._kwargs.get("scale")
+            assert isinstance(scale, dict)
+            assert scale["domain"] == [0.0, 400.0]
+
+    def test_joint_share_y_across_center_and_right_marginal(self):
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [10.0, 50.0, 90.0, 30.0],
+            "y_marginal": [5.0, 25.0, 75.0, 100.0],
+        })
+        center = fe.Chart(df).mark_point().encode(x="x", y="y")
+        right = fe.Chart(df).mark_point().encode(x="x", y="y_marginal")
+        shared = fe.JointChart(center, right=right).share_scale(y="shared")
+        assert shared.center._encoding["y"]._kwargs.get("scale") == {
+            "type": "linear", "domain": [5.0, 100.0]
+        }
+        assert shared.right._encoding["y"]._kwargs.get("scale") == {
+            "type": "linear", "domain": [5.0, 100.0]
+        }
+
+    def test_clustermap_share_x_across_heatmap_and_col_dendrogram(self):
+        df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, 20.0, 30.0], "r": [0, 1, 2]})
+        heat = fe.Chart(df).mark_rect().encode(x="a", y="r", fill="b")
+        col_d = fe.Chart(df).mark_rule().encode(x="b", y="r")
+        shared = fe.ClusterMapChart(heat, col_dendrogram=col_d).share_scale(x="shared")
+        assert shared.heatmap._encoding["x"]._kwargs.get("scale") == {
+            "type": "linear", "domain": [1.0, 30.0]
+        }
+        assert shared.col_dendrogram._encoding["x"]._kwargs.get("scale") == {
+            "type": "linear", "domain": [1.0, 30.0]
+        }
+
+    def test_repeat_share_scale_merges_into_resolve(self):
+        df = pl.DataFrame({
+            "small": [0.0, 1.0, 2.0],
+            "big": [10.0, 20.0, 30.0],
+            "y": [1, 2, 3],
+        })
+        tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
+        rc = fe.RepeatChart(tpl, column=["small", "big"])
+        shared = rc.share_scale(x="shared")
+        # New RepeatChart with resolve config carried; expand() runs the
+        # union-domain pass and injects the same scale dict on both cells.
+        assert shared.resolve == {"x": "shared"}
+        cells = shared.expand()
+        for _, _, chart in cells:
+            scale = chart._encoding["x"]._kwargs.get("scale")
+            assert isinstance(scale, dict)
+            assert scale["domain"] == [0.0, 30.0]
+
+    def test_repeat_share_scale_merges_with_existing_resolve(self):
+        df = pl.DataFrame({
+            "small": [0.0, 1.0, 2.0],
+            "big": [10.0, 20.0, 30.0],
+            "y": [1, 2, 3],
+        })
+        tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
+        rc = fe.RepeatChart(
+            tpl, column=["small", "big"], resolve={"y": "shared"}
+        )
+        shared = rc.share_scale(x="shared")
+        assert shared.resolve == {"y": "shared", "x": "shared"}
+
+    def test_share_scale_silent_when_channel_unbound(self):
+        # Two charts neither of which binds 'size' — share_scale should
+        # silently leave them alone (no scale injection, no exception).
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+        c = fe.Chart(df).mark_point().encode(x="x", y="y")
+        shared = (c | c).share_scale(size="shared")
+        for child in shared.charts:
+            assert "size" not in child._encoding
