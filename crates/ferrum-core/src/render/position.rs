@@ -827,6 +827,72 @@ mod tests {
         assert!((ya.value(0) + 10.0).abs() < 1e-9, "row 0 mid={}", ya.value(0));
         assert!((ya.value(1) -  5.0).abs() < 1e-9, "row 1 mid={}", ya.value(1));
     }
+
+    // R8b regression: axis_batch_for_y falls back to primary_batch on
+    // stack failure AND the same error is re-derivable by apply_stack.
+    #[test]
+    fn axis_batch_for_y_falls_back_on_stack_error() {
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::mark::Mark;
+        use arrow::array::BooleanArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, false),
+            Field::new("y", DataType::Boolean, false), // intentionally wrong type
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a"])),
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(StringArray::from(vec!["g1", "g2"])),
+            ],
+        )
+        .unwrap();
+
+        let spec = ChartSpec {
+            data: Default::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: Some(PositionAdjust::Stack {
+                by: Some("g".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+            }),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+        };
+
+        let result = axis_batch_for_y(&spec, "y", &batch);
+        assert!(
+            matches!(result, Cow::Borrowed(_)),
+            "expected Borrowed fallback on stack failure"
+        );
+
+        let direct = apply_stack(
+            &batch,
+            Some("g"),
+            &StackOffset::Zero,
+            &StackAnchor::Top,
+            &spec.encoding,
+        );
+        assert!(
+            direct.is_err(),
+            "apply_stack should fail on Boolean y column"
+        );
+    }
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /
