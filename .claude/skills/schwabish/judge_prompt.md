@@ -41,6 +41,34 @@ A finding is `objective: true` only if applying it would produce a sensible defa
 - T4: objective when a shipped composite or kwarg flip covers it.
 - T1_subtitle_* (subtitle suggestions): always subjective. Never auto-applied.
 
+## Verification rule — check the rendered SVG before flagging objective:true
+
+The ferrum figure-level functions (`roc_chart`, `pr_chart`, `calibration_chart`, `residuals_chart`, `importance_chart`, `learning_curve_chart`, `validation_curve_chart`, `confusion_matrix_chart`) all ship Schwabish defaults since SB3 (2026-05-11). That means the rendered output of a default panel may **already contain** the feature you would have flagged based on the panel script alone.
+
+**Before setting `objective: true` on any T1, T2, or T4 finding, you MUST `grep` the rendered SVG (or read the rendered PNG) and confirm the feature is genuinely absent.** Falsely flagging a feature as missing causes the autonomous fixer to add a duplicate annotation. If the SVG already contains the feature, set `objective: false` and note "SB3 default already applies".
+
+Verification patterns (use `Bash` + `grep -E` against `<row>/ferrum.svg`):
+
+| Finding ID | Confirm absent before flagging objective:true | grep pattern in ferrum.svg |
+|---|---|---|
+| `T4_auc_label_missing` | "AUC = " text missing | `>AUC = ` |
+| `T4_ap_label_missing` | "AP = " text missing | `>AP = ` |
+| `T4_brier_label_missing` | "Brier" text missing | `Brier` |
+| `T4_residual_metrics_missing` | R²/RMSE/MAE missing | `R²` |
+| `T4_cell_counts_missing` | numeric `<text>` missing | `<text[^>]*>\s*\d` |
+| `T4_importance_values_missing` | bar-end numeric labels missing | `<text[^>]*>\s*0\.\d{2,}` |
+| `T4_pr_baseline_missing` | dashed baseline missing | `stroke="#8a8a8a"\|stroke-dasharray="3,3"` |
+| `T4_residual_zero_line_missing` | y=0 reference missing | `_ref_zero\|stroke-dasharray.*y1` |
+| `T4_calibration_diagonal_missing` | y=x diagonal missing | `stroke-dasharray` |
+| `T1_active_title_eligible` | title lacks a metric number | check the title `<text>` element — look for a digit in it |
+| `T2_direct_labels_eligible` | series labels missing at endpoints AND legend present | check for `>(train\|test\|class_X)<` in the right-side legend gutter |
+
+When a pattern is present in the SVG, the SB3 default already covers it — set `objective: false` and add to the prose section:
+
+> "T4 marker present — `grep -c '>AUC = ' ferrum.svg` returned N. SB3 default covers this row; no fixer action needed."
+
+This verification is **mandatory** for T4 findings. T2 and T1 are also subject to the same check, but T3 stays subjective (callouts are dataset-specific by definition).
+
 ---
 
 ## Output format
