@@ -630,82 +630,21 @@ fn build_from_scale_spec(
         .column_by_name(&enc.field)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
 
-    // Themes-T4 padding precedence per ScaleSpec variant: if user supplied
-    // `padding`, honor it (including 0.0 to disable). Else if `domain` is
-    // explicit, suppress padding to 0.0 (user-specified domain wins). Else
-    // fall back to the 5% default. Caller's `range` override (when set)
-    // bypasses padding entirely — `range` is treated as the final pixel band.
     Ok(match scale_spec {
         ScaleSpec::Linear { domain, range, nice, clamp, padding, .. } => {
-            let d = match domain {
-                Some(d) => d.clone(),
-                None => {
-                    let (mn, mx) = column_min_max_f64(col)
-                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
-                    vec![mn, mx]
-                }
-            };
-            let r = if let Some(r) = range {
-                r.clone()
-            } else {
-                let frac = resolve_padding_fraction(*padding, domain.is_some());
-                let inset = inset_pixel_range(pr, frac);
-                vec![inset.0, inset.1]
-            };
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, *nice))
         }
         ScaleSpec::Log { base, domain, range, nice, clamp, padding } => {
-            let d = match domain {
-                Some(d) => d.clone(),
-                None => {
-                    let (mn, mx) = column_min_max_f64(col)
-                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
-                    vec![mn, mx]
-                }
-            };
-            let r = if let Some(r) = range {
-                r.clone()
-            } else {
-                let frac = resolve_padding_fraction(*padding, domain.is_some());
-                let inset = inset_pixel_range(pr, frac);
-                vec![inset.0, inset.1]
-            };
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
             ScaleKind::Log(LogScale::new_internal(d, r, *base, *clamp, *nice))
         }
         ScaleSpec::Time { domain, range, nice, clamp, padding } => {
-            let d = match domain {
-                Some(d) => d.clone(),
-                None => {
-                    let (mn, mx) = column_min_max_f64(col)
-                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
-                    vec![mn, mx]
-                }
-            };
-            let r = if let Some(r) = range {
-                r.clone()
-            } else {
-                let frac = resolve_padding_fraction(*padding, domain.is_some());
-                let inset = inset_pixel_range(pr, frac);
-                vec![inset.0, inset.1]
-            };
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, *clamp, *nice))
         }
         ScaleSpec::Symlog { constant, domain, range, nice, clamp, padding } => {
-            let d = match domain {
-                Some(d) => d.clone(),
-                None => {
-                    let (mn, mx) = column_min_max_f64(col)
-                        .map_err(|e| RenderError::ScaleResolutionFailed(e))?;
-                    vec![mn, mx]
-                }
-            };
-            let r = if let Some(r) = range {
-                r.clone()
-            } else {
-                let frac = resolve_padding_fraction(*padding, domain.is_some());
-                let inset = inset_pixel_range(pr, frac);
-                vec![inset.0, inset.1]
-            };
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), pr)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, *clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -722,6 +661,39 @@ fn build_from_scale_spec(
             ))
         }
     })
+}
+
+/// Resolve `(domain, range)` for a continuous ScaleSpec variant (Linear /
+/// Log / Time / Symlog — every continuous scale shares this prologue).
+///
+/// Themes-T4 padding precedence: if the user supplied `padding`, honor it
+/// (including 0.0 to disable). Else if `domain` is explicit, suppress
+/// padding to 0.0 (user-specified domain wins). Else fall back to the
+/// 5% default. An explicit `range` overrides padding entirely — `range`
+/// is treated as the final pixel band.
+fn resolve_continuous_domain_and_range(
+    domain: &Option<Vec<f64>>,
+    range: &Option<Vec<f64>>,
+    padding: Option<f64>,
+    col: &dyn Array,
+    pr: (f64, f64),
+) -> Result<(Vec<f64>, Vec<f64>), RenderError> {
+    let d = match domain {
+        Some(d) => d.clone(),
+        None => {
+            let (mn, mx) = column_min_max_f64(col)
+                .map_err(RenderError::ScaleResolutionFailed)?;
+            vec![mn, mx]
+        }
+    };
+    let r = if let Some(r) = range {
+        r.clone()
+    } else {
+        let frac = resolve_padding_fraction(padding, domain.is_some());
+        let inset = inset_pixel_range(pr, frac);
+        vec![inset.0, inset.1]
+    };
+    Ok((d, r))
 }
 
 /// Build a SizeScale if `encoding.size` is present.
