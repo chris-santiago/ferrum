@@ -694,11 +694,36 @@ pub fn build_color_scale(
     };
     let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
+
+    // F16 — Color type inference policy.
+    //
+    // Pre-F16 the continuous-vs-categorical decision was a narrow dtype
+    // check: `matches!(dtype, Float64 | UInt64)`. Every other numeric
+    // dtype (Float32, Int8/16/32/64, UInt8/16/32) silently fell into the
+    // categorical branch — a latent bug that violated ferrum-spec.md §3
+    // line 52 ("no magic inference that silently fails").
+    //
+    // The new policy mirrors `infer_spec_type` (used by axis scales):
+    //   - `EncodingSpec.type_` wins when explicitly set.
+    //   - Otherwise infer from Arrow dtype: numeric/temporal → continuous,
+    //     string/boolean → categorical.
+    //
+    // Conflict path: `type_ = Quantitative` on a non-numeric column
+    // becomes EncodingTypeMismatch rather than silently routing through
+    // numeric_extent's (0.0, 1.0) fallback.
+    let inferred = infer_spec_type(c_enc, located.col.data_type());
     let is_continuous_color = matches!(
-        located.col.data_type(),
-        arrow::datatypes::DataType::Float64 | arrow::datatypes::DataType::UInt64
+        inferred,
+        SpecDataType::Quantitative | SpecDataType::Temporal,
     );
     if is_continuous_color {
+        if !crate::render::arrow_cast::is_numeric(located.col.data_type()) {
+            return Err(RenderError::EncodingTypeMismatch {
+                channel: "color",
+                expected: "numeric column for quantitative/temporal type",
+                got: format!("{:?}", located.col.data_type()),
+            });
+        }
         // Numeric domain: min/max from the column, ignoring NaNs.
         let (lo, hi) = numeric_extent(located.col);
         // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
