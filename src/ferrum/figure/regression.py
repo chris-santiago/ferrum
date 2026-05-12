@@ -10,59 +10,6 @@ from ferrum import (
 _VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
 
 
-def _inject_lm_metrics(data: Any, *, x: str, y: str, order: int) -> Any:
-    """Return ``data`` augmented with ``_metrics_text`` + ``_metrics_y`` columns.
-
-    Computes OLS R²/RMSE/MAE via ``np.polyfit`` (numerically equivalent
-    to ``Smooth(method="lm")``'s OLS for any ``order``) and writes the
-    formatted corner text on the row with max ``x`` (rest null). Used
-    by ``lmplot(show_metrics=True)`` so the scatter layer's data carries
-    the columns a same-data ``mark_text`` overlay can read.
-
-    Returns the original ``data`` unchanged when fewer than ``order+1``
-    finite points are available (np.polyfit would fail).
-    """
-    import numpy as np
-    import polars as pl
-
-    from ferrum._coerce import to_arrow_table
-
-    tbl = to_arrow_table(data)
-    if x not in tbl.column_names or y not in tbl.column_names:
-        return data
-    x_arr = np.asarray(tbl.column(x).to_pylist(), dtype=float)
-    y_arr = np.asarray(tbl.column(y).to_pylist(), dtype=float)
-    finite = np.isfinite(x_arr) & np.isfinite(y_arr)
-    if finite.sum() < order + 1:
-        return data
-
-    x_fit = x_arr[finite]
-    y_fit = y_arr[finite]
-    coeffs = np.polyfit(x_fit, y_fit, deg=order)
-    y_pred = np.polyval(coeffs, x_fit)
-    resid = y_fit - y_pred
-    ss_res = float(np.sum(resid ** 2))
-    mean_y = float(np.mean(y_fit))
-    ss_tot = float(np.sum((y_fit - mean_y) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    rmse = float(np.sqrt(np.mean(resid ** 2)))
-    mae = float(np.mean(np.abs(resid)))
-    corner_text = f"R² {r2:.3f}\nRMSE {rmse:.3f}\nMAE {mae:.3f}"
-
-    n = x_arr.size
-    anchor_idx = int(np.nanargmax(np.where(finite, x_arr, -np.inf)))
-    text_col: list = [None] * n
-    text_col[anchor_idx] = corner_text
-    metrics_y_col: list = [None] * n
-    metrics_y_col[anchor_idx] = float(np.nanmax(y_fit))
-
-    base_pl = pl.from_arrow(tbl)
-    return base_pl.with_columns(
-        pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
-        pl.Series("_metrics_y", metrics_y_col, dtype=pl.Float64),
-    )
-
-
 def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
     """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
 
@@ -228,19 +175,20 @@ def lmplot(
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
 
-    # Schwabish SB-followup: inject R²/RMSE/MAE columns into ``data``
-    # before any layer references it, so the corner-text overlay reads
-    # the same DataFrame as the scatter layer (true same-data overlay,
-    # not HConcat fallback). Only fires for the LM-without-hue case
-    # where the metric is well-defined and the corner is unambiguous.
+    # Schwabish SB-followup (2026-05-12): the corner-metrics overlay is
+    # supplied by the Smooth Rust transform via ``inject_metrics=True``
+    # (threaded through ``mark_smooth(show_metrics=True)``), so the
+    # OLS R²/RMSE/MAE is computed once in Rust and surfaced as
+    # ``_metrics_text`` / ``_metrics_y`` columns on the fit-grid
+    # output. The text layer reads the same Smooth-named source as
+    # the ribbon + line layers — no Python-side OLS duplication.
+    # Restricted to LM-without-hue: per-group corners would crowd, and
+    # the metric is well-defined only for the OLS path.
     metrics_applied = (
         show_metrics
         and method == "lm"
         and hue is None
-        and scatter
     )
-    if metrics_applied:
-        data = _inject_lm_metrics(data, x=x, y=y, order=order)
 
     # Shared encoding.
     enc: dict = {"x": x, "y": y}
@@ -264,6 +212,7 @@ def lmplot(
         fit = Chart(data).mark_smooth(
             method="lm", ci=ci_frac, degree=order,
             x_bins=x_bins, x_estimator=x_estimator,
+            show_metrics=metrics_applied,
         ).encode(x=x, y=y)
     elif method == "loess":
         fit = Chart(data).mark_smooth(method="loess", ci=ci_frac).encode(x=x, y=y)
@@ -294,22 +243,12 @@ def lmplot(
         if scatter_layer is not None:
             scatter_layer = scatter_layer.encode(x=X(x, scale={"type": "log"}))
 
-    # Compose scatter + fit.
+    # Compose scatter + fit. (When ``metrics_applied``, the fit chart
+    # already carries the metrics-text layer reading the Smooth output.)
     if scatter_layer is None:
         out = fit
     else:
         out = _merge_layers(scatter_layer, fit)
-
-    # Schwabish SB-followup: layer the metrics-corner mark_text overlay
-    # against the augmented data (same-data overlay; the columns were
-    # injected at the top of this function).
-    if metrics_applied:
-        metrics_layer = (
-            Chart(data)
-            .mark_text(align="right", dx=-4, dy=4)
-            .encode(x=x, y="_metrics_y", text="_metrics_text")
-        )
-        out = out + metrics_layer
 
     # truncate=True: deferred (line extends to data range by Smooth's grid).
     # Faceting.

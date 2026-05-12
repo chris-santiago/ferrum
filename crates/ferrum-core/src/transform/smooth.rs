@@ -47,12 +47,16 @@ pub(crate) struct SmoothSpec {
     /// any extra Python-side data manipulation. No-op for ``Fitted`` output.
     #[serde(default)]
     pub inject_zero_ref: bool,
-    /// Schwabish SB-followup (2026-05-12): when ``output == Residuals`` and
-    /// this is ``true``, append nullable ``_metrics_text`` (Utf8) and
-    /// ``_metrics_y`` (Float64) columns. One non-null row at the
-    /// max-``x`` anchor with text ``"R² {r2}\nRMSE {rmse}\nMAE {mae}"`` and
-    /// y at the max residual. Designed for a same-data ``mark_text``
-    /// overlay reading both columns. No-op for ``Fitted`` output.
+    /// Schwabish SB-followup (2026-05-12): when ``true``, append nullable
+    /// ``_metrics_text`` (Utf8) and ``_metrics_y`` (Float64) columns with
+    /// a single non-null row holding ``"R² {r2}\nRMSE {rmse}\nMAE {mae}"``
+    /// and the anchor y position. Supported on BOTH outputs:
+    /// - ``Residuals``: anchor at the max-``x`` input row; ``_metrics_y``
+    ///   at the max residual (rides the top of the residual scatter).
+    /// - ``Fitted``: anchor at the rightmost grid point; ``_metrics_y``
+    ///   at the max fitted y (sits high in the chart, top-right corner).
+    ///   Metrics are computed against the RAW (pre-aggregation) input.
+    /// Designed for a same-data ``mark_text`` overlay reading both columns.
     #[serde(default)]
     pub inject_metrics: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -94,9 +98,22 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
         })
         .collect();
 
+    // Schwabish SB-followup (2026-05-12): when ``inject_metrics`` is
+    // set on the Fitted path, compute R²/RMSE/MAE against the RAW
+    // input (pre-aggregation) so the metrics reflect the spread of
+    // the actual data points, not the binned summary. Mirrors the
+    // residuals_fit convention.
+    let metrics_input: Option<(&[f64], &[f64])> = if spec.inject_metrics {
+        Some((&xs_raw, &ys_raw))
+    } else {
+        None
+    };
     match spec.method {
-        SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n),
-        SmoothMethod::Loess => loess_fit(&xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed),
+        SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics_input),
+        SmoothMethod::Loess => loess_fit(
+            &xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed,
+            metrics_input,
+        ),
     }
 }
 
@@ -338,30 +355,68 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec
 fn all_nan_output(spec: &SmoothSpec) -> PyResult<RecordBatch> {
     let n = spec.n;
     let nans = vec![f64::NAN; n];
-    build_smooth_batch(nans.clone(), nans.clone(), nans.clone(), nans)
+    build_smooth_batch(nans.clone(), nans.clone(), nans.clone(), nans, None)
 }
 
+/// Emit a fitted-smooth RecordBatch with the canonical
+/// ``[x, y, ci_lower, ci_upper]`` grid columns. Schwabish SB-followup
+/// (2026-05-12) extension: when ``metrics=Some((r2, rmse, mae))`` is
+/// passed, also append ``_metrics_text`` (Utf8) and ``_metrics_y``
+/// (Float64) with a single non-null row at the rightmost grid point
+/// so a chart-side ``mark_text`` overlay can render the OLS / LOESS
+/// summary in the chart's top-right corner without duplicating the
+/// fit computation in Python.
 fn build_smooth_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,
+    metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+    let n = x.len();
+    let mut fields = vec![
         Field::new("x",        DataType::Float64, true),
         Field::new("y",        DataType::Float64, true),
         Field::new("ci_lower", DataType::Float64, true),
         Field::new("ci_upper", DataType::Float64, true),
-    ]));
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(x)),
-        Arc::new(Float64Array::from(y)),
+    ];
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(x.clone())),
+        Arc::new(Float64Array::from(y.clone())),
         Arc::new(Float64Array::from(lo)),
         Arc::new(Float64Array::from(hi)),
     ];
+
+    if let Some((r2, rmse, mae)) = metrics {
+        // Anchor at the rightmost finite grid x; y at the max finite y
+        // (top of the fit curve) so the text sits high in the panel.
+        let anchor_idx = x.iter().enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i);
+        let max_y = y.iter().copied()
+            .filter(|v| v.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let anchor_y = if max_y.is_finite() { max_y } else { 0.0 };
+
+        let text = format!("R² {r2:.3}\nRMSE {rmse:.3}\nMAE {mae:.3}");
+        let mut text_col: Vec<Option<String>> = vec![None; n];
+        let mut y_col:    Vec<Option<f64>>    = vec![None; n];
+        if let Some(i) = anchor_idx {
+            text_col[i] = Some(text);
+            y_col[i]    = Some(anchor_y);
+        }
+        fields.push(Field::new("_metrics_text", DataType::Utf8, true));
+        cols.push(Arc::new(StringArray::from(text_col)));
+        fields.push(Field::new("_metrics_y", DataType::Float64, true));
+        cols.push(Arc::new(Float64Array::from(y_col)));
+    }
+
+    let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
 }
 
-fn lm_fit(xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize)
-    -> PyResult<RecordBatch>
-{
+fn lm_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    metrics_input: Option<(&[f64], &[f64])>,
+) -> PyResult<RecordBatch> {
     let n = xs.len();
     let mean_x: f64 = xs.iter().sum::<f64>() / n as f64;
     let mean_y: f64 = ys.iter().sum::<f64>() / n as f64;
@@ -374,6 +429,7 @@ fn lm_fit(xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize)
             vec![f64::NAN; n_grid],
             vec![f64::NAN; n_grid],
             vec![f64::NAN; n_grid],
+            None,
         );
     }
 
@@ -404,7 +460,14 @@ fn lm_fit(xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize)
         }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi)
+    let metrics = metrics_input.map(|(xs_m, ys_m)| {
+        let resids: Vec<f64> = xs_m.iter().zip(ys_m.iter())
+            .map(|(x, y)| y - (alpha + beta * x))
+            .collect();
+        compute_residual_metrics(ys_m, &resids)
+    });
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
 /// Two-sided t-critical at level `level` (e.g., 0.95) with `dof` degrees of freedom.
@@ -460,6 +523,7 @@ fn inv_normal_cdf(p: f64) -> f64 {
 fn loess_fit(
     xs: &[f64], ys: &[f64], grid: &[f64],
     bandwidth: f64, degree: u8, ci: Option<f64>, n_grid: usize, seed: u64,
+    metrics_input: Option<(&[f64], &[f64])>,
 ) -> PyResult<RecordBatch> {
     let n = xs.len();
     let k = ((bandwidth * n as f64).ceil() as usize).max((degree as usize) + 1);
@@ -474,7 +538,14 @@ fn loess_fit(
         Some(level) => loess_bootstrap_ci(xs, ys, grid, k, degree, level, seed),
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi)
+    let metrics = metrics_input.map(|(xs_m, ys_m)| {
+        let resids: Vec<f64> = xs_m.iter().zip(ys_m.iter())
+            .map(|(x, y)| y - loess_at_point(xs, ys, *x, k, degree))
+            .collect();
+        compute_residual_metrics(ys_m, &resids)
+    });
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
 fn loess_at_point(xs: &[f64], ys: &[f64], x0: f64, k: usize, degree: u8) -> f64 {
@@ -710,11 +781,11 @@ impl PySmooth {
                 return Err(PyValueError::new_err("Smooth: x_bins must be > 0"));
             }
         }
-        if (inject_zero_ref || inject_metrics)
+        if inject_zero_ref
             && !matches!(output_parsed, SmoothOutput::Residuals)
         {
             return Err(PyValueError::new_err(
-                "Smooth: inject_zero_ref / inject_metrics require output='residuals'",
+                "Smooth: inject_zero_ref requires output='residuals'",
             ));
         }
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {

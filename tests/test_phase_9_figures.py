@@ -264,7 +264,17 @@ class TestLmplot:
     def test_lm_no_scatter(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", scatter=False)
         d = json.loads(chart.to_spec().to_json())
-        # ribbon + line only.
+        # Schwabish SB-followup (3a rework, 2026-05-12): scatter=False
+        # still emits the metrics-corner text overlay because the
+        # corner rides on the Smooth-transform fit-grid output, not
+        # the scatter data. 3 layers = ribbon + line + metrics-text.
+        assert d.get("layers") is not None
+        assert len(d["layers"]) == 3
+
+    def test_lm_no_scatter_no_metrics(self, reg_data):
+        chart = fe.lmplot(reg_data, x="x", y="y", scatter=False, show_metrics=False)
+        d = json.loads(chart.to_spec().to_json())
+        # Opting out of metrics restores the pre-Schwabish 2-layer shape.
         assert d.get("layers") is not None
         assert len(d["layers"]) == 2
 

@@ -279,6 +279,7 @@ def desugar_smooth(
     seed: int = 0,
     x_bins: Any = None,
     x_estimator: Any = None,
+    show_metrics: bool = False,
 ) -> tuple:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
@@ -346,7 +347,7 @@ def desugar_smooth(
     '__layered__'
     """
 
-    if ci is None:
+    if ci is None and not show_metrics:
         # 8a-compatible single-line path: keep the legacy 3-tuple shape so the
         # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator when
         # explicitly set; otherwise omit (so existing goldens stay identical).
@@ -360,25 +361,38 @@ def desugar_smooth(
         encoding_remap = {"x": "x", "y": "y"}
         return ("line", transforms, encoding_remap)
 
-    # CI band path (NEW in 8b — replaces former warn-once deferral).
+    # Layered path: ci band and/or metrics-corner overlay.
     smooth_kwargs = dict(method=method, ci=ci, bandwidth=bandwidth,
                           degree=degree, n=n, seed=seed, name="smooth")
     if x_bins is not None:
         smooth_kwargs["x_bins"] = x_bins
     if x_estimator is not None:
         smooth_kwargs["x_estimator"] = x_estimator
+    if show_metrics:
+        # Schwabish SB-followup (2026-05-12): emit R²/RMSE/MAE columns
+        # on the fit-grid output so a same-source mark_text layer reads
+        # them. Computed in Rust against the raw input — no Python-side
+        # OLS duplication.
+        smooth_kwargs["inject_metrics"] = True
     transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
-    layers = [
-        _Layer(
+    layers = []
+    if ci is not None:
+        layers.append(_Layer(
             mark="ribbon",
             encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
             mark_kwargs={"opacity": 0.3},
             data_source="smooth",
-        ),
-        _Layer(
-            mark="line",
-            encoding={"x": "x", "y": "y"},
+        ))
+    layers.append(_Layer(
+        mark="line",
+        encoding={"x": "x", "y": "y"},
+        data_source="smooth",
+    ))
+    if show_metrics:
+        layers.append(_Layer(
+            mark="text",
+            encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+            mark_kwargs={"align": "right", "dx": -4, "dy": 4},
             data_source="smooth",
-        ),
-    ]
+        ))
     return ("__layered__", transforms, None, None, layers)
