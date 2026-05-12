@@ -791,6 +791,15 @@ def _calibration_chart_from_source(
             position="corner",
         )
 
+    from ferrum.layer import Layer
+
+    point_enc: dict = {"x": "mean_predicted", "y": "fraction_positive"}
+    if color is not None:
+        point_enc["color"] = color
+    chart = chart.layer(
+        Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True})
+    )
+
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1562,6 +1571,15 @@ def _learning_curve_chart_from_source(
         x_col="train_size",
         y_col="mean_score",
     )
+    from ferrum.layer import Layer
+
+    chart = chart.layer(
+        Layer(
+            mark="point",
+            encoding={"x": "train_size", "y": "mean_score", "color": "split"},
+            mark_kwargs={"size": 40, "filled": True},
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1619,6 +1637,15 @@ def _validation_curve_chart_from_source(
         x_col="param_value",
         y_col="mean_score",
     )
+    from ferrum.layer import Layer
+
+    chart = chart.layer(
+        Layer(
+            mark="point",
+            encoding={"x": "param_value", "y": "mean_score", "color": "split"},
+            mark_kwargs={"size": 40, "filled": True},
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1675,6 +1702,15 @@ def _alpha_selection_chart_from_source(
     )
     chart = chart.encode(y=Y("mean_score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Alpha Selection"))
+    from ferrum.layer import Layer
+
+    chart = chart.layer(
+        Layer(
+            mark="point",
+            encoding={"x": "alpha", "y": "mean_score"},
+            mark_kwargs={"size": 40, "filled": True},
+        )
+    )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1725,6 +1761,16 @@ def _pca_scree_chart_from_source(
         y=Y("explained_variance", title="Explained variance"),
     )
     chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
+    if cumulative_line:
+        from ferrum.layer import Layer
+
+        chart = chart.layer(
+            Layer(
+                mark="point",
+                encoding={"x": "component", "y": "cumulative_variance_ratio"},
+                mark_kwargs={"size": 40, "filled": True},
+            )
+        )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2271,17 +2317,33 @@ def _cluster_diagnostics_chart(
     df = pl.DataFrame(rows)
     from ferrum.encoding import X as XEnc, Y as YEnc
 
+    from ferrum.layer import Layer
+
     elbow = (
         ferrum.Chart(df)
         .mark_line()
         .encode(x=XEnc("k", title="k"), y=YEnc("inertia", title="Distortion score"))
         .properties(title=ferrum.Title("Cluster Diagnostics"))
+        .layer(
+            Layer(
+                mark="point",
+                encoding={"x": "k", "y": "inertia"},
+                mark_kwargs={"size": 40, "filled": True},
+            )
+        )
     )
     sil = (
         ferrum.Chart(df)
         .mark_line()
         .encode(x=XEnc("k", title="k"), y=YEnc("silhouette", title="Silhouette score"))
         .properties(title=ferrum.Title("Cluster Diagnostics"))
+        .layer(
+            Layer(
+                mark="point",
+                encoding={"x": "k", "y": "silhouette"},
+                mark_kwargs={"size": 40, "filled": True},
+            )
+        )
     )
     if scoring == "elbow":
         chart = elbow
