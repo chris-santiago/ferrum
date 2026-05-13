@@ -189,7 +189,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-            _ => ctx.mark_style.fill,
+            _ => ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
         };
         let stroke_color = with_opacity(stroke_color, ctx.mark_style.opacity);
         let stroke = Stroke {

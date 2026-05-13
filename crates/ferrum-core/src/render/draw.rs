@@ -120,10 +120,10 @@ pub fn resolve_mark_style(
     let mut style = MarkStyle::theme_base(theme);
     match mark {
         Mark::Area | Mark::Ribbon | Mark::Polygon => {
-            style.fill = with_opacity(theme.mark_color, theme.area_opacity);
+            style.fill = theme.mark_color;
             style.stroke = None;
             style.stroke_width = 0.0;
-            style.opacity = 1.0;
+            style.opacity = theme.area_opacity;
         }
         Mark::Line => {
             style.fill = theme.mark_color;
@@ -327,10 +327,13 @@ mod tests {
 
     #[test]
     fn resolve_style_for_area_uses_area_opacity() {
-        // Themes-T4: area_opacity default flipped 0.4 → 0.35; alpha 0.35*255 ≈ 89.
+        // Area fill is opaque; area_opacity is carried in style.opacity so the
+        // renderer can apply it (and user opacity kwarg can override it).
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Area);
-        assert!((style.fill.alpha as i32 - 89).abs() <= 1);
+        assert_eq!(style.fill.alpha, 0xFF, "area fill should be opaque");
+        assert!((style.opacity - theme.area_opacity).abs() < 1e-6,
+            "area opacity should default to theme.area_opacity");
     }
 
     #[test]

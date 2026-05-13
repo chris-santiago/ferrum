@@ -99,7 +99,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // from the categorical scale lookup and multiply in the mark-style
     // fill alpha so opacity is preserved.
     let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
-    let alpha_factor = (ctx.mark_style.fill.alpha as f64) / 255.0;
 
     for (key, rows) in groups {
         let mut indices: Vec<usize> = rows
@@ -164,10 +163,11 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 .as_deref()
                 .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
                 .unwrap_or(ctx.mark_style.fill);
-            let fill = crate::render::color::categorical::with_opacity(solid, alpha_factor);
+            let fill = crate::render::color::categorical::with_opacity(solid, ctx.mark_style.opacity);
             (Some(fill), ctx.mark_style.stroke)
         } else {
-            (Some(ctx.mark_style.fill), ctx.mark_style.stroke)
+            let fill = crate::render::color::categorical::with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
+            (Some(fill), ctx.mark_style.stroke)
         };
         out.path(
             &d,

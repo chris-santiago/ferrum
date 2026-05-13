@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use arrow::array::{Array, Float64Array, UInt32Array};
 
-use crate::render::color::{ContinuousScheme, NamedContinuous};
+use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ColorScale;
 use crate::render::svg::{FillStroke, SvgBuffer};
@@ -184,6 +184,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         } else {
             ctx.mark_style.fill
         };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
 
         out.polygon(
             &[ring],

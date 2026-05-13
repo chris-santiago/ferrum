@@ -300,15 +300,6 @@ def test_kwarg_reaches_svg(case, simple_df, bar_df):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Area renderer uses ctx.mark_style.fill directly (which has "
-        "theme.area_opacity baked in) but never multiplies by "
-        "ctx.mark_style.opacity. The opacity kwarg is deserialized "
-        "correctly but not applied in area.rs draw()."
-    ),
-    strict=True,
-)
 def test_area_opacity_kwarg(simple_df):
     """mark_area(opacity=0.1) should produce a MORE translucent fill than default."""
     default_svg = fm.Chart(simple_df).mark_area().encode(x="x", y="y").show_svg()
@@ -441,15 +432,6 @@ def test_point_fill_override(simple_df):
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Line renderer reads ctx.mark_style.fill (not .stroke) for its "
-        "stroke color. The 'stroke' kwarg is deserialized into "
-        "mark_style.stroke but the line draw function ignores it. "
-        "Use fill='#00ff00' as workaround."
-    ),
-    strict=True,
-)
 def test_line_stroke_override(simple_df):
     """mark_line(stroke='#00ff00') should produce green stroke."""
     svg = (

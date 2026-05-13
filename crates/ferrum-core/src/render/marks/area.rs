@@ -1,6 +1,7 @@
 //! mark_area: filled region between y(x) and the x-axis baseline. Single area
 //! over all rows when no color encoding; one area per category otherwise.
 
+use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ColorScale;
 use crate::render::svg::{FillStroke, Stroke, SvgBuffer};
@@ -64,9 +65,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
                 let base = scale.lookup(v).unwrap_or(ctx.mark_style.fill);
-                crate::render::color::with_opacity(base, ctx.theme.area_opacity)
+                with_opacity(base, ctx.mark_style.opacity)
             }
-            _ => ctx.mark_style.fill,
+            _ => with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity),
         };
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
