@@ -4135,7 +4135,7 @@ class Chart:
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     enc_json_dict: dict = {"field": field}
                     if d.get("type"):
-                        enc_json_dict["type_"] = d["type"]
+                        enc_json_dict["type"] = d["type"]
                     for opt_key in (
                         "title",
                         "aggregate",

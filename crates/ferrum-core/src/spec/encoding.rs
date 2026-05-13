@@ -479,8 +479,31 @@ impl Encoding {
         ) {
             match (child.as_mut(), parent.as_ref()) {
                 (None, Some(_)) => { *child = parent.clone(); }
-                (Some(c), Some(p)) if c.field == p.field && c.scale.is_none() && p.scale.is_some() => {
-                    c.scale = p.scale.clone();
+                (Some(c), Some(p)) if c.field == p.field => {
+                    if c.scale.is_none() && p.scale.is_some() {
+                        c.scale = p.scale.clone();
+                    }
+                    if c.title.is_none() && p.title.is_some() {
+                        c.title = p.title.clone();
+                    }
+                    if c.scheme.is_none() && p.scheme.is_some() {
+                        c.scheme = p.scheme.clone();
+                    }
+                    if c.type_.is_none() && p.type_.is_some() {
+                        c.type_ = p.type_;
+                    }
+                    if c.axis.is_none() && p.axis.is_some() {
+                        c.axis = p.axis.clone();
+                    }
+                    if c.legend.is_none() && p.legend.is_some() {
+                        c.legend = p.legend.clone();
+                    }
+                    if c.format.is_none() && p.format.is_some() {
+                        c.format = p.format.clone();
+                    }
+                    if c.format_type.is_none() && p.format_type.is_some() {
+                        c.format_type = p.format_type.clone();
+                    }
                 }
                 _ => {}
             }
@@ -724,5 +747,88 @@ mod tests {
             ScaleSpec::Log { base, .. } => assert_eq!(base, 10.0),
             _ => panic!("expected Log variant"),
         }
+    }
+
+    #[test]
+    fn inherit_from_propagates_title_on_same_field() {
+        let parent = Encoding {
+            x: Some(EncodingSpec {
+                field: "fpr".into(),
+                title: Some("False Positive Rate".into()),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "tpr".into(),
+                title: Some("True Positive Rate".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec { field: "fpr".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "tpr".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        assert_eq!(child.x.as_ref().unwrap().title.as_deref(), Some("False Positive Rate"));
+        assert_eq!(child.y.as_ref().unwrap().title.as_deref(), Some("True Positive Rate"));
+    }
+
+    #[test]
+    fn inherit_from_propagates_scheme_on_same_field() {
+        let parent = Encoding {
+            color: Some(EncodingSpec {
+                field: "species".into(),
+                scheme: Some("paper_ink".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            color: Some(EncodingSpec { field: "species".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        assert_eq!(child.color.as_ref().unwrap().scheme.as_deref(), Some("paper_ink"));
+    }
+
+    #[test]
+    fn inherit_from_does_not_overwrite_child_title() {
+        let parent = Encoding {
+            x: Some(EncodingSpec {
+                field: "fpr".into(),
+                title: Some("Parent Title".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec {
+                field: "fpr".into(),
+                title: Some("Child Title".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        assert_eq!(child.x.as_ref().unwrap().title.as_deref(), Some("Child Title"));
+    }
+
+    #[test]
+    fn inherit_from_does_not_cross_pollinate_different_fields() {
+        let parent = Encoding {
+            x: Some(EncodingSpec {
+                field: "fpr".into(),
+                title: Some("False Positive Rate".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec { field: "other_field".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        assert_eq!(child.x.as_ref().unwrap().title, None);
     }
 }
