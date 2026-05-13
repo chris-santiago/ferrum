@@ -272,10 +272,11 @@ def test_decision_boundary_chart_scatter_overlay():
     # The scatter overlay emits SVG <circle> elements with a black
     # stroke (uniform across all points).
     assert 'stroke="#000000"' in svg
-    # Boundary cells and points share the same viridis color palette;
-    # both #440154 (low end) and #fde725 (high end) should appear.
-    assert "#440154" in svg
-    assert "#fde725" in svg
+    # Boundary cells and points share the default sequential color palette
+    # (cool_blue). Both #eff6ff (low end) and #1e3a8a (high end) should
+    # appear.
+    assert "#eff6ff" in svg
+    assert "#1e3a8a" in svg
 
 
 def test_decision_boundary_chart_scatter_overlay_proba_mode():

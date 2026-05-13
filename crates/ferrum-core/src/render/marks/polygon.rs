@@ -105,7 +105,10 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             .cmap
             .as_deref()
             .and_then(NamedContinuous::from_name)
-            .unwrap_or(NamedContinuous::Viridis);
+            .unwrap_or_else(|| {
+                NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+                    .unwrap_or(NamedContinuous::Viridis)
+            });
         Some(ContinuousScheme::Named(named))
     } else {
         None

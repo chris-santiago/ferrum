@@ -52,6 +52,16 @@ area_opacity, opacity : optional
         ``electric_lime``, ``signal_blue``, ``ember_orange``) and diverging
         names (``rdbu``, ``blue_to_red``, ``cyan_to_amber``,
         ``blue_to_violet``) also accepted.
+    sequential_scheme : str, optional
+        Default sequential color ramp used by heatmaps, density plots, and
+        other continuous-color charts when no explicit ``cmap`` is given.
+        Must be one of the recognized sequential/diverging names. Defaults
+        to ``"cool_blue"`` (Paper Ink).
+    diverging_scheme : str, optional
+        Default diverging color ramp used by correlation matrices and other
+        diverging-color charts when no explicit ``cmap`` is given. Must be
+        one of the recognized sequential/diverging names. Defaults to
+        ``"blue_to_red"`` (Paper Ink).
     legend_orient, legend_direction, legend_title_font_size : optional
         Legend layout.
     padding, axis_title_padding, column_padding, row_padding : optional
@@ -118,6 +128,8 @@ area_opacity, opacity : optional
             "opacity",
             # Palette
             "color_scheme",
+            "sequential_scheme",
+            "diverging_scheme",
             # Strip
             "strip_background_color",
             # Legend

@@ -730,14 +730,18 @@ pub fn build_color_scale(
         // Numeric domain: min/max from the column, ignoring NaNs.
         let (lo, hi) = numeric_extent(located.col);
         // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
-        // else default to viridis.
+        // else fall back to the theme's sequential_scheme.
         use crate::render::color::{ContinuousScheme, NamedContinuous};
         let scheme = c_enc
             .scheme
             .as_deref()
             .and_then(NamedContinuous::from_name)
             .map(ContinuousScheme::Named)
-            .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis));
+            .unwrap_or_else(|| {
+                NamedContinuous::from_name(&theme.sequential_scheme)
+                    .map(ContinuousScheme::Named)
+                    .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
+            });
         Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), None))
     } else {
         let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;

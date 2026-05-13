@@ -169,6 +169,8 @@ pub struct ThemeInputs {
 
     // Palette
     pub color_scheme: String,
+    pub sequential_scheme: String,
+    pub diverging_scheme: String,
 
     // Legend
     pub legend_direction: Option<LegendDirection>,
@@ -237,6 +239,8 @@ impl Default for ThemeInputs {
             opacity_max: 1.0,
 
             color_scheme: "paper_ink".into(),
+            sequential_scheme: "cool_blue".into(),
+            diverging_scheme: "blue_to_red".into(),
 
             strip_background_color: strip_bg,
             strip_text_size: 12.0,
@@ -884,6 +888,8 @@ mod tests {
         assert_eq!(t.strip_padding, 6.0);
         assert_eq!(t.axis_title_padding, 8.0);
         assert_eq!(t.color_scheme, "paper_ink");
+        assert_eq!(t.sequential_scheme, "cool_blue");
+        assert_eq!(t.diverging_scheme, "blue_to_red");
         assert_eq!(t.title_font_weight, "600");
         assert_eq!(t.title_anchor, TextAnchor::Start);
         assert_eq!(t.title_offset, 6.0);

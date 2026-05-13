@@ -68,6 +68,8 @@ minimal = Theme(
     tick_size=0,
     padding=24,
     label_color="#888888",
+    sequential_scheme="viridis",
+    diverging_scheme="rdbu",
 )
 
 dark = Theme(
@@ -81,6 +83,8 @@ dark = Theme(
     grid_width=0.5,
     mark_color="#7fb3d5",
     color_scheme="dark2",
+    sequential_scheme="plasma",
+    diverging_scheme="rdbu",
     strip_background_color="#252540",
     reference_line_color="#666666",
 )
@@ -102,6 +106,8 @@ publication = Theme(
     title_anchor="middle",
     mark_color="#000000",
     color_scheme="tableau10",
+    sequential_scheme="viridis",
+    diverging_scheme="rdbu",
     point_size=24,
     reference_line_color="#999999",
 )
@@ -117,6 +123,8 @@ economist = Theme(
     grid_width=0.6,
     mark_color="#005a8c",
     color_scheme="set1",
+    sequential_scheme="blues",
+    diverging_scheme="rdbu",
     strip_background_color="#bfd4dc",
 )
 
@@ -130,6 +138,8 @@ fivethirtyeight = Theme(
     grid_width=1.0,
     mark_color="#fc4f30",
     color_scheme="set1",
+    sequential_scheme="viridis",
+    diverging_scheme="rdbu",
     title_font_weight="bold",
     title_anchor="start",
 )
@@ -146,6 +156,8 @@ solarized_light = Theme(
     tick_color="#93a1a1",
     mark_color="#268bd2",
     color_scheme="set2",
+    sequential_scheme="viridis",
+    diverging_scheme="rdbu",
 )
 
 solarized_dark = Theme(
@@ -160,6 +172,8 @@ solarized_dark = Theme(
     tick_color="#586e75",
     mark_color="#268bd2",
     color_scheme="set2",
+    sequential_scheme="plasma",
+    diverging_scheme="rdbu",
     strip_background_color="#073642",
 )
 
@@ -173,6 +187,8 @@ paper_ink = Theme(
     tick_color="#6B7280",
     mark_color="#2563EB",
     color_scheme="paper_ink",
+    sequential_scheme="cool_blue",
+    diverging_scheme="blue_to_red",
     strip_background_color="#EDE9E3",
     reference_line_color="#9CA3AF",
 )
@@ -187,6 +203,8 @@ slate_citrus = Theme(
     tick_color="#9CA3AF",
     mark_color="#60A5FA",
     color_scheme="slate_citrus",
+    sequential_scheme="night_blue",
+    diverging_scheme="cyan_to_amber",
     strip_background_color="#1E293B",
     reference_line_color="#6B7280",
 )
@@ -201,6 +219,8 @@ arctic_signal = Theme(
     tick_color="#64748B",
     mark_color="#0284C7",
     color_scheme="arctic_signal",
+    sequential_scheme="signal_blue",
+    diverging_scheme="blue_to_violet",
     strip_background_color="#E2E8F0",
     reference_line_color="#94A3B8",
 )
@@ -215,6 +235,8 @@ observable = Theme(
     tick_color="#888888",
     mark_color="#4C78A8",
     color_scheme="tableau10",
+    sequential_scheme="blues",
+    diverging_scheme="rdbu",
     strip_background_color="#F0F0F0",
     reference_line_color="#AAAAAA",
 )

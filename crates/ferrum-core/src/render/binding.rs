@@ -220,6 +220,8 @@ struct ThemeOverridesSpec {
 
     // Palette
     color_scheme: Option<String>,
+    sequential_scheme: Option<String>,
+    diverging_scheme: Option<String>,
 
     // Strip
     strip_background_color: Option<String>,
@@ -310,6 +312,24 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
             )));
         }
         t.color_scheme = s;
+    }
+    if let Some(s) = spec.sequential_scheme {
+        if !super::palette::is_sequential_scheme(&s) {
+            return Err(PyValueError::new_err(format!(
+                "Unknown sequential_scheme: '{s}'. Supported: {}.",
+                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+            )));
+        }
+        t.sequential_scheme = s;
+    }
+    if let Some(s) = spec.diverging_scheme {
+        if !super::palette::is_sequential_scheme(&s) {
+            return Err(PyValueError::new_err(format!(
+                "Unknown diverging_scheme: '{s}'. Supported: {}.",
+                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+            )));
+        }
+        t.diverging_scheme = s;
     }
 
     // Strip
@@ -416,6 +436,58 @@ mod theme_dict_tests {
                 d.set_item("color_scheme", name).unwrap();
                 let t = theme_from_dict(Some(&d)).expect(name);
                 assert_eq!(t.color_scheme, name);
+            }
+        });
+    }
+
+    #[test]
+    fn unknown_sequential_scheme_raises() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("sequential_scheme", "nonexistent").unwrap();
+            let err = theme_from_dict(Some(&d)).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("Unknown sequential_scheme"), "got: {msg}");
+            assert!(msg.contains("nonexistent"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn unknown_diverging_scheme_raises() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("diverging_scheme", "nonexistent").unwrap();
+            let err = theme_from_dict(Some(&d)).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("Unknown diverging_scheme"), "got: {msg}");
+            assert!(msg.contains("nonexistent"), "got: {msg}");
+        });
+    }
+
+    #[test]
+    fn known_sequential_scheme_accepted() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for name in ["cool_blue", "viridis", "blues", "night_blue", "signal_blue"] {
+                let d = PyDict::new(py);
+                d.set_item("sequential_scheme", name).unwrap();
+                let t = theme_from_dict(Some(&d)).expect(name);
+                assert_eq!(t.sequential_scheme, name);
+            }
+        });
+    }
+
+    #[test]
+    fn known_diverging_scheme_accepted() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for name in ["rdbu", "blue_to_red", "cyan_to_amber", "blue_to_violet"] {
+                let d = PyDict::new(py);
+                d.set_item("diverging_scheme", name).unwrap();
+                let t = theme_from_dict(Some(&d)).expect(name);
+                assert_eq!(t.diverging_scheme, name);
             }
         });
     }
