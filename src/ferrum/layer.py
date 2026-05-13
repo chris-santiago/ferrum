@@ -35,9 +35,10 @@ class Layer:
     >>> layer = Layer(mark="text", encoding={"x": "x", "y": "y"}, mark_kwargs={"dx": 5})
     """
 
-    def __init__(self, data=None, mark=None, *, encoding=None, transforms=None, mark_kwargs=None):
+    def __init__(self, data=None, mark=None, *, name=None, encoding=None, transforms=None, mark_kwargs=None):
         self.data = data
         self.mark = mark
+        self.name = name
         self.encoding = encoding or {}
         self.transforms = transforms or []
         self.mark_kwargs = mark_kwargs or {}

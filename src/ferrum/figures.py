@@ -144,6 +144,10 @@ def residuals_chart(
     annotate_metrics: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Residuals diagnostic chart for a regression estimator.
@@ -224,6 +228,10 @@ def residuals_chart(
         panels=panel_list,
         annotate_metrics=annotate_metrics,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -242,6 +250,10 @@ def roc_chart(
     subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """ROC curve chart for a classifier.
@@ -309,6 +321,10 @@ def roc_chart(
         average=average,
         annotate_auc=annotate_auc,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -325,6 +341,10 @@ def pr_chart(
     subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Precision-recall curve chart for a classifier.
@@ -402,6 +422,10 @@ def pr_chart(
         annotate_ap=annotate_ap,
         iso_lines=iso_lines,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -417,6 +441,10 @@ def calibration_chart(
     subtitle: str | None = None,
     compare: dict[str, Any] | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Calibration (reliability) curve for one or more classifiers.
@@ -484,6 +512,10 @@ def calibration_chart(
         strategy=strategy,
         annotate_brier=annotate_brier,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -496,6 +528,10 @@ def gain_chart(
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Cumulative-gain curve for a classifier.
@@ -541,7 +577,7 @@ def gain_chart(
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
-    return _gain_chart_from_source(source, subtitle=subtitle, theme=theme)
+    return _gain_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def lift_chart(
@@ -552,6 +588,10 @@ def lift_chart(
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Lift curve for a classifier.
@@ -596,7 +636,7 @@ def lift_chart(
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
-    return _lift_chart_from_source(source, subtitle=subtitle, theme=theme)
+    return _lift_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # --- 10c: classification matrices ------------------------------------
@@ -610,6 +650,10 @@ def confusion_matrix_chart(
     normalize: str | None = "true",
     annotate: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Confusion matrix heatmap for a classifier.
@@ -658,6 +702,10 @@ def confusion_matrix_chart(
         source,
         normalize=normalize,
         annotate=annotate,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -670,6 +718,10 @@ def class_prediction_error_chart(
     normalize: bool = False,
     show_counts: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Class prediction-error stacked bar chart for a classifier.
@@ -717,6 +769,10 @@ def class_prediction_error_chart(
         source,
         normalize=normalize,
         show_counts=show_counts,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -736,6 +792,10 @@ def importance_chart(
     show_values: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Feature-importance bar chart for an estimator.
@@ -797,6 +857,10 @@ def importance_chart(
         show_values=show_values,
         subtitle=subtitle,
         random_state=random_state,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -812,6 +876,10 @@ def shap_beeswarm_chart(
     per_class: bool = False,
     zero_line: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """SHAP beeswarm chart — per-sample SHAP scatter colored by z-scored value.
@@ -847,6 +915,10 @@ def shap_beeswarm_chart(
         background=background,
         per_class=per_class,
         zero_line=zero_line,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -861,6 +933,10 @@ def shap_bar_chart(
     background: Any = None,
     per_class: bool = False,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """SHAP bar chart — mean absolute SHAP per feature.
@@ -884,6 +960,10 @@ def shap_bar_chart(
         order=order,
         background=background,
         per_class=per_class,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -899,6 +979,10 @@ def shap_waterfall_chart(
     background: Any = None,
     per_class: bool = False,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """SHAP waterfall chart — cumulative per-feature contributions for one sample.
@@ -925,6 +1009,10 @@ def shap_waterfall_chart(
         order=order,
         background=background,
         per_class=per_class,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -940,6 +1028,10 @@ def shap_chart(
     order: str = "abs_mean",
     background: Any = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """SHAP value chart for an estimator.
@@ -1024,6 +1116,10 @@ def shap_chart(
             max_display=max_display,
             order=order,
             background=background,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
     if kind == "bar":
@@ -1032,6 +1128,10 @@ def shap_chart(
             max_display=max_display,
             order=order,
             background=background,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
     if kind == "waterfall":
@@ -1043,6 +1143,10 @@ def shap_chart(
             max_display=max_display,
             order=order,
             background=background,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
     raise ValueError(f"shap_chart(kind={kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'.")
@@ -1059,6 +1163,10 @@ def pdp_chart(
     ice_alpha: float = 0.2,
     center: bool = False,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Partial-dependence plot (PDP) for one or more features.
@@ -1132,6 +1240,10 @@ def pdp_chart(
         kind=kind,
         ice_alpha=ice_alpha,
         center=center,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1149,6 +1261,10 @@ def discrimination_threshold_chart(
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Discrimination-threshold sweep chart for a binary classifier.
@@ -1215,6 +1331,10 @@ def discrimination_threshold_chart(
         threshold_line=threshold_line,
         optimum_label=optimum_label,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1230,6 +1350,10 @@ def learning_curve_chart(
     ci_style: str = "band",
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Learning curve chart showing score vs. training set size.
@@ -1287,6 +1411,10 @@ def learning_curve_chart(
         train_sizes=train_sizes,
         ci_style=ci_style,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1304,6 +1432,10 @@ def validation_curve_chart(
     ci_style: str = "band",
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Plot score vs. a single hyperparameter value.
@@ -1381,6 +1513,10 @@ def validation_curve_chart(
         log_scale=log_scale,
         ci_style=ci_style,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1395,6 +1531,10 @@ def cv_scores_chart(
     kind: str = "box",
     split: str = "both",
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Per-fold cross-validation score distribution chart.
@@ -1449,6 +1589,10 @@ def cv_scores_chart(
         scoring=scoring,
         kind=kind,
         split=split,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1464,6 +1608,10 @@ def alpha_selection_chart(
     log_scale: bool = True,
     highlight_best: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Regularization-strength (alpha) selection chart.
@@ -1532,6 +1680,10 @@ def alpha_selection_chart(
         scoring=scoring,
         log_scale=log_scale,
         highlight_best=highlight_best,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1547,6 +1699,10 @@ def pca_scree_chart(
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """PCA scree chart showing explained variance per component.
@@ -1632,6 +1788,10 @@ def pca_scree_chart(
             df,
             cumulative_line=cumulative_line,
             threshold=threshold,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
 
@@ -1641,6 +1801,10 @@ def pca_scree_chart(
         n_components=n_components,
         cumulative_line=cumulative_line,
         threshold=threshold,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1653,6 +1817,10 @@ def cluster_diagnostics(
     scoring: str = "both",
     n_init: int = 10,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Elbow and silhouette diagnostics over a range of cluster counts.
@@ -1740,6 +1908,10 @@ def cluster_diagnostics(
         scoring=scoring,
         n_init=n_init,
         random_state=random_state,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1751,6 +1923,10 @@ def intercluster_distance_chart(
     k: int | None = None,
     method: str = "mds",
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Intercluster distance map: 2D embedding of cluster centers.
@@ -1818,6 +1994,10 @@ def intercluster_distance_chart(
         source,
         k=int(k),
         method=method,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -1834,6 +2014,10 @@ def rank_chart(
     orient: str = "horizontal",
     color_field: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Feature-ranking chart: univariate bar or pairwise heatmap.
@@ -1923,6 +2107,10 @@ def rank_chart(
             orient=orient,
             color_field=color_field,
             random_state=random_state,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
     if rank == "2d":
@@ -1933,6 +2121,10 @@ def rank_chart(
             algorithm=algorithm,
             annot=annot,
             random_state=random_state,
+            mark=mark,
+            encode=encode,
+            properties=properties,
+            layers=layers,
             theme=theme,
         )
     raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
@@ -1948,6 +2140,10 @@ def rank1d_chart(
     orient: str = "horizontal",
     color_field: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Univariate feature-ranking bar chart.
@@ -1999,6 +2195,10 @@ def rank1d_chart(
         orient=orient,
         top_k=top_k,
         color_field=color_field,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -2011,6 +2211,10 @@ def rank2d_chart(
     algorithm: str | None = None,
     annot: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Pairwise feature-correlation heatmap.
@@ -2050,6 +2254,10 @@ def rank2d_chart(
         df,
         algorithm=algo,
         annot=annot,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -2061,6 +2269,10 @@ def parallel_coordinates_chart(
     hue: str | None = None,
     rescale: str | None = "minmax",
     alpha: float = 0.5,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Parallel coordinates chart for multivariate data.
@@ -2116,6 +2328,10 @@ def parallel_coordinates_chart(
         hue=hue,
         rescale=rescale,
         alpha=alpha,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )
 
@@ -2130,6 +2346,10 @@ def decision_boundary_chart(
     proba: bool = False,
     scatter: bool = True,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Decision-boundary heatmap for a classifier over a 2D feature slice.
@@ -2196,5 +2416,9 @@ def decision_boundary_chart(
         grid_resolution=int(grid_resolution),
         proba=bool(proba),
         scatter=bool(scatter),
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
     )

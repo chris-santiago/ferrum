@@ -16,6 +16,7 @@ from typing import Any, Optional
 class _Layer:
     """Internal layer descriptor consumed by ``Chart._build_layers_list``."""
 
+    name: Optional[str] = None
     mark: Optional[str] = None
     encoding: dict = field(default_factory=dict)
     transforms: list = field(default_factory=list)

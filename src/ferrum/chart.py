@@ -326,6 +326,7 @@ class Chart:
         "_position",  # Phase 9c — Identity / Dodge / Jitter / Stack (or None)
         "_axis_x",
         "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
+        "_composite_kind",
     )
 
     def __init__(
@@ -362,6 +363,7 @@ class Chart:
         self._position = None
         self._axis_x: Optional[bool] = None
         self._axis_y: Optional[bool] = None
+        self._composite_kind: Optional[str] = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -382,6 +384,7 @@ class Chart:
         new._position = self._position
         new._axis_x = self._axis_x
         new._axis_y = self._axis_y
+        new._composite_kind = self._composite_kind
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -549,6 +552,7 @@ class Chart:
                 pass
         new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
         new._position = position
+        new._composite_kind = name
         return new
 
     def mark_point(self, **kwargs) -> "Chart":
@@ -3871,6 +3875,7 @@ class Chart:
                 )
             converted.append(
                 _Layer(
+                    name=ly.name,
                     mark=ly.mark,
                     encoding=dict(ly.encoding),
                     transforms=list(ly.transforms),
@@ -3879,6 +3884,18 @@ class Chart:
             )
         new._layers = existing + converted
         return new
+
+    @property
+    def layer_names(self) -> list[str]:
+        """Named sub-layers after composite-mark desugar resolution.
+
+        Returns ``[]`` for single-mark charts with no layers.  Accessing
+        this property forces resolution of any pending ``_PendingMark``.
+        """
+        resolved = self._resolve_pending()
+        if not resolved._layers:
+            return []
+        return [ly.name for ly in resolved._layers if ly.name is not None]
 
     def transform(self, *transforms) -> "Chart":
         """Append one or more data transforms to the chart's pipeline.

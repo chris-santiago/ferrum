@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import _Layer
+from ferrum._overrides import register_layer_names
 from ferrum.encoding import X, Y
 
 
@@ -119,13 +120,14 @@ def desugar_boxplot(
         return d
 
     layers = [
-        _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker", title=val), data_source="box"),
-        _Layer(mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
-        _Layer(mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
+        _Layer(name="whisker", mark="rule", encoding=enc("lower_whisker", "upper_whisker", title=val), data_source="box"),
+        _Layer(name="lower_cap", mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
+        _Layer(name="upper_cap", mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(
-            mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"band_size": band}, data_source="box"
+            name="box", mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"band_size": band}, data_source="box"
         ),
         _Layer(
+            name="median",
             mark="tick",
             encoding=enc("median"),
             mark_kwargs={"band_size": band, "stroke": "#222222", "stroke_width": 2},
@@ -133,9 +135,14 @@ def desugar_boxplot(
         ),
     ]
     if outliers:
-        layers.append(_Layer(mark="point", encoding=enc(val), mark_kwargs={"filled": False}, data_source="outliers"))
+        layers.append(_Layer(name="outlier", mark="point", encoding=enc(val), mark_kwargs={"filled": False}, data_source="outliers"))
 
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("boxplot", frozenset({
+    "whisker", "lower_cap", "upper_cap", "box", "median", "outlier",
+}))
 
 
 def desugar_errorbar(
@@ -202,6 +209,7 @@ def desugar_errorbar(
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
     layers = [
         _Layer(
+            name="rule",
             mark="rule",
             encoding={"x": x_field, "y": "lower", "y2": "upper"},
             data_source="err",
@@ -211,12 +219,14 @@ def desugar_errorbar(
         layers.extend(
             [
                 _Layer(
+                    name="lower_cap",
                     mark="tick",
                     encoding={"x": x_field, "y": "lower"},
                     mark_kwargs={"band_size": 0.3},
                     data_source="err",
                 ),
                 _Layer(
+                    name="upper_cap",
                     mark="tick",
                     encoding={"x": x_field, "y": "upper"},
                     mark_kwargs={"band_size": 0.3},
@@ -225,6 +235,11 @@ def desugar_errorbar(
             ]
         )
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("errorbar", frozenset({
+    "rule", "lower_cap", "upper_cap",
+}))
 
 
 def desugar_errorband(
@@ -289,6 +304,7 @@ def desugar_errorband(
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
     layers = [
         _Layer(
+            name="ribbon",
             mark="ribbon",
             encoding={"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"},
             mark_kwargs={"opacity": 0.2, "stroke": "none"},
@@ -298,11 +314,16 @@ def desugar_errorband(
     if borders:
         layers.extend(
             [
-                _Layer(mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
-                _Layer(mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
+                _Layer(name="lower_border", mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
+                _Layer(name="upper_border", mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
             ]
         )
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("errorband", frozenset({
+    "ribbon", "lower_border", "upper_border",
+}))
 
 
 def desugar_ribbon(
@@ -377,12 +398,18 @@ def desugar_ribbon(
         )
     layers = [
         _Layer(
+            name="ribbon",
             mark="ribbon",
             encoding={"x": x_field, "y": y_field, "y2": y2_field},
             mark_kwargs={"opacity": opacity, "stroke": "none"},
         ),
     ]
     return ("__layered__", [], None, None, layers)
+
+
+register_layer_names("ribbon", frozenset({
+    "ribbon",
+}))
 
 
 def desugar_boxen(
@@ -445,6 +472,7 @@ def desugar_boxen(
         )
         layers.append(
             _Layer(
+                name=f"depth_{k}",
                 mark="rect",
                 encoding=enc,
                 mark_kwargs={"opacity": opacity},
@@ -455,6 +483,7 @@ def desugar_boxen(
     # Median rule: at depth=1, ``lower == upper == median``.
     layers.append(
         _Layer(
+            name="median",
             mark="rule",
             encoding=({"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}),
             data_source="lv_depth_1",
@@ -465,6 +494,7 @@ def desugar_boxen(
     # [group, value, is_outlier].
     layers.append(
         _Layer(
+            name="outlier",
             mark="point",
             encoding=({"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}),
             data_source="lv_outliers",
@@ -472,6 +502,12 @@ def desugar_boxen(
     )
 
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("boxen", frozenset({
+    "depth_1", "depth_2", "depth_3", "depth_4", "depth_5", "depth_6",
+    "median", "outlier",
+}))
 
 
 def _extent_to_box(extent):

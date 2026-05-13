@@ -7,6 +7,7 @@ from typing import Any
 
 from ferrum import Bin, Kde, Smooth
 from ferrum._layer import _Layer
+from ferrum._overrides import register_layer_names
 
 
 def desugar_density(
@@ -414,6 +415,7 @@ def desugar_smooth(
     if ci is not None:
         layers.append(
             _Layer(
+                name="ribbon",
                 mark="ribbon",
                 encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
                 mark_kwargs={"opacity": 0.3},
@@ -422,6 +424,7 @@ def desugar_smooth(
         )
     layers.append(
         _Layer(
+            name="line",
             mark="line",
             encoding={"x": "x", "y": "y"},
             data_source="smooth",
@@ -430,6 +433,7 @@ def desugar_smooth(
     if show_metrics:
         layers.append(
             _Layer(
+                name="metrics",
                 mark="text",
                 encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
                 mark_kwargs={"align": "right", "dx": -4, "dy": 4},
@@ -437,3 +441,8 @@ def desugar_smooth(
             )
         )
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("smooth", frozenset({
+    "ribbon", "line", "metrics",
+}))

@@ -17,8 +17,14 @@ from typing import Any
 import polars as pl
 
 from ferrum.encoding import X, Y
+from ferrum._overrides import _apply_overrides, register_layer_names
 
 from ferrum._sentinels import _inject_constant  # noqa: F401  re-export
+
+# Register builder-added layer names that live outside desugar functions.
+# These augment the desugar-registered catalogs (or create them if the
+# desugar module hasn't been imported yet).
+register_layer_names("calibration", frozenset({"line", "reference", "point"}))
 
 
 def _inject_cook_outliers(
@@ -136,6 +142,7 @@ def _overlay_metrics_corner(chart):
             mark="text",
             encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
             mark_kwargs={"align": "right", "dx": -4, "dy": 4},
+            name="metrics",
         )
     )
 
@@ -162,6 +169,10 @@ def _residuals_chart_from_source(
     panels: Any = None,  # None / "single" / list of panel names
     annotate_metrics: bool = True,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a residuals diagnostic chart from a ModelSource.
@@ -195,6 +206,7 @@ def _residuals_chart_from_source(
         # ``_overlay_metrics_corner`` is a no-op when the injected
         # columns are absent, so the call is unconditional.
         chart = _overlay_metrics_corner(chart)
+        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
         if theme is not None:
             chart = chart.theme(theme)
         return chart
@@ -211,7 +223,12 @@ def _residuals_chart_from_source(
     charts = [
         _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold) for name in panel_list
     ]
-    return _grid_panels(charts, theme=theme)
+    # _grid_panels applies theme internally; apply overrides before theme.
+    chart = _grid_panels(charts)
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
 
 
 def _residuals_panel(
@@ -337,6 +354,10 @@ def _prediction_error_chart_from_source(
     identity_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build an actual-vs-predicted error chart from a ModelSource.
@@ -380,6 +401,7 @@ def _prediction_error_chart_from_source(
         y=Y("y_true", title="True value"),
     )
     chart = chart.properties(title=ferrum.Title("Prediction Error"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -404,6 +426,10 @@ def _roc_chart_from_source(
     average: str | None = "macro",
     annotate_auc: bool = True,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build an ROC chart from a ModelSource.
@@ -466,6 +492,7 @@ def _roc_chart_from_source(
             position="end",
         )
 
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -531,6 +558,10 @@ def _pr_chart_from_source(
     annotate_ap: bool = True,
     iso_lines: bool = False,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a precision-recall chart from a ModelSource.
@@ -634,6 +665,7 @@ def _pr_chart_from_source(
                 mark="rule",
                 encoding={"y": "_baseline_y"},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
+                name="baseline",
             )
         )
 
@@ -647,6 +679,7 @@ def _pr_chart_from_source(
             position="end",
         )
 
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -745,6 +778,10 @@ def _calibration_chart_from_source(
     strategy: str = "uniform",
     annotate_brier: bool = True,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a calibration (reliability) chart from a ModelSource.
@@ -821,9 +858,10 @@ def _calibration_chart_from_source(
     if color is not None:
         point_enc["color"] = color
     chart = chart.layer(
-        Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True})
+        Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
     )
 
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -833,6 +871,10 @@ def _gain_chart_from_source(
     source: Any,
     *,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a cumulative-gain chart from a ModelSource.
@@ -874,6 +916,7 @@ def _gain_chart_from_source(
             x_col="percent_population",
             y_col="gain",
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -883,6 +926,10 @@ def _lift_chart_from_source(
     source: Any,
     *,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a lift chart from a ModelSource.
@@ -918,6 +965,7 @@ def _lift_chart_from_source(
             x_col="percent_population",
             y_col="lift",
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -928,6 +976,10 @@ def _confusion_chart_from_source(
     *,
     normalize: str | None = "true",
     annotate: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a confusion-matrix heatmap chart from a ModelSource."""
@@ -943,6 +995,7 @@ def _confusion_chart_from_source(
         y=Y("actual", title="True label"),
     )
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -953,6 +1006,10 @@ def _class_prediction_error_chart_from_source(
     *,
     normalize: bool = False,
     show_counts: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a stacked-bar class-prediction-error chart from a ModelSource.
@@ -983,12 +1040,21 @@ def _class_prediction_error_chart_from_source(
         y=Y("value", title="Number of predictions"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
 
 
-def _classification_report_chart(source: Any, *, theme: Any = None):
+def _classification_report_chart(
+    source: Any,
+    *,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
     """Heatmap of per-class precision/recall/F1 (rect + text overlay).
 
     Long-form data: one row per (class, metric) cell with ``value`` and
@@ -1043,15 +1109,25 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
             Layer(
                 mark="text",
                 encoding={"x": "metric", "y": "class", "text": "value_fmt"},
+                name="annotation",
             )
         )
     )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
 
 
-def _class_balance_chart_from_dataframe(y_series: Any, *, theme: Any = None):
+def _class_balance_chart_from_dataframe(
+    y_series: Any,
+    *,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
     """Bar chart of class counts.
 
     Operates on ``y`` alone (no model required). Computes per-class
@@ -1072,6 +1148,7 @@ def _class_balance_chart_from_dataframe(y_series: Any, *, theme: Any = None):
         .sort("y")
     )
     chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count")
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1087,6 +1164,10 @@ def _importance_chart_from_source(
     show_values: bool = True,
     subtitle: str | None = None,
     random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a feature-importance chart from a ModelSource.
@@ -1137,15 +1218,18 @@ def _importance_chart_from_source(
                 mark="text",
                 encoding={"x": "importance", "y": "feature", "text": "_value_text"},
                 mark_kwargs={"align": "left", "dx": 4},
+                name="value_text",
             )
         else:
             text_ly = Layer(
                 mark="text",
                 encoding={"x": "feature", "y": "importance", "text": "_value_text"},
                 mark_kwargs={"baseline": "bottom", "dy": -4},
+                name="value_text",
             )
         chart = chart.layer(text_ly)
 
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1200,6 +1284,10 @@ def _shap_beeswarm_chart_from_source(
     background: Any = None,
     per_class: bool = False,
     zero_line: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Beeswarm chart: per-sample shap values colored by feature value.
@@ -1251,6 +1339,7 @@ def _shap_beeswarm_chart_from_source(
     chart = chart.properties(title=ferrum.Title("SHAP Summary"))
     if is_faceted:
         chart = chart.facet(col="class_label")
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1263,6 +1352,10 @@ def _shap_bar_chart_from_source(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """SHAP aggregated bar chart: mean(|shap_value|) per feature.
@@ -1302,6 +1395,7 @@ def _shap_bar_chart_from_source(
     )
     if per_class and agg["class_label"].n_unique() > 1:
         chart = chart.facet(col="class_label")
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1315,6 +1409,10 @@ def _shap_waterfall_chart_from_source(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Waterfall chart for a single sample's SHAP contributions.
@@ -1379,6 +1477,7 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1444,6 +1543,10 @@ def _pdp_chart_from_source(
     kind: str = "average",
     ice_alpha: float = 0.2,
     center: bool = False,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Partial-dependence chart: faceted, one polyline per feature panel.
@@ -1505,6 +1608,7 @@ def _pdp_chart_from_source(
         .facet(col="feature")
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1519,6 +1623,10 @@ def _discrimination_threshold_chart_from_source(
     threshold_line: bool = False,
     optimum_label: bool = True,
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Build a discrimination-threshold chart from a ModelSource.
@@ -1567,6 +1675,7 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1594,6 +1703,10 @@ def _learning_curve_chart_from_source(
     train_sizes: Any = None,
     ci_style: str = "band",
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Learning-curve chart: dedupe per (train_size, split), then ribbon+line.
@@ -1636,8 +1749,10 @@ def _learning_curve_chart_from_source(
             mark="point",
             encoding={"x": "train_size", "y": "mean_score", "color": "split"},
             mark_kwargs={"size": 40, "filled": True},
+            name="point",
         )
     )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1653,6 +1768,10 @@ def _validation_curve_chart_from_source(
     log_scale: Any = "auto",
     ci_style: str = "band",
     subtitle: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Validation-curve chart: dedupe per (param_value, split), then ribbon+line.
@@ -1705,8 +1824,10 @@ def _validation_curve_chart_from_source(
             mark="point",
             encoding={"x": "param_value", "y": "mean_score", "color": "split"},
             mark_kwargs={"size": 40, "filled": True},
+            name="point",
         )
     )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1719,6 +1840,10 @@ def _cv_scores_chart_from_source(
     scoring: Any = None,
     kind: str = "box",
     split: str = "both",
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Per-fold CV-score chart.
@@ -1738,6 +1863,7 @@ def _cv_scores_chart_from_source(
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1751,6 +1877,10 @@ def _alpha_selection_chart_from_source(
     scoring: Any = None,
     log_scale: bool = True,
     highlight_best: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Alpha-selection chart: dedupe per alpha (one row per alpha holds the
@@ -1774,6 +1904,7 @@ def _alpha_selection_chart_from_source(
             mark="point",
             encoding={"x": "alpha", "y": "mean_score"},
             mark_kwargs={"size": 40, "filled": True},
+            name="point",
         )
     )
     # Schwabish C11: annotate the best-alpha point with a text label.
@@ -1804,13 +1935,16 @@ def _alpha_selection_chart_from_source(
                 mark="point",
                 encoding={"x": "alpha", "y": "mean_score"},
                 mark_kwargs={"size": 40, "filled": True},
+                name="point",
             ),
             Layer(
                 mark="text",
                 encoding={"x": "_best_alpha", "y": "_best_alpha_y", "text": "_best_alpha_text"},
                 mark_kwargs={"dx": 8, "dy": -8, "align": "left"},
+                name="best_alpha_text",
             ),
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1825,6 +1959,10 @@ def _silhouette_chart_from_source(
     source: Any,
     *,
     k: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Silhouette chart from a ModelSource. The source method packs
@@ -1835,6 +1973,7 @@ def _silhouette_chart_from_source(
 
     df = source.silhouette(k=k)
     chart = ferrum.Chart(df).mark_silhouette()
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1846,6 +1985,10 @@ def _pca_scree_chart_from_source(
     n_components: int | None = None,
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """PCA scree chart with optional cumulative line + threshold rule."""
@@ -1865,8 +2008,10 @@ def _pca_scree_chart_from_source(
                 mark="point",
                 encoding={"x": "component", "y": "cumulative_variance_ratio"},
                 mark_kwargs={"size": 40, "filled": True},
+                name="point",
             )
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1877,6 +2022,10 @@ def _pca_scree_chart_from_variance_df(
     *,
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path)."""
@@ -1894,8 +2043,10 @@ def _pca_scree_chart_from_variance_df(
                 mark="point",
                 encoding={"x": "component", "y": "cumulative_variance_ratio"},
                 mark_kwargs={"size": 40, "filled": True},
+                name="point",
             )
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1906,6 +2057,10 @@ def _intercluster_distance_chart_from_source(
     *,
     k: int,
     method: str = "mds",
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Cluster-center 2D scatter sized by cluster count.
@@ -1946,6 +2101,7 @@ def _intercluster_distance_chart_from_source(
         )
     )
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -1958,6 +2114,10 @@ def _rank1d_chart_from_dataframe(
     orient: str = "horizontal",
     top_k: int | None = None,
     color_field: str | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Univariate rank1d chart over a pre-computed rank1d DataFrame.
@@ -2007,6 +2167,7 @@ def _rank1d_chart_from_dataframe(
             x=X("feature"),
             y=Y("score", scale={"type": "linear", "domain": x_domain}),
         )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2017,6 +2178,10 @@ def _rank2d_chart_from_dataframe(
     *,
     algorithm: str = "pearson",
     annot: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Pairwise rank2d heatmap chart over a pre-computed rank2d DataFrame.
@@ -2040,6 +2205,7 @@ def _rank2d_chart_from_dataframe(
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     chart = chart.properties(title=ferrum.Title("Feature Correlation"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2120,6 +2286,10 @@ def _parallel_coords_chart_from_dataframe(
     hue: str | None = None,
     rescale: str | None = "minmax",
     alpha: float = 0.3,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Parallel coordinates chart from a wide DataFrame.
@@ -2171,6 +2341,7 @@ def _parallel_coords_chart_from_dataframe(
         color_field=hue,
     )
     chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2183,6 +2354,10 @@ def _decision_boundary_chart_from_source(
     grid_resolution: int = 200,
     proba: bool = False,
     scatter: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
 ):
     """Decision-boundary heatmap of model predictions over a 2D feature grid.
@@ -2241,6 +2416,7 @@ def _decision_boundary_chart_from_source(
             )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
+        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
         if theme is not None:
             chart = chart.theme(theme)
         return chart
@@ -2260,9 +2436,11 @@ def _decision_boundary_chart_from_source(
             mark="point",
             encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
             mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},
+            name="scatter",
         )
     )
     chart = chart.properties(title=ferrum.Title("Decision Boundary"))
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2408,7 +2586,11 @@ def _cluster_diagnostics_chart(
     scoring: str,
     n_init: int,
     random_state: int | None,
-    theme: Any,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
 ):
     """Build the elbow / silhouette / both panel(s) for cluster_diagnostics.
 
@@ -2486,11 +2668,13 @@ def _cluster_diagnostics_chart(
                 mark="rule",
                 encoding={"x": "_elbow_k"},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
+                name="elbow_rule",
             ),
             Layer(
                 mark="text",
                 encoding={"x": "_elbow_k", "y": "_elbow_y", "text": "_elbow_text"},
                 mark_kwargs={"dx": 8, "dy": -8, "align": "left"},
+                name="elbow_text",
             ),
         ]
     elbow = (
@@ -2503,6 +2687,7 @@ def _cluster_diagnostics_chart(
                 mark="point",
                 encoding={"x": "k", "y": "inertia"},
                 mark_kwargs={"size": 40, "filled": True},
+                name="point",
             ),
             *elbow_layers,
         )
@@ -2517,6 +2702,7 @@ def _cluster_diagnostics_chart(
                 mark="point",
                 encoding={"x": "k", "y": "silhouette"},
                 mark_kwargs={"size": 40, "filled": True},
+                name="point",
             )
         )
     )
@@ -2525,7 +2711,12 @@ def _cluster_diagnostics_chart(
     elif scoring == "silhouette":
         chart = sil
     else:
+        # scoring="both" returns HConcatChart — mark/encode/layers overrides
+        # don't apply meaningfully to compound views. Only properties= is
+        # forwarded (via _apply_overrides, which calls .properties() on the
+        # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
     return chart

@@ -20,6 +20,7 @@ from ferrum import (
     Violin,
 )
 from ferrum._layer import _Layer
+from ferrum._overrides import register_layer_names
 
 
 def desugar_contour(
@@ -108,6 +109,7 @@ def desugar_contour(
             mk["cmap"] = cmap
         layers = [
             _Layer(
+                name="polygon",
                 mark="polygon",
                 encoding={"x": "contour_x", "y": "contour_y", "color": "level_value"},
                 mark_kwargs=mk,
@@ -123,6 +125,7 @@ def desugar_contour(
             mk["cmap"] = cmap
         layers = [
             _Layer(
+                name="segment",
                 mark="segment",
                 encoding={
                     "x": "contour_x",
@@ -135,6 +138,11 @@ def desugar_contour(
             )
         ]
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("contour", frozenset({
+    "polygon", "segment",
+}))
 
 
 def desugar_violin(
@@ -215,6 +223,7 @@ def desugar_violin(
 
     transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
     violin_layer = _Layer(
+        name="body",
         mark="polygon",
         encoding={"x": x_field, "y": Y("violin_y", title=y_field)},
         mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
@@ -228,7 +237,7 @@ def desugar_violin(
             transforms,
             None,
             None,
-            [violin_layer, _Layer(mark="point", encoding={"x": x_field, "y": y_field})],
+            [violin_layer, _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field})],
         )
     if inner == "quartile":
         transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
@@ -237,6 +246,7 @@ def desugar_violin(
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
             layers.append(
                 _Layer(
+                    name=col,
                     mark="rule",
                     encoding={"x": x_field, "y": col},
                     mark_kwargs=mk if mk else None,
@@ -251,6 +261,12 @@ def desugar_violin(
         x_field, y_field, extent=1.5, outliers=False, size=0.1
     )
     return ("__layered__", [*transforms, *box_t], None, None, [violin_layer, *box_layers])
+
+
+register_layer_names("violin", frozenset({
+    "body", "point", "q1", "median", "q3",
+    "whisker", "lower_cap", "upper_cap", "box", "outlier",
+}))
 
 
 def desugar_qq(
@@ -328,6 +344,7 @@ def desugar_qq(
 
     layers = [
         _Layer(
+            name="point",
             mark="point",
             encoding={
                 "x": X("theoretical", title="Theoretical Quantiles"),
@@ -339,6 +356,7 @@ def desugar_qq(
     if line:
         layers.append(
             _Layer(
+                name="reference",
                 mark="rule",
                 encoding={
                     "x": "qq_line_x_start",
@@ -350,6 +368,11 @@ def desugar_qq(
             )
         )
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("qq", frozenset({
+    "point", "reference",
+}))
 
 
 def desugar_raster(
@@ -459,6 +482,7 @@ def desugar_raster(
         mk["cmap"] = cmap
     layers = [
         _Layer(
+            name="image",
             mark="image",
             encoding={"x": x_field, "y": y_field},
             mark_kwargs=mk if mk else None,
@@ -466,6 +490,11 @@ def desugar_raster(
         )
     ]
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("raster", frozenset({
+    "image",
+}))
 
 
 def desugar_hex(
@@ -566,6 +595,7 @@ def desugar_hex(
         mk["cmap"] = cmap
     layers = [
         _Layer(
+            name="polygon",
             mark="polygon",
             encoding={"x": "hex_x", "y": "hex_y", "color": "value"},
             mark_kwargs=mk,
@@ -573,6 +603,11 @@ def desugar_hex(
         )
     ]
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("hex", frozenset({
+    "polygon",
+}))
 
 
 def desugar_swarm(
@@ -678,6 +713,7 @@ def desugar_swarm(
         # band center — same mechanism Dodge uses (Phase 9c).
         layers = [
             _Layer(
+                name="point",
                 mark="point",
                 encoding={"x": cat, "y": val},
                 data_source="swarm",
@@ -692,12 +728,18 @@ def desugar_swarm(
         # `render/position.rs::read_position_offsets`.
         layers = [
             _Layer(
+                name="point",
                 mark="point",
                 encoding={"x": val, "y": cat},
                 data_source="swarm",
             )
         ]
     return ("__layered__", transforms, None, None, layers)
+
+
+register_layer_names("swarm", frozenset({
+    "point",
+}))
 
 
 def desugar_function(
