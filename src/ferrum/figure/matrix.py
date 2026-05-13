@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Chart, RepeatChart, Repeat
+from ferrum._overrides import _apply_overrides
 
 
 _VALID_PAIR_KINDS = {"scatter", "kde", "hist", "reg"}
@@ -49,6 +50,10 @@ def pairplot(
     aspect: float | None = None,
     corner: bool = False,
     dropna: bool = False,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> RepeatChart:
@@ -246,6 +251,7 @@ def pairplot(
         diagonal=diagonal,
         corner=corner,
     )
+    rc = _apply_overrides(rc, mark=mark, encode=encode, properties=properties, layers=layers)
     return rc
 
 
@@ -263,6 +269,10 @@ def heatmap(
     robust: bool = False,
     square: bool = False,
     mask: Any = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -495,7 +505,9 @@ def heatmap(
             )
         from ferrum.figure.regression import _merge_layers
 
-        chart = _merge_layers(chart, text_layer)
+        chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
+
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
 
     if theme is not None:
         chart = chart.theme(theme)
@@ -512,6 +524,10 @@ def clustermap(
     standard_scale: Any = None,
     figsize: Any = None,
     dendrogram_ratio: float = 0.2,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Any:
@@ -674,6 +690,7 @@ def clustermap(
     # Column dendrogram (top): reads col_link_segments and draws diagonal
     # segments. mark_segment requires x, y, x2, y2 in encoding.
     col_dendro_layer = _Layer(
+        name="col_dendrogram",
         mark="segment",
         encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
         data_source="col_link_segments",
@@ -687,6 +704,7 @@ def clustermap(
     from ferrum import CoordFlip
 
     row_dendro_layer = _Layer(
+        name="row_dendrogram",
         mark="segment",
         encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
         data_source="row_link_segments",
@@ -716,4 +734,5 @@ def clustermap(
         col_dendrogram=col_dendro,
         dendrogram_ratio=dendrogram_ratio,
     )
+    cm = _apply_overrides(cm, mark=mark, encode=encode, properties=properties, layers=layers)
     return cm

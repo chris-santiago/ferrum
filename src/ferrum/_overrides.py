@@ -41,13 +41,19 @@ def _apply_overrides(
     For compound views (VConcatChart, HConcatChart, etc.), fans out to
     each child chart via ``_rebuild_with_charts``.
     """
-    if hasattr(chart, "_rebuild_with_charts"):
-        def _apply(c: Any) -> Any:
-            return _apply_overrides(
-                c, mark=mark, encode=encode, properties=properties, layers=layers,
-                _skip_unknown_mark_keys=True,
-            )
-        return chart._rebuild_with_charts(_apply)
+    from ferrum.chart import Chart
+    if not isinstance(chart, Chart):
+        try:
+            def _apply(c: Any) -> Any:
+                return _apply_overrides(
+                    c, mark=mark, encode=encode, properties=properties, layers=layers,
+                    _skip_unknown_mark_keys=True,
+                )
+            return chart._rebuild_with_charts(_apply)
+        except (NotImplementedError, AttributeError):
+            if properties is not None and hasattr(chart, "properties"):
+                chart = chart.properties(**properties)
+            return chart
 
     if mark is not None:
         chart = _apply_mark_overrides(chart, mark, _skip_unknown=_skip_unknown_mark_keys)

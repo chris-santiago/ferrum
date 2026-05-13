@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin2D, Chart, JointChart
+from ferrum._overrides import _apply_overrides
 
 
 _VALID_CENTER_KINDS = {"scatter", "kde", "hist", "hex", "reg"}
@@ -25,6 +26,10 @@ def jointplot(
     joint_kws: Any = None,
     marginal_kws: Any = None,
     height: float | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> JointChart:
@@ -162,7 +167,7 @@ def jointplot(
         fit = Chart(data).mark_smooth(method="lm", ci=None).encode(**reg_enc)
         from ferrum.figure.regression import _merge_layers
 
-        center = _merge_layers(scatter, fit)
+        center = _merge_layers(scatter, fit, scatter_name="scatter", fit_name="fit")
 
     # Build top marginal (over x).
     mk = dict(marginal_kws or {})
@@ -209,10 +214,12 @@ def jointplot(
         top = top.theme(theme)
         right = right.theme(theme)
 
-    return JointChart(
+    result = JointChart(
         center,
         top=top,
         right=right,
         ratio=ratio,
         spacing=space,
     )
+    result = _apply_overrides(result, mark=mark, encode=encode, properties=properties, layers=layers)
+    return result

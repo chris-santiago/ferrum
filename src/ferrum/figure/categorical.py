@@ -12,6 +12,7 @@ from ferrum import (
     Identity,
     Jitter,
 )
+from ferrum._overrides import _apply_overrides
 
 
 _VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
@@ -35,6 +36,10 @@ def catplot(
     ci: Any = 95,
     n_boot: int = 1000,
     seed: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -256,6 +261,8 @@ def catplot(
             chart = chart.facet(col=col)
         else:
             chart = chart.facet(row=row)
+
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
 
     if theme is not None:
         chart = chart.theme(theme)

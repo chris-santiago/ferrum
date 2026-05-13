@@ -11,26 +11,32 @@ from ferrum import (
     Robust,
     Smooth,
 )
+from ferrum._overrides import _apply_overrides
 
 
 _VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
 
 
-def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
+def _merge_layers(
+    scatter_chart: Chart,
+    fit_chart: Chart,
+    *,
+    scatter_name: str | None = None,
+    fit_name: str | None = None,
+) -> Chart:
     """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
 
     Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
     with transforms accumulated from both inputs.
     """
+    from dataclasses import replace as _replace
+
     s_resolved = scatter_chart._resolve_pending()
     f_resolved = fit_chart._resolve_pending()
 
     new = s_resolved._clone()
     new._pending_stat_mark = None
 
-    # Collect top-level transforms shared by both charts. To avoid duplicate
-    # transforms in the output (e.g. an Unpivot pipeline that both layers
-    # reference), we dedupe by class+constructor-equality on best-effort.
     shared_transforms: list = []
     seen_ids = set()
     for t in list(s_resolved._transforms) + list(f_resolved._transforms):
@@ -42,20 +48,22 @@ def _merge_layers(scatter_chart: Chart, fit_chart: Chart) -> Chart:
 
     from ferrum._layer import _Layer
 
-    # Build scatter layer.
     scatter_layer = _Layer(
+        name=scatter_name,
         mark=s_resolved._mark,
         encoding=dict(s_resolved._encoding),
         mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
         position=s_resolved._position,
     )
 
-    # Collect fit layers (may be single-mark or multi-layer).
     if f_resolved._layers is not None:
         fit_layers = list(f_resolved._layers)
+        if fit_name and fit_layers and fit_layers[0].name is None:
+            fit_layers[0] = _replace(fit_layers[0], name=fit_name)
     else:
         fit_layers = [
             _Layer(
+                name=fit_name,
                 mark=f_resolved._mark,
                 encoding=dict(f_resolved._encoding),
                 mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
@@ -89,6 +97,10 @@ def lmplot(
     x_jitter: Any = None,
     logx: bool = False,
     show_metrics: bool = True,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -318,7 +330,7 @@ def lmplot(
     if scatter_layer is None:
         out = fit
     else:
-        out = _merge_layers(scatter_layer, fit)
+        out = _merge_layers(scatter_layer, fit, scatter_name="scatter", fit_name="fit")
 
     # Apply line_kws to smooth-based methods (lm, loess) where line_kws
     # can't be passed through mark_smooth directly. Non-smooth methods
@@ -342,6 +354,8 @@ def lmplot(
         else:
             out = out.facet(row=row)
 
+    out = _apply_overrides(out, mark=mark, encode=encode, properties=properties, layers=layers)
+
     if theme is not None:
         out = out.theme(theme)
 
@@ -361,6 +375,10 @@ def residplot(
     zero_line: bool = True,
     label: Any = None,
     color: Any = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -481,18 +499,20 @@ def residplot(
         from ferrum._layer import _Layer
 
         chart = chart._clone()
-        layers: list = [_Layer(mark="point", encoding=dict(enc))]
+        internal_layers: list = [_Layer(name="point", mark="point", encoding=dict(enc))]
         if zero_line:
-            layers.append(
+            internal_layers.append(
                 _Layer(
+                    name="reference",
                     mark="rule",
                     encoding={"y": "_ref_zero"},
                     mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
                 )
             )
         if show_metrics:
-            layers.append(
+            internal_layers.append(
                 _Layer(
+                    name="metrics",
                     mark="text",
                     encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
                     mark_kwargs={"align": "right", "dx": -4, "dy": 4},
@@ -509,15 +529,18 @@ def residplot(
                     name="lowess",
                 ),
             ]
-            layers.append(
+            internal_layers.append(
                 _Layer(
+                    name="lowess",
                     mark="line",
                     encoding={"x": "x", "y": "y"},
                     data_source="lowess",
                 )
             )
-        chart._layers = layers
+        chart._layers = internal_layers
         chart._mark = None
+
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
 
     if theme is not None:
         chart = chart.theme(theme)

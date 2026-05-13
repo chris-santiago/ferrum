@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin, Chart, Identity, Dodge, Stack
+from ferrum._overrides import _apply_overrides
 
 
 _VALID_KINDS = {"hist", "kde", "ecdf", "rug"}
@@ -31,6 +32,10 @@ def displot(
     rug: bool = False,
     height: float | None = None,
     aspect: float | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
 ) -> Chart:
@@ -210,6 +215,25 @@ def displot(
         rug_layer = Chart(data).mark_tick().encode(x=x)
         chart = chart + rug_layer
 
+    # Name the layers so override passthrough can target them.
+    if chart._layers is not None:
+        from dataclasses import replace as _dc_replace
+
+        _kind_names = {"bar": "histogram", "area": "kde", "line": "kde",
+                       "tick": "rug", "point": "scatter"}
+        seen: dict[str, int] = {}
+        named: list = []
+        for ly in chart._layers:
+            if ly.name is not None:
+                named.append(ly)
+            else:
+                base = _kind_names.get(ly.mark or "", ly.mark or "layer")
+                count = seen.get(base, 0)
+                seen[base] = count + 1
+                lname = base if count == 0 else f"{base}_{count + 1}"
+                named.append(_dc_replace(ly, name=lname))
+        chart._layers = named
+
     # log_scale on x.
     if log_scale and x is not None:
         from ferrum.encoding import X
@@ -230,6 +254,8 @@ def displot(
         h = height if height is not None else 300.0
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
+
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
 
     if theme is not None:
         chart = chart.theme(theme)
