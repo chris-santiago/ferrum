@@ -1,16 +1,14 @@
 //! Swarm: greedy beeswarm placement.
 //!
 //! Output schema: input schema PLUS appended `swarm_x: Float64, swarm_y: Float64,
-//! __pos_x_offset__: Float64` (vertical-orient assumption — see below).
+//! `__pos_x_offset__: Float64` (vertical orient) or `__pos_y_offset__: Float64`
+//! (horizontal orient).
 //! `swarm_x` is the per-category cross-axis offset in *value-axis data units*
 //! (so callers can do their own conversion if needed); `swarm_y` is the original
-//! `value`. `__pos_x_offset__` is the same offset converted to *pixels* on the
-//! cross-axis under the vertical-orient assumption (cross = x = width), so the
-//! standard position-offset rendering path (`render/position.rs`) picks it up
-//! automatically when the desugar encodes the chart's original category field
-//! on the x-axis. For horizontal-orient swarms the Python desugar currently
-//! still uses the legacy `swarm_x`/`swarm_y` encoding — fixing that requires
-//! threading orient through the transform spec (Phase 10g+ scope).
+//! `value`. The position-offset column converts the data-unit offset to *pixels*
+//! on the cross-axis so the standard rendering path (`render/position.rs`) picks
+//! it up automatically when the desugar encodes the chart's original category
+//! field on the appropriate axis.
 //!
 //! Algorithm: per category, sort points by `value` ascending (stable on row index
 //! for byte-deterministic placements). For each point, try candidate offsets in
@@ -19,10 +17,7 @@
 //!
 //! `d = point_size + spacing`, converted from pixels to data-space along the
 //! value axis using `panel_pixel_size` from the TransformContext. Without context,
-//! falls back to `radius_data = 1.0`.
-//!
-//! TODO: warn-once when no context is provided so default radius doesn't silently
-//! mis-place; out of scope for this task.
+//! falls back to `radius_data = 1.0` and emits a one-time warning.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -31,9 +26,12 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
+
+static WARNED_DEFAULT_RADIUS: AtomicBool = AtomicBool::new(false);
 
 fn default_point_size() -> f64 {
     5.0
@@ -51,6 +49,14 @@ pub(crate) enum SwarmSide {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SwarmOrient {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SwarmSpec {
     pub category: String, // grouping field (Utf8 or Float64)
@@ -61,6 +67,8 @@ pub(crate) struct SwarmSpec {
     pub spacing: f64,
     #[serde(default)]
     pub side: SwarmSide,
+    #[serde(default)]
+    pub orient: SwarmOrient,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -126,8 +134,9 @@ pub(crate) fn apply_with_context(
     }
 
     // radius_data: how far points need to be in value-axis units.
-    let radius_data: f64 = match ctx.panel_pixel_size {
-        Some((_, h)) if h > 0 => {
+    // Vertical: value axis = y = panel height. Horizontal: value axis = x = panel width.
+    let radius_data: f64 = match (spec.orient, ctx.panel_pixel_size) {
+        (SwarmOrient::Vertical, Some((_, h))) if h > 0 => {
             let value_range = vmax - vmin;
             if value_range.is_finite() && value_range > 0.0 {
                 (spec.point_size + spec.spacing) * (value_range / h as f64)
@@ -135,7 +144,23 @@ pub(crate) fn apply_with_context(
                 1.0
             }
         }
-        _ => 1.0,
+        (SwarmOrient::Horizontal, Some((w, _))) if w > 0 => {
+            let value_range = vmax - vmin;
+            if value_range.is_finite() && value_range > 0.0 {
+                (spec.point_size + spec.spacing) * (value_range / w as f64)
+            } else {
+                1.0
+            }
+        }
+        _ => {
+            if !WARNED_DEFAULT_RADIUS.swap(true, AtomicOrdering::Relaxed) {
+                eprintln!(
+                    "ferrum: Swarm transform has no pixel context; \
+                     using default radius. Point placement may be inaccurate."
+                );
+            }
+            1.0
+        }
     };
 
     // 3. Group by category. BTreeMap for deterministic iteration order.
@@ -273,17 +298,17 @@ pub(crate) fn apply_with_context(
         }
     }
 
-    // 5. Build output: input columns + swarm_x + swarm_y + __pos_x_offset__.
+    // 5. Build output: input columns + swarm_x + swarm_y + position-offset column.
     //
-    // __pos_x_offset__ converts the value-axis-data-units offset back to pixels
-    // on the cross-axis (= x for vertical-orient). The inverse of the conversion
-    // used to derive `radius_data` above: pixel_offset = swarm_x * (h / value_range).
-    // This means each placement slot (`radius_data` step) renders at exactly
+    // Vertical: emits `__pos_x_offset__` (cross-axis = x). The inverse of the
+    // radius_data conversion: pixel_offset = swarm_x * (h / value_range).
+    // Horizontal: emits `__pos_y_offset__` (cross-axis = y), using w instead of h.
+    // Each placement slot (`radius_data` step) renders at exactly
     // `(point_size + spacing)` pixels — the visual spacing the algorithm intends.
     // For null offsets (skipped rows), emit 0.0 so the position-offset reader
     // never sees a None it doesn't expect (`render/position.rs` requires non-null).
-    let pixel_per_data: f64 = match ctx.panel_pixel_size {
-        Some((_, h)) if h > 0 => {
+    let pixel_per_data: f64 = match (spec.orient, ctx.panel_pixel_size) {
+        (SwarmOrient::Vertical, Some((_, h))) if h > 0 => {
             let value_range = vmax - vmin;
             if value_range.is_finite() && value_range > 0.0 {
                 (h as f64) / value_range
@@ -291,9 +316,17 @@ pub(crate) fn apply_with_context(
                 1.0
             }
         }
+        (SwarmOrient::Horizontal, Some((w, _))) if w > 0 => {
+            let value_range = vmax - vmin;
+            if value_range.is_finite() && value_range > 0.0 {
+                (w as f64) / value_range
+            } else {
+                1.0
+            }
+        }
         _ => 1.0,
     };
-    let pos_x_offset: Float64Array = swarm_x
+    let pos_offset: Float64Array = swarm_x
         .iter()
         .map(|opt| Some(opt.map(|o| o * pixel_per_data).unwrap_or(0.0)))
         .collect();
@@ -303,7 +336,12 @@ pub(crate) fn apply_with_context(
     let sy_arr: Float64Array = swarm_y.iter().copied().collect();
     out_cols.push(Arc::new(sx_arr));
     out_cols.push(Arc::new(sy_arr));
-    out_cols.push(Arc::new(pos_x_offset));
+    out_cols.push(Arc::new(pos_offset));
+
+    let offset_col_name = match spec.orient {
+        SwarmOrient::Vertical => "__pos_x_offset__",
+        SwarmOrient::Horizontal => "__pos_y_offset__",
+    };
 
     let mut new_fields: Vec<Field> = schema
         .fields()
@@ -312,7 +350,7 @@ pub(crate) fn apply_with_context(
         .collect();
     new_fields.push(Field::new("swarm_x", DataType::Float64, true));
     new_fields.push(Field::new("swarm_y", DataType::Float64, true));
-    new_fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+    new_fields.push(Field::new(offset_col_name, DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(new_fields));
 
     RecordBatch::try_new(out_schema, out_cols)
@@ -361,6 +399,7 @@ impl PySwarm {
         point_size = 5.0,
         spacing = 1.0,
         side = "both",
+        orient = "vertical",
         name = None,
     ))]
     fn new(
@@ -369,6 +408,7 @@ impl PySwarm {
         point_size: f64,
         spacing: f64,
         side: &str,
+        orient: &str,
         name: Option<String>,
     ) -> PyResult<Self> {
         if category.is_empty() || value.is_empty() {
@@ -396,12 +436,22 @@ impl PySwarm {
                 )))
             }
         };
+        let parsed_orient = match orient {
+            "vertical" => SwarmOrient::Vertical,
+            "horizontal" => SwarmOrient::Horizontal,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Swarm: unknown orient '{other}'; expected vertical|horizontal"
+                )))
+            }
+        };
         Ok(PySwarm(TransformSpec::Swarm(SwarmSpec {
             category: category.to_string(),
             value: value.to_string(),
             point_size,
             spacing,
             side: parsed_side,
+            orient: parsed_orient,
             name,
         })))
     }
@@ -409,8 +459,8 @@ impl PySwarm {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Swarm(s) => format!(
-                "Swarm(category='{}', value='{}', point_size={}, spacing={}, side={:?}, name={:?})",
-                s.category, s.value, s.point_size, s.spacing, s.side, s.name
+                "Swarm(category='{}', value='{}', point_size={}, spacing={}, side={:?}, orient={:?}, name={:?})",
+                s.category, s.value, s.point_size, s.spacing, s.side, s.orient, s.name
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -469,6 +519,7 @@ mod tests {
             point_size: 5.0,
             spacing: 1.0,
             side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
             name: None,
         };
         // Big panel → small radius.
@@ -508,6 +559,7 @@ mod tests {
             point_size: 5.0,
             spacing: 1.0,
             side: SwarmSide::Left,
+            orient: SwarmOrient::Vertical,
             name: None,
         };
         let out_l = apply_with_context(&spec_l, &b, &ctx_with_panel(400, 400)).unwrap();
@@ -526,6 +578,7 @@ mod tests {
             point_size: 5.0,
             spacing: 1.0,
             side: SwarmSide::Right,
+            orient: SwarmOrient::Vertical,
             name: None,
         };
         let out_r = apply_with_context(&spec_r, &b, &ctx_with_panel(400, 400)).unwrap();
@@ -553,6 +606,7 @@ mod tests {
             point_size: 5.0,
             spacing: 1.0,
             side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
             name: None,
         };
         let ctx = ctx_with_panel(400, 400);
@@ -591,6 +645,7 @@ mod tests {
             point_size: 5.0,
             spacing: 1.0,
             side: SwarmSide::Both,
+            orient: SwarmOrient::Vertical,
             name: None,
         };
         let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
@@ -612,5 +667,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn swarm_horizontal_emits_pos_y_offset() {
+        pyo3::Python::initialize();
+        // Horizontal swarm: category on y, value on x.
+        // Use clustered values so points must be displaced (offset != 0).
+        let cats = vec!["A", "A", "A", "A", "A"];
+        let vals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+        let b = make_batch(cats, vals);
+        let spec = SwarmSpec {
+            category: "cat".into(),
+            value: "v".into(),
+            point_size: 5.0,
+            spacing: 1.0,
+            side: SwarmSide::Both,
+            orient: SwarmOrient::Horizontal,
+            name: None,
+        };
+        let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
+        // Output must have 5 columns: cat, v, swarm_x, swarm_y, __pos_y_offset__
+        assert_eq!(out.num_columns(), 5);
+        // __pos_y_offset__ must be present; __pos_x_offset__ must NOT be present.
+        assert!(
+            out.schema().index_of("__pos_y_offset__").is_ok(),
+            "horizontal swarm must emit __pos_y_offset__"
+        );
+        assert!(
+            out.schema().index_of("__pos_x_offset__").is_err(),
+            "horizontal swarm must NOT emit __pos_x_offset__"
+        );
+        // With all values equal, points compete for the same slot and must be displaced.
+        let py_offset = col_f64(&out, "__pos_y_offset__");
+        let has_nonzero = (0..py_offset.len()).any(|i| py_offset.value(i).abs() > 1e-12);
+        assert!(has_nonzero, "horizontal swarm should have at least one non-zero offset");
     }
 }

@@ -553,17 +553,19 @@ def desugar_swarm(
     ``Swarm`` (named ``"swarm"``) computes non-overlapping positions and
     emits the original columns plus:
     ``[swarm_x (Float64, nullable), swarm_y (Float64, nullable),
-    __pos_x_offset__ (Float64)]``
+    __pos_x_offset__ (Float64)]`` for vertical, or
+    ``__pos_y_offset__ (Float64)`` for horizontal.
 
     For ``orient="vertical"``, the renderer uses the original ``cat``/``val``
     columns for axis labeling, and ``__pos_x_offset__`` shifts each point
     within the category band.  For ``orient="horizontal"``, the layer encodes
-    ``x="swarm_x"``, ``y="swarm_y"`` directly.
+    the original ``val``/``cat`` fields and the renderer applies
+    ``__pos_y_offset__`` to spread points along the y axis.
 
     Layers emitted
     --------------
     1. ``point`` — vertical: ``x=cat``, ``y=val``; horizontal:
-       ``x="swarm_x"``, ``y="swarm_y"``.  Both read from ``data_source="swarm"``.
+       ``x=val``, ``y=cat``.  Both read from ``data_source="swarm"``.
 
     Parameters
     ----------
@@ -618,15 +620,16 @@ def desugar_swarm(
             point_size=float(size),
             spacing=spacing,
             side=side,
+            orient=orient,
             name="swarm",
         )
     ]
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
-        # also emits a `__pos_x_offset__` column (pixel offset on the cross axis)
-        # which the renderer's standard position-offset path applies on top of
-        # the category band center — same mechanism Dodge uses (Phase 9c).
+        # emits `__pos_x_offset__` (pixel offset on the cross axis) which the
+        # renderer's standard position-offset path applies on top of the category
+        # band center — same mechanism Dodge uses (Phase 9c).
         layers = [
             _Layer(
                 mark="point",
@@ -635,15 +638,16 @@ def desugar_swarm(
             )
         ]
     else:
-        # TODO(phase-10g+): horizontal-orient swarm still uses the legacy
-        # value-axis-data-unit encoding. Fixing it requires either threading
-        # orient through the Rust transform so it emits __pos_y_offset__ instead,
-        # or adding a column-rename step in the Python pipeline. Lightly tested
-        # path; smoke render still produces an SVG.
+        # Horizontal swarm: value axis = x, category axis = y.
+        # The Rust transform receives orient="horizontal" and emits `__pos_y_offset__`
+        # (pixel offset on the y cross-axis) instead of `__pos_x_offset__`. Encoding
+        # the original field names lets the ordinal y axis render category labels
+        # correctly, and the renderer picks up `__pos_y_offset__` automatically via
+        # `render/position.rs::read_position_offsets`.
         layers = [
             _Layer(
                 mark="point",
-                encoding={"x": "swarm_x", "y": "swarm_y"},
+                encoding={"x": val, "y": cat},
                 data_source="swarm",
             )
         ]
