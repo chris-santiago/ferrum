@@ -519,11 +519,15 @@ def build_facet():
 
 
 def build_layered():
-    # Scatter + line: use Chart + Chart (both share same df so they render side-by-side)
-    scatter = fm.Chart(df_smooth).mark_point(opacity=0.5).encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"))
-    smooth = fm.Chart(df_smooth).mark_smooth().encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"))
-    combined = scatter + smooth
-    return combined.properties(title="Layered Chart — Scatter + Smooth", width=W, height=H).theme(THEME)
+    chart = (
+        fm.Chart(df_smooth)
+        .mark_point(opacity=0.5)
+        .mark_smooth()
+        .encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"))
+        .properties(title="Layered Chart — Scatter + Smooth", width=W, height=H)
+        .theme(THEME)
+    )
+    return chart
 
 
 def build_hconcat():
