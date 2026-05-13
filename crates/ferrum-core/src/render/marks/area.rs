@@ -37,6 +37,20 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // Stack writes __stack_y_base__ with per-segment baselines.
+    let stack_bases: Option<Vec<Option<f64>>> = ctx.batch.schema()
+        .index_of("__stack_y_base__")
+        .ok()
+        .and_then(|i| {
+            ctx.batch.column(i).as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .map(|a| a.iter().collect())
+        });
+    let is_stacked = stack_bases.is_some();
+
+    // Stacked areas use opaque fills so each band is visually distinct.
+    let effective_opacity = if is_stacked { 1.0 } else { ctx.mark_style.opacity };
+
     // S3: wrap all area paths in a <g> when stroke-linejoin is set.
     let need_join = ctx.mark_style.stroke_join.is_some();
     if need_join {
@@ -48,6 +62,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
     for (key, rows) in groups {
         let mut top: Vec<(f64, f64)> = Vec::new();
+        let mut bottom: Vec<(f64, f64)> = Vec::new();
         for i in rows {
             let (xv, yv) = match (xs[i], ys[i]) {
                 (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
@@ -55,19 +70,31 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             };
             let cx = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
             let cy = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-            let cx = cx + x_offsets.get(i).copied().unwrap_or(0.0);
-            let cy = cy + y_offsets.get(i).copied().unwrap_or(0.0);
-            top.push((cx, cy));
+            let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+            let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+            let cx = cx + xo;
+            let cy_top = cy + yo;
+            top.push((cx, cy_top));
+            if let Some(ref bases) = stack_bases {
+                let base_y = bases.get(i)
+                    .and_then(|v| *v)
+                    .and_then(|b| ctx.scales.y.to_pixel_f64(b))
+                    .unwrap_or(baseline_y);
+                bottom.push((cx, base_y));
+            }
         }
         if top.len() < 2 { continue; }
-        // S1: use interpolation-aware path builder.
-        let path = build_area_path(&top, baseline_y, interpolate);
+        let path = if is_stacked {
+            build_stacked_area_path(&top, &bottom, interpolate)
+        } else {
+            build_area_path(&top, baseline_y, interpolate)
+        };
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
                 let base = scale.lookup(v).unwrap_or(ctx.mark_style.fill);
-                with_opacity(base, ctx.mark_style.opacity)
+                with_opacity(base, effective_opacity)
             }
-            _ => with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity),
+            _ => with_opacity(ctx.mark_style.fill, effective_opacity),
         };
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -147,6 +174,17 @@ fn build_top_line_path(top: &[(f64, f64)], interpolate: Option<&str>) -> String 
             }
         }
     }
+    d
+}
+
+/// Build a closed stacked area path: top edge forward, bottom edge reversed.
+fn build_stacked_area_path(top: &[(f64, f64)], bottom: &[(f64, f64)], interpolate: Option<&str>) -> String {
+    use crate::render::svg::fmt_f;
+    let mut d = build_top_line_path(top, interpolate);
+    for &(x, y) in bottom.iter().rev() {
+        d.push_str(&format!(" L{} {}", fmt_f(x), fmt_f(y)));
+    }
+    d.push_str(" Z");
     d
 }
 
