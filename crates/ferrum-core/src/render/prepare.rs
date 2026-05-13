@@ -15,7 +15,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
     AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
-    SymbolKind,
+    LegendOrient, SymbolKind,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -160,6 +160,16 @@ pub struct PreparedInputs {
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
+    /// D13: legend orient override from `encoding.color.legend.orient`.
+    /// `None` means use the theme default. The renderer applies this by
+    /// temporarily replacing `theme.legend_orient` before calling
+    /// `compute_layout`.
+    pub legend_orient_override: Option<crate::layout::LegendOrient>,
+    /// D13: legend title override from `encoding.color.legend.title`.
+    /// `Some(s)` replaces the default field-name legend title.
+    pub legend_title_override: Option<String>,
+    /// D13: legend title font size override from `encoding.color.legend.titleFontSize`.
+    pub legend_title_font_size_override: Option<f64>,
 }
 
 impl PreparedInputs {
@@ -176,6 +186,7 @@ impl PreparedInputs {
 pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
+    theme: &crate::layout::ThemeInputs,
 ) -> Result<PreparedInputs, RenderError> {
     if batch.num_rows() == 0 {
         return Err(RenderError::EmptyBatch);
@@ -188,8 +199,19 @@ pub fn prepare_render_inputs(
     // Build the named-output map. When there are no transforms, the helper
     // still publishes a `FINAL_OUTPUT_KEY` entry pointing at the input batch.
     let ctx = TransformContext::default();
-    let transform_outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
+    let mut transform_outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
         .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+    // D10: apply imputation (fill missing group×x combinations with a constant y)
+    // on the final batch, when encoding.y.impute = {"value": N} is set.
+    {
+        let final_batch = transform_outputs
+            .get(FINAL_OUTPUT_KEY)
+            .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
+        let imputed = apply_impute(final_batch, spec);
+        if imputed.num_rows() != final_batch.num_rows() {
+            transform_outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+        }
+    }
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -264,7 +286,7 @@ pub fn prepare_render_inputs(
         &transform_outputs,
         (0.0, 1.0),
         (0.0, 1.0),
-        &crate::layout::ThemeInputs::default(),
+        theme,
     )?;
 
     // Axis title: prefer an explicit `encoding.title` over the field name when
@@ -302,18 +324,90 @@ pub fn prepare_render_inputs(
     if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
         y_tick_labels.reverse();
     }
+    // D7 + D12: extract per-axis style fields from encoding.axis and encoding.format.
+    // All new fields default to the safe backward-compat value so SVG output is
+    // byte-identical when the encoding carries no axis/format overrides.
+    let x_enc_axis = rendering_encoding.x.as_ref().and_then(|e| e.axis.as_ref());
+    let y_enc_axis = rendering_encoding.y.as_ref().and_then(|e| e.axis.as_ref());
+    let x_axis_labels = x_enc_axis
+        .and_then(|a| a.extra.get("labels"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let x_axis_ticks = x_enc_axis
+        .and_then(|a| a.extra.get("ticks"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let x_axis_domain = x_enc_axis
+        .and_then(|a| a.extra.get("domain"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let x_axis_grid = x_enc_axis
+        .and_then(|a| a.extra.get("grid"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let x_label_angle = x_enc_axis
+        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
+        .and_then(|v| v.as_f64());
+    let x_axis_title = x_enc_axis
+        .and_then(|a| a.extra.get("title"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let y_axis_labels = y_enc_axis
+        .and_then(|a| a.extra.get("labels"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let y_axis_ticks = y_enc_axis
+        .and_then(|a| a.extra.get("ticks"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let y_axis_domain = y_enc_axis
+        .and_then(|a| a.extra.get("domain"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let y_axis_grid = y_enc_axis
+        .and_then(|a| a.extra.get("grid"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let y_label_angle = y_enc_axis
+        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
+        .and_then(|v| v.as_f64());
+    let y_axis_title = y_enc_axis
+        .and_then(|a| a.extra.get("title"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    // D12: apply encoding.format to x/y tick labels.
+    let x_tick_format = rendering_encoding.x.as_ref().and_then(|e| e.format.clone());
+    let x_tick_format_type = rendering_encoding.x.as_ref().and_then(|e| e.format_type.clone());
+    let y_tick_format = rendering_encoding.y.as_ref().and_then(|e| e.format.clone());
+    let y_tick_format_type = rendering_encoding.y.as_ref().and_then(|e| e.format_type.clone());
+    // Apply format to pre-computed tick label strings.
+    let x_tick_labels = apply_tick_format(x_tick_labels, x_tick_format.as_deref(), x_tick_format_type.as_deref());
+    let y_tick_labels = apply_tick_format(y_tick_labels, y_tick_format.as_deref(), y_tick_format_type.as_deref());
+
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
-            title: x_field,
+            title: x_axis_title.or(x_field),
             tick_labels: x_tick_labels,
-            label_angle_override: None,
+            label_angle_override: x_label_angle,
+            show_labels: x_axis_labels,
+            show_ticks: x_axis_ticks,
+            show_domain: x_axis_domain,
+            show_grid: x_axis_grid,
+            tick_format: None, // already applied above
+            tick_format_type: None,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
-            title: y_field,
+            title: y_axis_title.or(y_field),
             tick_labels: y_tick_labels,
-            label_angle_override: None,
+            label_angle_override: y_label_angle,
+            show_labels: y_axis_labels,
+            show_ticks: y_axis_ticks,
+            show_domain: y_axis_domain,
+            show_grid: y_axis_grid,
+            tick_format: None,
+            tick_format_type: None,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -379,6 +473,33 @@ pub fn prepare_render_inputs(
         None
     };
 
+    // D13: extract legend style overrides from encoding.color.legend extra fields.
+    let color_legend_extra = spec
+        .encoding
+        .color
+        .as_ref()
+        .and_then(|c| c.legend.as_ref())
+        .map(|l| &l.extra);
+    let legend_orient_override = color_legend_extra
+        .and_then(|extra| extra.get("orient"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s {
+            "right" => Some(LegendOrient::Right),
+            "left" => Some(LegendOrient::Left),
+            "top" => Some(LegendOrient::Top),
+            "bottom" => Some(LegendOrient::Bottom),
+            _ => None,
+        });
+    let legend_title_override = color_legend_extra
+        .and_then(|extra| extra.get("title"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let legend_title_font_size_override = color_legend_extra
+        .and_then(|extra| {
+            extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
+        })
+        .and_then(|v| v.as_f64());
+
     Ok(PreparedInputs {
         transform_outputs,
         provisional_scales,
@@ -390,6 +511,9 @@ pub fn prepare_render_inputs(
         warnings: scale_warnings,
         layers,
         coord_flipped,
+        legend_orient_override,
+        legend_title_override,
+        legend_title_font_size_override,
     })
 }
 
@@ -417,6 +541,193 @@ fn format_colorbar_tick(value: f64, lo: f64, hi: f64) -> String {
     } else {
         s
     }
+}
+
+/// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
+///
+/// When `encoding.y.impute = {"value": N}` is set and the encoding has both an x and
+/// color channel, this synthesizes zero-rows for every (x-value, color-group) pair
+/// that is absent from the data, ensuring that line charts and area charts connect
+/// correctly even when some groups are missing observations at certain x ticks.
+///
+/// The imputed rows carry the x and color values from the (x, group) key and the
+/// impute constant for y. All other columns default to null. No-ops when any of
+/// these conditions hold: no x encoding, no color encoding, impute value absent,
+/// or the batch is already complete.
+fn apply_impute(
+    batch: &RecordBatch,
+    spec: &ChartSpec,
+) -> RecordBatch {
+    use arrow::array::{Float64Array, StringArray};
+
+    // Only handle `encoding.y.impute = {"value": <number>}`.
+    let impute_value = spec
+        .encoding
+        .y
+        .as_ref()
+        .and_then(|y| y.impute.as_ref())
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("value"))
+        .and_then(|v| v.as_f64());
+    let Some(fill) = impute_value else { return batch.clone(); };
+
+    let x_enc = match spec.encoding.x.as_ref() { Some(e) => e, None => return batch.clone() };
+    let color_enc = match spec.encoding.color.as_ref() { Some(e) => e, None => return batch.clone() };
+    let y_enc = match spec.encoding.y.as_ref() { Some(e) => e, None => return batch.clone() };
+
+    let x_field = &x_enc.field;
+    let color_field = &color_enc.field;
+    let y_field = &y_enc.field;
+
+    // Collect distinct x values and groups. Only handles Float64 x + Utf8 color.
+    let x_col = match batch.column_by_name(x_field) { Some(c) => c, None => return batch.clone() };
+    let color_col = match batch.column_by_name(color_field) { Some(c) => c, None => return batch.clone() };
+    let x_arr = match x_col.as_any().downcast_ref::<Float64Array>() { Some(a) => a, None => return batch.clone() };
+    let color_arr = match color_col.as_any().downcast_ref::<StringArray>() { Some(a) => a, None => return batch.clone() };
+
+    // Collect all (x, group) pairs and the full domain of each.
+    use std::collections::HashSet;
+    let mut x_vals: Vec<f64> = x_arr.iter().flatten().collect();
+    x_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    x_vals.dedup();
+    let mut groups: Vec<String> = color_arr.iter().flatten().map(str::to_owned).collect();
+    groups.sort_unstable();
+    groups.dedup();
+
+    if x_vals.is_empty() || groups.is_empty() { return batch.clone(); }
+
+    // Build the set of existing (x, group) keys.
+    let mut existing: HashSet<(u64, String)> = HashSet::new();
+    for i in 0..batch.num_rows() {
+        if x_arr.is_null(i) || color_arr.is_null(i) { continue; }
+        let xv = x_arr.value(i);
+        let gv = color_arr.value(i).to_owned();
+        existing.insert((xv.to_bits(), gv));
+    }
+
+    // Build synthetic rows for missing (x, group) pairs.
+    let mut new_x: Vec<Option<f64>> = Vec::new();
+    let mut new_group: Vec<Option<String>> = Vec::new();
+    let mut new_y: Vec<Option<f64>> = Vec::new();
+    for xv in &x_vals {
+        for gv in &groups {
+            if existing.contains(&(xv.to_bits(), gv.clone())) { continue; }
+            new_x.push(Some(*xv));
+            new_group.push(Some(gv.clone()));
+            new_y.push(Some(fill));
+        }
+    }
+    if new_x.is_empty() { return batch.clone(); }
+
+    // Append synthetic rows: build a small batch with (x, color, y) and null all other cols.
+    let n_new = new_x.len();
+    let n_orig = batch.num_rows();
+    let schema = batch.schema();
+    let mut combined_cols: Vec<ArrayRef> = Vec::new();
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        let orig_col = batch.column(col_idx);
+        match field.name().as_str() {
+            name if name == x_field => {
+                let combined: ArrayRef = Arc::new(Float64Array::from(
+                    (0..n_orig).map(|i| if x_arr.is_null(i) { None } else { Some(x_arr.value(i)) })
+                        .chain(new_x.iter().copied())
+                        .collect::<Vec<Option<f64>>>(),
+                ));
+                combined_cols.push(combined);
+            }
+            name if name == color_field => {
+                let orig_str = orig_col.as_any().downcast_ref::<StringArray>();
+                let combined: ArrayRef = if let Some(orig_str) = orig_str {
+                    Arc::new((0..n_orig).map(|i| if orig_str.is_null(i) { None } else { Some(orig_str.value(i)) })
+                        .chain(new_group.iter().map(|v| v.as_deref()))
+                        .collect::<Vec<Option<&str>>>()
+                        .into_iter()
+                        .collect::<StringArray>())
+                } else {
+                    return batch.clone();
+                };
+                combined_cols.push(combined);
+            }
+            name if name == y_field => {
+                let orig_f64 = orig_col.as_any().downcast_ref::<Float64Array>();
+                let combined: ArrayRef = if let Some(orig_f64) = orig_f64 {
+                    Arc::new(Float64Array::from(
+                        (0..n_orig).map(|i| if orig_f64.is_null(i) { None } else { Some(orig_f64.value(i)) })
+                            .chain(new_y.iter().copied())
+                            .collect::<Vec<Option<f64>>>(),
+                    ))
+                } else {
+                    return batch.clone();
+                };
+                combined_cols.push(combined);
+            }
+            _ => {
+                // Append nulls for synthetic rows.
+                let extended = arrow::compute::concat(&[
+                    orig_col.as_ref(),
+                    arrow::array::new_null_array(orig_col.data_type(), n_new).as_ref(),
+                ]);
+                match extended {
+                    Ok(arr) => combined_cols.push(arr),
+                    Err(_) => return batch.clone(),
+                }
+            }
+        }
+    }
+    match RecordBatch::try_new(schema, combined_cols) {
+        Ok(b) => b,
+        Err(_) => batch.clone(),
+    }
+}
+
+/// D12: apply an encoding-level `format` string to pre-computed tick label strings.
+///
+/// The scale's `tick_labels()` method returns pre-formatted strings. When the
+/// encoding carries an explicit `format` string (e.g. `.2f`), we re-parse each
+/// label back to a float and re-format it per the spec. When `format_type` is
+/// `"time"`, we treat the label as an epoch-ms integer and use `format_time`.
+/// Labels that fail to parse are left unchanged (ordinal labels, already-formatted
+/// time strings, etc.).
+fn apply_tick_format(
+    labels: Vec<String>,
+    format: Option<&str>,
+    format_type: Option<&str>,
+) -> Vec<String> {
+    use crate::render::format::{format_numeric, format_time};
+    let Some(fmt) = format else { return labels };
+    labels
+        .into_iter()
+        .map(|raw| {
+            if format_type == Some("time") {
+                // Try to parse as i64 epoch-ms.
+                if let Ok(epoch_ms) = raw.parse::<i64>() {
+                    return format_time(epoch_ms, 86_400_000);
+                }
+                // Also try f64 (tick_labels may produce "1.7e12" style).
+                if let Ok(f) = raw.parse::<f64>() {
+                    return format_time(f as i64, 86_400_000);
+                }
+                raw
+            } else {
+                // Re-parse to f64 and apply the numeric format spec.
+                if let Ok(v) = raw.parse::<f64>() {
+                    let trimmed = fmt.strip_prefix('.').unwrap_or(fmt);
+                    let (digits_part, fmt_char) = match trimmed.chars().last() {
+                        Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
+                        _ => return format_numeric(v),
+                    };
+                    let n: usize = digits_part.parse().unwrap_or(2);
+                    match fmt_char {
+                        'f' => format!("{v:.*}", n),
+                        'e' => format!("{v:.*e}", n),
+                        'g' | _ => format_numeric(v),
+                    }
+                } else {
+                    raw // ordinal — pass through
+                }
+            }
+        })
+        .collect()
 }
 
 fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGroup>, RenderError> {
@@ -506,7 +817,7 @@ mod tests {
     fn prepare_returns_axes_and_groups_and_legend() {
         let spec = spec_color_facet();
         let batch = batch3();
-        let prep = prepare_render_inputs(&spec, &batch).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert_eq!(prep.axes.x.title.as_deref(), Some("x"));
         assert_eq!(prep.axes.y.title.as_deref(), Some("y"));
         assert!(!prep.axes.x.tick_labels.is_empty());
@@ -534,7 +845,7 @@ mod tests {
         let mut spec = spec_color_facet();
         spec.encoding.color = None;
         spec.facet = None;
-        let err = prepare_render_inputs(&spec, &batch).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();
         assert!(matches!(err, RenderError::EmptyBatch));
     }
 
@@ -582,7 +893,7 @@ mod tests {
     fn prepare_single_layer_produces_one_layer_prepared() {
         let spec = single_layer_spec();
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert_eq!(prepared.layers.len(), 1);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert!(!prepared.coord_flipped);
@@ -619,7 +930,7 @@ mod tests {
             },
         ]);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert_eq!(prepared.layers.len(), 2);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert_eq!(prepared.layers[1].mark, Mark::Line);
@@ -679,7 +990,7 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(None);
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         // __final__ is always present.
         assert!(
             prep.transform_outputs.contains_key("__final__"),
@@ -708,7 +1019,7 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(Some("box".into()));
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
         assert!(prep.transform_outputs.contains_key("__final__"));
         // Under fan-out semantics, named transforms run on the ORIGINAL input
@@ -760,7 +1071,7 @@ mod tests {
             position: None,
         }]);
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing"), "error must name the bogus key: {msg}");
         // Available keys list must mention either the named transform or the sentinel.
@@ -776,7 +1087,7 @@ mod tests {
         let mut spec = single_layer_spec(); // x="price", y="weight"
         spec.coord = Some(CoordKind::Flip);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert!(prepared.coord_flipped);
         // After flip: x should have "weight", y should have "price"
         assert_eq!(

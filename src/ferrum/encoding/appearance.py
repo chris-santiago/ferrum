@@ -30,8 +30,9 @@ class Color(ChannelBase):
 
     Notes
     -----
-    ``legend`` and ``condition`` kwargs are accepted but are reserved for
-    future use (no-op today) — they trigger a one-time deprecation warning.
+    ``legend`` is honored: passing ``legend={"disabled": True}``,
+    ``legend=None``, or ``legend=False`` suppresses the color legend in the
+    rendered SVG.  ``condition`` is accepted but reserved for future use.
 
     Examples
     --------
@@ -180,8 +181,8 @@ class Fill(ChannelBase):
     """
 
     _channel_name = "fill"
-    _renders_in_phase_8a = False
-    _honored_kwargs = frozenset(["type"])
+    _renders_in_phase_8a = True
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend"])
 
 
 class Stroke(ChannelBase):
@@ -209,8 +210,8 @@ class Stroke(ChannelBase):
     """
 
     _channel_name = "stroke"
-    _renders_in_phase_8a = False
-    _honored_kwargs = frozenset(["type"])
+    _renders_in_phase_8a = True
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title"])
 
 
 class FillOpacity(ChannelBase):
@@ -239,8 +240,8 @@ class FillOpacity(ChannelBase):
     """
 
     _channel_name = "fill_opacity"
-    _renders_in_phase_8a = False
-    _honored_kwargs = frozenset(["type"])
+    _renders_in_phase_8a = True
+    _honored_kwargs = frozenset(["type", "scale", "title"])
 
 
 class StrokeOpacity(ChannelBase):
@@ -269,7 +270,7 @@ class StrokeOpacity(ChannelBase):
     """
 
     _channel_name = "stroke_opacity"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -298,7 +299,7 @@ class StrokeWidth(ChannelBase):
     """
 
     _channel_name = "stroke_width"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -328,7 +329,7 @@ class StrokeDash(ChannelBase):
     """
 
     _channel_name = "stroke_dash"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -358,5 +359,5 @@ class Angle(ChannelBase):
     """
 
     _channel_name = "angle"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])

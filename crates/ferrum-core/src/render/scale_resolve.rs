@@ -448,7 +448,8 @@ fn build_axis_scale(
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let domain = distinct_values_in_order(located.batch, &enc.field)?;
+            let mut domain = distinct_values_in_order(located.batch, &enc.field)?;
+            apply_sort_to_domain(&mut domain, enc.sort.as_ref());
             Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
                 domain, vec![pr.0, pr.1], 0.0,
             )))
@@ -462,6 +463,48 @@ fn build_axis_scale(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
+    }
+}
+
+/// Apply `encoding.sort` to an ordinal domain in place.
+///
+/// Accepted forms (mirrors the Vega-Lite `sort` field):
+/// - `"ascending"` — sort alphabetically ascending (locale-independent byte order).
+/// - `"descending"` — sort alphabetically descending.
+/// - JSON array of strings — replace domain with that explicit order. Values not
+///   present in the original domain are silently ignored; values in the original
+///   domain that are absent from the array are appended at the end in their
+///   original relative order so no data disappears from the scale.
+/// - Absent or any other JSON value — no-op (preserves insertion order).
+fn apply_sort_to_domain(domain: &mut Vec<String>, sort: Option<&serde_json::Value>) {
+    match sort {
+        None => {}
+        Some(serde_json::Value::String(s)) if s == "ascending" => {
+            domain.sort_unstable();
+        }
+        Some(serde_json::Value::String(s)) if s == "descending" => {
+            domain.sort_unstable_by(|a, b| b.cmp(a));
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            let explicit: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            // Keep only values that appear in the domain, in explicit order.
+            // Then append any domain values not covered by the explicit list.
+            let mut reordered: Vec<String> = explicit
+                .iter()
+                .filter(|v| domain.contains(v))
+                .cloned()
+                .collect();
+            for v in domain.iter() {
+                if !explicit.contains(v) {
+                    reordered.push(v.clone());
+                }
+            }
+            *domain = reordered;
+        }
+        _ => {} // Unknown sort spec — no-op.
     }
 }
 
@@ -596,8 +639,12 @@ fn build_from_scale_spec(
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
 
     Ok(match scale_spec {
-        ScaleSpec::Linear { domain, range, nice, clamp, padding, .. } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
+        ScaleSpec::Linear { domain, range, nice, clamp, padding, zero } => {
+            let (mut d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
+            if *zero && d.len() == 2 {
+                if d[0] > 0.0 { d[0] = 0.0; }
+                if d[1] < 0.0 { d[1] = 0.0; }
+            }
             ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, *nice))
         }
         ScaleSpec::Log { base, domain, range, nice, clamp, padding } => {
@@ -613,10 +660,11 @@ fn build_from_scale_spec(
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, *clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
-            let d = match domain {
+            let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
+            apply_sort_to_domain(&mut d, enc.sort.as_ref());
             // Ordinal scales use their own internal half-step padding;
             // the T4 quantitative inset does NOT apply here.
             ScaleKind::Ordinal(OrdinalScale::new_internal(
@@ -730,7 +778,8 @@ pub fn build_color_scale(
         // Numeric domain: min/max from the column, ignoring NaNs.
         let (lo, hi) = numeric_extent(located.col);
         // Scheme: prefer encoding.scheme (set by heatmap's `cmap=` arg),
-        // else fall back to the theme's sequential_scheme.
+        // else auto-detect diverging (domain spans negative to positive) →
+        // theme.diverging_scheme, else fall back to theme.sequential_scheme.
         use crate::render::color::{ContinuousScheme, NamedContinuous};
         let scheme = c_enc
             .scheme
@@ -738,7 +787,15 @@ pub fn build_color_scale(
             .and_then(NamedContinuous::from_name)
             .map(ContinuousScheme::Named)
             .unwrap_or_else(|| {
-                NamedContinuous::from_name(&theme.sequential_scheme)
+                // D15: auto-diverging detection — when the domain spans
+                // both negative and positive values, use the theme's
+                // diverging scheme rather than the sequential one.
+                let theme_scheme = if lo < 0.0 && hi > 0.0 {
+                    &theme.diverging_scheme
+                } else {
+                    &theme.sequential_scheme
+                };
+                NamedContinuous::from_name(theme_scheme)
                     .map(ContinuousScheme::Named)
                     .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
             });

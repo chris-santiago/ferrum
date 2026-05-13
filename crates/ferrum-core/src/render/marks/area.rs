@@ -3,7 +3,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ColorScale;
-use crate::render::svg::{FillStroke, SvgBuffer};
+use crate::render::svg::{FillStroke, Stroke, SvgBuffer};
 
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
@@ -35,6 +35,16 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    // S3: wrap all area paths in a <g> when stroke-linejoin is set.
+    let need_join = ctx.mark_style.stroke_join.is_some();
+    if need_join {
+        let join = ctx.mark_style.stroke_join.as_deref().unwrap_or("miter");
+        out.raw(&format!("<g stroke-linejoin=\"{}\">", join));
+    }
+
+    let interpolate = ctx.mark_style.interpolate.as_deref();
+
     for (key, rows) in groups {
         let mut top: Vec<(f64, f64)> = Vec::new();
         for i in rows {
@@ -49,7 +59,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             top.push((cx, cy));
         }
         if top.len() < 2 { continue; }
-        let path = build_area_path(&top, baseline_y);
+        // S1: use interpolation-aware path builder.
+        let path = build_area_path(&top, baseline_y, interpolate);
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
                 let base = scale.lookup(v).unwrap_or(ctx.mark_style.fill);
@@ -57,23 +68,93 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             }
             _ => ctx.mark_style.fill,
         };
+        let stroke_color = match (key.as_deref(), &ctx.scales.color) {
+            (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+            _ => ctx.mark_style.fill,
+        };
         out.path(&path, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         });
+
+        // S9: draw a line border on top of the area fill.
+        if ctx.mark_style.line_border == Some(true) {
+            let line_path = build_top_line_path(&top, interpolate);
+            out.raw(&format!(
+                "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
+                line_path,
+                crate::render::color::fmt_svg(stroke_color),
+                crate::render::svg::fmt_f(ctx.mark_style.stroke_width.max(1.0)),
+            ));
+        }
+
+        // S10: draw border lines on both top and bottom edges.
+        if ctx.mark_style.borders == Some(true) {
+            let top_path = build_top_line_path(&top, interpolate);
+            let bottom_y = baseline_y;
+            // Bottom edge: horizontal line at baseline level.
+            let x0 = top[0].0;
+            let x_last = top[top.len() - 1].0;
+            let bottom_path = format!(
+                "M{} {} H{}",
+                crate::render::svg::fmt_f(x0),
+                crate::render::svg::fmt_f(bottom_y),
+                crate::render::svg::fmt_f(x_last),
+            );
+            let sw = crate::render::svg::fmt_f(ctx.mark_style.stroke_width.max(1.0));
+            let stroke_str = crate::render::color::fmt_svg(stroke_color);
+            out.raw(&format!(
+                "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
+                top_path, stroke_str, sw,
+            ));
+            out.raw(&format!(
+                "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
+                bottom_path, stroke_str, sw,
+            ));
+        }
+    }
+
+    if need_join {
+        out.g_close();
     }
 }
 
-fn build_area_path(top: &[(f64, f64)], baseline: f64) -> String {
+/// Build the top-edge line path using the given interpolation method.
+/// This is the upper boundary of the area shape (before the baseline closure).
+fn build_top_line_path(top: &[(f64, f64)], interpolate: Option<&str>) -> String {
     use crate::render::svg::fmt_f;
-    let mut d = String::new();
-    let (x0, y0) = top[0];
-    d.push_str(&format!("M{} {}", fmt_f(x0), fmt_f(y0)));
-    for &(x, y) in &top[1..] {
-        d.push_str(&format!(" L{} {}", fmt_f(x), fmt_f(y)));
+    if top.is_empty() { return String::new(); }
+    let method = interpolate.unwrap_or("linear");
+    let mut d = format!("M{} {}", fmt_f(top[0].0), fmt_f(top[0].1));
+    for i in 1..top.len() {
+        let (px, _py) = top[i - 1];
+        let (cx, cy) = top[i];
+        match method {
+            "step" => {
+                let mid_x = (px + cx) / 2.0;
+                d.push_str(&format!(" H{} V{} H{}", fmt_f(mid_x), fmt_f(cy), fmt_f(cx)));
+            }
+            "step-before" => {
+                d.push_str(&format!(" V{} H{}", fmt_f(cy), fmt_f(cx)));
+            }
+            "step-after" => {
+                d.push_str(&format!(" H{} V{}", fmt_f(cx), fmt_f(cy)));
+            }
+            _ => {
+                d.push_str(&format!(" L{} {}", fmt_f(cx), fmt_f(cy)));
+            }
+        }
     }
+    d
+}
+
+/// Build a closed area path: top edge (with interpolation) + baseline closure.
+fn build_area_path(top: &[(f64, f64)], baseline: f64, interpolate: Option<&str>) -> String {
+    use crate::render::svg::fmt_f;
+    let mut d = build_top_line_path(top, interpolate);
     let last_x = top[top.len() - 1].0;
+    let x0 = top[0].0;
     d.push_str(&format!(" L{} {}", fmt_f(last_x), fmt_f(baseline)));
     d.push_str(&format!(" L{} {}", fmt_f(x0), fmt_f(baseline)));
     d.push_str(" Z");

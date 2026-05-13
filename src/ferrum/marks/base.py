@@ -102,6 +102,9 @@ class MarkBase:
         functions (``desugar_density``, ``desugar_smooth``, …) which build
         the transform objects before this dict is ever inspected.
 
+        ``orient`` is consumed Python-side (sets ``_coord = "flip"`` on the
+        chart) and is never forwarded to the Rust renderer.
+
         Returns
         -------
         dict
@@ -117,6 +120,7 @@ class MarkBase:
         """
         out = {}
         for k in (
+            # Core style fields (Phase 8a)
             "size",
             "stroke",
             "fill",
@@ -131,7 +135,48 @@ class MarkBase:
             "dx",
             "dy",
             "angle",
+            # S1: interpolate (line/area)
+            "interpolate",
+            # S2: stroke_cap (line)
+            "stroke_cap",
+            # S3: stroke_join (line/area)
+            "stroke_join",
+            # S5: filled (point)
+            "filled",
+            # S6: shape (point, constant)
+            "shape",
+            # S7: limit (text)
+            "limit",
+            # S8: band_size (tick/rect)
+            "band_size",
+            # S9: line border on area
+            "line",
+            # S10: borders on area/errorband
+            "borders",
         ):
             if k in self._kwargs:
                 out[k] = self._kwargs[k]
+        # S4: orient="horizontal" → consumed Python-side; set coord flip flag.
+        # The caller (_set_mark) reads this via orient_coord_flip().
         return out
+
+    def orient_coord_flip(self) -> bool:
+        """Return True if ``orient="horizontal"`` was passed, indicating coord flip.
+
+        Used by ``Chart._set_mark`` to set ``_coord = "flip"`` without
+        forwarding ``orient`` to the Rust renderer.
+
+        Returns
+        -------
+        bool
+            True when ``orient="horizontal"`` is in the stored kwargs.
+
+        Examples
+        --------
+        >>> mb = MarkBase("bar", orient="horizontal")
+        >>> mb.orient_coord_flip()
+        True
+        >>> MarkBase("bar").orient_coord_flip()
+        False
+        """
+        return self._kwargs.get("orient") == "horizontal"

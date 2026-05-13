@@ -89,6 +89,7 @@ impl ChartSpec {
         size = None, shape = None, opacity = None,           // NEW (from Task 3 follow-on)
         x2 = None, y2 = None,                                 // NEW Phase 8b Task 22 (ribbon)
         text = None,                                          // Phase 10c (mark_text label channel)
+        tooltip = None, href = None, description = None,      // Phase 10 gallery-defaults
         data = None, transforms = None,
         layers = None,                                        // from Task 1
         coord = None,                                         // from Task 4
@@ -110,6 +111,9 @@ impl ChartSpec {
         x2: Option<&Bound<'_, PyAny>>,
         y2: Option<&Bound<'_, PyAny>>,
         text: Option<&Bound<'_, PyAny>>,
+        tooltip: Option<&Bound<'_, PyAny>>,
+        href: Option<&Bound<'_, PyAny>>,
+        description: Option<&Bound<'_, PyAny>>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
@@ -133,6 +137,9 @@ impl ChartSpec {
         let x2 = x2.map(coerce_encoding).transpose()?;
         let y2 = y2.map(coerce_encoding).transpose()?;
         let text = text.map(coerce_encoding).transpose()?;
+        let tooltip = tooltip.map(coerce_encoding).transpose()?;
+        let href = href.map(coerce_encoding).transpose()?;
+        let description = description.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -192,7 +199,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description },
             transforms,
             facet,
             layers,

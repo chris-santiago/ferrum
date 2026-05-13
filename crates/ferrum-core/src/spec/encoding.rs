@@ -175,29 +175,33 @@ pub struct LegendSpec {
 /// title : str, optional
 ///     Axis or legend title. Overrides the auto-generated field name.
 /// axis : dict, optional
-///     Axis style overrides. **Reserved** — round-trips JSON but not yet
-///     honored by the renderer in Phase 8a.
+///     Axis style overrides. Supported keys: ``grid``, ``title``,
+///     ``labels``, ``ticks``, ``domain``, ``label_angle`` /
+///     ``labelAngle``. Honored by the renderer.
 /// legend : dict, optional
-///     Legend style overrides. **Reserved** — round-trips JSON but not yet
-///     honored by the renderer in Phase 8a.
+///     Legend style overrides. Supported keys: ``orient``, ``title``,
+///     ``titleFontSize`` / ``title_font_size``, ``disabled``. Honored
+///     by the renderer.
 /// sort : dict or str, optional
-///     Sort order. **Reserved** — round-trips JSON but not yet honored by
-///     the renderer in Phase 8a.
+///     Sort order for ordinal/nominal scales. Accepts ``"ascending"``,
+///     ``"descending"``, or an explicit array of domain values. Honored
+///     by the renderer.
 /// stack : str, optional
-///     Stack method. **Reserved** — round-trips JSON but not yet honored by
-///     the renderer in Phase 8a.
+///     Stack method for bar/area marks. Accepts ``"zero"``,
+///     ``"normalize"``, or ``"center"``. Honored by the renderer.
 /// impute : dict, optional
-///     Imputation strategy. **Reserved** — round-trips JSON but not yet
-///     honored by the renderer in Phase 8a.
+///     Imputation strategy. Accepts ``{"value": N}`` to fill missing
+///     group×x combinations with constant *N*. Honored by the renderer.
 /// scheme : str, optional
 ///     Color scheme name for quantitative color encodings (e.g. ``"viridis"``).
 ///     Honored by the renderer via ``scale_resolve``.
 /// format : str, optional
-///     Tick/label format string. **Reserved** — round-trips JSON but not yet
-///     honored by the renderer.
+///     Tick/label format string. Applied to axis tick labels for x/y
+///     encodings and to text mark labels. Honored by the renderer.
 /// format_type : str, optional
-///     Format type (e.g. ``"time"``). **Reserved** — round-trips JSON but
-///     not yet honored by the renderer.
+///     Format type (e.g. ``"time"``). When set to ``"time"``, the
+///     ``format`` string is interpreted as a date/time pattern. Honored
+///     by the renderer for text mark labels.
 ///
 /// Notes
 /// -----
@@ -217,7 +221,7 @@ pub struct EncodingSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
-    // NEW deferred fields (Phase 8a — round-trip + warn-once at Python layer):
+    // Honored renderer fields (D7–D13 — consumed by prepare.rs / position.rs / scale_resolve.rs):
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<AxisSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,7 +347,7 @@ impl EncodingSpec {
         self.title.as_deref()
     }
 
-    /// Axis style overrides (reserved — not yet honored by renderer).
+    /// Axis style overrides (honored: grid, title, labels, ticks, domain, label_angle).
     #[getter]
     fn axis(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.axis {
@@ -357,7 +361,7 @@ impl EncodingSpec {
         }
     }
 
-    /// Legend style overrides (reserved — not yet honored by renderer).
+    /// Legend style overrides (honored: orient, title, titleFontSize, disabled).
     #[getter]
     fn legend(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.legend {
@@ -371,7 +375,7 @@ impl EncodingSpec {
         }
     }
 
-    /// Sort order (reserved — not yet honored by renderer).
+    /// Sort order for ordinal/nominal scales ("ascending", "descending", or explicit array).
     #[getter]
     fn sort(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.sort {
@@ -385,13 +389,13 @@ impl EncodingSpec {
         }
     }
 
-    /// Stack method (reserved — not yet honored by renderer).
+    /// Stack method for bar/area marks ("zero", "normalize", "center").
     #[getter]
     fn stack(&self) -> Option<&str> {
         self.stack.as_deref()
     }
 
-    /// Imputation strategy (reserved — not yet honored by renderer).
+    /// Imputation strategy. {"value": N} fills missing group×x combinations with N.
     #[getter]
     fn impute(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.impute {
@@ -411,13 +415,13 @@ impl EncodingSpec {
         self.scheme.as_deref()
     }
 
-    /// Tick/label format string (reserved — not yet honored by renderer).
+    /// Tick/label format string. Applied to axis tick labels (x/y) and text mark labels.
     #[getter]
     fn format(&self) -> Option<&str> {
         self.format.as_deref()
     }
 
-    /// Format type string (reserved — not yet honored by renderer).
+    /// Format type string. When "time", format is applied as a date/time pattern.
     #[getter]
     fn format_type(&self) -> Option<&str> {
         self.format_type.as_deref()
@@ -455,6 +459,15 @@ pub struct Encoding {
     // formatting the y value (legacy Phase 7 behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<EncodingSpec>,
+    // Phase 10 gallery-defaults: tooltip field emitted as SVG <title> on each mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<EncodingSpec>,
+    // Phase 10 gallery-defaults: href field wraps marks in SVG <a xlink:href=...>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<EncodingSpec>,
+    // Phase 10 gallery-defaults: description field emits SVG <desc> for accessibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -517,6 +530,9 @@ impl Encoding {
         inherit(&mut self.x2, &parent.x2);
         inherit(&mut self.y2, &parent.y2);
         inherit(&mut self.text, &parent.text);
+        inherit(&mut self.tooltip, &parent.tooltip);
+        inherit(&mut self.href, &parent.href);
+        inherit(&mut self.description, &parent.description);
     }
 }
 

@@ -20,6 +20,42 @@ use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field,
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::svg::{Stroke, SvgBuffer};
 
+/// Build an SVG path `d` string from a sequence of (x, y) pixel points using
+/// the given interpolation method. Supports "linear" (default), "step"
+/// (horizontal-then-vertical at midpoint), "step-before" (vertical-first),
+/// and "step-after" (horizontal-first). Unknown methods fall back to linear.
+fn build_line_path(points: &[(f64, f64)], interpolate: Option<&str>) -> String {
+    use crate::render::svg::fmt_f;
+    if points.is_empty() { return String::new(); }
+    let method = interpolate.unwrap_or("linear");
+    let mut out = format!("M{} {}", fmt_f(points[0].0), fmt_f(points[0].1));
+    for i in 1..points.len() {
+        let (px, _py) = points[i - 1];
+        let (cx, cy) = points[i];
+        match method {
+            "step" => {
+                // Go horizontal to the midpoint x, then vertical to target y,
+                // then horizontal to target x.
+                let mid_x = (px + cx) / 2.0;
+                out.push_str(&format!(" H{} V{} H{}", fmt_f(mid_x), fmt_f(cy), fmt_f(cx)));
+            }
+            "step-before" => {
+                // Drop to next y at current x, then go horizontal to next x.
+                out.push_str(&format!(" V{} H{}", fmt_f(cy), fmt_f(cx)));
+            }
+            "step-after" => {
+                // Advance to next x at current y, then drop to next y.
+                out.push_str(&format!(" H{} V{}", fmt_f(cx), fmt_f(cy)));
+            }
+            _ => {
+                // "linear", "monotone", "basis" — all use linear L segments.
+                out.push_str(&format!(" L{} {}", fmt_f(cx), fmt_f(cy)));
+            }
+        }
+    }
+    out
+}
+
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -120,6 +156,24 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         _ => vec![(None, (0..n_rows).collect())],
     };
 
+    // S2/S3: wrap all lines in a <g> when stroke-linecap or stroke-linejoin
+    // are set so SVG attribute inheritance applies to every path in the group.
+    let need_cap_join = ctx.mark_style.stroke_cap.is_some()
+        || ctx.mark_style.stroke_join.is_some();
+    if need_cap_join {
+        let mut g_attrs = String::new();
+        if let Some(ref cap) = ctx.mark_style.stroke_cap {
+            g_attrs.push_str(&format!(" stroke-linecap=\"{}\"", cap));
+        }
+        if let Some(ref join) = ctx.mark_style.stroke_join {
+            g_attrs.push_str(&format!(" stroke-linejoin=\"{}\"", join));
+        }
+        out.raw(&format!("<g{}>", g_attrs));
+    }
+
+    let interpolate = ctx.mark_style.interpolate.as_deref();
+    let use_path = interpolate.is_some() && interpolate != Some("linear");
+
     for (key, rows) in groups {
         let mut points: Vec<(f64, f64)> = Vec::new();
         for i in rows {
@@ -136,11 +190,39 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.fill,
         };
-        out.polyline(&points, &Stroke {
+        let stroke = Stroke {
             stroke: stroke_color,
             stroke_width: ctx.mark_style.stroke_width,
             stroke_dash: ctx.mark_style.stroke_dash.clone(),
-        });
+        };
+
+        if use_path {
+            // S1: emit as a <path> element for non-linear interpolation.
+            use crate::render::svg::FillStroke;
+            use crate::render::color::fmt_svg;
+            let d = build_line_path(&points, interpolate);
+            let dash_attr = if let Some(ref dash) = stroke.stroke_dash {
+                let v: Vec<String> = dash.iter()
+                    .map(|x| crate::render::svg::fmt_f(*x))
+                    .collect();
+                format!(" stroke-dasharray=\"{}\"", v.join(","))
+            } else {
+                String::new()
+            };
+            out.raw(&format!(
+                "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"{}/> ",
+                d,
+                fmt_svg(stroke.stroke),
+                crate::render::svg::fmt_f(stroke.stroke_width),
+                dash_attr,
+            ));
+        } else {
+            out.polyline(&points, &stroke);
+        }
+    }
+
+    if need_cap_join {
+        out.g_close();
     }
 }
 

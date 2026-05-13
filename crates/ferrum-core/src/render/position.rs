@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
 use crate::spec::chart::ChartSpec;
-use crate::spec::position::{PositionAdjust, StackOffset};
+use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
 
 /// Return the batch the y-scale should resolve against, accounting for a
 /// Stack position adjustment.
@@ -103,7 +103,27 @@ pub(crate) fn apply_position(
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
 ) -> Result<RecordBatch, crate::render::RenderError> {
-    let Some(p) = position else { return Ok(batch.clone()); };
+    // D9: when no explicit position is set, check encoding.y.stack for an
+    // encoding-level stacking directive.
+    let enc_stack: Option<PositionAdjust>;
+    let effective_position: Option<&PositionAdjust> = if position.is_none() {
+        // Resolve encoding.y.stack → synthesize a Stack PositionAdjust.
+        enc_stack = encoding.y.as_ref().and_then(|y| y.stack.as_deref()).and_then(|s| {
+            let offset = match s {
+                "zero" => StackOffset::Zero,
+                "normalize" => StackOffset::Normalize,
+                "center" => StackOffset::Center,
+                "false" | "null" | "none" => return None,
+                _ => return None,
+            };
+            Some(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top })
+        });
+        enc_stack.as_ref()
+    } else {
+        enc_stack = None;
+        position
+    };
+    let Some(p) = effective_position else { return Ok(batch.clone()); };
     match p {
         PositionAdjust::Identity => Ok(batch.clone()),
         PositionAdjust::Dodge { by, padding } => {

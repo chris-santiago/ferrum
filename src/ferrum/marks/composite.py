@@ -123,7 +123,7 @@ def desugar_boxplot(
         _Layer(mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(
-            mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"width": band}, data_source="box"
+            mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"band_size": band}, data_source="box"
         ),
         _Layer(
             mark="tick",
@@ -364,6 +364,11 @@ def desugar_ribbon(
     >>> result[4][0].mark
     'ribbon'
     """
+    if interpolate != "linear":
+        raise ValueError(
+            f"mark_ribbon(interpolate={interpolate!r}) is not supported; "
+            "only 'linear' interpolation is available"
+        )
     if x_field is None or y_field is None:
         raise ValueError("mark_ribbon() requires .encode(x=..., y=...)")
     if y2_field is None:

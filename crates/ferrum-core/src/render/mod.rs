@@ -188,18 +188,43 @@ pub fn render_svg(
     };
     let background = config.background.or(Some(theme.background_color));
 
-    let prep = prepare::prepare_render_inputs(spec, batch)?;
+    let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
+
+    // D13: apply per-chart legend overrides from encoding.color.legend extra fields.
+    // Clone theme and patch the relevant fields so existing golden tests are unaffected
+    // when no legend overrides are present (the clone is zero-cost when unneeded because
+    // all fields are Copy or Clone — the legend_orient_override path is uncommon).
+    let mut effective_theme;
+    let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
+        || prep.legend_title_font_size_override.is_some()
+    {
+        effective_theme = theme.clone();
+        if let Some(orient) = prep.legend_orient_override {
+            effective_theme.legend_orient = orient;
+        }
+        if let Some(fs) = prep.legend_title_font_size_override {
+            effective_theme.legend_title_font_size = fs;
+        }
+        &effective_theme
+    } else {
+        theme
+    };
+    // D13: legend title override (replaces the default field-name title when Some).
+    let effective_legend_title = prep
+        .legend_title_override
+        .clone()
+        .or_else(|| prep.legend_title.clone());
 
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
-        theme,
+        theme_ref,
         viewport,
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
-        prep.legend_title.clone(),
+        effective_legend_title,
         prep.colorbar.as_ref(),
         &metrics,
     )
@@ -208,34 +233,55 @@ pub fn render_svg(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
-    let mut out = svg::SvgBuffer::new(layout.viewport, background, true);
+    let mut out = svg::SvgBuffer::new(layout.viewport, background, config.embed_fonts);
 
     // Chart-level title (Themes-T2.5a). Emits at the position computed by
     // compute_layout in the reserved top band. Schwabish SB1 adds an
     // optional subtitle drawn as a second line below the title at a
     // smaller font size and theme label_color.
     if let Some(title) = &layout.chart_title {
+        // D1-D6: per-chart TitleSpec overrides, falling back to theme.
+        let title_spec = spec.title.as_ref();
+        let resolved_font_size = title_spec
+            .and_then(|t| t.font_size)
+            .unwrap_or(theme.title_font_size);
+        let resolved_font_weight: String = title_spec
+            .and_then(|t| t.font_weight.clone())
+            .unwrap_or_else(|| theme.title_font_weight.clone());
+        let resolved_color = title_spec
+            .and_then(|t| t.color.as_deref())
+            .and_then(|hex| color::from_hex_str(hex).ok())
+            .unwrap_or(theme.title_color);
         let style = svg::TextStyle {
-            fill: theme.title_color,
-            font_size: theme.title_font_size,
+            fill: resolved_color,
+            font_size: resolved_font_size,
             anchor: title.anchor,
             angle: 0.0,
             font_family: &theme.title_font_family,
-            font_weight: if theme.title_font_weight == "normal" {
+            font_weight: if resolved_font_weight == "normal" {
                 None
             } else {
-                Some(&theme.title_font_weight)
+                Some(&resolved_font_weight)
             },
+            dominant_baseline: None,
         };
         out.text(title.x, title.y, &title.text, &style);
         if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
+            let resolved_sub_color = title_spec
+                .and_then(|t| t.subtitle_color.as_deref())
+                .and_then(|hex| color::from_hex_str(hex).ok())
+                .unwrap_or(theme.font_color);
+            let resolved_sub_font_size = title_spec
+                .and_then(|t| t.subtitle_font_size)
+                .unwrap_or(resolved_font_size * 0.85);
             let sub_style = svg::TextStyle {
-                fill: theme.font_color,
-                font_size: theme.title_font_size * 0.85,
+                fill: resolved_sub_color,
+                font_size: resolved_sub_font_size,
                 anchor: title.anchor,
                 angle: 0.0,
                 font_family: &theme.font_family,
                 font_weight: None,
+                dominant_baseline: None,
             };
             out.text(title.x, sy, subtitle, &sub_style);
         }

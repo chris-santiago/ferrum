@@ -33,6 +33,7 @@ pub struct TextStyle<'a> {
     pub angle: f64,
     pub font_family: &'a str,
     pub font_weight: Option<&'a str>,
+    pub dominant_baseline: Option<&'a str>,
 }
 
 impl SvgBuffer {
@@ -75,6 +76,34 @@ impl SvgBuffer {
     /// Callers are responsible for valid SVG (no escaping is performed).
     pub fn raw(&mut self, fragment: &str) {
         self.buf.push_str(fragment);
+    }
+
+    /// Emit an SVG `<title>` element (tooltip text on hover in browsers).
+    /// The text is XML-escaped.
+    pub fn title_elem(&mut self, text: &str) {
+        self.buf.push_str("<title>");
+        self.buf.push_str(&escape_text(text));
+        self.buf.push_str("</title>");
+    }
+
+    /// Emit an SVG `<desc>` element (accessibility description).
+    /// The text is XML-escaped.
+    pub fn desc_elem(&mut self, text: &str) {
+        self.buf.push_str("<desc>");
+        self.buf.push_str(&escape_text(text));
+        self.buf.push_str("</desc>");
+    }
+
+    /// Open an SVG `<a>` hyperlink wrapper with the given URL.
+    pub fn a_open(&mut self, href: &str) {
+        self.buf.push_str("<a href=\"");
+        self.buf.push_str(&escape_attr(href));
+        self.buf.push_str("\">");
+    }
+
+    /// Close an SVG `<a>` hyperlink wrapper.
+    pub fn a_close(&mut self) {
+        self.buf.push_str("</a>");
     }
 
     pub fn rect(&mut self, r: Rect, style: &FillStroke, corner_radius: Option<f64>) {
@@ -170,6 +199,9 @@ impl SvgBuffer {
         push_attr(&mut self.buf, "font-size", &fmt_f(style.font_size));
         if let Some(fw) = style.font_weight {
             push_attr(&mut self.buf, "font-weight", fw);
+        }
+        if let Some(db) = style.dominant_baseline {
+            push_attr(&mut self.buf, "dominant-baseline", db);
         }
         push_attr(&mut self.buf, "text-anchor", anchor_str(style.anchor));
         if style.angle != 0.0 {
@@ -369,7 +401,7 @@ mod tests {
     #[test]
     fn text_escapes_lt_gt_amp() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None };
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
         buf.text(0.0, 0.0, "Price > 0 & < 1", &style);
         let out = buf.finish();
         assert!(out.contains("Price &gt; 0 &amp; &lt; 1"), "got: {out}");

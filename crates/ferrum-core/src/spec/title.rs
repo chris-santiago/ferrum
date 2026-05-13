@@ -7,8 +7,11 @@ pub struct TitleSpec {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    #[serde(default = "default_anchor", skip_serializing_if = "is_default_anchor")]
-    pub anchor: String,
+    /// Per-chart anchor override. `None` = fall back to theme's `title_anchor`.
+    /// Python's `Title.to_spec_dict()` only emits `anchor` when explicitly set
+    /// (i.e. not the default "start"), so `None` here means "use theme".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,20 +26,12 @@ pub struct TitleSpec {
     pub subtitle_color: Option<String>,
 }
 
-fn default_anchor() -> String {
-    "start".into()
-}
-
-fn is_default_anchor(s: &String) -> bool {
-    s == "start"
-}
-
 impl Default for TitleSpec {
     fn default() -> Self {
         Self {
             text: String::new(),
             subtitle: None,
-            anchor: "start".into(),
+            anchor: None,
             offset: None,
             font_size: None,
             font_weight: None,
@@ -84,7 +79,7 @@ mod tests {
     fn anchor_middle_round_trips() {
         let t = TitleSpec {
             text: "x".into(),
-            anchor: "middle".into(),
+            anchor: Some("middle".into()),
             ..TitleSpec::default()
         };
         let json = serde_json::to_string(&t).unwrap();

@@ -22,6 +22,51 @@ pub struct AxisInput {
     pub title: Option<String>,
     pub tick_labels: Vec<String>,
     pub label_angle_override: Option<f64>,
+    /// When `false`, tick labels are suppressed (D7: `axis.labels`).
+    /// Default `true` — preserves byte-identity for all existing goldens.
+    pub show_labels: bool,
+    /// When `false`, tick marks are suppressed (D7: `axis.ticks`).
+    /// Default `true`.
+    pub show_ticks: bool,
+    /// When `false`, the axis domain line is suppressed (D7: `axis.domain`).
+    /// Default `true`.
+    pub show_domain: bool,
+    /// When `false`, gridlines for this axis are suppressed even when the theme
+    /// enables them globally (D7: `axis.grid`). Default `true`.
+    pub show_grid: bool,
+    /// Optional d3-format string applied to each tick label before layout
+    /// (D12: `encoding.format` on x/y axes). `None` → use the scale's own
+    /// default formatter (existing behavior).
+    pub tick_format: Option<String>,
+    /// When `Some("time")`, `tick_format` is a time format spec (D12:
+    /// `encoding.format_type`). Currently unused by `layout_x_axis` /
+    /// `layout_y_axis` — tick strings are already pre-formatted before this
+    /// struct is built. Reserved for future granularity hints.
+    pub tick_format_type: Option<String>,
+}
+
+impl AxisInput {
+    /// Construct an `AxisInput` with all new D7/D12 fields at their
+    /// backward-compatible defaults (all show_* = true, no tick_format).
+    pub fn new(
+        orient: AxisOrient,
+        title: Option<String>,
+        tick_labels: Vec<String>,
+        label_angle_override: Option<f64>,
+    ) -> Self {
+        Self {
+            orient,
+            title,
+            tick_labels,
+            label_angle_override,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            tick_format: None,
+            tick_format_type: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +90,21 @@ pub struct AxisLayout {
     pub ticks: Vec<TickLayout>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<AxisTitleLayout>,
+    /// D7: whether to render tick labels. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_labels: bool,
+    /// D7: whether to render tick marks. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_ticks: bool,
+    /// D7: whether to render the axis domain line. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_domain: bool,
+    /// D7: whether to render gridlines from this axis. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_grid: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickLayout {
@@ -145,6 +204,10 @@ pub fn layout_y_axis(
         axis_line,
         ticks,
         title,
+        show_labels: input.show_labels,
+        show_ticks: input.show_ticks,
+        show_domain: input.show_domain,
+        show_grid: input.show_grid,
     }
 }
 
@@ -287,7 +350,17 @@ pub fn layout_x_axis(
         }
     });
 
-    (AxisLayout { orient: AxisOrient::Bottom, panel_index, axis_line, ticks, title }, warning)
+    (AxisLayout {
+        orient: AxisOrient::Bottom,
+        panel_index,
+        axis_line,
+        ticks,
+        title,
+        show_labels: input.show_labels,
+        show_ticks: input.show_ticks,
+        show_domain: input.show_domain,
+        show_grid: input.show_grid,
+    }, warning)
 }
 
 #[cfg(test)]
@@ -312,6 +385,10 @@ mod tests {
                 anchor_y: 380.0,
                 angle: 0.0,
             }),
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -326,6 +403,10 @@ mod tests {
             axis_line: Rect::ZERO,
             ticks: vec![],
             title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));
@@ -340,12 +421,12 @@ mod tests {
 
     #[test]
     fn y_axis_label_band_uses_longest_label() {
-        let input = AxisInput {
-            orient: AxisOrient::Left,
-            title: None,
-            tick_labels: vec!["0".into(), "100".into(), "10000".into()],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "100".into(), "10000".into()],
+            None,
+        );
         let m = mock(10.0);
         let band = compute_y_label_band_width(&input, 11.0, &m);
         assert_eq!(band, 50.0);
@@ -353,24 +434,19 @@ mod tests {
 
     #[test]
     fn y_axis_label_band_empty_labels_returns_zero() {
-        let input = AxisInput {
-            orient: AxisOrient::Left,
-            title: None,
-            tick_labels: vec![],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(AxisOrient::Left, None, vec![], None);
         let m = mock(10.0);
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m), 0.0);
     }
 
     #[test]
     fn y_axis_layout_uniform_tick_positions() {
-        let input = AxisInput {
-            orient: AxisOrient::Left,
-            title: Some("Price".into()),
-            tick_labels: vec!["0".into(), "1".into(), "2".into(), "3".into()],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            Some("Price".into()),
+            vec!["0".into(), "1".into(), "2".into(), "3".into()],
+            None,
+        );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
         let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -390,12 +466,12 @@ mod tests {
 
     #[test]
     fn x_axis_no_collision_keeps_labels_flat() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: vec!["A".into(), "B".into(), "C".into(), "D".into()],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            None,
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 50.0, line_h_factor: 1.2 };
         let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -409,12 +485,12 @@ mod tests {
 
     #[test]
     fn x_axis_uniform_tick_positions_along_axis() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: vec!["A".into(), "B".into(), "C".into(), "D".into()],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            None,
+        );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
         let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -426,12 +502,12 @@ mod tests {
 
     #[test]
     fn x_axis_collision_triggers_default_45_rotation() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: (0..8).map(|i| format!("L{}", i)).collect(),
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..8).map(|i| format!("L{}", i)).collect(),
+            None,
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -442,12 +518,12 @@ mod tests {
 
     #[test]
     fn x_axis_rotates_at_custom_angle_override() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: (0..8).map(|i| format!("L{}", i)).collect(),
-            label_angle_override: Some(-90.0),
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..8).map(|i| format!("L{}", i)).collect(),
+            Some(-90.0),
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -458,12 +534,12 @@ mod tests {
 
     #[test]
     fn x_axis_rotation_only_no_elision_when_rotated_fits() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: (0..6).map(|i| format!("L{}", i)).collect(),
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..6).map(|i| format!("L{}", i)).collect(),
+            None,
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 95.0, line_h_factor: 1.2 };
         let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -476,12 +552,12 @@ mod tests {
 
     #[test]
     fn x_axis_elides_with_ellipsis_when_rotated_still_collides() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: (0..20).map(|i| format!("Label_{}", i)).collect(),
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..20).map(|i| format!("Label_{}", i)).collect(),
+            None,
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
         let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -498,12 +574,12 @@ mod tests {
 
     #[test]
     fn x_axis_elision_unicode_safe() {
-        let input = AxisInput {
-            orient: AxisOrient::Bottom,
-            title: None,
-            tick_labels: vec!["héllo wörld".into(); 20],
-            label_angle_override: None,
-        };
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["héllo wörld".into(); 20],
+            None,
+        );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
         let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);

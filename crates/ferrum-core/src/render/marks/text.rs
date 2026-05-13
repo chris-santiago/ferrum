@@ -7,8 +7,8 @@
 //! label is `format_numeric(y)` (Phase 7 behavior).
 
 use crate::layout::TextAnchor;
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
-use crate::render::format::format_numeric;
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::format::{format_numeric, format_time};
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::svg::{SvgBuffer, TextStyle};
 
@@ -66,10 +66,13 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // Explicit text channel: Utf8 column of labels, or numeric column whose
     // values are formatted via format_numeric (heatmap-annot path). When the
     // EncodingSpec carries a `format` string (e.g. ".2f"), it is honored for
-    // numeric columns. Absent text channel → format_numeric(y) (legacy).
+    // numeric columns. When `format_type` is `"time"`, the value is treated
+    // as epoch-ms and formatted via format_time with a 1-day spacing heuristic.
+    // Absent text channel → format_numeric(y) (legacy).
     let text_enc = spec.encoding.text.as_ref();
     let text_field = text_enc.map(|e| e.field.as_str());
     let text_format = text_enc.and_then(|e| e.format.as_deref());
+    let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
     let texts: Option<Vec<Option<String>>> = match text_field {
         None => None,
         Some(f) => col_as_str(ctx.batch, f).ok().or_else(|| {
@@ -80,7 +83,14 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                             if !v.is_finite() {
                                 return None;
                             }
-                            Some(format_with_spec(v, text_format))
+                            if text_format_type == Some("time") {
+                                // Use the format string as a strftime-like granularity hint;
+                                // we approximate with a 1-day inter-tick spacing so the
+                                // date/time formatter picks a reasonable default.
+                                Some(format_time(v as i64, 86_400_000))
+                            } else {
+                                Some(format_with_spec(v, text_format))
+                            }
                         })
                     })
                     .collect()
@@ -109,7 +119,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         angle: ctx.mark_style.angle.unwrap_or(0.0),
         font_family: &ctx.theme.font_family,
         font_weight: ctx.mark_style.font_weight.as_deref(),
+        dominant_baseline: ctx.mark_style.baseline.as_deref(),
     };
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..n_x {
         let px = if let Some(xs) = &xs_f {
@@ -144,7 +156,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             }
         } else { continue };
 
-        let label: String = if let Some(t) = &texts {
+        let raw_label: String = if let Some(t) = &texts {
             match &t[i] {
                 Some(s) => s.clone(),
                 None => continue,
@@ -158,7 +170,22 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 None => continue,
             }
         };
+
+        // S7: truncate label to `limit` characters (including the ellipsis).
+        let label = if let Some(limit) = ctx.mark_style.limit {
+            if limit > 0 && raw_label.chars().count() > limit {
+                let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}") // …
+            } else {
+                raw_label
+            }
+        } else {
+            raw_label
+        };
+
+        let wrapped = meta.open(i, out);
         out.text(px + dx, py + dy, &label, &style);
+        if wrapped { meta.close(i, out); }
     }
 }
 

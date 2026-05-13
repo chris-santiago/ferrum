@@ -94,18 +94,8 @@ pub fn compute_layout(
     theme.legend_orient = parse_legend_orient(legend_orient)?;
 
     let axes = AxesInput {
-        x: AxisInput {
-            orient: AxisOrient::Bottom,
-            title: x_title,
-            tick_labels: x_tick_labels,
-            label_angle_override: label_angle,
-        },
-        y: AxisInput {
-            orient: AxisOrient::Left,
-            title: y_title,
-            tick_labels: y_tick_labels,
-            label_angle_override: None,
-        },
+        x: AxisInput::new(AxisOrient::Bottom, x_title, x_tick_labels, label_angle),
+        y: AxisInput::new(AxisOrient::Left, y_title, y_tick_labels, None),
         show_x: true,
         show_y: true,
     };

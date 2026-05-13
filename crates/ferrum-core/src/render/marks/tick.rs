@@ -28,7 +28,8 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 for v in xs.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.w / n_cats as f64) * 0.3;
+            // S8: band_size overrides the 0.3 default (fraction of band width).
+            let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };

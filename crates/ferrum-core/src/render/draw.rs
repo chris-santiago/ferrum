@@ -45,6 +45,24 @@ pub struct MarkStyle {
     // Polygon-mark-only fields (None = no detail grouping / default cmap)
     pub detail: Option<String>,
     pub cmap: Option<String>,
+    // ── S1: interpolate (line/area) ──
+    pub interpolate: Option<String>,
+    // ── S2: stroke_cap (line) ────────
+    pub stroke_cap: Option<String>,
+    // ── S3: stroke_join (line/area) ──
+    pub stroke_join: Option<String>,
+    // ── S5: filled (point) ───────────
+    pub filled: Option<bool>,
+    // ── S6: shape (point, constant) ──
+    pub shape: Option<String>,
+    // ── S7: limit (text) ─────────────
+    pub limit: Option<usize>,
+    // ── S8: band_size (tick/rect) ────
+    pub band_size: Option<f64>,
+    // ── S9: line (area) ──────────────
+    pub line_border: Option<bool>,
+    // ── S10: borders (area) ──────────
+    pub borders: Option<bool>,
 }
 
 impl MarkStyle {
@@ -71,6 +89,15 @@ impl MarkStyle {
             angle: None,
             detail: None,
             cmap: None,
+            interpolate: None,
+            stroke_cap: None,
+            stroke_join: None,
+            filled: None,
+            shape: None,
+            limit: None,
+            band_size: None,
+            line_border: None,
+            borders: None,
         }
     }
 }
@@ -106,7 +133,15 @@ pub fn resolve_mark_style(
         Mark::Bar | Mark::Rect => {
             style.corner_radius = theme.bar_corner_radius;
         }
-        Mark::Rule | Mark::Segment => {
+        Mark::Rule => {
+            // Reference-line defaults from theme; non-reference rules
+            // (boxplot whiskers, error bars) override via mark_kwargs.
+            style.fill = theme.reference_line_color;
+            style.stroke = Some(theme.reference_line_color);
+            style.stroke_width = theme.line_stroke_width;
+            style.stroke_dash = theme.reference_line_dash.clone();
+        }
+        Mark::Segment => {
             style.fill = theme.mark_color;
             style.stroke = Some(theme.mark_color);
             style.stroke_width = theme.line_stroke_width;
@@ -153,10 +188,116 @@ pub fn resolve_mark_style(
     if let Some(ref d) = o.detail { style.detail = Some(d.clone()); }
     if let Some(ref c) = o.cmap { style.cmap = Some(c.clone()); }
 
+    // S1: interpolate
+    if let Some(ref i) = o.interpolate { style.interpolate = Some(i.clone()); }
+    // S2: stroke_cap
+    if let Some(ref sc) = o.stroke_cap { style.stroke_cap = Some(sc.clone()); }
+    // S3: stroke_join
+    if let Some(ref sj) = o.stroke_join { style.stroke_join = Some(sj.clone()); }
+    // S5: filled
+    if let Some(f) = o.filled { style.filled = Some(f); }
+    // S6: shape (constant)
+    if let Some(ref sh) = o.shape { style.shape = Some(sh.clone()); }
+    // S7: limit
+    if let Some(l) = o.limit { style.limit = Some(l); }
+    // S8: band_size
+    if let Some(bs) = o.band_size { style.band_size = Some(bs); }
+    // S9: line border on area
+    if let Some(lb) = o.line { style.line_border = Some(lb); }
+    // S10: borders on area
+    if let Some(b) = o.borders { style.borders = Some(b); }
+
     style
 }
 
 pub(crate) use super::arrow_cast::{col_as_f64, col_as_str};
+
+/// Pre-read per-row SVG metadata columns (tooltip, href, description).
+/// Constructed once per draw call; individual mark renderers call
+/// `open_metadata`/`close_metadata` around each mark element.
+pub struct MetadataColumns {
+    pub tooltip: Option<Vec<Option<String>>>,
+    pub href: Option<Vec<Option<String>>>,
+    pub description: Option<Vec<Option<String>>>,
+}
+
+impl MetadataColumns {
+    /// Read tooltip/href/description columns from the RecordBatch when the
+    /// corresponding encoding is present. Falls back to f64 → string
+    /// conversion when the column is numeric.
+    pub fn from_ctx(ctx: &DrawCtx) -> Self {
+        let tooltip = ctx.spec.encoding.tooltip.as_ref().and_then(|e| {
+            col_as_str(ctx.batch, &e.field)
+                .ok()
+                .or_else(|| {
+                    col_as_f64(ctx.batch, &e.field).ok().map(|vals| {
+                        vals.into_iter()
+                            .map(|v| v.map(|f| format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()))
+                            .collect()
+                    })
+                })
+        });
+        let href = ctx.spec.encoding.href.as_ref().and_then(|e| {
+            col_as_str(ctx.batch, &e.field).ok()
+        });
+        let description = ctx.spec.encoding.description.as_ref().and_then(|e| {
+            col_as_str(ctx.batch, &e.field)
+                .ok()
+                .or_else(|| {
+                    col_as_f64(ctx.batch, &e.field).ok().map(|vals| {
+                        vals.into_iter()
+                            .map(|v| v.map(|f| format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()))
+                            .collect()
+                    })
+                })
+        });
+        MetadataColumns { tooltip, href, description }
+    }
+
+    /// True when at least one metadata channel is present.
+    pub fn has_any(&self) -> bool {
+        self.tooltip.is_some() || self.href.is_some() || self.description.is_some()
+    }
+
+    /// Open wrapping elements for row `i`: `<a>` if href is set, then `<g>`
+    /// containing `<title>` and/or `<desc>` if tooltip/description are set.
+    /// Returns `true` if any wrapper was opened (caller must call `close`).
+    pub fn open(&self, i: usize, out: &mut super::svg::SvgBuffer) -> bool {
+        if !self.has_any() {
+            return false;
+        }
+        let tooltip_val = self.tooltip.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
+        let desc_val = self.description.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
+        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
+
+        let needs_wrap = tooltip_val.is_some() || desc_val.is_some() || href_val.is_some();
+        if !needs_wrap {
+            return false;
+        }
+
+        if let Some(url) = href_val {
+            out.a_open(url);
+        }
+        // Wrap in <g> to attach <title>/<desc> to the next mark element.
+        out.g_open(None);
+        if let Some(tip) = tooltip_val {
+            out.title_elem(tip);
+        }
+        if let Some(desc) = desc_val {
+            out.desc_elem(desc);
+        }
+        true
+    }
+
+    /// Close wrapping elements opened by `open`.
+    pub fn close(&self, i: usize, out: &mut super::svg::SvgBuffer) {
+        out.g_close();
+        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
+        if href_val.is_some() {
+            out.a_close();
+        }
+    }
+}
 
 pub fn x_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpec) -> Option<&'a str> {
     spec.encoding.x.as_ref().map(|e| e.field.as_str())

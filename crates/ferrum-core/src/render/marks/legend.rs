@@ -16,7 +16,12 @@ pub fn draw(
         anchor: TextAnchor::Start,
         angle: 0.0,
         font_family: &theme.label_font_family,
-        font_weight: None,
+        font_weight: if theme.font_weight == "normal" {
+            None
+        } else {
+            Some(&theme.font_weight)
+        },
+        dominant_baseline: None,
     };
 
     // Legend title (Themes-T2.5b). Drawn before entries so it stays on top
@@ -33,6 +38,7 @@ pub fn draw(
             } else {
                 Some(&theme.title_font_weight)
             },
+            dominant_baseline: None,
         };
         out.text(title.x, title.y, &title.text, &title_style);
     }

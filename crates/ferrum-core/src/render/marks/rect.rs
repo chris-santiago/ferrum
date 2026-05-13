@@ -9,7 +9,7 @@
 
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 use crate::render::svg::{FillStroke, SvgBuffer};
 
@@ -62,6 +62,7 @@ fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
         _ => None,
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..n {
         let x_lo = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -96,11 +97,13 @@ fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -126,8 +129,9 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
     if xs.len() != ys.len() || y2s.len() != ys.len() { return; }
 
     let panel = ctx.panel.plot_area;
-    // 60% of band width matches the Python-side mark_kwargs width: 0.6 default.
-    let box_w = (panel.w / n_categories as f64) * 0.6;
+    // S8: band_size (fraction of band width) overrides the 0.6 default.
+    // The Python boxplot desugar passes width=band (e.g. 0.6), now mapped to band_size.
+    let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
 
     let cfield = color_field(ctx, spec);
     let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
@@ -135,6 +139,7 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
         _ => None,
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..xs.len() {
         let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -158,11 +163,13 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -194,6 +201,7 @@ fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
         _ => None,
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..xs.len() {
         let xs_v = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -222,11 +230,13 @@ fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 

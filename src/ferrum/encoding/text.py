@@ -37,7 +37,7 @@ class Text(ChannelBase):
     """
 
     _channel_name = "text"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type", "format", "formatType"])
 
 
@@ -67,7 +67,7 @@ class Detail(ChannelBase):
     """
 
     _channel_name = "detail"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -100,7 +100,7 @@ class Tooltip(ChannelBase):
     """
 
     _channel_name = "tooltip"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
     def __init__(self, *fields, **kwargs):
@@ -145,7 +145,7 @@ class TooltipField(ChannelBase):
     """
 
     _channel_name = "tooltip_field"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type", "title", "format", "formatType"])
 
 
@@ -175,7 +175,7 @@ class Href(ChannelBase):
     """
 
     _channel_name = "href"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -204,7 +204,7 @@ class Description(ChannelBase):
     """
 
     _channel_name = "description"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -233,5 +233,5 @@ class Key(ChannelBase):
     """
 
     _channel_name = "key"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])

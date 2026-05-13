@@ -132,7 +132,10 @@ def desugar_density(
                 cmap=cmap,
             )
 
-    del kernel  # informational; underlying Kde uses gaussian only
+    if kernel is not None and kernel != "gaussian":
+        raise ValueError(
+            f"mark_density(kernel={kernel!r}) is not supported; only 'gaussian' is available"
+        )
     if multiple != "layer":
         # `multiple` parameter from spec §3.3 deferred (no stack support yet).
         raise NotImplementedError(
@@ -254,7 +257,16 @@ def desugar_histogram(
     >>> result[2]
     {'x': 'bin_start', 'x2': 'bin_end', 'y': 'count'}
     """
-    del right, multiple  # forwarded to renderer in a later phase
+    if right:
+        raise ValueError(
+            "mark_histogram(right=True) is not supported; "
+            "bins are always left-closed, right-open [lo, hi)"
+        )
+    if multiple != "layer":
+        raise ValueError(
+            f"mark_histogram(multiple={multiple!r}) is not supported; "
+            "only 'layer' overlap is available"
+        )
     if orientation not in ("vertical", "horizontal"):
         raise ValueError(
             f"desugar_histogram: orientation must be 'vertical' or "

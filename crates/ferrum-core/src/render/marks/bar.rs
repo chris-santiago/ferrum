@@ -7,7 +7,7 @@
 
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 use crate::render::svg::{FillStroke, SvgBuffer};
 
@@ -69,6 +69,7 @@ fn draw_ordinal(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..x_strs.len() {
         let xs = match &x_strs[i] { Some(s) => s.as_str(), None => continue };
@@ -101,11 +102,13 @@ fn draw_ordinal(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -144,6 +147,7 @@ fn draw_ordinal_y(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let bar_height = (panel.h / n_categories as f64) * 0.8;
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..y_strs.len() {
         let ys = match &y_strs[i] { Some(s) => s.as_str(), None => continue };
@@ -183,11 +187,13 @@ fn draw_ordinal_y(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -212,6 +218,7 @@ fn draw_quantitative(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..xs.len() {
         let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -240,11 +247,13 @@ fn draw_quantitative(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -273,6 +282,7 @@ fn draw_quantitative_horizontal(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let meta = MetadataColumns::from_ctx(ctx);
 
     for i in 0..xs.len() {
         let xv  = match xs[i]  { Some(v) if v.is_finite() => v, _ => continue };
@@ -307,11 +317,13 @@ fn draw_quantitative_horizontal(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
+        let wrapped = meta.open(i, out);
         out.rect(r, &FillStroke {
             fill: Some(fill),
             stroke: ctx.mark_style.stroke,
             stroke_width: ctx.mark_style.stroke_width,
         }, Some(ctx.mark_style.corner_radius));
+        if wrapped { meta.close(i, out); }
     }
 }
 

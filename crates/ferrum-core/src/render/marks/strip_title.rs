@@ -30,6 +30,7 @@ pub fn draw(
         angle: 0.0,
         font_family: &theme.font_family,
         font_weight: None,
+        dominant_baseline: None,
     });
 }
 

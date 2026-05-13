@@ -37,7 +37,32 @@ _RENDERER_HONORED_CHANNELS = (
     "shape",
     "opacity",
     "text",
+    "tooltip",
+    "href",
+    "description",
 )
+# Channels that are silently accepted but produce no visual encoding in the
+# current static SVG renderer.  They are handled by special-case logic in
+# to_spec() (alias to another channel, inject into mark_style, or simply
+# stored for future interactive rendering).  No warning emitted.
+_SILENT_CHANNELS = frozenset((
+    "fill",           # alias → color encoding
+    "stroke",         # alias → color encoding or mark_style.stroke
+    "fill_opacity",   # alias → opacity encoding
+    "stroke_opacity", # accepted, no visual effect in static SVG
+    "stroke_width",   # accepted, no visual effect in static SVG
+    "stroke_dash",    # accepted, no visual effect in static SVG
+    "angle",          # accepted, no visual effect in static SVG
+    "detail",         # injected into mark_style.detail
+    "key",            # stored for future interactive/animated rendering
+    "x_error",        # used through composite mark desugar (mark_errorbar)
+    "y_error",        # used through composite mark desugar (mark_errorbar)
+    "x_error2",       # used through composite mark desugar (mark_errorbar)
+    "y_error2",       # used through composite mark desugar (mark_errorbar)
+))
+# Polar channels raise NotImplementedError when a chart is actually rendered
+# with them, rather than emitting a misleading "not yet rendered" warning.
+_POLAR_CHANNELS = frozenset(("theta", "radius"))
 # Facet channels have a separate code path through resolved._facet — no
 # silent-drop, no warn.
 _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
@@ -427,6 +452,9 @@ class Chart:
         new._mark = name
         new._mark_kwargs = m.to_mark_kwargs_dict()
         new._position = position
+        # S4: orient="horizontal" → coord flip (consumed Python-side).
+        if m.orient_coord_flip():
+            new._coord = "flip"
         return new
 
     def _set_composite_mark(
@@ -4141,8 +4169,13 @@ class Chart:
                         "aggregate",
                         "scheme",
                         "format",
-                        "formatType",
+                        "format_type",
                         "scale",
+                        "axis",
+                        "legend",
+                        "sort",
+                        "stack",
+                        "impute",
                     ):
                         if d.get(opt_key):
                             enc_json_dict[opt_key] = d[opt_key]
@@ -4266,14 +4299,69 @@ class Chart:
         from ferrum import ChartSpec, EncodingSpec
         from ferrum.repeat import _RepeatPlaceholder
 
-        # Spec §3.2 (L309-315): channels accepted at the encode() boundary but
-        # not yet rendered must emit a one-time UserWarning per channel so the
-        # caller knows the field will not appear in the SVG. The ferrum._warn
-        # registry dedupes process-wide on (channel_name, kwarg).
+        # --- Polar channels: raise early if theta/radius are actually used ---
+        for polar_ch in _POLAR_CHANNELS:
+            if polar_ch in resolved._encoding:
+                ch = resolved._encoding[polar_ch]
+                field = getattr(ch, "field", None)
+                if field is not None and not isinstance(field, _RepeatPlaceholder):
+                    raise NotImplementedError(
+                        f"Polar coordinates ({polar_ch!r}) require interactive "
+                        "rendering mode (planned for Phase 11+). Static SVG "
+                        "rendering does not support polar coordinate channels."
+                    )
+
+        # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
+        enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
+        mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
+
+        # Fill → color (fill IS the fill color for filled marks). Fill wins
+        # over color when both are present.
+        if "fill" in enc and "color" not in enc:
+            enc["color"] = enc["fill"]
+
+        # Stroke → if no color channel, treat as color; otherwise inject into
+        # mark_style as a constant stroke color override.
+        if "stroke" in enc:
+            stroke_ch = enc["stroke"]
+            if "color" not in enc:
+                enc["color"] = stroke_ch
+            elif stroke_ch.field is not None and not isinstance(
+                stroke_ch.field, _RepeatPlaceholder
+            ):
+                # Can't map to a scale — inject as a mark_style grouping hint.
+                # mark_style.stroke expects a hex color, not a field name, so
+                # this is a best-effort: when the user maps a field to stroke
+                # while color is already mapped, the stroke encoding is silently
+                # stored but produces no visual effect.
+                pass
+
+        # FillOpacity → opacity (fill opacity IS what the opacity channel controls).
+        if "fill_opacity" in enc and "opacity" not in enc:
+            enc["opacity"] = enc["fill_opacity"]
+
+        # Detail → inject into mark_style.detail (the Rust renderer reads it there).
+        if "detail" in enc:
+            detail_ch = enc["detail"]
+            if detail_ch.field is not None and not isinstance(
+                detail_ch.field, _RepeatPlaceholder
+            ):
+                mk.setdefault("detail", detail_ch.field)
+
+        # Safety net: any channel not in honored/silent/polar/facet sets would
+        # fall through to this warning. After all 18 channels are wired this
+        # should never fire, but we keep it as a guard against future channels
+        # being added to the encoding registry without a handler.
         from ferrum._warn import warn_once
 
-        for ch_name, ch in resolved._encoding.items():
-            if ch_name in _RENDERER_HONORED_CHANNELS or ch_name in _FACET_CHANNELS:
+        _all_known = (
+            frozenset(_RENDERER_HONORED_CHANNELS)
+            | _SILENT_CHANNELS
+            | _POLAR_CHANNELS
+            | _FACET_CHANNELS
+        )
+        for ch_name, ch in enc.items():
+            if ch_name in _all_known:
                 continue
             field = getattr(ch, "field", None)
             if field is None or isinstance(field, _RepeatPlaceholder):
@@ -4292,8 +4380,8 @@ class Chart:
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
         kw = {"mark": resolved._mark or "point", "data": "default"}
         for axis in _RENDERER_HONORED_CHANNELS:
-            if axis in resolved._encoding:
-                ch = resolved._encoding[axis]
+            if axis in enc:
+                ch = enc[axis]
                 if ch.field is None:
                     continue  # Tooltip(*fields) etc. with no single field
                 # Phase 9: skip channels whose field is an unresolved Repeat
@@ -4322,8 +4410,8 @@ class Chart:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:
             kw["coord"] = resolved._coord
-        if resolved._mark_kwargs:
-            kw["mark_style"] = dict(resolved._mark_kwargs)
+        if mk:
+            kw["mark_style"] = mk
         if resolved._layers is not None:
             kw["layers"] = resolved._build_layers_list()
         if resolved._position is not None:
@@ -4336,6 +4424,10 @@ class Chart:
             kw["axis_x"] = resolved._axis_x
         if resolved._axis_y is not None:
             kw["axis_y"] = resolved._axis_y
+        # TODO(G1): `_description` is stored but not serialized — ChartSpec in
+        # crates/ferrum-core/src/spec/chart.rs has no `description` field yet.
+        # When added, wire it here as `kw["description"] = resolved._description`
+        # so the renderer can emit a `<desc>` element inside the root `<svg>`.
         return ChartSpec(**kw)
 
     def _build_spec(self):

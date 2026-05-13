@@ -31,8 +31,9 @@ class X(ChannelBase):
 
     Notes
     -----
-    ``axis`` and ``legend`` kwargs are accepted but are reserved for future use
-    (no-op today) — they trigger a one-time deprecation warning.
+    ``axis``, ``legend``, ``sort``, ``stack``, and ``impute`` kwargs are
+    accepted and forwarded to the EncodingSpec; per-channel axis/legend
+    customization depends on Rust-side support for the channel.
 
     Examples
     --------
@@ -70,8 +71,9 @@ class Y(ChannelBase):
 
     Notes
     -----
-    ``axis`` and ``legend`` kwargs are accepted but are reserved for future use
-    (no-op today) — they trigger a one-time deprecation warning.
+    ``axis``, ``legend``, ``sort``, ``stack``, and ``impute`` kwargs are
+    accepted and forwarded to the EncodingSpec; per-channel axis/legend
+    customization depends on Rust-side support for the channel.
 
     Examples
     --------
@@ -111,7 +113,7 @@ class X2(ChannelBase):
     """
 
     _channel_name = "x2"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -141,7 +143,7 @@ class Y2(ChannelBase):
     """
 
     _channel_name = "y2"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -169,7 +171,7 @@ class XError(ChannelBase):
     """
 
     _channel_name = "x_error"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -197,7 +199,7 @@ class YError(ChannelBase):
     """
 
     _channel_name = "y_error"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -230,7 +232,7 @@ class XError2(ChannelBase):
     """
 
     _channel_name = "x_error2"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -263,7 +265,7 @@ class YError2(ChannelBase):
     """
 
     _channel_name = "y_error2"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
 
 
@@ -300,7 +302,7 @@ class Theta(ChannelBase):
     """
 
     _channel_name = "theta"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type", "stack"])
 
 
@@ -333,5 +335,5 @@ class Radius(ChannelBase):
     """
 
     _channel_name = "radius"
-    _renders_in_phase_8a = False
+    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])

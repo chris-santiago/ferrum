@@ -5,7 +5,8 @@ use crate::render::svg::{Stroke, SvgBuffer, TextStyle};
 
 pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
     let r = axis.axis_line;
-    if theme.axis_line {
+    // D7: show_domain controls the axis domain line.
+    if theme.axis_line && axis.show_domain {
         let line_style = Stroke {
             stroke: theme.axis_line_color,
             stroke_width: theme.axis_line_width,
@@ -25,7 +26,12 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
         anchor: TextAnchor::Middle,
         angle: 0.0,
         font_family: &theme.label_font_family,
-        font_weight: None,
+        font_weight: if theme.font_weight == "normal" {
+            None
+        } else {
+            Some(&theme.font_weight)
+        },
+        dominant_baseline: None,
     };
     for tick in &axis.ticks {
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
@@ -50,11 +56,17 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
                 TextAnchor::Start, 0.0,
             ),
         };
-        out.line(tx1, ty1, tx2, ty2, &tick_style);
-        let mut style = label_style_base.clone();
-        style.anchor = anchor;
-        style.angle = angle;
-        out.text(label_x, label_y, &tick.label, &style);
+        // D7: show_ticks controls tick marks.
+        if axis.show_ticks {
+            out.line(tx1, ty1, tx2, ty2, &tick_style);
+        }
+        // D7: show_labels controls tick label text.
+        if axis.show_labels {
+            let mut style = label_style_base.clone();
+            style.anchor = anchor;
+            style.angle = angle;
+            out.text(label_x, label_y, &tick.label, &style);
+        }
     }
 
     if let Some(t) = &axis.title {
@@ -69,6 +81,7 @@ pub fn draw(axis: &AxisLayout, theme: &ThemeInputs, out: &mut SvgBuffer) {
             } else {
                 Some(&theme.title_font_weight)
             },
+            dominant_baseline: None,
         };
         out.text(t.anchor_x, t.anchor_y, &t.text, &title_style);
     }
@@ -104,7 +117,8 @@ pub fn draw_grid(
         .map(|a| a.axis_line.y)
         .unwrap_or(plot.y + plot.h);
 
-    if let Some(ax) = x_axis {
+    // D7: per-axis show_grid gate (true by default → backward-compat).
+    if let Some(ax) = x_axis.filter(|a| a.show_grid) {
         for tick in &ax.ticks {
             if (tick.position - y_baseline_x).abs() < 0.5 {
                 continue;
@@ -122,7 +136,7 @@ pub fn draw_grid(
         }
     }
 
-    if let Some(ay) = y_axis {
+    if let Some(ay) = y_axis.filter(|a| a.show_grid) {
         for tick in &ay.ticks {
             if (tick.position - x_baseline_y).abs() < 0.5 {
                 continue;
@@ -162,6 +176,10 @@ mod tests {
                 anchor_y: 95.0,
                 angle: 0.0,
             }),
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
         };
         let theme = ThemeInputs::default();
         let mut out = SvgBuffer::new(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, None, false);

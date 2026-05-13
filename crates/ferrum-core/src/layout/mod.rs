@@ -304,18 +304,31 @@ pub fn compute_layout(
     // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
     //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
     let (chart_title_layout, inner) = if let Some(title_spec) = spec.title.as_ref() {
-        let title_line_h = metrics.line_height(theme.title_font_size);
+        // D1-D6: per-chart TitleSpec overrides for layout geometry.
+        let resolved_font_size = title_spec
+            .font_size
+            .unwrap_or(theme.title_font_size);
+        let resolved_offset = title_spec
+            .offset
+            .unwrap_or(theme.title_offset);
+        let resolved_anchor = match title_spec.anchor.as_deref() {
+            Some("middle") => TextAnchor::Middle,
+            Some("end")    => TextAnchor::End,
+            Some(_)        => TextAnchor::Start,
+            None           => theme.title_anchor,
+        };
+        let title_line_h = metrics.line_height(resolved_font_size);
         let subtitle_font_size = title_spec
             .subtitle_font_size
-            .unwrap_or(theme.title_font_size * 0.85);
+            .unwrap_or(resolved_font_size * 0.85);
         let subtitle_line_h = if title_spec.subtitle.is_some() {
             metrics.line_height(subtitle_font_size)
         } else {
             0.0
         };
-        let band_h = title_line_h + subtitle_line_h + theme.title_offset;
+        let band_h = title_line_h + subtitle_line_h + resolved_offset;
         let (band, rest) = inner.split_top(band_h);
-        let x = match theme.title_anchor {
+        let x = match resolved_anchor {
             TextAnchor::Start => band.x,
             TextAnchor::Middle => band.x + band.w / 2.0,
             TextAnchor::End => band.x + band.w,
@@ -332,7 +345,7 @@ pub fn compute_layout(
             x,
             y,
             subtitle_y,
-            anchor: theme.title_anchor,
+            anchor: resolved_anchor,
         };
         (Some(chart_title), rest)
     } else {
@@ -597,18 +610,18 @@ mod tests {
 
     fn dummy_axes() -> AxesInput {
         AxesInput {
-            x: AxisInput {
-                orient: AxisOrient::Bottom,
-                title: None,
-                tick_labels: vec!["0".into(), "1".into(), "2".into(), "3".into()],
-                label_angle_override: None,
-            },
-            y: AxisInput {
-                orient: AxisOrient::Left,
-                title: None,
-                tick_labels: vec!["0".into(), "5".into(), "10".into()],
-                label_angle_override: None,
-            },
+            x: AxisInput::new(
+                AxisOrient::Bottom,
+                None,
+                vec!["0".into(), "1".into(), "2".into(), "3".into()],
+                None,
+            ),
+            y: AxisInput::new(
+                AxisOrient::Left,
+                None,
+                vec!["0".into(), "5".into(), "10".into()],
+                None,
+            ),
             show_x: true,
             show_y: true,
         }

@@ -3,9 +3,21 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 use crate::render::svg::{FillStroke, Stroke, SvgBuffer};
+
+/// Parse a shape name string to a `ShapeKind`. Unknown values fall back to `Circle`.
+fn shape_from_str(s: &str) -> ShapeKind {
+    match s {
+        "square" => ShapeKind::Square,
+        "cross" => ShapeKind::Cross,
+        "diamond" => ShapeKind::Diamond,
+        "triangle-up" | "triangle_up" => ShapeKind::TriangleUp,
+        "triangle-down" | "triangle_down" => ShapeKind::TriangleDown,
+        _ => ShapeKind::Circle, // "circle" and unknown values
+    }
+}
 
 /// Emit one shape glyph centered at (cx, cy) with the given radius and fill/stroke style.
 ///
@@ -113,6 +125,9 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // an ordinal-x band). Zero-valued when no adjustment was applied.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // SVG metadata channels (tooltip, href, description).
+    let meta = MetadataColumns::from_ctx(ctx);
+
     for i in 0..n {
         // Resolve x-pixel: prefer Utf8 lookup when the scale is ordinal AND a
         // string column is available, falling back to f64.
@@ -183,10 +198,24 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
         let fill = with_opacity(fill_base, row_opacity);
 
+        // S5: filled=false → hollow points: fill="none", color goes to stroke.
+        let (effective_fill, effective_stroke, effective_sw) =
+            if ctx.mark_style.filled == Some(false) {
+                // Hollow: no fill, color applied to stroke with a visible stroke width.
+                let sw = if ctx.mark_style.stroke_width > 0.0 {
+                    ctx.mark_style.stroke_width
+                } else {
+                    1.5
+                };
+                (None, Some(fill_base), sw)
+            } else {
+                (Some(fill), ctx.mark_style.stroke, ctx.mark_style.stroke_width)
+            };
+
         let style = FillStroke {
-            fill: Some(fill),
-            stroke: ctx.mark_style.stroke,
-            stroke_width: ctx.mark_style.stroke_width,
+            fill: effective_fill,
+            stroke: effective_stroke,
+            stroke_width: effective_sw,
         };
 
         // Resolve per-row radius from size encoding (area → radius), falling back to default.
@@ -199,17 +228,26 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             default_radius
         };
 
-        // Resolve per-row shape kind using ShapeScale.lookup(), falling back to Circle.
+        // Resolve per-row shape kind:
+        // 1. Data-driven shape encoding (ShapeScale), if present.
+        // 2. S6: constant mark_style.shape, if set and encoding is absent.
+        // 3. Default: Circle.
         let shape_kind = if let (Some(values), Some(scale)) = (&shape_values, &ctx.scales.shape) {
             match values[i].as_deref() {
                 Some(v) => scale.lookup(v).unwrap_or(ShapeKind::Circle),
                 None => ShapeKind::Circle,
             }
+        } else if let Some(ref shape_name) = ctx.mark_style.shape {
+            shape_from_str(shape_name)
         } else {
             ShapeKind::Circle
         };
 
+        let wrapped = meta.open(i, out);
         emit_shape(out, shape_kind, cx, cy, radius, &style);
+        if wrapped {
+            meta.close(i, out);
+        }
     }
 }
 

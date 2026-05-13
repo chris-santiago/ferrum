@@ -43,6 +43,45 @@ pub struct MarkKwargsSpec {
     /// when `color` encoding maps to a quantitative column. Defaults to `viridis`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmap: Option<String>,
+    // ── S1: interpolate (line/area) ──────────────────────────────────────────
+    /// Path interpolation method. Supported: "linear" (default), "step",
+    /// "step-before", "step-after". Others fall back to linear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpolate: Option<String>,
+    // ── S2: stroke_cap (line) ────────────────────────────────────────────────
+    /// SVG stroke-linecap. Values: "butt" (default), "round", "square".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_cap: Option<String>,
+    // ── S3: stroke_join (line/area) ──────────────────────────────────────────
+    /// SVG stroke-linejoin. Values: "miter" (default), "round", "bevel".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_join: Option<String>,
+    // ── S5: filled (point) ───────────────────────────────────────────────────
+    /// When false, points are hollow: fill="none", color applied to stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled: Option<bool>,
+    // ── S6: shape (point, constant) ──────────────────────────────────────────
+    /// Constant point shape when shape encoding is absent.
+    /// Values: "circle", "square", "diamond", "triangle-up", "cross", "triangle-down".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    // ── S7: limit (text) ─────────────────────────────────────────────────────
+    /// Max character length for text labels; truncates with "…" if exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    // ── S8: band_size (tick/rect) ────────────────────────────────────────────
+    /// Width of tick marks as a fraction of the band width (e.g. 0.3).
+    /// Also controls boxplot IQR rect width when set on rect marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_size: Option<f64>,
+    // ── S9: line (area) ──────────────────────────────────────────────────────
+    /// When true, draw an additional line border on top of the area fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<bool>,
+    // ── S10: borders (area/errorband) ────────────────────────────────────────
+    /// When true, draw border lines on both top and bottom edges of an area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borders: Option<bool>,
 }
 
 #[cfg(test)]

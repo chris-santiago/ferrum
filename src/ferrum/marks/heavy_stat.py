@@ -500,6 +500,10 @@ def desugar_hex(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
+    if stroke is not None:
+        raise ValueError(f"mark_hex(stroke={stroke!r}) is not supported")
+    if stroke_width != 0:
+        raise ValueError(f"mark_hex(stroke_width={stroke_width!r}) is not supported")
     if aggregate in ("mean", "sum") and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     if aggregate not in ("count", "mean", "sum"):
@@ -714,6 +718,10 @@ def desugar_function(
     >>> result[3].num_rows
     200
     """
+    if not clip:
+        raise ValueError(
+            "mark_function(clip=False) is not supported; clipping is always enabled"
+        )
     import numpy as np
     import pyarrow as pa
 

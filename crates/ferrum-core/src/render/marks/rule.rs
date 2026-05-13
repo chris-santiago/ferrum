@@ -4,7 +4,7 @@
 //!   ordinal y + x + x2 → ranged horizontal segment (Phase 10d-pre,
 //!     feature-importance error bars).
 
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::svg::{Stroke, SvgBuffer};
 
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
