@@ -44,16 +44,23 @@ df_lines = pl.DataFrame(rows_ts)
 
 # Scatter 3-class
 n_sc = 180
-scatter_x = np.concatenate([rng.normal(-1.5, 0.8, 60), rng.normal(1.5, 0.8, 60), rng.normal(0, 0.8, 60)])
-scatter_y = np.concatenate([rng.normal(-1.5, 0.8, 60), rng.normal(1.5, 0.8, 60), rng.normal(0, 0.8, 60)])
+scatter_x = np.concatenate(
+    [rng.normal(-1.5, 0.8, 60), rng.normal(1.5, 0.8, 60), rng.normal(0, 0.8, 60)]
+)
+scatter_y = np.concatenate(
+    [rng.normal(-1.5, 0.8, 60), rng.normal(1.5, 0.8, 60), rng.normal(0, 0.8, 60)]
+)
 scatter_cls = ["Alpha"] * 60 + ["Beta"] * 60 + ["Gamma"] * 60
 df_scatter = pl.DataFrame({"x": scatter_x, "y": scatter_y, "class": scatter_cls})
 
 # Bar chart
 categories = ["Q1", "Q2", "Q3", "Q4"]
 bar_groups = ["North", "South", "West"]
-rows_bar = [{"quarter": cat, "region": bg, "sales": float(rng.integers(40, 120))}
-            for cat in categories for bg in bar_groups]
+rows_bar = [
+    {"quarter": cat, "region": bg, "sales": float(rng.integers(40, 120))}
+    for cat in categories
+    for bg in bar_groups
+]
 df_bar = pl.DataFrame(rows_bar)
 
 # Simple bar for area
@@ -68,18 +75,21 @@ df_area = pl.DataFrame(rows_area)
 
 # Distribution / boxplot groups
 box_groups = ["Control", "Treatment A", "Treatment B", "Treatment C"]
-rows_box = [{"group": g, "value": float(rng.normal(mu, 1.0))}
-            for g, mu in zip(box_groups, [0.0, 0.8, -0.4, 1.2])
-            for _ in range(80)]
+rows_box = [
+    {"group": g, "value": float(rng.normal(mu, 1.0))}
+    for g, mu in zip(box_groups, [0.0, 0.8, -0.4, 1.2])
+    for _ in range(80)
+]
 df_box = pl.DataFrame(rows_box)
 
 # Wide corr matrix
 feature_names = ["Feature A", "Feature B", "Feature C", "Feature D", "Feature E"]
 cov_raw = rng.standard_normal((5, 50))
 corr = np.corrcoef(cov_raw)
-corr_rows = [{"feature": fn, **{cn: float(round(corr[i, j], 2))
-              for j, cn in enumerate(feature_names)}}
-             for i, fn in enumerate(feature_names)]
+corr_rows = [
+    {"feature": fn, **{cn: float(round(corr[i, j], 2)) for j, cn in enumerate(feature_names)}}
+    for i, fn in enumerate(feature_names)
+]
 df_corr = pl.DataFrame(corr_rows)
 
 # Hex / contour data
@@ -93,19 +103,24 @@ smooth_y = 2 * smooth_x + rng.normal(0, 3, 120)
 df_smooth = pl.DataFrame({"x": smooth_x, "y": smooth_y})
 
 # Text labels
-df_text = pl.DataFrame({
-    "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-    "y": [2.0, 4.0, 1.5, 3.5, 2.5],
-    "label": ["A", "B", "C", "D", "E"],
-})
+df_text = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "y": [2.0, 4.0, 1.5, 3.5, 2.5],
+        "label": ["A", "B", "C", "D", "E"],
+    }
+)
 
 # Tick / strip
 df_tick = df_box
 
 # Histogram groups
 hist_groups = ["Group A", "Group B"]
-rows_hist = [{"value": float(rng.normal(0.0 if g == "Group A" else 2.0, 1.0)), "group": g}
-             for g in hist_groups for _ in range(150)]
+rows_hist = [
+    {"value": float(rng.normal(0.0 if g == "Group A" else 2.0, 1.0)), "group": g}
+    for g in hist_groups
+    for _ in range(150)
+]
 df_hist = pl.DataFrame(rows_hist)
 
 # Facet data
@@ -131,13 +146,15 @@ df_fn = pl.DataFrame(rows_fn)
 eb_groups = ["A", "B", "C", "D"]
 eb_means = [2.5, 3.8, 1.9, 4.2]
 eb_errs = [0.3, 0.5, 0.4, 0.6]
-df_eb = pl.DataFrame({
-    "group": eb_groups,
-    "mean": eb_means,
-    "err": eb_errs,
-    "lower": [m - e for m, e in zip(eb_means, eb_errs)],
-    "upper": [m + e for m, e in zip(eb_means, eb_errs)],
-})
+df_eb = pl.DataFrame(
+    {
+        "group": eb_groups,
+        "mean": eb_means,
+        "err": eb_errs,
+        "lower": [m - e for m, e in zip(eb_means, eb_errs)],
+        "upper": [m + e for m, e in zip(eb_means, eb_errs)],
+    }
+)
 
 # Violin / KDE data
 df_violin = df_box
@@ -152,40 +169,50 @@ raster_y = raster_x * 0.5 + rng.normal(0, 1.5, 1000)
 df_raster = pl.DataFrame({"x": raster_x, "y": raster_y})
 
 # Swarm
-df_swarm = pl.DataFrame({
-    "group": (["A"] * 40 + ["B"] * 40 + ["C"] * 40),
-    "value": list(rng.normal(0, 1, 40)) + list(rng.normal(1, 0.8, 40)) + list(rng.normal(-0.5, 1.2, 40)),
-})
+df_swarm = pl.DataFrame(
+    {
+        "group": (["A"] * 40 + ["B"] * 40 + ["C"] * 40),
+        "value": list(rng.normal(0, 1, 40))
+        + list(rng.normal(1, 0.8, 40))
+        + list(rng.normal(-0.5, 1.2, 40)),
+    }
+)
 
 # Segment
-df_segment = pl.DataFrame({
-    "x": [1.0, 2.0, 3.0, 4.0],
-    "y": [1.0, 2.5, 1.5, 3.0],
-    "x2": [1.5, 2.5, 3.5, 4.5],
-    "y2": [2.0, 3.5, 2.5, 4.0],
-})
+df_segment = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 2.5, 1.5, 3.0],
+        "x2": [1.5, 2.5, 3.5, 4.5],
+        "y2": [2.0, 3.5, 2.5, 4.0],
+    }
+)
 
 # Boxen
 df_boxen = df_box
 
 # jointplot / pairplot data
-iris_x = np.vstack([
-    rng.multivariate_normal([5.0, 3.5], [[0.4, 0.1], [0.1, 0.2]], 50),
-    rng.multivariate_normal([6.0, 2.8], [[0.5, 0.2], [0.2, 0.3]], 50),
-    rng.multivariate_normal([6.5, 3.0], [[0.3, 0.1], [0.1, 0.4]], 50),
-])
-df_iris = pl.DataFrame({
-    "sepal_length": iris_x[:, 0],
-    "sepal_width": iris_x[:, 1],
-    "petal_length": rng.normal(3.5, 1.5, 150),
-    "petal_width": rng.normal(1.2, 0.7, 150),
-    "species": ["setosa"] * 50 + ["versicolor"] * 50 + ["virginica"] * 50,
-})
+iris_x = np.vstack(
+    [
+        rng.multivariate_normal([5.0, 3.5], [[0.4, 0.1], [0.1, 0.2]], 50),
+        rng.multivariate_normal([6.0, 2.8], [[0.5, 0.2], [0.2, 0.3]], 50),
+        rng.multivariate_normal([6.5, 3.0], [[0.3, 0.1], [0.1, 0.4]], 50),
+    ]
+)
+df_iris = pl.DataFrame(
+    {
+        "sepal_length": iris_x[:, 0],
+        "sepal_width": iris_x[:, 1],
+        "petal_length": rng.normal(3.5, 1.5, 150),
+        "petal_width": rng.normal(1.2, 0.7, 150),
+        "species": ["setosa"] * 50 + ["versicolor"] * 50 + ["virginica"] * 50,
+    }
+)
 
 # clustermap data (wide)
 cluster_data = rng.standard_normal((8, 6))
 cluster_rows = [
-    {"row": f"Sample {i+1}", **{f"Gene {j+1}": float(cluster_data[i, j]) for j in range(6)}}
+    {"row": f"Sample {i + 1}", **{f"Gene {j + 1}": float(cluster_data[i, j]) for j in range(6)}}
     for i in range(8)
 ]
 df_cluster = pl.DataFrame(cluster_rows)
@@ -204,13 +231,13 @@ df_parallel = df_iris
 
 # ── sklearn model setup ────────────────────────────────────────────────────────
 try:
-    from sklearn.datasets import load_iris, load_breast_cancer, make_regression
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-    from sklearn.linear_model import LogisticRegression, Ridge, Lasso
-    from sklearn.decomposition import PCA
-    from sklearn.cluster import KMeans
-    from sklearn.preprocessing import StandardScaler
     import pandas as pd
+    from sklearn.cluster import KMeans
+    from sklearn.datasets import load_breast_cancer, load_iris, make_regression
+    from sklearn.decomposition import PCA
+    from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+    from sklearn.linear_model import Lasso, LogisticRegression, Ridge
+    from sklearn.preprocessing import StandardScaler
 
     # Classification (multi-class)
     iris = load_iris()
@@ -256,6 +283,7 @@ except Exception as exc:
 
 # ── chart builders ─────────────────────────────────────────────────────────────
 
+
 def try_render(name: str, fn) -> tuple[str, bytes | None, str | None]:
     """Run fn(), return (name, png_bytes_or_None, error_or_None)."""
     try:
@@ -274,11 +302,14 @@ def try_render(name: str, fn) -> tuple[str, bytes | None, str | None]:
 
 # ── Grammar-level marks ───────────────────────────────────────────────────────
 
+
 def build_mark_point():
     return (
         fm.Chart(df_scatter)
         .mark_point()
-        .encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"), color=fm.Color("class", title="Class"))
+        .encode(
+            x=fm.X("x", title="X"), y=fm.Y("y", title="Y"), color=fm.Color("class", title="Class")
+        )
         .properties(title="mark_point() — Scatter", width=W, height=H)
         .theme(THEME)
     )
@@ -288,7 +319,11 @@ def build_mark_line():
     return (
         fm.Chart(df_lines)
         .mark_line()
-        .encode(x=fm.X("month", title="Month"), y=fm.Y("value", title="Value"), color=fm.Color("group", title="Group"))
+        .encode(
+            x=fm.X("month", title="Month"),
+            y=fm.Y("value", title="Value"),
+            color=fm.Color("group", title="Group"),
+        )
         .properties(title="mark_line() — Multi-Series Line", width=W, height=H)
         .theme(THEME)
     )
@@ -298,7 +333,11 @@ def build_mark_bar():
     return (
         fm.Chart(df_bar)
         .mark_bar(position=fm.Dodge())
-        .encode(x=fm.X("quarter", title="Quarter"), y=fm.Y("sales", title="Sales"), color=fm.Color("region", title="Region"))
+        .encode(
+            x=fm.X("quarter", title="Quarter"),
+            y=fm.Y("sales", title="Sales"),
+            color=fm.Color("region", title="Region"),
+        )
         .properties(title="mark_bar() — Grouped Bar", width=W, height=H)
         .theme(THEME)
     )
@@ -308,7 +347,11 @@ def build_mark_area():
     return (
         fm.Chart(df_area)
         .mark_area(position=fm.Stack())
-        .encode(x=fm.X("x", title="X"), y=fm.Y("value", title="Value"), color=fm.Color("series", title="Series"))
+        .encode(
+            x=fm.X("x", title="X"),
+            y=fm.Y("value", title="Value"),
+            color=fm.Color("series", title="Series"),
+        )
         .properties(title="mark_area() — Stacked Area", width=W, height=H)
         .theme(THEME)
     )
@@ -338,7 +381,11 @@ def build_mark_histogram():
     return (
         fm.Chart(df_hist)
         .mark_histogram(groupby="group")
-        .encode(x=fm.X("value", title="Value"), y=fm.Y("count", title="Count"), color=fm.Color("group", title="Group"))
+        .encode(
+            x=fm.X("value", title="Value"),
+            y=fm.Y("count", title="Count"),
+            color=fm.Color("group", title="Group"),
+        )
         .properties(title="mark_histogram() — Histogram", width=W, height=H)
         .theme(THEME)
     )
@@ -385,13 +432,16 @@ def build_mark_tick():
 
 
 def build_mark_rule():
-    return (
+    scatter = (
         fm.Chart(df_smooth)
-        .mark_point()
+        .mark_point(opacity=0.4)
         .encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"))
-        .properties(title="mark_rule() — Reference Line overlay", width=W, height=H)
+        .properties(width=W, height=H)
         .theme(THEME)
     )
+    rule_df = pl.DataFrame({"y": [float(np.mean(smooth_y))]})
+    rule = fm.Chart(rule_df).mark_rule(stroke_dash="4,2").encode(y=fm.Y("y")).theme(THEME)
+    return (scatter + rule).properties(title="mark_rule() — Reference Line overlay")
 
 
 def build_mark_errorbar():
@@ -408,9 +458,9 @@ def build_mark_errorbar():
 def build_mark_errorband():
     return (
         fm.Chart(df_smooth)
-        .mark_smooth()
+        .mark_smooth(ci=0.95)
         .encode(x=fm.X("x", title="X"), y=fm.Y("y", title="Y"))
-        .properties(title="mark_smooth() + errorband — LOESS Smooth", width=W, height=H)
+        .properties(title="mark_smooth(ci=0.95) — LOESS + CI Band", width=W, height=H)
         .theme(THEME)
     )
 
@@ -439,7 +489,9 @@ def build_mark_function():
     return (
         fm.Chart(df_fn)
         .mark_line()
-        .encode(x=fm.X("x", title="x"), y=fm.Y("y", title="y"), color=fm.Color("fn", title="Function"))
+        .encode(
+            x=fm.X("x", title="x"), y=fm.Y("y", title="y"), color=fm.Color("fn", title="Function")
+        )
         .properties(title="mark_function() — Sin/Cos Lines", width=W, height=H)
         .theme(THEME)
     )
@@ -486,11 +538,19 @@ def build_mark_qq():
 
 
 def build_mark_ribbon():
+    x_rb = np.linspace(0, 10, 50)
+    df_rb = pl.DataFrame(
+        {
+            "x": x_rb,
+            "lower": np.sin(x_rb) - 0.5,
+            "upper": np.sin(x_rb) + 0.5,
+        }
+    )
     return (
-        fm.Chart(df_eb)
-        .mark_errorband()
-        .encode(x=fm.X("group", title="Group"), y=fm.Y("lower", title="Lower"), y2=fm.Y2("upper"))
-        .properties(title="mark_ribbon() — Error Band/Ribbon", width=W, height=H)
+        fm.Chart(df_rb)
+        .mark_ribbon()
+        .encode(x=fm.X("x", title="X"), y=fm.Y("lower", title="Y"), y2=fm.Y2("upper"))
+        .properties(title="mark_ribbon() — Ribbon Band", width=W, height=H)
         .theme(THEME)
     )
 
@@ -506,6 +566,7 @@ def build_mark_segment():
 
 
 # ── Composition examples ──────────────────────────────────────────────────────
+
 
 def build_facet():
     return (
@@ -550,6 +611,7 @@ def build_hconcat():
 
 # ── Figure-level functions ────────────────────────────────────────────────────
 
+
 def build_catplot_box():
     return fm.catplot(df_box, x="group", y="value", kind="box", theme=THEME).properties(
         title="catplot(kind='box')", width=W, height=H
@@ -575,16 +637,16 @@ def build_catplot_swarm():
 
 
 def build_catplot_bar():
-    return fm.catplot(df_bar, x="quarter", y="sales", hue="region", kind="bar", theme=THEME).properties(
-        title="catplot(kind='bar')", width=W, height=H
-    )
+    return fm.catplot(
+        df_bar, x="quarter", y="sales", hue="region", kind="bar", theme=THEME
+    ).properties(title="catplot(kind='bar')", width=W, height=H)
 
 
 def build_displot_hist():
     # multiple="dodge" passes groupby so hue column is preserved in the transform output
-    return fm.displot(df_hist, x="value", hue="group", kind="hist", multiple="dodge", theme=THEME).properties(
-        title="displot(kind='hist')", width=W, height=H
-    )
+    return fm.displot(
+        df_hist, x="value", hue="group", kind="hist", multiple="dodge", theme=THEME
+    ).properties(title="displot(kind='hist')", width=W, height=H)
 
 
 def build_displot_kde():
@@ -627,16 +689,17 @@ def build_pairplot():
 
 
 def build_heatmap():
-    return fm.heatmap(df_corr, cmap="rdbu", center=0.0, annot=True, fmt=".2f", theme=THEME).properties(
+    return fm.heatmap(df_corr, center=0.0, annot=True, fmt=".2f", theme=THEME).properties(
         title="heatmap() — Correlation Matrix", width=480, height=400
     )
 
 
 def build_clustermap():
-    return fm.clustermap(df_cluster, cmap="magma", theme=THEME)
+    return fm.clustermap(df_cluster, theme=THEME)
 
 
 # ── Diagnostic charts (sklearn required) ─────────────────────────────────────
+
 
 def build_roc_chart():
     return fm.roc_chart(clf_bc, X_bc, y_bc, theme=THEME).properties(
@@ -661,11 +724,12 @@ def build_residuals_chart():
 
 
 def build_prediction_error_chart():
-    # Use mark_prediction_error directly
     src = fm.ModelSource(reg, X_reg, y_reg)
-    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
-    return _prediction_error_chart_from_source(src, theme=THEME).properties(
-        title="prediction_error_chart()", width=W, height=H
+    return (
+        fm.Chart(src.predictions())
+        .mark_prediction_error()
+        .properties(title="prediction_error_chart()", width=W, height=H)
+        .theme(THEME)
     )
 
 
@@ -719,9 +783,9 @@ def build_discrimination_threshold_chart():
 
 def build_alpha_selection_chart():
     alphas = list(np.logspace(-3, 2, 12))
-    return fm.alpha_selection_chart(Ridge(), X_reg, y_reg, alphas=alphas, cv=3, theme=THEME).properties(
-        title="alpha_selection_chart()", width=W, height=H
-    )
+    return fm.alpha_selection_chart(
+        Ridge(), X_reg, y_reg, alphas=alphas, cv=3, theme=THEME
+    ).properties(title="alpha_selection_chart()", width=W, height=H)
 
 
 def build_pca_scree_chart():
@@ -737,9 +801,10 @@ def build_intercluster_distance_chart():
 
 
 def build_decision_boundary_chart():
-    return fm.decision_boundary_chart(clf_bc, X_bc, y_bc, features=(0, 1), grid_resolution=80, theme=THEME).properties(
-        title="decision_boundary_chart()", width=W, height=H
-    )
+    clf_2d = RandomForestClassifier(n_estimators=50, random_state=42).fit(X_iris[:, :2], y_iris)
+    return fm.decision_boundary_chart(
+        clf_2d, X_iris[:, :2], y_iris, features=(0, 1), grid_resolution=80, theme=THEME
+    ).properties(title="decision_boundary_chart()", width=W, height=H)
 
 
 def build_parallel_coordinates_chart():
@@ -781,9 +846,9 @@ def build_shap_bar_chart():
 
 
 def build_shap_waterfall_chart():
-    return fm.shap_waterfall_chart(gbm_bc, X_bc, y_bc, sample_idx=0, max_display=8, theme=THEME).properties(
-        title="shap_waterfall_chart()", width=W, height=H
-    )
+    return fm.shap_waterfall_chart(
+        gbm_bc, X_bc, y_bc, sample_idx=0, max_display=8, theme=THEME
+    ).properties(title="shap_waterfall_chart()", width=W, height=H)
 
 
 def build_class_prediction_error_chart():
@@ -805,84 +870,325 @@ def build_pdp_chart():
 # ── Chart registry ─────────────────────────────────────────────────────────────
 
 GRAMMAR_MARKS = [
-    ("mark_point",      "mark_point() — Scatter",           build_mark_point,       "fm.Chart(df).mark_point().encode(x='x', y='y', color='class')"),
-    ("mark_line",       "mark_line() — Multi-Series Line",  build_mark_line,        "fm.Chart(df).mark_line().encode(x='month', y='value', color='group')"),
-    ("mark_bar",        "mark_bar() — Grouped Bar",         build_mark_bar,         "fm.Chart(df).mark_bar(position=fm.Dodge()).encode(x='quarter', y='sales', color='region')"),
-    ("mark_area",       "mark_area() — Stacked Area",       build_mark_area,        "fm.Chart(df).mark_area(position=fm.Stack()).encode(x='x', y='value', color='series')"),
-    ("mark_boxplot",    "mark_boxplot() — Box Plot",        build_mark_boxplot,     "fm.Chart(df).mark_boxplot().encode(x='group', y='value')"),
-    ("mark_violin",     "mark_violin() — Violin",           build_mark_violin,      "fm.Chart(df).mark_violin().encode(x='group', y='value')"),
-    ("mark_histogram",  "mark_histogram() — Histogram",     build_mark_histogram,   "fm.Chart(df).mark_histogram(groupby='group').encode(x='value', y='count', color='group')"),
-    ("mark_density",    "mark_density() — KDE",             build_mark_density,     "fm.Chart(df).mark_density(groupby='group').encode(x='value', color='group')"),
-    ("mark_hex",        "mark_hex() — Hexbin",              build_mark_hex,         "fm.Chart(df).mark_hex().encode(x='x', y='y')"),
-    ("mark_text",       "mark_text() — Text Labels",        build_mark_text,        "fm.Chart(df).mark_text().encode(x='x', y='y', text='label')"),
-    ("mark_tick",       "mark_tick() — Strip/Tick",         build_mark_tick,        "fm.Chart(df).mark_tick().encode(x='value', y='group')"),
-    ("mark_errorbar",   "mark_errorbar() — Error Bars",     build_mark_errorbar,    "fm.Chart(df).mark_errorbar().encode(x='group', y='mean', yError='err')"),
-    ("mark_smooth",     "mark_smooth() — LOESS Smooth",     build_mark_errorband,   "fm.Chart(df).mark_smooth().encode(x='x', y='y')"),
-    ("mark_smooth_lm",  "mark_smooth(lm) — Linear",         build_mark_smooth,      "fm.Chart(df).mark_smooth(method='lm').encode(x='x', y='y')"),
-    ("mark_contour",    "mark_contour() — 2D Contour",      build_mark_contour,     "fm.Chart(df).mark_contour().encode(x='x', y='y')"),
-    ("mark_function",   "mark_function() — Function Lines", build_mark_function,    "fm.Chart(df).mark_line().encode(x='x', y='y', color='fn')"),
-    ("mark_raster",     "mark_raster() — 2D Raster",        build_mark_raster,      "fm.Chart(df).mark_raster().encode(x='x', y='y')"),
-    ("mark_swarm",      "mark_swarm() — Beeswarm",          build_mark_swarm,       "fm.Chart(df).mark_swarm().encode(x='group', y='value')"),
-    ("mark_boxen",      "mark_boxen() — Letter-Value",      build_mark_boxen,       "fm.Chart(df).mark_boxen().encode(x='group', y='value')"),
-    ("mark_qq",         "mark_qq() — QQ Plot",              build_mark_qq,          "fm.Chart(df).mark_qq().encode(x='value')"),
-    ("mark_ribbon",     "mark_ribbon() — Error Band",       build_mark_ribbon,      "fm.Chart(df).mark_errorband().encode(x='group', y='lower', y2='upper')"),
-    ("mark_segment",    "mark_segment() — Segments",        build_mark_segment,     "fm.Chart(df).mark_segment().encode(x='x', y='y', x2='x2', y2='y2')"),
+    (
+        "mark_point",
+        "mark_point() — Scatter",
+        build_mark_point,
+        "fm.Chart(df).mark_point().encode(x='x', y='y', color='class')",
+    ),
+    (
+        "mark_line",
+        "mark_line() — Multi-Series Line",
+        build_mark_line,
+        "fm.Chart(df).mark_line().encode(x='month', y='value', color='group')",
+    ),
+    (
+        "mark_bar",
+        "mark_bar() — Grouped Bar",
+        build_mark_bar,
+        "fm.Chart(df).mark_bar(position=fm.Dodge()).encode(x='quarter', y='sales', color='region')",
+    ),
+    (
+        "mark_area",
+        "mark_area() — Stacked Area",
+        build_mark_area,
+        "fm.Chart(df).mark_area(position=fm.Stack()).encode(x='x', y='value', color='series')",
+    ),
+    (
+        "mark_boxplot",
+        "mark_boxplot() — Box Plot",
+        build_mark_boxplot,
+        "fm.Chart(df).mark_boxplot().encode(x='group', y='value')",
+    ),
+    (
+        "mark_violin",
+        "mark_violin() — Violin",
+        build_mark_violin,
+        "fm.Chart(df).mark_violin().encode(x='group', y='value')",
+    ),
+    (
+        "mark_histogram",
+        "mark_histogram() — Histogram",
+        build_mark_histogram,
+        "fm.Chart(df).mark_histogram(groupby='group').encode(x='value', y='count', color='group')",
+    ),
+    (
+        "mark_density",
+        "mark_density() — KDE",
+        build_mark_density,
+        "fm.Chart(df).mark_density(groupby='group').encode(x='value', color='group')",
+    ),
+    (
+        "mark_hex",
+        "mark_hex() — Hexbin",
+        build_mark_hex,
+        "fm.Chart(df).mark_hex().encode(x='x', y='y')",
+    ),
+    (
+        "mark_text",
+        "mark_text() — Text Labels",
+        build_mark_text,
+        "fm.Chart(df).mark_text().encode(x='x', y='y', text='label')",
+    ),
+    (
+        "mark_tick",
+        "mark_tick() — Strip/Tick",
+        build_mark_tick,
+        "fm.Chart(df).mark_tick().encode(x='value', y='group')",
+    ),
+    (
+        "mark_errorbar",
+        "mark_errorbar() — Error Bars",
+        build_mark_errorbar,
+        "fm.Chart(df).mark_errorbar().encode(x='group', y='mean', yError='err')",
+    ),
+    (
+        "mark_smooth_ci",
+        "mark_smooth(ci) — LOESS + CI Band",
+        build_mark_errorband,
+        "fm.Chart(df).mark_smooth(ci=0.95).encode(x='x', y='y')",
+    ),
+    (
+        "mark_smooth_lm",
+        "mark_smooth(lm) — Linear",
+        build_mark_smooth,
+        "fm.Chart(df).mark_smooth(method='lm').encode(x='x', y='y')",
+    ),
+    (
+        "mark_contour",
+        "mark_contour() — 2D Contour",
+        build_mark_contour,
+        "fm.Chart(df).mark_contour().encode(x='x', y='y')",
+    ),
+    (
+        "mark_function",
+        "mark_function() — Function Lines",
+        build_mark_function,
+        "fm.Chart(df).mark_line().encode(x='x', y='y', color='fn')",
+    ),
+    (
+        "mark_raster",
+        "mark_raster() — 2D Raster",
+        build_mark_raster,
+        "fm.Chart(df).mark_raster().encode(x='x', y='y')",
+    ),
+    (
+        "mark_swarm",
+        "mark_swarm() — Beeswarm",
+        build_mark_swarm,
+        "fm.Chart(df).mark_swarm().encode(x='group', y='value')",
+    ),
+    (
+        "mark_boxen",
+        "mark_boxen() — Letter-Value",
+        build_mark_boxen,
+        "fm.Chart(df).mark_boxen().encode(x='group', y='value')",
+    ),
+    ("mark_qq", "mark_qq() — QQ Plot", build_mark_qq, "fm.Chart(df).mark_qq().encode(x='value')"),
+    (
+        "mark_ribbon",
+        "mark_ribbon() — Error Band",
+        build_mark_ribbon,
+        "fm.Chart(df).mark_errorband().encode(x='group', y='lower', y2='upper')",
+    ),
+    (
+        "mark_segment",
+        "mark_segment() — Segments",
+        build_mark_segment,
+        "fm.Chart(df).mark_segment().encode(x='x', y='y', x2='x2', y2='y2')",
+    ),
 ]
 
 COMPOSITION_EXAMPLES = [
-    ("facet",    "Faceted Chart",            build_facet,    "fm.Chart(df).mark_point().encode(...).facet(col='dose', ncols=3)"),
-    ("layered",  "Layered — Scatter+Smooth", build_layered,  "scatter.layer(smooth).properties(...)"),
-    ("hconcat",  "Horizontal Concat (A+B)",  build_hconcat,  "chart1 + chart2"),
+    (
+        "facet",
+        "Faceted Chart",
+        build_facet,
+        "fm.Chart(df).mark_point().encode(...).facet(col='dose', ncols=3)",
+    ),
+    ("layered", "Layered — Scatter+Smooth", build_layered, "scatter.layer(smooth).properties(...)"),
+    ("hconcat", "Horizontal Concat (A+B)", build_hconcat, "chart1 + chart2"),
 ]
 
 FIGURE_FUNCTIONS = [
-    ("catplot_box",     "catplot(kind='box')",     build_catplot_box,     "fm.catplot(df, x='group', y='value', kind='box')"),
-    ("catplot_violin",  "catplot(kind='violin')",  build_catplot_violin,  "fm.catplot(df, x='group', y='value', kind='violin')"),
-    ("catplot_strip",   "catplot(kind='strip')",   build_catplot_strip,   "fm.catplot(df, x='group', y='value', kind='strip')"),
-    ("catplot_swarm",   "catplot(kind='swarm')",   build_catplot_swarm,   "fm.catplot(df, x='group', y='value', kind='swarm')"),
-    ("catplot_bar",     "catplot(kind='bar')",     build_catplot_bar,     "fm.catplot(df, x='quarter', y='sales', hue='region', kind='bar')"),
-    ("displot_hist",    "displot(kind='hist')",    build_displot_hist,    "fm.displot(df, x='value', hue='group', kind='hist')"),
-    ("displot_kde",     "displot(kind='kde')",     build_displot_kde,     "fm.displot(df, x='value', hue='group', kind='kde')"),
-    ("displot_ecdf",    "displot(kind='ecdf')",    build_displot_ecdf,    "fm.displot(df, x='value', hue='group', kind='ecdf')"),
-    ("lmplot",          "lmplot()",                build_lmplot,          "fm.lmplot(df, x='x', y='y', hue='group')"),
-    ("residplot",       "residplot()",             build_residplot,       "fm.residplot(df, x='x', y='y')"),
-    ("jointplot",       "jointplot()",             build_jointplot,       "fm.jointplot(df, x='sepal_length', y='sepal_width', hue='species')"),
-    ("pairplot",        "pairplot()",              build_pairplot,        "fm.pairplot(df, vars=[...], hue='species')"),
-    ("heatmap",         "heatmap()",               build_heatmap,         "fm.heatmap(df_corr, cmap='rdbu', center=0, annot=True)"),
-    ("clustermap",      "clustermap()",            build_clustermap,      "fm.clustermap(df_cluster, cmap='magma')"),
+    (
+        "catplot_box",
+        "catplot(kind='box')",
+        build_catplot_box,
+        "fm.catplot(df, x='group', y='value', kind='box')",
+    ),
+    (
+        "catplot_violin",
+        "catplot(kind='violin')",
+        build_catplot_violin,
+        "fm.catplot(df, x='group', y='value', kind='violin')",
+    ),
+    (
+        "catplot_strip",
+        "catplot(kind='strip')",
+        build_catplot_strip,
+        "fm.catplot(df, x='group', y='value', kind='strip')",
+    ),
+    (
+        "catplot_swarm",
+        "catplot(kind='swarm')",
+        build_catplot_swarm,
+        "fm.catplot(df, x='group', y='value', kind='swarm')",
+    ),
+    (
+        "catplot_bar",
+        "catplot(kind='bar')",
+        build_catplot_bar,
+        "fm.catplot(df, x='quarter', y='sales', hue='region', kind='bar')",
+    ),
+    (
+        "displot_hist",
+        "displot(kind='hist')",
+        build_displot_hist,
+        "fm.displot(df, x='value', hue='group', kind='hist')",
+    ),
+    (
+        "displot_kde",
+        "displot(kind='kde')",
+        build_displot_kde,
+        "fm.displot(df, x='value', hue='group', kind='kde')",
+    ),
+    (
+        "displot_ecdf",
+        "displot(kind='ecdf')",
+        build_displot_ecdf,
+        "fm.displot(df, x='value', kind='ecdf')",
+    ),
+    ("lmplot", "lmplot()", build_lmplot, "fm.lmplot(df, x='x', y='y', hue='group')"),
+    ("residplot", "residplot()", build_residplot, "fm.residplot(df, x='x', y='y')"),
+    (
+        "jointplot",
+        "jointplot()",
+        build_jointplot,
+        "fm.jointplot(df, x='sepal_length', y='sepal_width', hue='species')",
+    ),
+    ("pairplot", "pairplot()", build_pairplot, "fm.pairplot(df, vars=[...], hue='species')"),
+    ("heatmap", "heatmap()", build_heatmap, "fm.heatmap(df_corr, center=0, annot=True)"),
+    ("clustermap", "clustermap()", build_clustermap, "fm.clustermap(df_cluster)"),
 ]
 
 DIAGNOSTIC_CHARTS = [
-    ("roc_chart",                    "roc_chart()",                      build_roc_chart,                    "fm.roc_chart(clf, X, y)"),
-    ("pr_chart",                     "pr_chart()",                       build_pr_chart,                     "fm.pr_chart(clf, X, y)"),
-    ("confusion_matrix_chart",       "confusion_matrix_chart()",         build_confusion_matrix_chart,       "fm.confusion_matrix_chart(clf, X, y)"),
-    ("residuals_chart",              "residuals_chart() — 4 panels",     build_residuals_chart,              "fm.residuals_chart(reg, X, y)"),
-    ("prediction_error_chart",       "prediction_error_chart()",         build_prediction_error_chart,       "fm.ModelSource(reg, X, y) → _prediction_error_chart_from_source(src)"),
-    ("learning_curve_chart",         "learning_curve_chart()",           build_learning_curve_chart,         "fm.learning_curve_chart(clf, X, y, cv=3)"),
-    ("validation_curve_chart",       "validation_curve_chart()",         build_validation_curve_chart,       "fm.validation_curve_chart(Ridge(), X, y, param='alpha', values=[...])"),
-    ("cv_scores_chart",              "cv_scores_chart()",                build_cv_scores_chart,              "fm.cv_scores_chart(clf, X, y, cv=5)"),
-    ("calibration_chart",            "calibration_chart()",              build_calibration_chart,            "fm.calibration_chart(clf, X, y)"),
-    ("importance_chart",             "importance_chart()",               build_importance_chart,             "fm.importance_chart(rf, X, y)"),
-    ("gain_chart",                   "gain_chart()",                     build_gain_chart,                   "fm.gain_chart(clf, X, y)"),
-    ("lift_chart",                   "lift_chart()",                     build_lift_chart,                   "fm.lift_chart(clf, X, y)"),
-    ("discrimination_threshold",     "discrimination_threshold_chart()", build_discrimination_threshold_chart, "fm.discrimination_threshold_chart(clf, X, y)"),
-    ("alpha_selection_chart",        "alpha_selection_chart()",          build_alpha_selection_chart,        "fm.alpha_selection_chart(Ridge(), X, y, alphas=[...])"),
-    ("pca_scree_chart",              "pca_scree_chart()",                build_pca_scree_chart,              "fm.pca_scree_chart(pca, X)"),
-    ("intercluster_distance_chart",  "intercluster_distance_chart()",    build_intercluster_distance_chart,  "fm.intercluster_distance_chart(km, X)"),
-    ("decision_boundary_chart",      "decision_boundary_chart()",        build_decision_boundary_chart,      "fm.decision_boundary_chart(clf, X, y, features=(0,1))"),
-    ("parallel_coordinates_chart",   "parallel_coordinates_chart()",     build_parallel_coordinates_chart,   "fm.parallel_coordinates_chart(df, hue='species')"),
-    ("rank1d_chart",                 "rank1d_chart()",                   build_rank1d_chart,                 "fm.rank1d_chart(X_df)"),
-    ("rank2d_chart",                 "rank2d_chart()",                   build_rank2d_chart,                 "fm.rank2d_chart(X_df)"),
-    ("shap_beeswarm_chart",          "shap_beeswarm_chart()",            build_shap_beeswarm_chart,          "fm.shap_beeswarm_chart(gbm, X, y)"),
-    ("shap_bar_chart",               "shap_bar_chart()",                 build_shap_bar_chart,               "fm.shap_bar_chart(gbm, X, y)"),
-    ("shap_waterfall_chart",         "shap_waterfall_chart()",           build_shap_waterfall_chart,         "fm.shap_waterfall_chart(gbm, X, y, sample_idx=0)"),
-    ("class_prediction_error",       "class_prediction_error_chart()",   build_class_prediction_error_chart, "fm.class_prediction_error_chart(clf, X, y)"),
-    ("cluster_diagnostics",          "cluster_diagnostics()",            build_cluster_diagnostics,          "fm.cluster_diagnostics(X, ks=range(2,7))"),
-    ("pdp_chart",                    "pdp_chart()",                      build_pdp_chart,                    "fm.pdp_chart(clf, X, y, features=[0, 1])"),
+    ("roc_chart", "roc_chart()", build_roc_chart, "fm.roc_chart(clf, X, y)"),
+    ("pr_chart", "pr_chart()", build_pr_chart, "fm.pr_chart(clf, X, y)"),
+    (
+        "confusion_matrix_chart",
+        "confusion_matrix_chart()",
+        build_confusion_matrix_chart,
+        "fm.confusion_matrix_chart(clf, X, y)",
+    ),
+    (
+        "residuals_chart",
+        "residuals_chart() — 4 panels",
+        build_residuals_chart,
+        "fm.residuals_chart(reg, X, y)",
+    ),
+    (
+        "prediction_error_chart",
+        "prediction_error_chart()",
+        build_prediction_error_chart,
+        "fm.Chart(src.predictions()).mark_prediction_error()",
+    ),
+    (
+        "learning_curve_chart",
+        "learning_curve_chart()",
+        build_learning_curve_chart,
+        "fm.learning_curve_chart(clf, X, y, cv=3)",
+    ),
+    (
+        "validation_curve_chart",
+        "validation_curve_chart()",
+        build_validation_curve_chart,
+        "fm.validation_curve_chart(Ridge(), X, y, param='alpha', values=[...])",
+    ),
+    (
+        "cv_scores_chart",
+        "cv_scores_chart()",
+        build_cv_scores_chart,
+        "fm.cv_scores_chart(clf, X, y, cv=5)",
+    ),
+    (
+        "calibration_chart",
+        "calibration_chart()",
+        build_calibration_chart,
+        "fm.calibration_chart(clf, X, y)",
+    ),
+    (
+        "importance_chart",
+        "importance_chart()",
+        build_importance_chart,
+        "fm.importance_chart(rf, X, y)",
+    ),
+    ("gain_chart", "gain_chart()", build_gain_chart, "fm.gain_chart(clf, X, y)"),
+    ("lift_chart", "lift_chart()", build_lift_chart, "fm.lift_chart(clf, X, y)"),
+    (
+        "discrimination_threshold",
+        "discrimination_threshold_chart()",
+        build_discrimination_threshold_chart,
+        "fm.discrimination_threshold_chart(clf, X, y)",
+    ),
+    (
+        "alpha_selection_chart",
+        "alpha_selection_chart()",
+        build_alpha_selection_chart,
+        "fm.alpha_selection_chart(Ridge(), X, y, alphas=[...])",
+    ),
+    ("pca_scree_chart", "pca_scree_chart()", build_pca_scree_chart, "fm.pca_scree_chart(pca, X)"),
+    (
+        "intercluster_distance_chart",
+        "intercluster_distance_chart()",
+        build_intercluster_distance_chart,
+        "fm.intercluster_distance_chart(km, X)",
+    ),
+    (
+        "decision_boundary_chart",
+        "decision_boundary_chart()",
+        build_decision_boundary_chart,
+        "fm.decision_boundary_chart(clf, X, y, features=(0,1))",
+    ),
+    (
+        "parallel_coordinates_chart",
+        "parallel_coordinates_chart()",
+        build_parallel_coordinates_chart,
+        "fm.parallel_coordinates_chart(df, hue='species')",
+    ),
+    ("rank1d_chart", "rank1d_chart()", build_rank1d_chart, "fm.rank1d_chart(X_df)"),
+    ("rank2d_chart", "rank2d_chart()", build_rank2d_chart, "fm.rank2d_chart(X_df)"),
+    (
+        "shap_beeswarm_chart",
+        "shap_beeswarm_chart()",
+        build_shap_beeswarm_chart,
+        "fm.shap_beeswarm_chart(gbm, X, y)",
+    ),
+    ("shap_bar_chart", "shap_bar_chart()", build_shap_bar_chart, "fm.shap_bar_chart(gbm, X, y)"),
+    (
+        "shap_waterfall_chart",
+        "shap_waterfall_chart()",
+        build_shap_waterfall_chart,
+        "fm.shap_waterfall_chart(gbm, X, y, sample_idx=0)",
+    ),
+    (
+        "class_prediction_error",
+        "class_prediction_error_chart()",
+        build_class_prediction_error_chart,
+        "fm.class_prediction_error_chart(clf, X, y)",
+    ),
+    (
+        "cluster_diagnostics",
+        "cluster_diagnostics()",
+        build_cluster_diagnostics,
+        "fm.cluster_diagnostics(X, ks=range(2,7))",
+    ),
+    ("pdp_chart", "pdp_chart()", build_pdp_chart, "fm.pdp_chart(clf, X, y, features=[0, 1])"),
 ]
 
 
 # ── rendering ──────────────────────────────────────────────────────────────────
+
 
 def render_section(
     entries: list,
@@ -893,7 +1199,12 @@ def render_section(
     results = {}
     for slug, label, builder, api_call in entries:
         if skip_if_no_sklearn and not SKLEARN_AVAILABLE:
-            results[slug] = {"label": label, "api_call": api_call, "png_path": None, "error": "sklearn not available"}
+            results[slug] = {
+                "label": label,
+                "api_call": api_call,
+                "png_path": None,
+                "error": "sklearn not available",
+            }
             continue
 
         out_path = PNG_DIR / f"{slug}.png"
@@ -901,7 +1212,12 @@ def render_section(
         _, png, error = try_render(label, builder)
         if png is not None:
             out_path.write_bytes(png)
-            results[slug] = {"label": label, "api_call": api_call, "png_path": out_path, "error": None}
+            results[slug] = {
+                "label": label,
+                "api_call": api_call,
+                "png_path": out_path,
+                "error": None,
+            }
             print(" OK")
         else:
             results[slug] = {"label": label, "api_call": api_call, "png_path": None, "error": error}
@@ -922,7 +1238,9 @@ def main() -> None:
     figure_results = render_section(FIGURE_FUNCTIONS, "FIGURE")
 
     print("\nDiagnostic Charts:")
-    diag_results = render_section(DIAGNOSTIC_CHARTS, "DIAG", skip_if_no_sklearn=not SKLEARN_AVAILABLE)
+    diag_results = render_section(
+        DIAGNOSTIC_CHARTS, "DIAG", skip_if_no_sklearn=not SKLEARN_AVAILABLE
+    )
 
     all_results = {**grammar_results, **composition_results, **figure_results, **diag_results}
     total = len(all_results)
@@ -1053,7 +1371,9 @@ def _card(slug: str, info: dict) -> str:
         # Embed as base64 data URI so the HTML is self-contained
         data = png_path.read_bytes()
         b64 = base64.b64encode(data).decode()
-        img_tag = f'<img class="card-img" src="data:image/png;base64,{b64}" alt="{label}" loading="lazy">'
+        img_tag = (
+            f'<img class="card-img" src="data:image/png;base64,{b64}" alt="{label}" loading="lazy">'
+        )
         return f"""
 <div class="card">
   <div class="card-header"><h3>{label}</h3></div>
@@ -1080,12 +1400,14 @@ def _generate_html(grammar, composition, figure, diag) -> str:
     total = len(all_r)
     passed = sum(1 for v in all_r.values() if v["png_path"] is not None)
 
-    sections = "\n".join([
-        _section("Grammar-Level Marks", grammar),
-        _section("Composition Examples", composition),
-        _section("Figure-Level Functions", figure),
-        _section("Diagnostic &amp; Model Charts", diag),
-    ])
+    sections = "\n".join(
+        [
+            _section("Grammar-Level Marks", grammar),
+            _section("Composition Examples", composition),
+            _section("Figure-Level Functions", figure),
+            _section("Diagnostic &amp; Model Charts", diag),
+        ]
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
