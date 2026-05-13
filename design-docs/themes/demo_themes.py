@@ -385,9 +385,9 @@ h1 {
 def _img_tag(png_path: Path | None, chart_label: str, theme_label: str) -> str:
     if png_path is None or not png_path.exists():
         return f'<div class="chart-cell missing">render failed</div>'
-    rel = png_path.relative_to(HERE)
+    b64 = base64.b64encode(png_path.read_bytes()).decode()
     alt = f"{chart_label} — {theme_label}"
-    return f'<div class="chart-cell"><img src="{rel}" alt="{alt}" loading="lazy"></div>'
+    return f'<div class="chart-cell"><img src="data:image/png;base64,{b64}" alt="{alt}" loading="lazy"></div>'
 
 
 def generate_html(results: dict[tuple[str, str], Path]) -> str:
