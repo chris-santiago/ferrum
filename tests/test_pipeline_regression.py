@@ -759,22 +759,35 @@ def _group_df(n_per_group: int = 15, seed: int = 42) -> pl.DataFrame:
 class TestRound2Fixes:
     # --- Contour rendering (was blank) -----------------------------------
 
-    def test_contour_spec_has_polygon_layer(self):
-        """mark_contour desugars to a polygon layer in the chart spec.
+    def test_contour_spec_has_correct_layer(self):
+        """mark_contour desugars to the correct layer mark per fill mode.
 
-        The SVG renderer may emit an empty clip group when the dataset is
-        small and density estimates are near-zero everywhere, so the
-        regression guard is on the spec structure, not the SVG bitmap.
+        fill=False (default) produces segment mark (isolines).
+        fill=True            produces polygon mark (isobands) with color encoding.
         """
         df = _bivariate_df()
+        # fill=False (default): segment mark for isolines
         chart = fm.Chart(df).mark_contour().encode(x="x", y="y")
         spec = _json.loads(chart.to_json())
         transform_types = [t["type"] for t in spec.get("transforms", [])]
         assert "kde2_d" in transform_types, "Expected 'kde2_d' transform in contour spec"
         assert "contour" in transform_types, "Expected 'contour' transform in contour spec"
         layer_marks = [layer["mark"] for layer in spec.get("layers", [])]
-        assert "polygon" in layer_marks, (
-            "Expected a 'polygon' mark layer in contour spec"
+        assert "segment" in layer_marks, (
+            "Expected a 'segment' mark layer in contour spec (fill=False)"
+        )
+
+        # fill=True: polygon mark for isobands with color=level_value
+        chart_fill = fm.Chart(df).mark_contour(fill=True).encode(x="x", y="y")
+        spec_fill = _json.loads(chart_fill.to_json())
+        layer_marks_fill = [layer["mark"] for layer in spec_fill.get("layers", [])]
+        assert "polygon" in layer_marks_fill, (
+            "Expected a 'polygon' mark layer in contour spec (fill=True)"
+        )
+        # Verify color encoding is present for density-band coloring
+        poly_layer = next(l for l in spec_fill["layers"] if l["mark"] == "polygon")
+        assert poly_layer["encoding"].get("color", {}).get("field") == "level_value", (
+            "Expected 'color' encoding mapped to 'level_value' for filled contour"
         )
 
     def test_contour_spec_renders_without_error(self):
