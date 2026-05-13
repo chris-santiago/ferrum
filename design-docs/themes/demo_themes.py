@@ -220,7 +220,7 @@ def build_faceted(theme: Any) -> bytes:
             y=fm.Y("response", title="Response"),
         )
         .facet(col="dose", ncols=3)
-        .properties(title="Dose-Response (Faceted)", width=260, height=260)
+        .properties(title="Dose-Response (Faceted)", width=480, height=300)
         .theme(theme)
     )
     return chart.show_png()
