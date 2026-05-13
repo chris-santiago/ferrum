@@ -16,6 +16,7 @@
 //!   multiple samples within a class each get their own polyline.
 //! - Otherwise: one polyline over all rows in batch order.
 
+use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::svg::{Stroke, SvgBuffer};
@@ -190,6 +191,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.fill,
         };
+        let stroke_color = with_opacity(stroke_color, ctx.mark_style.opacity);
         let stroke = Stroke {
             stroke: stroke_color,
             stroke_width: ctx.mark_style.stroke_width,

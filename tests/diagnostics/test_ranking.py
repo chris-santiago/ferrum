@@ -281,6 +281,23 @@ def test_parallel_coordinates_visualizer_y_attached_as_hue():
     assert svg.count("<polyline") == df.height
 
 
+def test_parallel_coordinates_alpha_reaches_svg():
+    """Regression: alpha kwarg must produce opacity in SVG polylines."""
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.parallel_coordinates_chart(
+        df, features=_MULTICLASS_FEATURES, hue="y", alpha=0.3,
+    )
+    svg = chart.show_svg()
+    # Opacity is baked into the RGBA stroke color (e.g. rgba(37,99,235,0.302)).
+    # Verify at least one polyline carries a stroke with alpha < 1.
+    import re
+    rgba_alphas = re.findall(r'stroke="rgba\(\d+,\d+,\d+,([\d.]+)\)"', svg)
+    assert rgba_alphas, "no rgba stroke colors found in SVG"
+    assert any(float(a) < 0.5 for a in rgba_alphas), (
+        f"expected alpha ~0.3 in stroke colors but got: {rgba_alphas[:5]}"
+    )
+
+
 def test_visualizer_show_before_fit_raises():
     viz = ferrum.Rank1DVisualizer()
     with pytest.raises(RuntimeError, match="must be fit"):
