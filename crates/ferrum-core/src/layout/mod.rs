@@ -418,6 +418,21 @@ pub fn compute_layout(
             .spacing
             .map(|s| (s, s))
             .unwrap_or((theme.column_padding, theme.row_padding));
+        // When there are multiple rows of facet panels and the x-axis is
+        // visible, the inter-row gutter must accommodate x-axis tick labels
+        // so non-bottom-row labels are not clipped by the next row's panel.
+        let effective_nrows = match facet.mode {
+            FacetMode::Wrap { ncols } => {
+                let nc = ncols.max(1);
+                (n_panels + nc - 1) / nc
+            }
+            FacetMode::Grid { nrows, .. } => nrows.max(1),
+        };
+        let gy = if effective_nrows > 1 && axes.show_x {
+            gy + x_label_band
+        } else {
+            gy
+        };
         let grid = match facet.mode {
             FacetMode::Wrap { ncols } => {
                 facet::FacetGrid::compute_wrap(ncols, n_panels, plot_region, gx, gy)
@@ -447,6 +462,11 @@ pub fn compute_layout(
     } else {
         0.0
     };
+
+    // Compute the maximum row index so non-bottom panels can suppress the
+    // x-axis title (only the bottom row needs it — duplicating it in every
+    // inter-row gutter is visually noisy).
+    let max_row = panel_rects.iter().map(|(r, _, _, _)| *r).max().unwrap_or(0);
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
@@ -514,8 +534,18 @@ pub fn compute_layout(
             }
 
             if axes.show_x {
+                // Suppress x-axis title on non-bottom-row facet panels to
+                // avoid duplicating "Feature value" (or similar) in every
+                // inter-row gutter — only the bottom row's title is needed.
+                let x_input = if row < max_row && spec.facet.is_some() {
+                    let mut modified = axes.x.clone();
+                    modified.title = None;
+                    modified
+                } else {
+                    axes.x.clone()
+                };
                 let (x_axis, xwarn) = axis::layout_x_axis(
-                    &axes.x,
+                    &x_input,
                     rect,
                     panel_index,
                     theme.label_font_size,
