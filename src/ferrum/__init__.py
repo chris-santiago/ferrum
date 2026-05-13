@@ -192,6 +192,44 @@ from ferrum.encoding import (
 
 __version__ = "0.1.0"
 
+
+def hconcat(*charts, spacing=10.0):
+    """Horizontal concatenation of charts.
+
+    Parameters
+    ----------
+    *charts : Chart or _ChartLike
+        Two or more charts to place side-by-side.
+    spacing : float, default 10.0
+        Pixel gap between adjacent charts.
+
+    Returns
+    -------
+    HConcatChart
+    """
+    from ferrum.composition import HConcatChart
+
+    return HConcatChart(list(charts), spacing=spacing)
+
+
+def vconcat(*charts, spacing=10.0):
+    """Vertical concatenation of charts.
+
+    Parameters
+    ----------
+    *charts : Chart or _ChartLike
+        Two or more charts to stack top-to-bottom.
+    spacing : float, default 10.0
+        Pixel gap between adjacent charts.
+
+    Returns
+    -------
+    VConcatChart
+    """
+    from ferrum.composition import VConcatChart
+
+    return VConcatChart(list(charts), spacing=spacing)
+
 __all__ = [
     # Phase 1-7 core
     "Aggregate",
@@ -240,6 +278,8 @@ __all__ = [
     "Layer",
     "HConcatChart",
     "VConcatChart",
+    "hconcat",
+    "vconcat",
     # Phase 9
     "Repeat",
     "JointChart",

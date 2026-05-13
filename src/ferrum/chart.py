@@ -260,6 +260,19 @@ def _warn_on_layer_conflicts(lhs: "Chart", rhs: "Chart") -> None:
         )
 
 
+def _to_polars(data):
+    """Convert arbitrary chart data to a polars DataFrame.
+
+    Used by ``__add__`` to null-pad merge when two charts have
+    different data.
+    """
+    import polars as pl
+
+    if isinstance(data, pl.DataFrame):
+        return data
+    return pl.from_arrow(to_arrow_table(data))
+
+
 class Chart:
     """Top-level chart value class.
 
@@ -3906,13 +3919,17 @@ class Chart:
     def __add__(self, other: "Chart") -> "Chart":
         """Overlay two charts as a multi-layer composite.
 
-        When both sides share the same data (identity check or Arrow value
-        equality), produces a single multi-layer ``Chart`` that renders all
+        Always produces a single multi-layer ``Chart`` that renders all
         layers within one plot area with shared x/y scales.
 
-        When data differs, falls back to horizontal concatenation (same
-        behaviour as ``__or__``) and emits a ``UserWarning`` so the caller
-        knows the result is side-by-side rather than overlaid.
+        When both sides share the same data (identity check or Arrow value
+        equality), the unified chart reuses the original DataFrame.
+
+        When data differs, the two DataFrames are merged via
+        ``pl.concat([df1, df2], how="diagonal")`` — columns present in only
+        one side are null-padded in the other.  Each layer's encoding
+        references only its own columns; marks skip null values, so the
+        padding is invisible at render time.
 
         Parameters
         ----------
@@ -3921,8 +3938,8 @@ class Chart:
 
         Returns
         -------
-        Chart or HConcatChart
-            Multi-layer ``Chart`` when data matches; ``HConcatChart`` otherwise.
+        Chart
+            Multi-layer ``Chart``.
 
         Raises
         ------
@@ -3940,21 +3957,17 @@ class Chart:
         """
         if not isinstance(other, Chart):
             return NotImplemented
-        if not self._shares_data_with(other):
-            import warnings
-
-            warnings.warn(
-                "Layered charts with differing data render as horizontal concatenation. "
-                "Combine the two DataFrames into one with null padding "
-                "(see decision_boundary_chart for an example) to get a true overlay.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return self.__or__(other)
         # Resolve pending statistical marks before snapshotting encoding dicts.
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
+        # When data differs, null-pad merge into a unified DataFrame.
+        if not self._shares_data_with(other):
+            import polars as pl
+
+            lhs_df = _to_polars(self._data)
+            rhs_df = _to_polars(other._data)
+            new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
         lhs_layers, _ = _expand_layers(lhs)  # lhs top xforms already in `new` via _clone()
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
         new._layers = lhs_layers + rhs_layers

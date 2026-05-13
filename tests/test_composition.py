@@ -1,6 +1,4 @@
 """Tests for Chart composition operators: +, |, &."""
-import warnings
-
 import polars as pl
 import pytest
 
@@ -21,17 +19,15 @@ def test_layer_same_data_produces_layered_chart(df):
     assert len(layered._layers) == 2
 
 
-def test_layer_different_data_falls_through_to_hconcat(df):
+def test_layer_different_data_produces_layered_chart(df):
     df2 = pl.DataFrame({"a": [10], "b": [20]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df2).mark_line().encode(x="a", y="b")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = c1 + c2
-    # Falls through to HConcat
-    from ferrum.composition import HConcatChart
-    assert isinstance(result, HConcatChart)
-    assert any("differing data" in str(wi.message) for wi in w)
+    # + always layers — no warning, no HConcat fallback
+    result = c1 + c2
+    assert isinstance(result, Chart)
+    assert result._layers is not None
+    assert len(result._layers) == 2
 
 
 def test_hconcat_two_charts(df):
@@ -84,11 +80,7 @@ def test_layer_same_df_object_by_identity(df):
     """Two charts referencing the same df object layer without warning."""
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_line().encode(x="a", y="b")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = c1 + c2
-    differing_warns = [x for x in w if "differing data" in str(x.message)]
-    assert not differing_warns, "Should not warn for same df object"
+    result = c1 + c2
     assert result._layers is not None
 
 

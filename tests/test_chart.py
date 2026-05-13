@@ -151,24 +151,35 @@ def test_to_json_indent_produces_multiline():
     assert "  " in j  # indentation present
 
 
-# ---- BUG-3: __add__ warning message regression ----
+# ---- BUG-3: __add__ always layers (redesigned) ----
 
-def test_add_differing_data_warns_with_actionable_message():
-    import warnings
+def test_add_differing_data_produces_layered_chart():
+    """+ with different data auto null-pad merges and layers."""
     df1 = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
     df2 = pl.DataFrame({"x": [5, 6], "y": [7, 8]})
     c1 = Chart(df1).mark_point().encode(x="x", y="y")
     c2 = Chart(df2).mark_line().encode(x="x", y="y")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = c1 + c2
-    assert len(w) == 1
-    msg = str(w[0].message)
-    assert "null padding" in msg
-    assert "decision_boundary_chart" in msg
-    # falls back to HConcatChart
-    from ferrum.composition import HConcatChart
-    assert isinstance(result, HConcatChart)
+    result = c1 + c2
+    # Always a layered Chart, never HConcatChart
+    assert isinstance(result, Chart)
+    assert result._layers is not None
+    assert len(result._layers) == 2
+
+
+def test_add_differing_columns_null_pad_merges():
+    """+ with disjoint columns produces unified data with all columns."""
+    df1 = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
+    df2 = pl.DataFrame({"c": [5, 6], "d": [7, 8]})
+    c1 = Chart(df1).mark_point().encode(x="a", y="b")
+    c2 = Chart(df2).mark_line().encode(x="c", y="d")
+    result = c1 + c2
+    unified = result._data
+    assert isinstance(unified, pl.DataFrame)
+    assert set(unified.columns) == {"a", "b", "c", "d"}
+    # Original rows from df1 have nulls in c, d columns
+    assert unified["c"][:2].null_count() == 2
+    # Original rows from df2 have nulls in a, b columns
+    assert unified["a"][2:].null_count() == 2
 
 
 # ---- BUG-4: mark_shap_waterfall(sample_idx=-1) sentinel regression ----

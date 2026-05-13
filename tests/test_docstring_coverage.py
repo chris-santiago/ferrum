@@ -28,6 +28,7 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 5 — composition / layer / repeat
     "HConcatChart", "VConcatChart", "JointChart", "RepeatChart", "ClusterMapChart",
     "Layer", "Repeat",
+    "hconcat", "vconcat",
     # Task 6 — themes / position / coord / annotations / schemes
     "Theme", "set_default_theme", "get_default_theme", "theme_context",
     "Identity", "Dodge", "Jitter", "Stack",

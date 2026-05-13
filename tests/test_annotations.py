@@ -43,12 +43,8 @@ def test_annotate_text_encodes_text_channel():
 def test_annotate_hline_can_be_added_to_scatter():
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     scatter = Chart(df).mark_point().encode(x="a", y="b")
-    # annotate_hline uses different data → falls through to hconcat with warning,
-    # OR uses an inline 1-row table that matches the chart's column shape.
-    # Phase 8a impl: annotate_* return charts with empty data; the + path
-    # detects "same data" check fails → hconcat fallback. That's acceptable for 8a;
-    # Phase 9 will improve via a shared-data resolver.
-    # For this test, just assert no exception raised.
-    with pytest.warns(UserWarning):
-        composed = scatter + annotate_hline(5)
+    # + always layers now — annotate_hline's different data is auto null-pad
+    # merged into the scatter's DataFrame.
+    composed = scatter + annotate_hline(5)
     assert composed is not None
+    assert composed._layers is not None

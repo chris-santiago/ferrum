@@ -284,8 +284,8 @@ def _residuals_panel(
     if name == "residuals_vs_leverage":
         # Inject outlier columns BEFORE constructing the base chart so
         # base and overlay layers share the same DataFrame identity
-        # (Chart.__add__ falls back to HConcat when data objects
-        # differ). x_col="leverage" so the overlay sits at the right
+        # (avoids unnecessary null-pad merge in Chart.__add__).
+        # x_col="leverage" so the overlay sits at the right
         # x coordinate for this panel.
         if cook_threshold is not None:
             df = _inject_cook_outliers(
@@ -2176,8 +2176,9 @@ def _decision_boundary_chart_from_source(
     ``x/x2/y/y2/z`` with the scatter coordinates null, and scatter rows
     hold ``scatter_x/scatter_y/scatter_z`` (= true class label mapped to
     the same numeric domain as ``z``) with the grid columns null. Both
-    layers share the same DataFrame identity so ``Chart.__add__``
-    produces a true layered chart and both color encodings resolve
+    layers share the same DataFrame identity (avoiding unnecessary
+    null-pad merge) so ``Chart.__add__`` layers them and both color
+    encodings resolve
     against the same continuous color scale — matching boundary and
     point colors means the cell-color directly says "predicted class /
     probability" while the point's color says "true class", so a

@@ -642,7 +642,7 @@ def build_comp_hconcat():
         .properties(title="Violin", width=260, height=H)
         .theme(THEME)
     )
-    return c1 + c2
+    return fm.hconcat(c1, c2)
 
 
 def build_comp_triple_layer():
