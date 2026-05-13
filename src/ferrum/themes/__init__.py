@@ -44,10 +44,14 @@ title_anchor, title_offset : optional
 area_opacity, opacity : optional
         Mark styling.
     color_scheme : str, optional
-        Named categorical palette: one of ``okabe_ito`` (default),
+        Named categorical palette: one of ``paper_ink`` (default),
+        ``slate_citrus``, ``arctic_signal``, ``okabe_ito``,
         ``tableau10``, ``set1``, ``set2``, ``paired``, ``pastel``, ``dark2``.
         Sequential names (``viridis``, ``plasma``, ``magma``, ``inferno``,
-        ``cividis``) also accepted.
+        ``cividis``, ``cool_blue``, ``warm_ochre``, ``night_blue``,
+        ``electric_lime``, ``signal_blue``, ``ember_orange``) and diverging
+        names (``rdbu``, ``blue_to_red``, ``cyan_to_amber``,
+        ``blue_to_violet``) also accepted.
     legend_orient, legend_direction, legend_title_font_size : optional
         Legend layout.
     padding, axis_title_padding, column_padding, row_padding : optional
@@ -220,8 +224,12 @@ area_opacity, opacity : optional
 
 from ferrum.themes import builtins as _builtins  # noqa: E402
 
-# Re-export the 8 builtins as module attributes
+# Re-export the 12 builtins as module attributes
 default = _builtins.default
+paper_ink = _builtins.paper_ink
+slate_citrus = _builtins.slate_citrus
+arctic_signal = _builtins.arctic_signal
+observable = _builtins.observable
 minimal = _builtins.minimal
 dark = _builtins.dark
 publication = _builtins.publication
@@ -233,6 +241,10 @@ solarized_dark = _builtins.solarized_dark
 __all__ = [
     "Theme",
     "default",
+    "paper_ink",
+    "slate_citrus",
+    "arctic_signal",
+    "observable",
     "minimal",
     "dark",
     "publication",

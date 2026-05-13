@@ -64,11 +64,10 @@ def test_sequential_scheme_falls_back_to_tableau10_on_nominal() -> None:
 
 def test_no_theme_equals_explicit_default_scheme() -> None:
     # When no theme is supplied, the renderer uses ThemeInputs::default()
-    # which carries color_scheme="tableau10" (themes-T4). Verify that an
-    # explicit Theme(color_scheme="tableau10") produces a byte-identical
-    # SVG — confirms the default theme path doesn't drift from the
-    # explicit-theme path.
+    # which carries color_scheme="paper_ink". Verify that an explicit
+    # Theme(color_scheme="paper_ink") produces a byte-identical SVG —
+    # confirms the default theme path doesn't drift from the explicit-theme path.
     chart = _multi_series_chart()
     svg_default = chart.show_svg()
-    svg_explicit = chart.theme(fm.Theme(color_scheme="tableau10")).show_svg()
+    svg_explicit = chart.theme(fm.Theme(color_scheme="paper_ink")).show_svg()
     assert svg_default == svg_explicit

@@ -181,57 +181,49 @@ pub struct ThemeInputs {
 
 impl Default for ThemeInputs {
     fn default() -> Self {
-        // Themes-T4 (2026-05-11) — Observable Plot–flavored visual identity.
-        // Section 2 of docs/superpowers/specs/2026-05-11-themes-overhaul-design.md.
-        let mark_blue = palette::Srgba::new(0x4C, 0x78, 0xA8, 0xFF);   // tableau blue
-        let text_222  = palette::Srgba::new(0x22, 0x22, 0x22, 0xFF);
-        let label_555 = palette::Srgba::new(0x55, 0x55, 0x55, 0xFF);
-        let axis_888  = palette::Srgba::new(0x88, 0x88, 0x88, 0xFF);
-        let grid_ddd  = palette::Srgba::new(0xDD, 0xDD, 0xDD, 0xFF);
-        let bg_white  = palette::Srgba::new(0xFF, 0xFF, 0xFF, 0xFF);
-        let strip_bg  = palette::Srgba::new(0xF0, 0xF0, 0xF0, 0xFF);
+        // Paper Ink default identity (2026-05-12).
+        // Warm cream background, blue lead mark, warm-tinted grid.
+        // See docs/superpowers/specs/2026-05-12-custom-themes-design.md §4.
+        let mark_blue  = palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF);
+        let text_fg    = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
+        let label_gray = palette::Srgba::new(0x6B, 0x72, 0x80, 0xFF);
+        let grid_warm  = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
+        let bg_cream   = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
+        let strip_bg   = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
 
         Self {
-            // Canvas
             padding: 16.0,
             column_padding: 12.0,
             row_padding: 12.0,
             axis_title_padding: 8.0,
-            background_color: bg_white,
+            background_color: bg_cream,
 
-            // Typography. Font family kept as "Inter" per user override of
-            // Section 2's "DejaVu Sans" — Inter is already bundled and
-            // deterministic across machines for goldens; DejaVu Sans would
-            // resolve via the system font path and risks CI divergence.
             font_family: "Inter".into(),
             font_weight: "normal".into(),
-            font_color: text_222,
+            font_color: text_fg,
             label_font_family: "Inter".into(),
             label_font_size: DEFAULT_LABEL_FONT_SIZE,
-            label_color: label_555,
+            label_color: label_gray,
             title_font_family: "Inter".into(),
             title_font_size: DEFAULT_TITLE_FONT_SIZE,
             title_font_weight: "600".into(),
-            title_color: text_222,
+            title_color: text_fg,
             title_anchor: TextAnchor::Start,
             title_offset: 6.0,
 
-            // Grid (faint but visible at default zoom)
             grid: true,
-            grid_color: grid_ddd,
+            grid_color: grid_warm,
             grid_width: 0.5,
             grid_dash: None,
             grid_opacity: 1.0,
 
-            // Axes
             axis_line: true,
-            axis_line_color: axis_888,
+            axis_line_color: label_gray,
             axis_line_width: 1.0,
             tick_size: 4.0,
             tick_width: 1.0,
-            tick_color: axis_888,
+            tick_color: label_gray,
 
-            // Marks
             mark_color: mark_blue,
             point_size: 36.0,
             point_size_min: 4.0,
@@ -244,25 +236,17 @@ impl Default for ThemeInputs {
             opacity_min: 0.1,
             opacity_max: 1.0,
 
-            // Color scheme — flipped from §3.6's stated `okabe_ito` to
-            // `tableau10` to match the Observable Plot aesthetic.
-            // `okabe_ito` remains accessible via Theme(color_scheme=...).
-            color_scheme: "tableau10".into(),
+            color_scheme: "paper_ink".into(),
 
-            // Strip (facet headers)
             strip_background_color: strip_bg,
             strip_text_size: 12.0,
             strip_padding: 6.0,
 
-            // Legend — kept legend_direction=None so the renderer auto-derives
-            // Vertical from legend_orient=Right (Section 2 wants Vertical
-            // explicitly; None is the equivalent and minimizes goldens churn).
             legend_orient: LegendOrient::Right,
             legend_direction: None,
             legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
 
-            // Reference lines
-            reference_line_color: palette::Srgba::new(0xAA, 0xAA, 0xAA, 0xFF),
+            reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
             reference_line_dash: Some(vec![4.0, 4.0]),
         }
     }
@@ -879,8 +863,7 @@ mod tests {
 
     #[test]
     fn theme_inputs_default_includes_render_fields() {
-        // Themes-T4 (2026-05-11) — values flipped to Observable Plot identity;
-        // see Section 2 of docs/superpowers/specs/2026-05-11-themes-overhaul-design.md.
+        // Paper Ink default identity (2026-05-12).
         let t = ThemeInputs::default();
         assert_eq!(t.padding, 16.0);
         assert_eq!(t.column_padding, 12.0);
@@ -900,9 +883,11 @@ mod tests {
         assert_eq!(t.strip_text_size, 12.0);
         assert_eq!(t.strip_padding, 6.0);
         assert_eq!(t.axis_title_padding, 8.0);
-        assert_eq!(t.color_scheme, "tableau10");
+        assert_eq!(t.color_scheme, "paper_ink");
         assert_eq!(t.title_font_weight, "600");
         assert_eq!(t.title_anchor, TextAnchor::Start);
         assert_eq!(t.title_offset, 6.0);
+        assert_eq!(t.background_color, palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF));
+        assert_eq!(t.mark_color, palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF));
     }
 }

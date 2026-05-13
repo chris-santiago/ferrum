@@ -1,21 +1,34 @@
 """Named built-in themes shipped with ferrum.
 
 Each theme overrides only the keys that differ from
-``ThemeInputs::default()``; the Rust side fills in the rest. Themes-T4
-(2026-05-11) flipped the default identity to an Observable Plot aesthetic:
-tableau blue marks, faint ``#DDD`` grid, Inter typography, left-aligned
-semibold titles, 5% scale padding on quantitative axes. See
-``ferrum-spec.md`` §3.13 and
-``docs/superpowers/specs/2026-05-11-themes-overhaul-design.md`` §3 for the
+``ThemeInputs::default()``; the Rust side fills in the rest. The default
+identity is Paper Ink: warm cream background (#FAF7F2), blue lead marks,
+warm-tinted grid, Inter typography. See
+``docs/superpowers/specs/2026-05-12-custom-themes-design.md`` for the
 authoritative definitions.
 
-Eight pre-built ``Theme`` instances are exported here and re-exported at
+Twelve pre-built ``Theme`` instances are exported here and re-exported at
 ``ferrum.themes.<name>``:
 
 ``default``
     All properties at Rust renderer defaults (equivalent to ``Theme()``).
-    Tableau blue marks, faint visible grid, Inter typography, semibold
-    left-aligned title, 5% inset on quantitative axes.
+    Paper Ink identity: warm cream bg, blue marks, warm grid.
+
+``paper_ink``
+    Explicit Paper Ink — identical to ``default`` but with all properties
+    set, useful as a derivation base.
+
+``slate_citrus``
+    Dark navy background (``#111827``), vibrant neon accents, lime/cyan
+    categorical cycle.
+
+``arctic_signal``
+    Cool white background (``#F8FAFC``), precise signal colors, sky blue
+    lead mark.
+
+``observable``
+    Preserved pre-2026-05-12 default: white background, tableau blue
+    marks, neutral gray grid, tableau10 palette.
 
 ``minimal``
     No grid lines, no axis lines, generous padding (24 px).
@@ -148,4 +161,60 @@ solarized_dark = Theme(
     mark_color="#268bd2",
     color_scheme="set2",
     strip_background_color="#073642",
+)
+
+paper_ink = Theme(
+    background="#FAF7F2",
+    font_color="#1F2937",
+    label_color="#6B7280",
+    title_color="#1F2937",
+    grid_color="#D6D3D1",
+    axis_line_color="#6B7280",
+    tick_color="#6B7280",
+    mark_color="#2563EB",
+    color_scheme="paper_ink",
+    strip_background_color="#EDE9E3",
+    reference_line_color="#9CA3AF",
+)
+
+slate_citrus = Theme(
+    background="#111827",
+    font_color="#E5E7EB",
+    label_color="#9CA3AF",
+    title_color="#E5E7EB",
+    grid_color="#374151",
+    axis_line_color="#9CA3AF",
+    tick_color="#9CA3AF",
+    mark_color="#60A5FA",
+    color_scheme="slate_citrus",
+    strip_background_color="#1E293B",
+    reference_line_color="#6B7280",
+)
+
+arctic_signal = Theme(
+    background="#F8FAFC",
+    font_color="#0F172A",
+    label_color="#64748B",
+    title_color="#0F172A",
+    grid_color="#CBD5E1",
+    axis_line_color="#64748B",
+    tick_color="#64748B",
+    mark_color="#0284C7",
+    color_scheme="arctic_signal",
+    strip_background_color="#E2E8F0",
+    reference_line_color="#94A3B8",
+)
+
+observable = Theme(
+    background="#ffffff",
+    font_color="#222222",
+    label_color="#555555",
+    title_color="#222222",
+    grid_color="#DDDDDD",
+    axis_line_color="#888888",
+    tick_color="#888888",
+    mark_color="#4C78A8",
+    color_scheme="tableau10",
+    strip_background_color="#F0F0F0",
+    reference_line_color="#AAAAAA",
 )

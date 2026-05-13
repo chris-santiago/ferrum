@@ -10,14 +10,20 @@ pub enum NamedContinuous {
     Magma,
     Inferno,
     Cividis,
-    /// Sequential single-hue blue ramp (light → dark blue). Default for
-    /// confusion matrices and other sequential count/probability heatmaps
-    /// (gallery feedback C2).
     Blues,
-    /// Red–Blue diverging scheme, centred on 0. Default for correlation
-    /// heatmaps (rank2d) where negative correlations are red and positive
-    /// correlations are blue (gallery feedback C2).
     RdBu,
+    // Paper Ink family
+    CoolBlue,
+    WarmOchre,
+    BlueToRed,
+    // Slate Citrus family
+    NightBlue,
+    ElectricLime,
+    CyanToAmber,
+    // Arctic Signal family
+    SignalBlue,
+    EmberOrange,
+    BlueToViolet,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,31 +36,77 @@ pub enum ContinuousScheme {
 impl NamedContinuous {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
-            "viridis" => Some(Self::Viridis),
-            "plasma"  => Some(Self::Plasma),
-            "magma"   => Some(Self::Magma),
-            "inferno" => Some(Self::Inferno),
-            "cividis" => Some(Self::Cividis),
-            "blues"   => Some(Self::Blues),
-            "rdbu"    => Some(Self::RdBu),
+            "viridis"       => Some(Self::Viridis),
+            "plasma"        => Some(Self::Plasma),
+            "magma"         => Some(Self::Magma),
+            "inferno"       => Some(Self::Inferno),
+            "cividis"       => Some(Self::Cividis),
+            "blues"         => Some(Self::Blues),
+            "rdbu"          => Some(Self::RdBu),
+            "cool_blue"     => Some(Self::CoolBlue),
+            "warm_ochre"    => Some(Self::WarmOchre),
+            "blue_to_red"   => Some(Self::BlueToRed),
+            "night_blue"    => Some(Self::NightBlue),
+            "electric_lime" => Some(Self::ElectricLime),
+            "cyan_to_amber" => Some(Self::CyanToAmber),
+            "signal_blue"   => Some(Self::SignalBlue),
+            "ember_orange"  => Some(Self::EmberOrange),
+            "blue_to_violet" => Some(Self::BlueToViolet),
             _ => None,
         }
     }
 
     pub fn list() -> &'static [&'static str] {
-        &["viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu"]
+        &[
+            "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu",
+            "cool_blue", "warm_ochre", "blue_to_red",
+            "night_blue", "electric_lime", "cyan_to_amber",
+            "signal_blue", "ember_orange", "blue_to_violet",
+        ]
     }
 
-    fn colorous_gradient(&self) -> colorous::Gradient {
+    fn colorous_gradient(&self) -> Option<colorous::Gradient> {
         match self {
-            Self::Viridis => colorous::VIRIDIS,
-            Self::Plasma  => colorous::PLASMA,
-            Self::Magma   => colorous::MAGMA,
-            Self::Inferno => colorous::INFERNO,
-            Self::Cividis => colorous::CIVIDIS,
-            Self::Blues   => colorous::BLUES,
-            Self::RdBu    => colorous::RED_BLUE,
+            Self::Viridis => Some(colorous::VIRIDIS),
+            Self::Plasma  => Some(colorous::PLASMA),
+            Self::Magma   => Some(colorous::MAGMA),
+            Self::Inferno => Some(colorous::INFERNO),
+            Self::Cividis => Some(colorous::CIVIDIS),
+            Self::Blues   => Some(colorous::BLUES),
+            Self::RdBu    => Some(colorous::RED_BLUE),
+            _ => None,
         }
+    }
+
+    pub fn sample(&self, t: f64) -> Color {
+        if let Some(g) = self.colorous_gradient() {
+            let c = g.eval_continuous(t);
+            from_rgba(c.r, c.g, c.b, 255)
+        } else {
+            sample_gradient(&self.custom_stops(), t)
+        }
+    }
+
+    fn custom_stops(&self) -> Vec<(f64, Color)> {
+        let hexes: &[u32] = match self {
+            Self::CoolBlue     => &[0xEFF6FF, 0xDBEAFE, 0x93C5FD, 0x60A5FA, 0x2563EB, 0x1D4ED8, 0x1E3A8A],
+            Self::WarmOchre    => &[0xFFF7E6, 0xFDECC8, 0xF8D88A, 0xD4A017, 0xB45309, 0x92400E, 0x78350F],
+            Self::BlueToRed    => &[0x1E3A8A, 0x60A5FA, 0xDBEAFE, 0xFAF7F2, 0xFDE68A, 0xDC2626, 0x7F1D1D],
+            Self::NightBlue    => &[0x1E293B, 0x1D4ED8, 0x2563EB, 0x60A5FA, 0x93C5FD, 0xBFDBFE, 0xE0F2FE],
+            Self::ElectricLime => &[0x365314, 0x4D7C0F, 0x65A30D, 0x84CC16, 0xA3E635, 0xBEF264, 0xD9F99D],
+            Self::CyanToAmber  => &[0x155E75, 0x0891B2, 0x67E8F9, 0x111827, 0xFDE68A, 0xF59E0B, 0xB45309],
+            Self::SignalBlue   => &[0xF0F9FF, 0xE0F2FE, 0x7DD3FC, 0x38BDF8, 0x0284C7, 0x0369A1, 0x0C4A6E],
+            Self::EmberOrange  => &[0xFFF7ED, 0xFED7AA, 0xFDBA74, 0xEA580C, 0xC2410C, 0x9A3412, 0x7C2D12],
+            Self::BlueToViolet => &[0x0C4A6E, 0x38BDF8, 0xBAE6FD, 0xF8FAFC, 0xE9D5FF, 0xA78BFA, 0x6D28D9],
+            _ => unreachable!(),
+        };
+        let step = 1.0 / (hexes.len() - 1) as f64;
+        hexes.iter().enumerate().map(|(i, &h)| {
+            let r = ((h >> 16) & 0xFF) as u8;
+            let g = ((h >> 8) & 0xFF) as u8;
+            let b = (h & 0xFF) as u8;
+            (i as f64 * step, from_rgba(r, g, b, 255))
+        }).collect()
     }
 }
 
@@ -63,10 +115,7 @@ impl ContinuousScheme {
     pub fn sample(&self, t: f64) -> Color {
         let t = t.clamp(0.0, 1.0);
         match self {
-            Self::Named(n) => {
-                let c = n.colorous_gradient().eval_continuous(t);
-                from_rgba(c.r, c.g, c.b, 255)
-            }
+            Self::Named(n) => n.sample(t),
             Self::Gradient(stops) => sample_gradient(stops, t),
             Self::Reverse(inner) => inner.sample(1.0 - t),
         }
@@ -108,7 +157,10 @@ use pyo3::exceptions::PyValueError;
 /// numeric values are mapped to colors.
 ///
 /// Named built-in colormaps: ``"viridis"``, ``"plasma"``, ``"magma"``,
-/// ``"inferno"``, ``"cividis"``, ``"blues"``, ``"rdbu"``.
+/// ``"inferno"``, ``"cividis"``, ``"blues"``, ``"rdbu"``,
+/// ``"cool_blue"``, ``"warm_ochre"``, ``"blue_to_red"``,
+/// ``"night_blue"``, ``"electric_lime"``, ``"cyan_to_amber"``,
+/// ``"signal_blue"``, ``"ember_orange"``, ``"blue_to_violet"``.
 ///
 /// Do not call the constructor directly. Obtain an instance via
 /// ``ferrum.continuous_palette(name)`` (named map) or
@@ -131,14 +183,13 @@ pub struct PyContinuousScheme(pub ContinuousScheme);
 
 #[pymethods]
 impl PyContinuousScheme {
-    /// Look up a built-in continuous colormap by name. Accepted names:
-    /// "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu".
     #[staticmethod]
     fn from_name(name: &str) -> PyResult<Self> {
         NamedContinuous::from_name(name)
             .map(|n| Self(ContinuousScheme::Named(n)))
             .ok_or_else(|| PyValueError::new_err(format!(
-                "Unknown colormap: '{name}'; available: viridis, plasma, magma, inferno, cividis, blues, rdbu"
+                "Unknown colormap: '{name}'; available: {}",
+                NamedContinuous::list().join(", ")
             )))
     }
 
@@ -252,5 +303,34 @@ mod tests {
         // Reversed viridis: 0.0 should look like normal viridis(1.0)
         assert!(c0.red > 240 && c0.green > 220);
         assert!(c1.red < 80);
+    }
+
+    #[test]
+    fn cool_blue_endpoints() {
+        let s = ContinuousScheme::Named(NamedContinuous::CoolBlue);
+        let c0 = s.sample(0.0); // #EFF6FF
+        let c1 = s.sample(1.0); // #1E3A8A
+        assert!(c0.red > 0xE0 && c0.blue == 0xFF, "cool_blue(0): {:?}", c0);
+        assert!(c1.red == 0x1E && c1.green == 0x3A && c1.blue == 0x8A, "cool_blue(1): {:?}", c1);
+    }
+
+    #[test]
+    fn blue_to_red_midpoint_is_paper_ink_bg() {
+        let s = ContinuousScheme::Named(NamedContinuous::BlueToRed);
+        let mid = s.sample(0.5); // #FAF7F2
+        assert_eq!(mid.red, 0xFA);
+        assert_eq!(mid.green, 0xF7);
+        assert_eq!(mid.blue, 0xF2);
+    }
+
+    #[test]
+    fn all_custom_schemes_resolve_via_from_name() {
+        for name in &[
+            "cool_blue", "warm_ochre", "blue_to_red",
+            "night_blue", "electric_lime", "cyan_to_amber",
+            "signal_blue", "ember_orange", "blue_to_violet",
+        ] {
+            assert!(NamedContinuous::from_name(name).is_some(), "{name} not found");
+        }
     }
 }

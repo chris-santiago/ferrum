@@ -1,5 +1,4 @@
-//! Hardcoded categorical palette (Okabe-Ito). One palette for Phase 7;
-//! Phase 8+ may add a scheme registry.
+//! Categorical palettes and scheme registry.
 
 use std::sync::LazyLock;
 
@@ -67,10 +66,32 @@ pub static DARK2: LazyLock<[Color; 8]> = LazyLock::new(|| [
     from_rgb(0xA6, 0x76, 0x1D), from_rgb(0x66, 0x66, 0x66),
 ]);
 
+pub static PAPER_INK: LazyLock<[Color; 8]> = LazyLock::new(|| [
+    from_rgb(0x25, 0x63, 0xEB), from_rgb(0xDC, 0x26, 0x26),
+    from_rgb(0xD4, 0xA0, 0x17), from_rgb(0x0F, 0x76, 0x6E),
+    from_rgb(0x7C, 0x3A, 0xED), from_rgb(0xEA, 0x58, 0x0C),
+    from_rgb(0x4B, 0x55, 0x63), from_rgb(0xDB, 0x27, 0x77),
+]);
+
+pub static SLATE_CITRUS: LazyLock<[Color; 8]> = LazyLock::new(|| [
+    from_rgb(0x60, 0xA5, 0xFA), from_rgb(0xA7, 0x8B, 0xFA),
+    from_rgb(0xA3, 0xE6, 0x35), from_rgb(0xF5, 0x9E, 0x0B),
+    from_rgb(0x34, 0xD3, 0x99), from_rgb(0xF4, 0x72, 0xB6),
+    from_rgb(0xF8, 0x71, 0x71), from_rgb(0x22, 0xD3, 0xEE),
+]);
+
+pub static ARCTIC_SIGNAL: LazyLock<[Color; 8]> = LazyLock::new(|| [
+    from_rgb(0x02, 0x84, 0xC7), from_rgb(0x7C, 0x3A, 0xED),
+    from_rgb(0xEA, 0x58, 0x0C), from_rgb(0x16, 0xA3, 0x4A),
+    from_rgb(0xDC, 0x26, 0x26), from_rgb(0x08, 0x91, 0xB2),
+    from_rgb(0xCA, 0x8A, 0x04), from_rgb(0xDB, 0x27, 0x77),
+]);
+
 /// Categorical scheme names recognized by [`categorical_palette`]. Source of
 /// truth for theme-side validation in `binding::theme_from_dict`.
 pub const CATEGORICAL_SCHEMES: &[&str] = &[
     "okabe_ito", "tableau10", "set1", "set2", "paired", "pastel", "dark2",
+    "paper_ink", "slate_citrus", "arctic_signal",
 ];
 
 /// Sequential/diverging scheme names recognized by `ContinuousScheme` in
@@ -79,6 +100,9 @@ pub const CATEGORICAL_SCHEMES: &[&str] = &[
 /// sequential single-hue ramp; "rdbu" is a diverging red-blue scheme.
 pub const SEQUENTIAL_SCHEMES: &[&str] = &[
     "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu",
+    "cool_blue", "warm_ochre", "blue_to_red",
+    "night_blue", "electric_lime", "cyan_to_amber",
+    "signal_blue", "ember_orange", "blue_to_violet",
 ];
 
 /// True when `name` is one of the recognized categorical schemes.
@@ -92,21 +116,24 @@ pub fn is_sequential_scheme(name: &str) -> bool {
     SEQUENTIAL_SCHEMES.contains(&name)
 }
 
-/// Look up a categorical palette by scheme name. Returns OKABE_ITO when the
+/// Look up a categorical palette by scheme name. Returns PAPER_INK when the
 /// name is unknown (caller may emit a warning). Theme-level validation in
 /// `binding::theme_from_dict` rejects unknown names eagerly, so callers
 /// reaching this function with an unknown name are using an encoding-level
 /// override (e.g. `encoding.color.scheme`) — fallback preserved for that path.
 pub fn categorical_palette(name: &str) -> &'static [Color] {
     match name {
-        "okabe_ito"  => &*OKABE_ITO,
-        "tableau10"  => &*TABLEAU10,
-        "set1"       => &*SET1,
-        "set2"       => &*SET2,
-        "paired"     => &*PAIRED,
-        "pastel"     => &*PASTEL,
-        "dark2"      => &*DARK2,
-        _            => &*OKABE_ITO,   // fallback
+        "okabe_ito"      => &*OKABE_ITO,
+        "tableau10"      => &*TABLEAU10,
+        "set1"           => &*SET1,
+        "set2"           => &*SET2,
+        "paired"         => &*PAIRED,
+        "pastel"         => &*PASTEL,
+        "dark2"          => &*DARK2,
+        "paper_ink"      => &*PAPER_INK,
+        "slate_citrus"   => &*SLATE_CITRUS,
+        "arctic_signal"  => &*ARCTIC_SIGNAL,
+        _                => &*PAPER_INK,
     }
 }
 
@@ -119,33 +146,34 @@ mod tests {
         assert!(std::ptr::eq(categorical_palette("tableau10").as_ptr(), TABLEAU10.as_ptr()));
         assert!(std::ptr::eq(categorical_palette("set1").as_ptr(), SET1.as_ptr()));
         assert!(std::ptr::eq(categorical_palette("dark2").as_ptr(), DARK2.as_ptr()));
+        assert!(std::ptr::eq(categorical_palette("paper_ink").as_ptr(), PAPER_INK.as_ptr()));
+        assert!(std::ptr::eq(categorical_palette("slate_citrus").as_ptr(), SLATE_CITRUS.as_ptr()));
+        assert!(std::ptr::eq(categorical_palette("arctic_signal").as_ptr(), ARCTIC_SIGNAL.as_ptr()));
     }
 
     #[test]
-    fn categorical_palette_unknown_falls_back_to_okabe_ito() {
-        assert!(std::ptr::eq(categorical_palette("nonexistent").as_ptr(), (&*OKABE_ITO).as_ptr()));
+    fn categorical_palette_unknown_falls_back_to_paper_ink() {
+        assert!(std::ptr::eq(categorical_palette("nonexistent").as_ptr(), (&*PAPER_INK).as_ptr()));
     }
 
     #[test]
     fn each_named_palette_has_at_least_8_colors() {
-        for name in &["okabe_ito", "tableau10", "set1", "set2", "paired", "pastel", "dark2"] {
+        for name in CATEGORICAL_SCHEMES {
             assert!(categorical_palette(name).len() >= 8, "{name} has < 8 colors");
         }
     }
 
     #[test]
     fn categorical_schemes_const_matches_match_arms() {
-        // Every entry in CATEGORICAL_SCHEMES must resolve to its own palette,
-        // not the fallback. Detect via pointer identity.
         for name in CATEGORICAL_SCHEMES {
             let p = categorical_palette(name).as_ptr();
-            let fallback = (&*OKABE_ITO).as_ptr();
-            if *name == "okabe_ito" {
+            let fallback = (&*PAPER_INK).as_ptr();
+            if *name == "paper_ink" {
                 assert!(std::ptr::eq(p, fallback));
             } else {
                 assert!(
                     !std::ptr::eq(p, fallback),
-                    "{name} resolved to OKABE_ITO fallback",
+                    "{name} resolved to PAPER_INK fallback",
                 );
             }
         }
