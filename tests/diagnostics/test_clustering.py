@@ -272,11 +272,12 @@ def test_decision_boundary_chart_scatter_overlay():
     # The scatter overlay emits SVG <circle> elements with a black
     # stroke (uniform across all points).
     assert 'stroke="#000000"' in svg
-    # Boundary cells and points share the default sequential color palette
-    # (cool_blue). Both #eff6ff (low end) and #1e3a8a (high end) should
-    # appear.
-    assert "#eff6ff" in svg
-    assert "#1e3a8a" in svg
+    # Non-proba mode: class indices are cast to String → categorical color
+    # palette. At least two distinct fill colors from the theme's qualitative
+    # palette should appear (one per class).
+    import re
+    fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
+    assert len(fills) >= 2, f"Expected ≥2 distinct fill colors; got {fills}"
 
 
 def test_decision_boundary_chart_scatter_overlay_proba_mode():

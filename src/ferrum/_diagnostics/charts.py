@@ -1862,10 +1862,6 @@ def _pca_scree_chart_from_source(
         cumulative_line=cumulative_line,
         threshold_line=threshold,
     )
-    chart = chart.encode(
-        x=X("component", title="Component", type="O"),
-        y=Y("explained_variance", title="Explained variance"),
-    )
     chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
     if cumulative_line:
         from ferrum.layer import Layer
@@ -2163,7 +2159,7 @@ def _decision_boundary_chart_from_source(
     features: tuple = (0, 1),
     grid_resolution: int = 200,
     proba: bool = False,
-    scatter: bool = False,
+    scatter: bool = True,
     theme: Any = None,
 ):
     """Decision-boundary heatmap of model predictions over a 2D feature grid.
@@ -2214,6 +2210,11 @@ def _decision_boundary_chart_from_source(
                 "z": [float(v) for v in grid_info["z"]],
             }
         )
+        # Non-proba: cast class indices to String for categorical color scale.
+        if not proba:
+            grid_df = grid_df.with_columns(
+                pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
+            )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         if theme is not None:
@@ -2223,6 +2224,12 @@ def _decision_boundary_chart_from_source(
     from ferrum.layer import Layer
 
     unified = _build_decision_boundary_unified(source, grid_info)
+    # Non-proba: cast class indices to String for categorical color scale.
+    if not proba:
+        unified = unified.with_columns(
+            pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
+            pl.col("scatter_z").cast(pl.Int64).cast(pl.Utf8).alias("scatter_z"),
+        )
     chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
     chart = chart.layer(
         Layer(

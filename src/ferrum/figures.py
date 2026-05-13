@@ -2083,7 +2083,7 @@ def decision_boundary_chart(
     features: tuple = (0, 1),
     grid_resolution: int = 200,
     proba: bool = False,
-    scatter: bool = False,
+    scatter: bool = True,
     random_state: int | None = None,
     theme: Any = None,
 ):
