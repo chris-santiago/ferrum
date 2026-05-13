@@ -140,6 +140,57 @@ The full visualizer menu mirrors the helpers:
 
 Pick the helper when you want the diagnostic with minimal ceremony. Pick the visualizer when you want CV-fold lifecycle, custom training/scoring splits, or compatibility with code patterns from yellowbrick.
 
+## Customizing diagnostic output
+
+Every diagnostic helper accepts four override keywords for customization without dropping to the grammar API:
+
+| Keyword | What it does |
+|---|---|
+| `mark=` | Override or suppress sub-layers by name. |
+| `encode=` | Override encoding channels. |
+| `properties=` | Override chart properties (`title`, `width`, `height`). |
+| `layers=` | Append extra layers on top. |
+
+Diagnostic charts are composites with named sub-layers. Inspect them with `.layer_names`:
+
+```python
+import ferrum as fm
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, random_state=0)
+model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
+
+chart = fm.roc_chart(model, X_test, y_test)
+names = chart.layer_names
+assert "line" in names
+assert "reference" in names
+```
+
+Override sub-layers by name — suppress them with `False`, or merge mark kwargs with a dict:
+
+```python
+import ferrum as fm
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, random_state=0)
+model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
+
+chart = fm.roc_chart(
+    model, X_test, y_test,
+    mark={"line": {"stroke_width": 3}},
+    properties={"title": "ROC — Random Forest"},
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+The same `mark=`, `encode=`, `properties=`, `layers=` pattern works on every diagnostic helper — `confusion_matrix_chart`, `calibration_chart`, `importance_chart`, and all the rest.
+
 ## Diagnostics compose with everything else
 
 The most important property of these helpers is structural: their output is a regular Ferrum chart. That means a ROC curve participates in the rest of the grammar identically to a scatter plot:

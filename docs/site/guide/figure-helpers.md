@@ -166,6 +166,38 @@ assert chart.show_svg().startswith("<svg")
 
 `kind=` controls the center plot (`"scatter"`, `"kde"`, `"hist"`, `"hex"`, `"reg"`); `marginal_kind=` controls both marginals (`"hist"`, `"kde"`, `"rug"`, `"box"`). The marginals share their data axis with the center.
 
+## Customizing helper output
+
+Since helper output is a regular chart, you can chain grammar methods to customize it:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = fm.displot(iris, x="sepal_length", kind="hist").properties(title="Sepal length distribution")
+assert chart.show_svg().startswith("<svg")
+```
+
+Composite marks (boxplot, errorbar, smooth with CI, etc.) have **named sub-layers** you can inspect:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 3, 5, 4]})
+chart = fm.Chart(df).mark_boxplot().encode(x="x", y="y")
+names = chart.layer_names
+assert "box" in names
+assert "median" in names
+```
+
+The [model diagnostics](model-diagnostics.md) helpers go further with a built-in `mark=`, `encode=`, `properties=`, `layers=` override surface — see that page for details.
+
 ## Helpers and the rest of the grammar
 
 The output of every helper is a regular Ferrum chart object. That means:
