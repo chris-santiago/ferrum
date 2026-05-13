@@ -27,9 +27,7 @@ from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides, register_layer_names
 from ferrum.plots._helpers import _color_field_for
 
-# Re-register the calibration layer-name catalog entry.  ``register_layer_names``
-# is additive (frozenset union), so the duplicate call in ``_diagnostics.charts``
-# is harmless while both modules coexist.
+# Register the calibration layer-name catalog entry.
 register_layer_names("calibration", frozenset({"line", "reference", "point"}))
 
 

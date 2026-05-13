@@ -3,7 +3,7 @@
 The Rust ``Smooth`` / ``Robust`` transforms emit a ``_metrics_text`` column
 formatted via ``format!("R² {r2:.3}\\nRMSE {rmse:.3}\\nMAE {mae:.3}")`` (see
 ``crates/ferrum-core/src/transform/residuals.rs``). The Python-side
-``_inject_metrics_corner`` (in ``ferrum._diagnostics.charts``) augments a
+``_inject_metrics_corner`` (in ``ferrum.plots._helpers``) augments a
 DataFrame without going through a Rust transform — but it must produce a
 byte-identical string so chart renderings are interchangeable between the
 two paths.

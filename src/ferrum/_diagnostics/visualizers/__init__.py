@@ -12,13 +12,13 @@ first-class API.
   to render. The ``.fit`` / ``.predict`` / ``get_params`` /
   ``set_params`` surface keeps visualizers composable inside sklearn
   pipelines, ``GridSearchCV``, and external evaluators.
-- **Figure functions** (``ferrum.figures``). A direct
+- **Figure functions** (``ferrum.plots``). A direct
   ``f(model, X, y) -> Chart`` call. No state, no separate ``.fit()``.
   Best for exploratory work, notebook one-liners, and any path where
   the user already has a fitted estimator and just wants a chart.
 
 Both surfaces dispatch to the same ``_*_chart_from_source`` builders in
-``ferrum._diagnostics.charts``; the dual API is sugar over a single
+``ferrum.plots.*`` domain modules; the dual API is sugar over a single
 implementation tree, not a parallel pipeline.
 
 Each visualizer wraps a ``ModelSource`` internally — the derived-data

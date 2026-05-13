@@ -522,7 +522,7 @@ def test_pdp_chart_center_starts_at_zero():
     (feature, sample_id) so every polyline starts at 0 at the left."""
     import numpy as np
     model, X, y = _rf_xy()
-    from ferrum._diagnostics.charts import _pdp_chart_from_source
+    from ferrum.plots.explanation import _pdp_chart_from_source
     source = ferrum.ModelSource(model, X, y)
     chart = _pdp_chart_from_source(
         source, features=["f0"], grid_resolution=10,
@@ -552,7 +552,7 @@ def test_pdp_chart_kind_invalid_raises():
 
 def test_shap_order_features_unknown_order_raises():
     """_shap_order_features must raise ValueError for unknown order strings."""
-    from ferrum._diagnostics.charts import _shap_order_features
+    from ferrum.plots.explanation import _shap_order_features
 
     sv = pl.DataFrame({
         "feature": ["a", "a", "b", "b"],
@@ -568,7 +568,7 @@ def test_shap_order_features_unknown_order_raises():
 
 def test_shap_order_features_accepted_orders_work():
     """Accepted order values must not raise."""
-    from ferrum._diagnostics.charts import _shap_order_features
+    from ferrum.plots.explanation import _shap_order_features
 
     sv = pl.DataFrame({
         "feature": ["a", "a", "b", "b"],

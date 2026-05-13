@@ -6,7 +6,7 @@ from typing import Any
 
 import polars as pl
 
-from ..charts import (
+from ferrum.plots.explanation import (
     _importance_chart_from_source,
     _shap_bar_chart_from_source,
     _shap_beeswarm_chart_from_source,

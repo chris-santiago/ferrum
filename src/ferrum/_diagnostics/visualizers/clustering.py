@@ -66,7 +66,7 @@ class SilhouetteVisualizer(FerrumVisualizer):
         self._metrics["mean_silhouette"] = float(sil["silhouette_value"].mean())
 
     def _build_chart(self) -> Any:
-        from ..charts import _silhouette_chart_from_source
+        from ferrum.plots.clustering import _silhouette_chart_from_source
 
         return _silhouette_chart_from_source(
             self._source,

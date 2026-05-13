@@ -29,7 +29,7 @@ def test_residuals_annotate_metrics_false_omits():
 def test_residuals_single_panel_also_annotates():
     """The corner annotation rides on both the 4-panel and single-panel
     layouts — see _inject_metrics_corner + _overlay_metrics_corner in
-    src/ferrum/_diagnostics/charts.py."""
+    src/ferrum/plots/_helpers.py."""
     rng = np.random.default_rng(0)
     X = rng.normal(0, 1, (200, 3))
     y = X.sum(axis=1) + rng.normal(0, 0.5, 200)

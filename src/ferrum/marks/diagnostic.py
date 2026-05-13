@@ -15,7 +15,7 @@ columns literally.
 Reference lines: Rust's ``mark_rule`` renders one line per row. To draw
 a single reference line, the corresponding ``Chart.mark_*`` method
 injects a one-non-null-row column (see
-``ferrum._diagnostics.charts._inject_constant``); the desugar references
+``ferrum._sentinels._inject_constant``); the desugar references
 that column by name. No new Rust marks or transforms.
 """
 

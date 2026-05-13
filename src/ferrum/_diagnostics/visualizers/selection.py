@@ -8,7 +8,7 @@ from typing import Any
 
 import polars as pl
 
-from ..charts import (
+from ferrum.plots.model_selection import (
     _alpha_selection_chart_from_source,
     _cv_scores_chart_from_source,
     _learning_curve_chart_from_source,

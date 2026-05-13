@@ -12,7 +12,7 @@ instead of one per data row. The pattern is:
    ``text.rs`` skip non-finite values and null strings).
 
 This module exists so the helpers live independently of any one
-caller. Both chart-builder code (``_diagnostics/charts.py``) and mark
+caller. Both chart-builder code (``ferrum.plots.*``) and mark
 methods (``chart.py: mark_silhouette``, ``mark_shap_beeswarm``, …) reach
 for the same helpers.
 """

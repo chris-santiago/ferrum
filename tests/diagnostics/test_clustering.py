@@ -70,7 +70,7 @@ def test_pca_variance_fallback_without_capability():
 
 
 def test_silhouette_chart_renders():
-    from ferrum._diagnostics.charts import _silhouette_chart_from_source
+    from ferrum.plots.clustering import _silhouette_chart_from_source
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df)

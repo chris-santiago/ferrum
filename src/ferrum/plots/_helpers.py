@@ -1,7 +1,6 @@
 """Shared helper functions used across diagnostic and plot builders.
 
-Extracted from ``ferrum._diagnostics.charts`` so they can be imported by
-any domain module without pulling in the full builder registry.
+Shared by the ``ferrum.plots.*`` domain modules.
 """
 
 from __future__ import annotations

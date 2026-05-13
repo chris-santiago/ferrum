@@ -64,7 +64,7 @@ def test_golden_residuals_chart_regression():
 
 
 def test_golden_prediction_error_regression_ci95():
-    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    from ferrum.plots.regression import _prediction_error_chart_from_source
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -74,7 +74,7 @@ def test_golden_prediction_error_regression_ci95():
 
 
 def test_golden_prediction_error_regression_reference_band():
-    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    from ferrum.plots.regression import _prediction_error_chart_from_source
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -84,7 +84,7 @@ def test_golden_prediction_error_regression_reference_band():
 
 
 def test_golden_prediction_error_regression():
-    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    from ferrum.plots.regression import _prediction_error_chart_from_source
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -357,7 +357,7 @@ def test_golden_alpha_selection_ridge():
 
 
 def test_golden_silhouette_kmeans():
-    from ferrum._diagnostics.charts import _silhouette_chart_from_source
+    from ferrum.plots.clustering import _silhouette_chart_from_source
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df)

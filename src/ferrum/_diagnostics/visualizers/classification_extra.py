@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ..charts import (
+from ferrum.plots.classification import (
     _class_balance_chart_from_dataframe,
     _class_prediction_error_chart_from_source,
     _discrimination_threshold_chart_from_source,

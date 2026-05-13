@@ -15,7 +15,7 @@ import numpy as np
 import polars as pl
 
 from .base import FerrumVisualizer
-from ..charts import (
+from ferrum.plots.ranking import (
     _parallel_coords_chart_from_dataframe,
     _rank1d_chart_from_dataframe,
     _rank2d_chart_from_dataframe,

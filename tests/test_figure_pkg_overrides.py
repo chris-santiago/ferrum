@@ -1,4 +1,4 @@
-"""Override passthrough tests for the src/ferrum/figure/ package functions.
+"""Override passthrough tests for the src/ferrum/plots/ package functions.
 
 Covers lmplot, residplot, catplot, displot, heatmap, pairplot, jointplot,
 clustermap with SVG round-trip verification and edge cases.

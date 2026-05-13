@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ..charts import (
+from ferrum.plots.classification import (
     _calibration_chart_from_source,
     _classification_report_chart,
     _confusion_chart_from_source,

@@ -82,7 +82,7 @@ def test_chart_mark_prediction_error_sorts_by_y_true():
 
 
 def test_residuals_chart_from_source_builder():
-    from ferrum._diagnostics.charts import _residuals_chart_from_source
+    from ferrum.plots.regression import _residuals_chart_from_source
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source)
     svg = chart.show_svg()
@@ -90,7 +90,7 @@ def test_residuals_chart_from_source_builder():
 
 
 def test_residuals_chart_from_source_raw_kind():
-    from ferrum._diagnostics.charts import _residuals_chart_from_source
+    from ferrum.plots.regression import _residuals_chart_from_source
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source, kind="raw")
     svg = chart.show_svg()
@@ -98,7 +98,7 @@ def test_residuals_chart_from_source_raw_kind():
 
 
 def test_prediction_error_chart_from_source_builder():
-    from ferrum._diagnostics.charts import _prediction_error_chart_from_source
+    from ferrum.plots.regression import _prediction_error_chart_from_source
     source, _ = _ridge_source()
     chart = _prediction_error_chart_from_source(source)
     svg = chart.show_svg()

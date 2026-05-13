@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..charts import (
+from ferrum.plots.regression import (
     _prediction_error_chart_from_source,
     _residuals_chart_from_source,
 )
