@@ -57,11 +57,13 @@ def jointplot(
     space : float, default 0.05
         Gap (in layout units) between the center and marginal panels.
     xlim : tuple, optional
-        ``(min, max)`` domain for the x-axis (reserved; passed to
-        ``JointChart`` for future renderer support).
+        ``(min, max)`` domain override for the x-axis.  Applied as an
+        explicit scale domain on the center and top-marginal x encodings
+        via ``X(field, scale={"domain": [min, max]})``.
     ylim : tuple, optional
-        ``(min, max)`` domain for the y-axis (reserved; passed to
-        ``JointChart`` for future renderer support).
+        ``(min, max)`` domain override for the y-axis.  Applied as an
+        explicit scale domain on the center and right-marginal y encodings
+        via ``Y(field, scale={"domain": [min, max]})``.
     joint_kws : dict, optional
         Extra keyword arguments forwarded to the center-panel mark call.
     marginal_kws : dict, optional
@@ -107,12 +109,24 @@ def jointplot(
         )
 
     # Build the center chart per `kind`.
+    from ferrum.encoding import X as _X, Y as _Y
+
     jk = dict(joint_kws or {})
 
     enc_center: dict = {"x": x, "y": y}
     if hue is not None:
         enc_center["color"] = hue
     enc_center.update(encode_kwargs)
+
+    # Apply xlim/ylim as scale domain overrides on center encodings.
+    if xlim is not None:
+        x_field = enc_center.get("x", x)
+        if isinstance(x_field, str):
+            enc_center["x"] = _X(x_field, scale={"domain": list(xlim)})
+    if ylim is not None:
+        y_field = enc_center.get("y", y)
+        if isinstance(y_field, str):
+            enc_center["y"] = _Y(y_field, scale={"domain": list(ylim)})
 
     if kind == "scatter":
         center = Chart(data).mark_point(**jk).encode(**enc_center)
@@ -124,18 +138,28 @@ def jointplot(
         for k in ("bins_x", "bins_y"):
             if k in jk:
                 bin2d_kwargs[k] = jk.pop(k)
+        hist_enc: dict = {"x": "bin_x_start", "y": "bin_y_start", "color": "count"}
+        if xlim is not None:
+            hist_enc["x"] = _X("bin_x_start", scale={"domain": list(xlim)})
+        if ylim is not None:
+            hist_enc["y"] = _Y("bin_y_start", scale={"domain": list(ylim)})
         center = (
             Chart(data)
             .transform(Bin2D(x=x, y=y, **bin2d_kwargs))
             .mark_rect()
-            .encode(x="bin_x_start", y="bin_y_start", color="count")
+            .encode(**hist_enc)
         )
     elif kind == "hex":
         center = Chart(data).mark_hex(**jk).encode(**enc_center)
     elif kind == "reg":
         # Layered: scatter + smoothed regression line.
         scatter = Chart(data).mark_point(**jk).encode(**enc_center)
-        fit = Chart(data).mark_smooth(method="lm", ci=None).encode(x=x, y=y)
+        reg_enc: dict = {"x": x, "y": y}
+        if xlim is not None:
+            reg_enc["x"] = _X(x, scale={"domain": list(xlim)})
+        if ylim is not None:
+            reg_enc["y"] = _Y(y, scale={"domain": list(ylim)})
+        fit = Chart(data).mark_smooth(method="lm", ci=None).encode(**reg_enc)
         from ferrum.figure.regression import _merge_layers
 
         center = _merge_layers(scatter, fit)
@@ -143,6 +167,8 @@ def jointplot(
     # Build top marginal (over x).
     mk = dict(marginal_kws or {})
     enc_top: dict = {"x": x}
+    if xlim is not None:
+        enc_top["x"] = _X(x, scale={"domain": list(xlim)})
     if hue is not None:
         enc_top["color"] = hue
     if marginal_kind == "hist":
@@ -158,6 +184,8 @@ def jointplot(
     # the marginal's x-axis while the binned data dimension stays on the
     # marginal's y-axis (shared with the centre cell via share_y).
     enc_right: dict = {"y": y}
+    if ylim is not None:
+        enc_right["y"] = _Y(y, scale={"domain": list(ylim)})
     if hue is not None:
         enc_right["color"] = hue
     if marginal_kind == "hist":

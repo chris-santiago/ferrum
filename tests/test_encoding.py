@@ -100,8 +100,9 @@ def test_x_warns_on_deferred_kwargs():
     reset_warnings()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
+        # `sort` is now honored (D8 wiring), so only `axis` warns.
         X("price", axis={"grid": False}, sort="ascending")
-    assert len(w) == 2
+    assert len(w) == 1
 
 
 # ---------------------------------------------------------------------------

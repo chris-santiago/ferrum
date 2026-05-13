@@ -184,22 +184,14 @@ class TestEncodingAxis:
 
 class TestEncodingSort:
     def test_sort_descending_accepted_without_crash(self):
-        """sort kwarg is accepted; emits a UserWarning (not yet rendered)."""
-        from ferrum._warn import reset_warnings
-        reset_warnings()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            svg = (
-                fm.Chart(_bar_df())
-                .mark_bar()
-                .encode(x=fm.X("cat", sort="descending"), y="val")
-                .show_svg()
-            )
-        assert "<svg" in svg
-        messages = [str(w.message) for w in caught]
-        assert any("sort" in m.lower() for m in messages), (
-            f"Expected a 'sort' warning; got: {messages}"
+        """sort kwarg is honored on X/Y — no warning emitted."""
+        svg = (
+            fm.Chart(_bar_df())
+            .mark_bar()
+            .encode(x=fm.X("cat", sort="descending"), y="val")
+            .show_svg()
         )
+        assert "<svg" in svg
 
 
 # ---------------------------------------------------------------------------

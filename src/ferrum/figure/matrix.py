@@ -55,7 +55,7 @@ def pairplot(
     """Pairwise-scatter grid (scatterplot matrix).
 
     Returns a ``RepeatChart`` whose template repeats over the cartesian
-    product of ``row`` × ``column`` field lists, resolved from ``vars`` or
+    product of ``row`` x ``column`` field lists, resolved from ``vars`` or
     ``x_vars``/``y_vars``.  When neither is supplied, all numeric columns
     in ``data`` are used.
 
@@ -84,18 +84,21 @@ def pairplot(
         ``"auto"`` resolves to ``"kde"`` (KDE is smoother and more informative
         than histograms for overlapping distributions).  Pass ``None`` or
         ``"none"`` to suppress diagonal marks.
-    markers : any, optional
-        Reserved for future point-marker customisation (no-op today).
+    markers : str or list of str, optional
+        Point-marker shape(s).  A single string (e.g. ``"square"``) sets the
+        shape on every scatter panel.  A list maps each hue level to a shape
+        via the ``Shape`` encoding.  Only applies when ``kind="scatter"``.
     height : float or None, optional
-        Reserved for future use (no-op today). When wired, will control the
-        height of each individual panel in pixels.
+        Height of each individual panel in pixels.  When set alongside
+        ``aspect``, each panel's width is ``height * aspect``.
     aspect : float or None, optional
-        Reserved for future use (no-op today). When wired, will control the
-        aspect ratio per panel (width = height * aspect).
+        Aspect ratio per panel (width = ``height * aspect``).  Defaults to
+        ``1.0`` when ``height`` is set and ``aspect`` is omitted.
     corner : bool, default False
         Render only the lower-triangle panels.
     dropna : bool, default False
-        Reserved for future NaN-dropping logic (no-op today).
+        When ``True``, drop rows with any null value in the selected
+        variable columns before building the pairplot.
     theme : Theme, optional
         Visual theme applied to all panels.
     **encode_kwargs
@@ -162,9 +165,22 @@ def pairplot(
         rows = numeric_cols
         cols = numeric_cols
 
+    # dropna: drop rows with any null in the selected variable columns.
+    if dropna:
+        import polars as pl
+
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
+        data = data.drop_nulls(subset=all_vars)
+
     # Build the off-diagonal template.
+    mark_kwargs: dict = {}
+    if markers is not None and kind == "scatter":
+        if isinstance(markers, str):
+            mark_kwargs["shape"] = markers
+
     if kind == "scatter":
-        off = Chart(data).mark_point()
+        off = Chart(data).mark_point(**mark_kwargs)
     elif kind == "kde":
         off = Chart(data).mark_density()
     elif kind == "hist":
@@ -174,8 +190,18 @@ def pairplot(
     enc: dict = {"x": Repeat.column, "y": Repeat.row}
     if hue is not None:
         enc["color"] = hue
+    # markers as list: map each hue level to a shape via Shape encoding.
+    if markers is not None and isinstance(markers, list) and hue is not None and kind == "scatter":
+        from ferrum.encoding import Shape as _Shape
+
+        enc["shape"] = _Shape(hue, scale={"range": markers})
     enc.update(encode_kwargs)
     off = off.encode(**enc)
+
+    # Per-panel sizing via height / aspect.
+    if height is not None:
+        panel_aspect = aspect if aspect is not None else 1.0
+        off = off.properties(height=height, width=height * panel_aspect)
 
     # Build the diagonal template (only meaningful for symmetric vars).
     symmetric = rows == cols
@@ -202,6 +228,11 @@ def pairplot(
             if hue is not None:
                 kde_kwargs["groupby"] = hue
             diagonal = Chart(data).mark_density(**kde_kwargs).encode(**diag_enc)
+
+        # Apply same panel sizing to diagonal template.
+        if height is not None:
+            panel_aspect = aspect if aspect is not None else 1.0
+            diagonal = diagonal.properties(height=height, width=height * panel_aspect)
 
     if theme is not None:
         off = off.theme(theme)
@@ -270,8 +301,12 @@ def heatmap(
         to the 2nd and 98th percentiles of the data.
     square : bool, default False
         Force equal width and height per cell so the heatmap is square.
-    mask : any, optional
-        Reserved for future cell-masking support (no-op today).
+    mask : array-like, "upper", "lower", or None, optional
+        Cell-masking control.  When ``"upper"``, only the upper triangle
+        (including the diagonal) is shown.  When ``"lower"``, only the
+        lower triangle (including the diagonal) is shown.  When an
+        array-like boolean matrix (same shape as the numeric portion of
+        ``data``), cells where the mask is ``True`` are hidden.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     **encode_kwargs
@@ -332,6 +367,67 @@ def heatmap(
         if vmax is None and arr.size:
             vmax = float(np.percentile(arr, 98.0))
 
+    # When mask is set, we melt the data in Python and filter out masked
+    # cells before chart construction (no Rust Unpivot needed).
+    # Otherwise, use the Rust Unpivot transform for the standard path.
+    melted_data = None
+    if mask is not None:
+        import polars as pl
+
+        pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
+        # Build a long-form DataFrame: (id_col, "column", "value").
+        n_rows = pdf.height
+        n_cols = len(value_cols)
+
+        if isinstance(mask, str):
+            if mask == "upper":
+                # Keep upper triangle + diagonal: row_idx <= col_idx.
+                keep = [
+                    (r, c)
+                    for r in range(n_rows)
+                    for c in range(n_cols)
+                    if r <= c
+                ]
+            elif mask == "lower":
+                # Keep lower triangle + diagonal: row_idx >= col_idx.
+                keep = [
+                    (r, c)
+                    for r in range(n_rows)
+                    for c in range(n_cols)
+                    if r >= c
+                ]
+            else:
+                raise ValueError(
+                    f"heatmap: mask must be 'upper', 'lower', or array-like; got {mask!r}"
+                )
+        else:
+            # Array-like boolean mask: True = hide, False = show.
+            import numpy as np
+
+            mask_arr = np.asarray(mask, dtype=bool)
+            if mask_arr.shape != (n_rows, n_cols):
+                raise ValueError(
+                    f"heatmap: mask shape {mask_arr.shape} does not match data "
+                    f"shape ({n_rows}, {n_cols})"
+                )
+            keep = [
+                (r, c)
+                for r in range(n_rows)
+                for c in range(n_cols)
+                if not mask_arr[r, c]
+            ]
+
+        # Build the filtered long-form DataFrame.
+        row_labels = pdf[id_col].to_list()
+        rows_long: list[dict] = []
+        for r, c in keep:
+            rows_long.append({
+                id_col: row_labels[r],
+                "column": value_cols[c],
+                "value": pdf[value_cols[c]][r],
+            })
+        melted_data = pl.DataFrame(rows_long)
+
     # Build the chart: Unpivot to long format, then mark_rect.
     unpivot = Unpivot(
         id_vars=[id_col],
@@ -365,7 +461,11 @@ def heatmap(
         if len(scale_kwargs) > 1:  # > just "type"
             enc["color"] = Color(enc["color"], scale=scale_kwargs)
 
-    chart = Chart(data).transform(unpivot).mark_rect(**rect_kwargs).encode(**enc)
+    if melted_data is not None:
+        # Data already melted and filtered — no Unpivot transform needed.
+        chart = Chart(melted_data).mark_rect(**rect_kwargs).encode(**enc)
+    else:
+        chart = Chart(data).transform(unpivot).mark_rect(**rect_kwargs).encode(**enc)
 
     # square=True → fix width=height proportions.
     if square:
@@ -379,12 +479,19 @@ def heatmap(
     if annot:
         from ferrum.encoding import Text
 
-        text_layer = (
-            Chart(data)
-            .transform(unpivot)
-            .mark_text()
-            .encode(x="column", y=id_col, text=Text("value", format=fmt))
-        )
+        if melted_data is not None:
+            text_layer = (
+                Chart(melted_data)
+                .mark_text()
+                .encode(x="column", y=id_col, text=Text("value", format=fmt))
+            )
+        else:
+            text_layer = (
+                Chart(data)
+                .transform(unpivot)
+                .mark_text()
+                .encode(x="column", y=id_col, text=Text("value", format=fmt))
+            )
         from ferrum.figure.regression import _merge_layers
 
         chart = _merge_layers(chart, text_layer)
@@ -440,16 +547,16 @@ def clustermap(
         Normalise to [0, 1] along rows (``0``) or columns (``1``);
         forwarded to ``Linkage``.
     figsize : tuple of (float, float), optional
-        Reserved for future use (no-op today). When wired, will control the
-        overall figure size.
+        Overall figure size as ``(width, height)`` in pixels, applied to
+        the center heatmap panel via ``.properties()``.
     dendrogram_ratio : float, default 0.2
         Fraction of the total width/height allocated to each dendrogram
         panel, forwarded to ``ClusterMapChart``.
     theme : Theme, optional
         Visual theme applied to the center and dendrogram charts.
     **encode_kwargs
-        Reserved for future use (no-op today). Currently accepted but not
-        forwarded to the underlying chart.
+        Additional keyword arguments forwarded to ``Chart.encode()`` on
+        the center heatmap chart.
 
     Returns
     -------
@@ -543,6 +650,8 @@ def clustermap(
     # the internal unpivot column names — real row-label columns keep their names.
     _x_enc = _X("column", title="")
     _y_enc = _Y(id_col, title="" if id_col in ("_row_id", "column") else id_col)
+    center_enc: dict = {"x": _x_enc, "y": _y_enc, "color": _color_enc}
+    center_enc.update(encode_kwargs)
     center = (
         Chart(data)
         .transform(
@@ -552,12 +661,12 @@ def clustermap(
             unpivot,
         )
         .mark_rect()
-        .encode(
-            x=_x_enc,
-            y=_y_enc,
-            color=_color_enc,
-        )
+        .encode(**center_enc)
     )
+
+    # figsize → set width/height on center heatmap panel.
+    if figsize is not None:
+        center = center.properties(width=figsize[0], height=figsize[1])
 
     from ferrum._layer import _Layer
 

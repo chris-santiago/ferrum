@@ -83,7 +83,7 @@ def lmplot(
     scatter: bool = True,
     scatter_kws: Any = None,
     line_kws: Any = None,
-    truncate: bool = False,
+    truncate: bool = True,
     x_bins: Any = None,
     x_estimator: Any = None,
     x_jitter: Any = None,
@@ -135,11 +135,12 @@ def lmplot(
     line_kws : dict, optional
         Extra keyword arguments forwarded to the regression-line mark
         call (e.g. ``{"stroke_width": 3}``).
-    truncate : bool, default False
-        Reserved — not yet wired to the Rust rendering layer.  The fit
-        line currently clips to the observed data range regardless of
-        this setting.  Rust-side ``x_range`` support is tracked in the
-        design spec (WI-7).
+    truncate : bool, default True
+        When ``True`` (default), the fit line spans only the observed
+        data range (min to max of ``x``).  When ``False``, raises
+        ``ValueError`` because extending the fit line beyond the data
+        range requires Rust-side ``x_range`` support (tracked in the
+        design spec WI-7).
     x_bins : any, optional
         Forwarded as ``x_bins`` to ``mark_smooth`` for binning the
         x-axis before fitting (``method="lm"`` only).
@@ -172,6 +173,9 @@ def lmplot(
     ------
     ValueError
         If ``method`` is not one of the supported values.
+    ValueError
+        If ``truncate=False`` (extending the fit line beyond the data range
+        is not yet supported).
 
     Examples
     --------
@@ -203,10 +207,15 @@ def lmplot(
     # the metric is well-defined only for the OLS path.
     metrics_applied = show_metrics and method == "lm" and hue is None
 
-    # truncate: acknowledged but not yet wired to Rust x_range.
-    # True = clip to data range (current Smooth default); False = extend
-    # (needs SmoothSpec.x_range, tracked in design spec WI-7).
-    _ = truncate
+    # truncate: True = clip to data range (current Smooth default).
+    # False = extend beyond data range — requires Rust-side x_range
+    # support (SmoothSpec.x_range, tracked in design spec WI-7).
+    if not truncate:
+        raise ValueError(
+            "lmplot: truncate=False is not yet supported; the fit line always "
+            "clips to the observed data range. Set truncate=True or omit the "
+            "parameter. Rust-side x_range support is tracked in design spec WI-7."
+        )
 
     # Shared encoding.
     enc: dict = {"x": x, "y": y}

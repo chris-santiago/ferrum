@@ -5,7 +5,7 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_RENDERED_HONORED = frozenset(["type", "bin", "aggregate", "scale", "title"])
+_RENDERED_HONORED = frozenset(["type", "bin", "aggregate", "scale", "title", "sort"])
 
 
 class X(ChannelBase):

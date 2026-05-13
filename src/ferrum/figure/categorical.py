@@ -68,10 +68,12 @@ def catplot(
     kind : {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}, default "strip"
         Which categorical mark to draw.
     order : list of str, optional
-        Reserved for future use (no-op today). Explicit ordering for the
-        categorical axis levels.
+        Explicit ordering for the categorical axis levels.  Passed as
+        ``sort=order`` on the categorical-axis encoding so the domain
+        renders in the given order.
     hue_order : list of str, optional
-        Reserved for future use (no-op today). Explicit ordering for hue levels.
+        Explicit ordering for hue levels.  Passed as ``sort=hue_order``
+        on the color encoding.
     orient : {"h", "v", None}, optional
         ``"h"`` flips the axes (``x`` becomes the value axis, ``y`` the category
         axis) and applies ``CoordFlip``.  ``"v"`` and ``None`` are both treated
@@ -83,13 +85,17 @@ def catplot(
         For ``kind="strip"``, add ``Jitter`` on the categorical axis.
         Ignored when ``dodge=True``.
     native_scale : bool, default False
-        Reserved for future use (no-op in the current renderer).
+        When ``True``, treat the categorical axis as quantitative instead
+        of ordinal (preserves numeric spacing rather than equal-spacing
+        categories).  Currently raises ``ValueError`` because the renderer
+        does not support quantitative categorical axes.
     ci : int or float, default 95
-        Reserved for future use (no-op today). When wired, will set the
-        confidence-interval level for ``"point"`` and ``"bar"`` kinds.
+        Confidence-interval level (0--100) for ``"point"`` and ``"bar"``
+        kinds.  Currently raises ``ValueError`` because the Summary
+        transform is not yet wired into catplot.
     n_boot : int, default 1000
-        Reserved for future use (no-op today). When wired, will set the
-        bootstrap iteration count used to compute ``ci``.
+        Bootstrap iteration count used to compute ``ci``.  Currently
+        raises ``ValueError`` alongside ``ci``.
     seed : int or None, optional
         Random seed forwarded to ``Jitter`` for reproducible strip positions.
     theme : Theme, optional
@@ -109,6 +115,11 @@ def catplot(
     ValueError
         If ``kind="count"`` is used without specifying ``x`` (or ``y`` when
         ``orient="h"``).
+    ValueError
+        If ``native_scale=True`` is passed (not yet supported by the renderer).
+    ValueError
+        If ``ci`` is not the default value ``95`` and the kind is ``"point"``
+        or ``"bar"`` (Summary transform not yet wired).
 
     Examples
     --------
@@ -126,6 +137,24 @@ def catplot(
     if kind not in _VALID_KINDS:
         raise ValueError(f"catplot: kind must be one of {sorted(_VALID_KINDS)}; got {kind!r}")
 
+    if native_scale:
+        raise ValueError(
+            "catplot: native_scale=True is not supported; the renderer does not "
+            "support quantitative categorical axes"
+        )
+
+    if ci != 95 and kind in ("point", "bar"):
+        raise ValueError(
+            f"catplot: ci={ci!r} with kind={kind!r} is not yet supported; "
+            "the Summary transform is not wired into catplot"
+        )
+
+    if n_boot != 1000 and kind in ("point", "bar"):
+        raise ValueError(
+            f"catplot: n_boot={n_boot!r} with kind={kind!r} is not yet supported; "
+            "the Summary transform is not wired into catplot"
+        )
+
     # Determine the categorical and value axes. By default x is categorical,
     # y is value; orient="h" flips to y categorical / x value (and we add
     # CoordFlip to the chart).
@@ -139,6 +168,9 @@ def catplot(
         position = Dodge(by=hue)
 
     # Encoding shared across all kinds.
+    from ferrum.encoding import Color as _Color
+    from ferrum.encoding import X as _X, Y as _Y
+
     enc: dict = {}
     if x is not None:
         enc["x"] = x
@@ -146,6 +178,17 @@ def catplot(
         enc["y"] = y
     if hue is not None:
         enc["color"] = hue
+
+    # Wire order → sort on the categorical axis encoding.
+    if order is not None and cat_field is not None:
+        cat_channel = "x" if not horizontal else "y"
+        cls = _X if cat_channel == "x" else _Y
+        enc[cat_channel] = cls(cat_field, sort=list(order))
+
+    # Wire hue_order → sort on the color encoding.
+    if hue_order is not None and hue is not None:
+        enc["color"] = _Color(hue, sort=list(hue_order))
+
     enc.update(encode_kwargs)
 
     chart = Chart(data)

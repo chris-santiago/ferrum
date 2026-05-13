@@ -32,7 +32,9 @@ class Color(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend={"disabled": True}``,
     ``legend=None``, or ``legend=False`` suppresses the color legend in the
-    rendered SVG.  ``condition`` is accepted but reserved for future use.
+    rendered SVG.  ``sort`` is honored: pass a list of strings to set the
+    explicit domain order for the color scale.  ``condition`` is accepted but
+    reserved for future use.
 
     Examples
     --------
@@ -50,7 +52,7 @@ class Color(ChannelBase):
     # ``legend=None`` (or ``False``) suppresses the categorical color legend
     # at the renderer level. Used by direct-label diagnostic charts to
     # avoid a redundant legend alongside endpoint-anchored series labels.
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend"])
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "sort"])
 
 
 class Size(ChannelBase):
