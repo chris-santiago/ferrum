@@ -11,7 +11,6 @@ base chart's ``_data`` and overlay cleanly via ``+``.
 
 from __future__ import annotations
 
-import numpy as np
 import polars as pl
 
 from typing import TYPE_CHECKING
@@ -73,54 +72,44 @@ def _direct_label_endpoint(
     ):
         return chart  # bail rather than crash — caller can fall back to legend
 
-    series_arr = np.asarray(tbl.column(label_field).to_pylist())
-    x_all = np.asarray(tbl.column(x_col).to_pylist(), dtype=float)
-    y_all = (
-        np.asarray(tbl.column(y_col).to_pylist(), dtype=float)
-        if y_col in tbl.column_names
-        else None
-    )
-    labels_col: list[str | None] = [None] * len(series_arr)
-    label_y_col: list[float | None] = [None] * len(series_arr)
-    # Collect endpoint coordinates per series so we can detect collisions
-    # (e.g. binary gain/lift curves saturating at gain=1 produce overlapping
-    # endpoint labels). When two endpoints are within ``stagger_threshold``
-    # of each other on the y axis, stagger downward by ``stagger_step``.
-    series_list = sorted(set(series_arr.tolist()), key=str)
+    base_pl = chart._data if isinstance(chart._data, pl.DataFrame) else pl.from_arrow(tbl)
+    df = base_pl.with_row_index("_idx")
+    has_y = y_col in df.columns
+    n = df.height
+    labels_col: list[str | None] = [None] * n
+    label_y_col: list[float | None] = [None] * n
+
+    series_list = sorted(df[label_field].unique().to_list(), key=str)
     series_endpoints: list[tuple[str, int, float, float]] = []
+    descending = position == "end"
     for series in series_list:
-        mask = series_arr == series
-        if not mask.any():
+        group = df.filter(pl.col(label_field) == series)
+        if group.is_empty():
             continue
-        masked_x = x_all[mask]
-        idx_in_mask = int(np.argmax(masked_x) if position == "end" else np.argmin(masked_x))
-        global_idx = int(np.where(mask)[0][idx_in_mask])
-        ep_x = float(masked_x[idx_in_mask])
-        ep_y = float(y_all[global_idx]) if y_all is not None else 0.0
+        row = group.sort(x_col, descending=descending).row(0, named=True)
+        global_idx = int(row["_idx"])
+        ep_x = float(row[x_col])
+        ep_y = float(row[y_col]) if has_y else 0.0
         series_endpoints.append((str(series), global_idx, ep_x, ep_y))
 
     y_range = (
-        float(np.nanmax(y_all) - np.nanmin(y_all)) if (y_all is not None and y_all.size) else 1.0
+        float(df[y_col].max() - df[y_col].min()) if (has_y and n > 0) else 1.0
     )
     stagger_step = max(y_range * 0.05, 1e-9)
     stagger_threshold = stagger_step * 0.8
 
     used_y: list[float] = []
-    # Process endpoints in descending y order so the highest sits at its
-    # natural position and subsequent labels stagger downward.
     for series, global_idx, ep_x, ep_y in sorted(
         series_endpoints,
         key=lambda t: -t[3],
     ):
         target_y = ep_y
-        # Push down if too close to a previously placed label.
         while any(abs(target_y - prev_y) < stagger_threshold for prev_y in used_y):
             target_y -= stagger_step
         used_y.append(target_y)
         labels_col[global_idx] = series
         label_y_col[global_idx] = target_y
 
-    base_pl = chart._data if isinstance(chart._data, pl.DataFrame) else pl.from_arrow(tbl)
     augmented = base_pl.with_columns(
         pl.Series("_direct_label_text", labels_col, dtype=pl.Utf8),
         pl.Series("_direct_label_y", label_y_col, dtype=pl.Float64),

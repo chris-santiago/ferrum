@@ -226,8 +226,8 @@ class CalibrationVisualizer(FerrumVisualizer):
         # When the source is a ComparedModelSource the frame carries one
         # row per (model, bin). Per-model calibration_error then
         # surfaces as a dict in the repr via the dispatched mean.
-        diff = cal["fraction_positive"].to_numpy() - cal["mean_predicted"].to_numpy()
-        self._metrics["calibration_error"] = float(np.mean(diff**2))
+        diff = cal["fraction_positive"] - cal["mean_predicted"]
+        self._metrics["calibration_error"] = float((diff**2).mean())
 
     def _build_chart(self) -> Any:
         return _calibration_chart_from_source(
@@ -341,8 +341,8 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 
-        y_true = self._source.y.to_numpy()
-        y_pred = self._source.model.predict(self._source.X.to_numpy())
+        y_true = self._source.y
+        y_pred = self._source.model.predict(self._source.X)
         self._metrics["f1_macro"] = float(
             f1_score(y_true, y_pred, average="macro", zero_division=0)
         )

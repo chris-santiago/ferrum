@@ -360,7 +360,7 @@ def heatmap(
 
         all_vals = []
         for c in value_cols:
-            all_vals.extend(tbl[c].to_numpy().tolist())
+            all_vals.extend(tbl[c].to_pylist())
         arr = np.asarray(all_vals, dtype=float)
         arr = arr[~np.isnan(arr)]
         if vmin is None and arr.size:

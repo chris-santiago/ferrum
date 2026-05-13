@@ -5,9 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import polars as pl
 
-from ..deps import require_sklearn, require_umap
+from ferrum import _core
+
+
+def _x_to_arrow(x_df: pl.DataFrame) -> pa.RecordBatch:
+    return pa.RecordBatch.from_pydict(
+        {c: x_df[c].to_arrow() for c in x_df.columns}
+    )
 
 
 class ClusteringMixin:
@@ -29,20 +36,20 @@ class ClusteringMixin:
         key = self._cache_key("silhouette", k=k)
         if key in self._cache:
             return self._cache[key]
-        require_sklearn("silhouette")
-        from sklearn.metrics import silhouette_samples
 
-        X_np = self._X.to_numpy()
         if "labels_" in self._capabilities:
             labels = np.asarray(self._model.labels_)
         elif "predict" in self._capabilities:
-            labels = np.asarray(self._model.predict(X_np))
+            labels = np.asarray(self._model.predict(self._X))
         else:
             raise AttributeError(
                 "ModelSource.silhouette() requires the wrapped model to "
                 "expose 'labels_' or 'predict'."
             )
-        sv = silhouette_samples(X_np, labels)
+        x_arrow = _x_to_arrow(self._X)
+        labels_arrow = pa.array(labels.astype(int).tolist(), type=pa.int64())
+        sv_raw = _core.silhouette_samples(x_arrow, labels_arrow, "euclidean")
+        sv = np.array(pa.array(sv_raw), dtype=np.float64)
         clusters = sorted(set(int(c) for c in labels.tolist()))
         if k is not None:
             clusters = [c for c in clusters if c < int(k)]
@@ -58,11 +65,6 @@ class ClusteringMixin:
                     {
                         "sample_id": int(i),
                         "y_position": int(y_pos),
-                        # cluster is rendered as a categorical color channel;
-                        # serialize as Utf8 to match every other 10b/10c
-                        # categorical diagnostic schema (ROC class, confusion
-                        # actual/predicted) and avoid the renderer's
-                        # continuous-scale fallback for low-cardinality ints.
                         "cluster": str(int(c)),
                         "silhouette_value": float(val),
                     }
@@ -74,25 +76,31 @@ class ClusteringMixin:
 
     def pca_variance(self, *, n_components: int | None = None) -> pl.DataFrame:
         """Explained-variance ratio per principal component plus the
-        cumulative running sum. Requires the wrapped model to expose
-        ``explained_variance_ratio_`` (e.g. ``sklearn.decomposition.PCA``,
-        ``TruncatedSVD``).
+        cumulative running sum.
+
+        If the wrapped model exposes ``explained_variance_ratio_`` (e.g.
+        ``sklearn.decomposition.PCA``), reads it directly (backward compat).
+        Otherwise computes from raw X via Rust SVD.
         """
         key = self._cache_key("pca_variance", n_components=n_components)
         if key in self._cache:
             return self._cache[key]
-        self._require_capability("explained_variance_ratio_", "pca_variance")
-        evr = np.asarray(self._model.explained_variance_ratio_, dtype=np.float64)
-        if n_components is not None:
-            evr = evr[: int(n_components)]
-        cum = np.cumsum(evr)
-        df = pl.DataFrame(
-            {
-                "component": list(range(1, len(evr) + 1)),
-                "explained_variance_ratio": [float(x) for x in evr],
-                "cumulative_variance_ratio": [float(x) for x in cum],
-            }
-        )
+        if "explained_variance_ratio_" in self._capabilities:
+            evr = np.asarray(self._model.explained_variance_ratio_, dtype=np.float64)
+            if n_components is not None:
+                evr = evr[: int(n_components)]
+            cum = np.cumsum(evr)
+            df = pl.DataFrame(
+                {
+                    "component": list(range(1, len(evr) + 1)),
+                    "explained_variance_ratio": [float(x) for x in evr],
+                    "cumulative_variance_ratio": [float(x) for x in cum],
+                }
+            )
+        else:
+            x_arrow = _x_to_arrow(self._X)
+            result = _core.pca_variance(x_arrow, n_components)
+            df = pl.from_arrow(result)
         self._cache[key] = df
         return df
 
@@ -117,48 +125,48 @@ class ClusteringMixin:
         )
         if key in self._cache:
             return self._cache[key]
-        X_np = self._X.to_numpy()
         seed = self._random_state if self._random_state is not None else 0
         if method == "umap":
-            umap = require_umap("embeddings")
-            reducer = umap.UMAP(
-                n_components=n_components,
-                random_state=seed,
-                **method_kwargs,
+            x_arrow = _x_to_arrow(self._X)
+            result = _core.umap_embedding(
+                x_arrow, n_components, seed,
+                method_kwargs.get("n_neighbors"),
+                method_kwargs.get("min_dist"),
+                method_kwargs.get("n_epochs"),
             )
-            emb = reducer.fit_transform(X_np)
+            df = pl.from_arrow(result)
+            if self._y is not None:
+                label_arr = np.asarray(self._y)
+            else:
+                label_arr = np.zeros(df.height)
+            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "tsne":
-            require_sklearn("embeddings(tsne)")
-            from sklearn.manifold import TSNE
-
-            emb = TSNE(
-                n_components=n_components,
-                random_state=seed,
-                **method_kwargs,
-            ).fit_transform(X_np)
+            x_arrow = _x_to_arrow(self._X)
+            result = _core.tsne_embedding(
+                x_arrow, n_components, seed,
+                method_kwargs.get("perplexity"),
+                method_kwargs.get("learning_rate"),
+                method_kwargs.get("n_iter"),
+            )
+            df = pl.from_arrow(result)
+            if self._y is not None:
+                label_arr = np.asarray(self._y)
+            else:
+                label_arr = np.zeros(df.height)
+            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "pca":
-            require_sklearn("embeddings(pca)")
-            from sklearn.decomposition import PCA
-
-            emb = PCA(
-                n_components=n_components,
-                random_state=seed,
-                **method_kwargs,
-            ).fit_transform(X_np)
+            x_arrow = _x_to_arrow(self._X)
+            scores_batch = _core.pca_scores(x_arrow, n_components)
+            df = pl.from_arrow(scores_batch)
+            if self._y is not None:
+                label_arr = np.asarray(self._y)
+            else:
+                label_arr = np.zeros(df.height)
+            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         else:
             raise ValueError(
                 f"ModelSource.embeddings(method={method!r}) — expected 'umap', 'tsne', or 'pca'."
             )
-        emb = np.asarray(emb, dtype=np.float64)
-        if self._y is not None:
-            label_arr = np.asarray(self._y.to_numpy())
-        else:
-            label_arr = np.zeros(emb.shape[0])
-        data: dict[str, Any] = {
-            f"dim_{i}": [float(v) for v in emb[:, i]] for i in range(emb.shape[1])
-        }
-        data["label"] = label_arr.tolist()
-        df = pl.DataFrame(data)
         self._cache[key] = df
         return df
 
@@ -181,28 +189,39 @@ class ClusteringMixin:
         )
         if key in self._cache:
             return self._cache[key]
-        require_sklearn("intercluster_distance")
         self._require_capability("cluster_centers_", "intercluster_distance")
         centers = np.asarray(self._model.cluster_centers_, dtype=np.float64)
         if centers.shape[0] < int(k):
             k = centers.shape[0]
         seed = self._random_state if self._random_state is not None else 0
         if method == "mds":
-            from sklearn.manifold import MDS
-
-            xy = MDS(
-                n_components=2,
-                random_state=seed,
-                normalized_stress="auto",
-            ).fit_transform(centers[:k])
+            centers_arrow = pa.RecordBatch.from_pydict(
+                {f"f{j}": centers[:k, j].tolist() for j in range(centers.shape[1])}
+            )
+            mds_batch = _core.mds_classical(centers_arrow, 2, "features", "euclidean")
+            mds_df = pl.from_arrow(mds_batch)
+            xy = np.column_stack([
+                mds_df["dim_0"].to_numpy(),
+                mds_df["dim_1"].to_numpy(),
+            ])
         elif method == "tsne":
-            from sklearn.manifold import TSNE
-
-            xy = TSNE(
-                n_components=2,
-                random_state=seed,
-                perplexity=max(1, min(5, int(k) - 1)),
-            ).fit_transform(centers[:k])
+            if int(k) < 4:
+                raise ValueError(
+                    f"intercluster_distance(method='tsne') requires at least 4 "
+                    f"clusters, got k={k}. Use method='mds' for small k."
+                )
+            centers_arrow = pa.RecordBatch.from_pydict(
+                {f"f{j}": centers[:k, j].tolist() for j in range(centers.shape[1])}
+            )
+            perplexity = float(max(1, min(5, int(k) - 1)))
+            tsne_batch = _core.tsne_embedding(
+                centers_arrow, 2, seed, perplexity,
+            )
+            tsne_df = pl.from_arrow(tsne_batch)
+            xy = np.column_stack([
+                tsne_df["dim_0"].to_numpy(),
+                tsne_df["dim_1"].to_numpy(),
+            ])
         else:
             raise ValueError(
                 f"ModelSource.intercluster_distance(method={method!r}) — expected 'mds' or 'tsne'."
@@ -214,9 +233,6 @@ class ClusteringMixin:
             sizes = np.ones(int(k), dtype=int)
         df = pl.DataFrame(
             {
-                # cluster routes through a categorical color scale (one
-                # color per cluster id); serialize as Utf8 — same Int64 →
-                # continuous-scale gotcha as silhouette.cluster.
                 "cluster": [str(i) for i in range(int(k))],
                 "x": [float(v) for v in xy[:, 0]],
                 "y": [float(v) for v in xy[:, 1]],

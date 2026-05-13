@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 from ..charts import (
     _prediction_error_chart_from_source,
     _residuals_chart_from_source,
@@ -59,9 +57,9 @@ class ResidualsVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.predictions()
-        resid = df["residual"].to_numpy()
-        self._metrics["rmse"] = float(np.sqrt((resid**2).mean()))
-        self._metrics["mae"] = float(np.abs(resid).mean())
+        resid = df["residual"]
+        self._metrics["rmse"] = float((resid**2).mean() ** 0.5)
+        self._metrics["mae"] = float(resid.abs().mean())
 
     def _build_chart(self) -> Any:
         return _residuals_chart_from_source(
@@ -123,8 +121,8 @@ class PredictionErrorVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.predictions()
-        resid = df["residual"].to_numpy()
-        self._metrics["rmse"] = float(np.sqrt((resid**2).mean()))
+        resid = df["residual"]
+        self._metrics["rmse"] = float((resid**2).mean() ** 0.5)
 
     def _build_chart(self) -> Any:
         return _prediction_error_chart_from_source(
@@ -187,8 +185,8 @@ class CooksDistanceVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.predictions()
-        stud = df["studentized_residual"].to_numpy()
-        self._metrics["max_studentized"] = float(np.max(np.abs(stud)))
+        stud = df["studentized_residual"]
+        self._metrics["max_studentized"] = float(stud.abs().max())
 
     def _build_chart(self) -> Any:
         return _residuals_chart_from_source(

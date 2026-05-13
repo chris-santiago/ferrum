@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import polars as pl
 
 from ..charts import (
@@ -198,10 +197,9 @@ class ValidationCurveVisualizer(FerrumVisualizer):
             .sort("param_value")
         )
         if test_rows.height:
-            scores = test_rows["mean_score"].to_numpy()
-            idx = int(np.argmax(scores))
+            idx = test_rows["mean_score"].arg_max()
             self._metrics["best_param"] = float(test_rows["param_value"][idx])
-            self._metrics["best_test_score"] = float(scores[idx])
+            self._metrics["best_test_score"] = float(test_rows["mean_score"][idx])
         else:
             self._metrics["best_param"] = float("nan")
             self._metrics["best_test_score"] = float("nan")
@@ -278,10 +276,10 @@ class CVScoresVisualizer(FerrumVisualizer):
 
     def _materialize(self) -> None:
         df = self._source.cv_scores(cv=self.cv, scoring=self.scoring)
-        test = df.filter(pl.col("split") == "test")["score"].to_numpy()
-        if test.size:
+        test = df.filter(pl.col("split") == "test")["score"]
+        if test.len():
             self._metrics["test_mean"] = float(test.mean())
-            self._metrics["test_std"] = float(test.std())
+            self._metrics["test_std"] = float(test.std(ddof=0))
         else:
             self._metrics["test_mean"] = float("nan")
             self._metrics["test_std"] = float("nan")
@@ -378,10 +376,9 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
         # against schema changes that might add a (split, alpha) breakdown.
         agg = df.unique(subset=["alpha"], keep="first", maintain_order=True).sort("alpha")
         if agg.height:
-            scores = agg["mean_score"].to_numpy()
-            idx = int(np.argmax(scores))
+            idx = agg["mean_score"].arg_max()
             self._metrics["best_alpha"] = float(agg["alpha"][idx])
-            self._metrics["best_score"] = float(scores[idx])
+            self._metrics["best_score"] = float(agg["mean_score"][idx])
         else:
             self._metrics["best_alpha"] = float("nan")
             self._metrics["best_score"] = float("nan")

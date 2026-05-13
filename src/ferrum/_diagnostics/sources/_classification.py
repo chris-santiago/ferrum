@@ -43,7 +43,7 @@ class ClassificationCurvesMixin:
             raise ValueError("ModelSource.roc_curve() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         classes = [c[len("proba_") :] for c in proba_cols]
         n_classes = len(classes)
 
@@ -52,7 +52,7 @@ class ClassificationCurvesMixin:
         # accepted for API symmetry with the multiclass path but treated as a
         # no-op (there is only one class to average over).
         if n_classes == 2:
-            y_score = proba_df[proba_cols[1]].to_numpy()
+            y_score = proba_df[proba_cols[1]]
             fpr, tpr, thr = _sk_roc_curve(
                 y_true,
                 y_score,
@@ -72,7 +72,7 @@ class ClassificationCurvesMixin:
         else:
             for i, cls in enumerate(classes):
                 y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
-                y_score = proba_df[proba_cols[i]].to_numpy()
+                y_score = proba_df[proba_cols[i]]
                 fpr, tpr, thr = _sk_roc_curve(
                     y_bin,
                     y_score,
@@ -144,7 +144,7 @@ class ClassificationCurvesMixin:
             raise ValueError("ModelSource.pr_curve() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         classes = [c[len("proba_") :] for c in proba_cols]
         n_classes = len(classes)
 
@@ -198,7 +198,7 @@ class ClassificationCurvesMixin:
             raise ValueError(
                 f"calibration_curve() is binary-classifier only; got {len(proba_cols)} classes."
             )
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         y_score = proba_df[proba_cols[1]].to_numpy()
 
         frac_pos, mean_pred = _ccurve(
@@ -245,14 +245,14 @@ class ClassificationCurvesMixin:
             raise ValueError("ModelSource.cumulative_gain() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         classes = [c[len("proba_") :] for c in proba_cols]
         n = len(y_true)
 
         rows: list[dict] = []
         for i, cls in enumerate(classes):
             y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
-            order = np.argsort(-proba_df[proba_cols[i]].to_numpy())
+            order = np.argsort(-np.asarray(proba_df[proba_cols[i]]))
             cum_pos = np.cumsum(y_bin[order])
             total_pos = max(int(cum_pos[-1]), 1) if n else 1
             pct_pop = np.arange(1, n + 1) / max(n, 1)
@@ -287,7 +287,7 @@ class ClassificationCurvesMixin:
             raise ValueError("ModelSource.lift_curve() requires y to be provided.")
         proba_df = self.probabilities()
         proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         classes = [c[len("proba_") :] for c in proba_cols]
         n = len(y_true)
 
@@ -297,7 +297,7 @@ class ClassificationCurvesMixin:
             base_rate = float(y_bin.mean()) if n else 0.0
             if base_rate == 0.0:
                 continue
-            order = np.argsort(-proba_df[proba_cols[i]].to_numpy())
+            order = np.argsort(-np.asarray(proba_df[proba_cols[i]]))
             cum_pos = np.cumsum(y_bin[order])
             denom = np.arange(1, n + 1)
             cum_rate = cum_pos / denom
@@ -354,7 +354,7 @@ class ClassificationCurvesMixin:
                 "discrimination_threshold() is binary-classifier only; "
                 f"got {len(proba_cols)} classes."
             )
-        y_true = np.asarray(self._y.to_numpy())
+        y_true = np.asarray(self._y)
         positive_class = _coerce_class_label(
             proba_cols[1][len("proba_") :],
             y_true.dtype,
@@ -362,7 +362,7 @@ class ClassificationCurvesMixin:
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
-            y_score = proba_df[proba_cols[1]].to_numpy()
+            y_score = np.asarray(proba_df[proba_cols[1]])
             df = self._sweep_thresholds(
                 y_true,
                 y_score,
@@ -391,6 +391,8 @@ class ClassificationCurvesMixin:
         from sklearn.base import clone
         from sklearn.model_selection import KFold
 
+        # numpy required: CV split uses integer-array row indexing (X_np[tr], X_np[te])
+        # which polars does not support.
         X_np = self._X.to_numpy()
         splitter = (
             cv
@@ -444,9 +446,8 @@ class ClassificationCurvesMixin:
 
         if self._y is None:
             raise ValueError("ModelSource.confusion_matrix() requires y to be provided.")
-        y_true = np.asarray(self._y.to_numpy())
-        X_np = self._X.to_numpy()
-        y_pred = np.asarray(self._model.predict(X_np))
+        y_true = np.asarray(self._y)
+        y_pred = np.asarray(self._model.predict(self._X))
 
         if self._class_names is not None:
             labels: list = list(self._class_names)
@@ -526,7 +527,7 @@ def _pr_rows_binary(y_true, proba_df, proba_cols, classes) -> list[dict]:
     """Per-row PR curve for a binary classifier on the positive class."""
     from sklearn.metrics import precision_recall_curve, average_precision_score
 
-    y_score = proba_df[proba_cols[1]].to_numpy()
+    y_score = proba_df[proba_cols[1]]
     p, r, thr = precision_recall_curve(y_true, y_score)
     ap = float(average_precision_score(y_true, y_score))
     thresholds_padded = np.concatenate([thr, [float("nan")]])
@@ -549,7 +550,7 @@ def _pr_rows_per_class(y_true, proba_df, proba_cols, classes) -> list[dict]:
     rows: list[dict] = []
     for i, cls in enumerate(classes):
         y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
-        y_score = proba_df[proba_cols[i]].to_numpy()
+        y_score = proba_df[proba_cols[i]]
         p, r, thr = precision_recall_curve(y_bin, y_score)
         try:
             ap = float(average_precision_score(y_bin, y_score))

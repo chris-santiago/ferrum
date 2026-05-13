@@ -212,7 +212,6 @@ def annotate_text(
 # Schwabish SB1 — metric labels + annotate_arrow
 # -------------------------------------------------------------------
 
-import numpy as np  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Literal  # noqa: E402
 
@@ -233,22 +232,25 @@ def _resolve_field(enc_value: Any) -> Optional[str]:
     return None
 
 
-def _trapezoid_auc(x: np.ndarray, y: np.ndarray) -> float:
+def _trapezoid_auc(x, y) -> float:
     """Trapezoidal AUC for a curve. Sorts by x before integrating."""
+    import numpy as np
     order = np.argsort(x)
     trap = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
     return float(trap(y[order], x[order]))
 
 
-def _ap_step(x: np.ndarray, y: np.ndarray) -> float:
+def _ap_step(x, y) -> float:
     """Step-integrated average precision: sum((R_i - R_{i-1}) * P_i)."""
+    import numpy as np
     order = np.argsort(x)
     xs, ys = x[order], y[order]
     return float(np.sum(np.diff(np.concatenate([[0.0], xs])) * ys))
 
 
-def _brier_score(p: np.ndarray, obs: np.ndarray) -> float:
+def _brier_score(p, obs) -> float:
     """Brier score as mean squared error between predicted prob and observed rate."""
+    import numpy as np
     return float(np.mean((p - obs) ** 2))
 
 
@@ -286,34 +288,40 @@ def _apply_metric_label(
     tbl = to_arrow_table(base._data)
     if x_col not in tbl.column_names or y_col not in tbl.column_names:
         raise ValueError(f"{type(label).__name__}: column {x_col!r} or {y_col!r} missing from data")
-    x_arr = np.asarray(tbl.column(x_col).to_pylist(), dtype=float)
-    y_arr = np.asarray(tbl.column(y_col).to_pylist(), dtype=float)
-    n = len(x_arr)
+    df = pl.from_arrow(tbl).with_row_index("_idx")
+    n = df.height
     labels_col: list[Optional[str]] = [None] * n
 
-    y_range = float(np.nanmax(y_arr) - np.nanmin(y_arr)) if y_arr.size else 1.0
-    y_top = float(np.nanmax(y_arr)) if y_arr.size else 1.0
+    y_range = float(df[y_col].max() - df[y_col].min()) if n > 0 else 1.0
+    y_top = float(df[y_col].max()) if n > 0 else 1.0
     stagger_step = max(y_range * 0.06, 1e-9)
     label_y_col: list[Optional[float]] = [None] * n
 
-    if color_col is not None and color_col in tbl.column_names:
-        color_vals = np.asarray(tbl.column(color_col).to_pylist())
-        unique_colors = sorted(set(color_vals.tolist()), key=str)
+    if color_col is not None and color_col in df.columns:
+        unique_colors = sorted(df[color_col].unique().to_list(), key=str)
         for stack_i, cls in enumerate(unique_colors):
-            mask = color_vals == cls
-            if not mask.any():
+            group = df.filter(pl.col(color_col) == cls)
+            if group.is_empty():
                 continue
-            metric = metric_fn(x_arr[mask], y_arr[mask])
+            # metric_fn expects numpy arrays (AUC/AP/Brier integration)
+            import numpy as np
+            metric = metric_fn(
+                np.asarray(group[x_col].to_list(), dtype=float),
+                np.asarray(group[y_col].to_list(), dtype=float),
+            )
             text = f"{label.prefix}{metric:{label.format}}"
-            mask_idxs = np.where(mask)[0]
-            idx_in_mask = int(np.argmax(x_arr[mask]))
-            global_idx = int(mask_idxs[idx_in_mask])
+            endpoint_row = group.sort(x_col, descending=True).row(0, named=True)
+            global_idx = int(endpoint_row["_idx"])
             labels_col[global_idx] = text
             label_y_col[global_idx] = y_top - stack_i * stagger_step
     else:
-        metric = metric_fn(x_arr, y_arr)
+        import numpy as np
+        metric = metric_fn(
+            np.asarray(df[x_col].to_list(), dtype=float),
+            np.asarray(df[y_col].to_list(), dtype=float),
+        )
         text = f"{label.prefix}{metric:{label.format}}"
-        global_idx = int(np.argmax(x_arr))
+        global_idx = df[x_col].arg_max()
         labels_col[global_idx] = text
         label_y_col[global_idx] = y_top
 
@@ -410,28 +418,29 @@ class OutlierLabel:
         tbl = to_arrow_table(base._data)
         if field is None or field not in tbl.column_names:
             raise ValueError(f"OutlierLabel: cannot locate field {field!r}")
-        values = np.asarray(tbl.column(field).to_pylist(), dtype=float)
-        mu = float(np.mean(values))
-        sigma = float(np.std(values, ddof=1)) or 1.0
-        z = np.abs((values - mu) / sigma)
-        mask = z > self.threshold
-        if not mask.any():
-            return base
-        candidate_idx = np.where(mask)[0]
-        ordered = candidate_idx[np.argsort(-z[candidate_idx])][: self.max_labels]
-        label_col_name = "_outlier_text"
-        labels_col: list[Optional[str]] = [None] * len(values)
-        label_lookup = (
-            tbl.column(self.label_field).to_pylist()
-            if self.label_field and self.label_field in tbl.column_names
-            else None
-        )
-        for i in ordered:
-            if label_lookup is not None:
-                labels_col[int(i)] = str(label_lookup[int(i)])
-            else:
-                labels_col[int(i)] = str(values[int(i)])
         base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
+        df = base_pl.with_row_index("_idx")
+        mu = float(df[field].mean())
+        sigma = float(df[field].std(ddof=1)) or 1.0
+        df = df.with_columns(
+            ((pl.col(field) - mu).abs() / sigma).alias("_z")
+        )
+        outliers = (
+            df.filter(pl.col("_z") > self.threshold)
+            .sort("_z", descending=True)
+            .head(self.max_labels)
+        )
+        if outliers.is_empty():
+            return base
+        label_col_name = "_outlier_text"
+        labels_col: list[Optional[str]] = [None] * base_pl.height
+        has_label_field = self.label_field and self.label_field in base_pl.columns
+        for row in outliers.iter_rows(named=True):
+            idx = int(row["_idx"])
+            if has_label_field:
+                labels_col[idx] = str(base_pl[self.label_field][idx])
+            else:
+                labels_col[idx] = str(base_pl[field][idx])
         augmented = base_pl.with_columns(pl.Series(label_col_name, labels_col))
         base_aug = base._clone()
         base_aug._data = augmented

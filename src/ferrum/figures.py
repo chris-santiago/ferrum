@@ -54,6 +54,7 @@ from ferrum._diagnostics.charts import (
     _lift_chart_from_source,
     _parallel_coords_chart_from_dataframe,
     _pca_scree_chart_from_source,
+    _pca_scree_chart_from_variance_df,
     _pdp_chart_from_source,
     _pr_chart_from_source,
     _prediction_error_chart_from_source,
@@ -68,7 +69,7 @@ from ferrum._diagnostics.charts import (
 )
 from ferrum._diagnostics.deps import require_sklearn
 from ferrum._diagnostics.source import ComparedModelSource
-from ferrum._diagnostics.stats import rank1d_compute, rank2d_compute
+from ferrum._diagnostics._rank_helpers import rank1d_compute, rank2d_compute
 
 
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
@@ -1556,10 +1557,11 @@ def pca_scree_chart(
 
     Parameters
     ----------
-    model_or_source : PCA estimator or ModelSource
+    model_or_source : PCA estimator, ModelSource, or DataFrame
         A fitted ``sklearn.decomposition.PCA`` instance, an explicit
-        ``ferrum.ModelSource`` wrapping one, or an unfitted PCA
-        estimator (fit is run on ``X``).
+        ``ferrum.ModelSource`` wrapping one, an unfitted PCA
+        estimator (fit is run on ``X``), or a raw polars/pandas
+        DataFrame (variance computed via Rust SVD — no sklearn needed).
     X : array-like, optional
         Feature matrix. Required when ``model_or_source`` is a raw
         (unfitted) estimator; ignored when it is already a
@@ -1589,7 +1591,50 @@ def pca_scree_chart(
     >>> import ferrum as fm
     >>> from sklearn.decomposition import PCA
     >>> fm.pca_scree_chart(PCA(n_components=10).fit(X_train), threshold=0.90)
+
+    Raw DataFrame (no sklearn required):
+
+    >>> fm.pca_scree_chart(X_train, n_components=10)
     """
+    import numpy as np
+    import polars as pl
+
+    is_raw_data = False
+    if isinstance(model_or_source, pl.DataFrame):
+        is_raw_data = True
+    elif isinstance(model_or_source, np.ndarray) and model_or_source.ndim == 2:
+        is_raw_data = True
+    else:
+        try:
+            import pandas as pd
+            if isinstance(model_or_source, pd.DataFrame):
+                is_raw_data = True
+        except ImportError:
+            pass
+
+    if is_raw_data:
+        import pyarrow as pa
+        from ferrum import _core
+
+        if isinstance(model_or_source, pl.DataFrame):
+            x_df = model_or_source
+        elif isinstance(model_or_source, np.ndarray):
+            x_df = pl.from_numpy(model_or_source, schema=[f"f{i}" for i in range(model_or_source.shape[1])])
+        else:
+            x_df = pl.from_pandas(model_or_source)
+
+        x_arrow = pa.RecordBatch.from_pydict(
+            {c: x_df[c].to_arrow() for c in x_df.columns}
+        )
+        var_batch = _core.pca_variance(x_arrow, n_components)
+        df = pl.from_arrow(var_batch)
+        return _pca_scree_chart_from_variance_df(
+            df,
+            cumulative_line=cumulative_line,
+            threshold=threshold,
+            theme=theme,
+        )
+
     source = _resolve_source(model_or_source, X, None, random_state=random_state)
     return _pca_scree_chart_from_source(
         source,
@@ -1944,7 +1989,7 @@ def rank1d_chart(
         )
         df = source.rank1d(algorithm=algo)
     else:
-        from ferrum._diagnostics.stats import rank1d_compute
+        from ferrum._diagnostics._rank_helpers import rank1d_compute
 
         data = data_or_source if X is None else X
         df = rank1d_compute(data, algorithm=algo)
@@ -1997,7 +2042,7 @@ def rank2d_chart(
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank2d(algorithm=algo)
     else:
-        from ferrum._diagnostics.stats import rank2d_compute
+        from ferrum._diagnostics._rank_helpers import rank2d_compute
 
         data = data_or_source if X is None else X
         df = rank2d_compute(data, algorithm=algo)

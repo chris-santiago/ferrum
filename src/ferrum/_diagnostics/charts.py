@@ -63,12 +63,12 @@ def _inject_cook_outliers(
     )
 
 
-def _r2_score(y_true, y_pred) -> float:
+def _r2_score(y_true: pl.Series, y_pred: pl.Series) -> float:
     """Coefficient of determination — Schwabish SB3 corner-metrics helper."""
-    import numpy as np
-
-    ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - float(np.mean(y_true))) ** 2))
+    diff = y_true - y_pred
+    ss_res = float((diff ** 2).sum())
+    mean_y = float(y_true.mean())
+    ss_tot = float(((y_true - mean_y) ** 2).sum())
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
 
@@ -92,27 +92,23 @@ def _inject_metrics_corner(
     the y-anchor — must match what ``mark_residuals`` will render so the
     text lands at the correct corner.
     """
-    import numpy as np
-
     if df.height == 0:
         return df
     y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     from ferrum._metrics_fmt import format_corner_metrics
 
-    y_true = np.asarray(df["y_true"].to_list(), dtype=float)
-    y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
-    r2 = _r2_score(y_true, y_pred)
-    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-    mae = float(np.mean(np.abs(y_true - y_pred)))
+    diff = df["y_pred"] - df["y_true"]
+    r2 = _r2_score(df["y_true"], df["y_pred"])
+    rmse = float((diff ** 2).mean() ** 0.5)
+    mae = float(diff.abs().mean())
     corner_text = format_corner_metrics(r2, rmse, mae)
 
     n = df.height
-    anchor_idx = int(np.argmax(y_pred))
+    anchor_idx = df["y_pred"].arg_max()
     text_col: list[str | None] = [None] * n
     text_col[anchor_idx] = corner_text
-    resid_arr = np.asarray(df[y_col].to_list(), dtype=float)
     y_col_vals: list[float | None] = [None] * n
-    y_col_vals[anchor_idx] = float(np.max(resid_arr))
+    y_col_vals[anchor_idx] = float(df[y_col].max())
     return df.with_columns(
         pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
         pl.Series("_metrics_y", y_col_vals, dtype=pl.Float64),
@@ -359,15 +355,15 @@ def _prediction_error_chart_from_source(
 
     df = source.predictions().sort("y_true")
     if ci is not None or reference_band:
-        residuals = (df["y_pred"] - df["y_true"]).to_numpy()
+        residuals = df["y_pred"] - df["y_true"]
         if ci is not None:
             if not 0.0 < ci < 1.0:
                 raise ValueError(f"mark_prediction_error(ci={ci!r}) — expected a value in (0, 1).")
             alpha = (1.0 - float(ci)) / 2.0
-            q_lo = float(np.quantile(residuals, alpha))
-            q_hi = float(np.quantile(residuals, 1.0 - alpha))
+            q_lo = float(residuals.quantile(alpha, interpolation="linear"))
+            q_hi = float(residuals.quantile(1.0 - alpha, interpolation="linear"))
         else:
-            sigma = float(np.sqrt(np.mean(residuals**2)))
+            sigma = float((residuals**2).mean() ** 0.5)
             q_lo = -sigma
             q_hi = sigma
         df = df.with_columns(
@@ -579,11 +575,10 @@ def _pr_chart_from_source(
     if y_series is None:
         y_series = getattr(source, "_y", None)
     if y_series is not None:
-        y_arr = np.asarray(y_series.to_numpy())
-        unique_y = np.unique(y_arr)
+        unique_y = y_series.unique().sort()
         if len(unique_y) == 2:
             positive = unique_y[1]
-            p = float((y_arr == positive).mean())
+            p = float((y_series == positive).mean())
             if 0.0 < p < 1.0:
                 baseline_prevalence = p
                 n = df.height
@@ -790,11 +785,10 @@ def _calibration_chart_from_source(
             if y_attr is None:
                 y_attr = getattr(source, "_y", None)
             if model_attr is not None and X_attr is not None and y_attr is not None:
-                X_np = X_attr.to_numpy()
-                proba = model_attr.predict_proba(X_np)
+                proba = model_attr.predict_proba(X_attr)
                 if proba.ndim == 2 and proba.shape[1] == 2:
                     p = np.asarray(proba[:, 1], dtype=float)
-                    obs = np.asarray(y_attr.to_numpy(), dtype=float)
+                    obs = np.asarray(y_attr, dtype=float)
                     brier_value = _brier_score(p, obs)
         except Exception:
             brier_value = None
@@ -1008,8 +1002,8 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
 
     import ferrum
 
-    y_true = source.y.to_numpy()
-    y_pred = source.model.predict(source.X.to_numpy())
+    y_true = source.y
+    y_pred = source.model.predict(source.X)
     report = classification_report(
         y_true,
         y_pred,
@@ -1338,7 +1332,6 @@ def _shap_waterfall_chart_from_source(
     class_label group.
     """
     import ferrum
-    import numpy as np
 
     sv = source.shap_values(background=background)
     sv = _shap_select_class(sv, per_class=per_class)
@@ -1362,12 +1355,13 @@ def _shap_waterfall_chart_from_source(
         .sort("_rank")
         .drop("_rank")
     )
-    sv_arr = ordered["shap_value"].to_numpy()
-    cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
+    cumsum = ordered["shap_value"].cum_sum()
+    x0 = pl.concat([pl.Series("x0", [0.0]), cumsum.head(cumsum.len() - 1).alias("x0")])
+    x1 = cumsum.alias("x1")
     plot_df = ordered.with_columns(
         [
-            pl.Series("x0", cum[:-1]),
-            pl.Series("x1", cum[1:]),
+            x0,
+            x1,
             pl.when(pl.col("shap_value") >= 0)
             .then(pl.lit("positive"))
             .otherwise(pl.lit("negative"))
@@ -1375,8 +1369,8 @@ def _shap_waterfall_chart_from_source(
         ]
     )
 
-    x_lo = float(min(cum.min(), 0.0))
-    x_hi = float(max(cum.max(), 0.0))
+    x_lo = float(min(x0.min(), x1.min(), 0.0))
+    x_hi = float(max(x0.max(), x1.max(), 0.0))
     pad = max(abs(x_lo), abs(x_hi)) * 0.05 if (x_lo < x_hi) else 1.0
     domain = (x_lo - pad, x_hi + pad)
 
@@ -1878,6 +1872,35 @@ def _pca_scree_chart_from_source(
     return chart
 
 
+def _pca_scree_chart_from_variance_df(
+    df: Any,
+    *,
+    cumulative_line: bool = True,
+    threshold: float | None = 0.95,
+    theme: Any = None,
+):
+    """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path)."""
+    import ferrum
+    from ferrum.layer import Layer
+
+    chart = ferrum.Chart(df).mark_pca_scree(
+        cumulative_line=cumulative_line,
+        threshold_line=threshold,
+    )
+    chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
+    if cumulative_line:
+        chart = chart.layer(
+            Layer(
+                mark="point",
+                encoding={"x": "component", "y": "cumulative_variance_ratio"},
+                mark_kwargs={"size": 40, "filled": True},
+            )
+        )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _intercluster_distance_chart_from_source(
     source: Any,
     *,
@@ -2272,6 +2295,7 @@ def _build_decision_boundary_grid(
     """
     import numpy as np
 
+    # numpy required: 2D positional column slicing (X_np[:, i]) and meshgrid operations.
     X_np = source.X.to_numpy()
     x_col = X_np[:, feat_idx[0]].astype(np.float64)
     y_col = X_np[:, feat_idx[1]].astype(np.float64)
@@ -2328,7 +2352,7 @@ def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
     """
     import numpy as np
 
-    y_raw = source.y.to_numpy()
+    y_raw = np.asarray(source.y)
     if hasattr(source.model, "classes_"):
         class_order = list(source.model.classes_)
     else:
@@ -2394,11 +2418,16 @@ def _cluster_diagnostics_chart(
     """
     import ferrum
     import numpy as np
+    import pyarrow as pa
+    from ferrum import _core
     from sklearn.cluster import KMeans, AgglomerativeClustering
-    from sklearn.metrics import silhouette_score
 
-    X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
-    X_np = np.ascontiguousarray(X_np, dtype=np.float64)
+    # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
+    X_np = np.asarray(X, dtype=np.float64)
+    X_np = np.ascontiguousarray(X_np)
+    x_arrow = pa.RecordBatch.from_pydict(
+        {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
+    )
     seed = 0 if random_state is None else int(random_state)
     rows: list[dict] = []
     for k in ks:
@@ -2413,19 +2442,17 @@ def _cluster_diagnostics_chart(
         else:  # hierarchical
             m = AgglomerativeClustering(n_clusters=int(k), linkage="ward").fit(X_np)
             labels = m.labels_
-            # AgglomerativeClustering doesn't expose inertia_; compute
-            # manually as the sum of squared distances from each sample
-            # to its cluster centroid (the same definition KMeans uses).
             inertia = 0.0
             for cluster_id in np.unique(labels):
                 mask = labels == cluster_id
                 centroid = X_np[mask].mean(axis=0)
                 inertia += float(np.sum((X_np[mask] - centroid) ** 2))
+        labels_arrow = pa.array(labels.astype(int).tolist(), type=pa.int64())
         rows.append(
             {
                 "k": int(k),
                 "inertia": inertia,
-                "silhouette": float(silhouette_score(X_np, labels)),
+                "silhouette": float(_core.silhouette_score(x_arrow, labels_arrow, "euclidean")),
             }
         )
     df = pl.DataFrame(rows)

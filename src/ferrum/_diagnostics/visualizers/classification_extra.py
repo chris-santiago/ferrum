@@ -81,8 +81,8 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
             n_thresholds=self.n_thresholds,
             cv=self.cv,
         )
-        f1 = dt["f1"].to_numpy()
-        idx = int(np.argmax(f1)) if f1.size else 0
+        f1 = dt["f1"]
+        idx = f1.arg_max() if f1.len() else 0
         self._metrics["best_threshold"] = float(dt["threshold"][idx])
         self._metrics["best_f1"] = float(dt["f1"][idx])
 

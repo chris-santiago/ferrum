@@ -6,9 +6,9 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 
 from ..deps import require_sklearn
-from ..stats import cooks_distance, studentized_residual
 
 
 class PredictionsMixin:
@@ -29,38 +29,34 @@ class PredictionsMixin:
             return self._cache[key]
 
         self._require_capability("predict", "predictions")
-        X_np = self._X.to_numpy()
-        y_pred = np.asarray(self._model.predict(X_np), dtype=np.float64)
+        y_pred = np.asarray(self._model.predict(self._X), dtype=np.float64)
         y_true = (
-            np.asarray(self._y.to_numpy(), dtype=np.float64)
+            np.asarray(self._y, dtype=np.float64)
             if self._y is not None
             else np.full_like(y_pred, np.nan)
         )
         residual = y_true - y_pred
 
-        # Studentized residual + Cook's distance + leverage: hat-matrix
-        # quantities require the design matrix. Linear-estimator path
-        # uses `coef_` as the gate; non-linear estimators fall back to
-        # the no-X studentized residual and report NaN for Cook's D and
-        # leverage (both undefined without a hat matrix).
         if "coef_" in self._capabilities and self._y is not None:
-            X_with_intercept = np.column_stack([np.ones(len(X_np)), X_np])
-            stud = studentized_residual(y_true, y_pred, X_with_intercept)
-            cooks = cooks_distance(y_true, y_pred, X_with_intercept)
-            # leverage h_ii = diag(X (XᵀX)⁻¹ Xᵀ). Recomputed here rather
-            # than threaded out of studentized_residual/cooks_distance to
-            # keep those helpers single-output; the redundant pinv() per
-            # call is O(p³) at most and negligible for typical p.
-            XtX_inv = np.linalg.pinv(X_with_intercept.T @ X_with_intercept)
-            lev = np.einsum(
-                "ij,jk,ik->i",
-                X_with_intercept,
-                XtX_inv,
-                X_with_intercept,
+            from ferrum._core import hat_matrix_stats
+
+            x_arrow = pa.RecordBatch.from_pydict(
+                {c: self._X[c].to_arrow() for c in self._X.columns}
             )
-            lev = np.clip(lev, 0.0, 1.0 - 1e-12)
+            yt_arrow = pa.array(y_true, type=pa.float64())
+            yp_arrow = pa.array(y_pred, type=pa.float64())
+            result = hat_matrix_stats(x_arrow, yt_arrow, yp_arrow)
+            result_pl = pl.from_arrow(result)
+            stud = result_pl["studentized_residual"].to_numpy()
+            cooks = result_pl["cooks_distance"].to_numpy()
+            lev = result_pl["leverage"].to_numpy()
         else:
-            stud = studentized_residual(y_true, y_pred, X=None)
+            from ferrum._core import studentized_residual_no_x
+
+            yt_arrow = pa.array(y_true, type=pa.float64())
+            yp_arrow = pa.array(y_pred, type=pa.float64())
+            stud_arro3 = studentized_residual_no_x(yt_arrow, yp_arrow)
+            stud = np.asarray(pa.array(stud_arro3), dtype=np.float64)
             cooks = np.full_like(y_pred, np.nan)
             lev = np.full_like(y_pred, np.nan)
 
@@ -84,12 +80,11 @@ class PredictionsMixin:
             return self._cache[key]
 
         require_sklearn("probabilities")
-        X_np = self._X.to_numpy()
 
         if "predict_proba" in self._capabilities:
-            proba = np.asarray(self._model.predict_proba(X_np), dtype=np.float64)
+            proba = np.asarray(self._model.predict_proba(self._X), dtype=np.float64)
         elif "decision_function" in self._capabilities:
-            scores = np.asarray(self._model.decision_function(X_np), dtype=np.float64)
+            scores = np.asarray(self._model.decision_function(self._X), dtype=np.float64)
             if scores.ndim == 1:
                 # Binary classifier — apply sigmoid.
                 p1 = 1.0 / (1.0 + np.exp(-scores))
@@ -115,7 +110,7 @@ class PredictionsMixin:
 
         data: dict[str, Any] = {}
         if self._y is not None:
-            data["y_true"] = self._y.to_numpy()
+            data["y_true"] = self._y
         for i, c in enumerate(classes):
             data[f"proba_{c}"] = proba[:, i]
         df = pl.DataFrame(data)
