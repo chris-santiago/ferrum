@@ -21,22 +21,37 @@
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::svg::{fmt_f, FillStroke, SvgBuffer};
 
+fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
+    if let Ok(xs_f) = col_as_f64(ctx.batch, xf) {
+        let pixels: Vec<Option<f64>> = xs_f
+            .into_iter()
+            .take(n)
+            .map(|v| v.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
+            .collect();
+        return Some((pixels, false));
+    }
+    if let Ok(xs_s) = col_as_str(ctx.batch, xf) {
+        let pixels: Vec<Option<f64>> = xs_s
+            .into_iter()
+            .take(n)
+            .map(|v| v.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+            .collect();
+        return Some((pixels, true));
+    }
+    None
+}
+
 pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b),
         _ => return,
     };
-    // Ribbon REQUIRES y2; missing y2 -> silent skip (Python layer warns).
     let y2f = match spec.encoding.y2.as_ref() {
         Some(e) => e.field.as_str(),
         None => return,
     };
 
-    let xs = match col_as_f64(ctx.batch, xf) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
     let ys = match col_as_f64(ctx.batch, yf) {
         Ok(v) => v,
         Err(_) => return,
@@ -45,7 +60,12 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let n = xs.len().min(ys.len()).min(y2s.len());
+    let n = ys.len().min(y2s.len());
+    let (x_pixels, x_is_ordinal) = match resolve_x_pixels(ctx, xf, n) {
+        Some(v) => v,
+        None => return,
+    };
+    let n = n.min(x_pixels.len());
 
     // Partition rows by color category when a color encoding is bound; mirrors
     // line.rs so a multi-series ribbon (e.g. train + test CI bands sharing an x
@@ -82,30 +102,31 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let alpha_factor = (ctx.mark_style.fill.alpha as f64) / 255.0;
 
     for (key, rows) in groups {
-        // Drop rows with any null/NaN in x/y/y2, then sort by x ascending.
         let mut indices: Vec<usize> = rows
             .into_iter()
             .filter(|&i| {
-                matches!((xs[i], ys[i], y2s[i]),
-                    (Some(a), Some(b), Some(c)) if a.is_finite() && b.is_finite() && c.is_finite())
+                let xp_ok = x_pixels.get(i).and_then(|v| *v).map(|p| p.is_finite()).unwrap_or(false);
+                let yv_ok = ys.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                let y2v_ok = y2s.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                xp_ok && yv_ok && y2v_ok
             })
             .collect();
-        indices.sort_by(|&a, &b| {
-            let xa = xs[a].unwrap_or(f64::NAN);
-            let xb = xs[b].unwrap_or(f64::NAN);
-            xa.partial_cmp(&xb).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        if !x_is_ordinal {
+            indices.sort_by(|&a, &b| {
+                let xa = x_pixels[a].unwrap_or(f64::NAN);
+                let xb = x_pixels[b].unwrap_or(f64::NAN);
+                xa.partial_cmp(&xb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         if indices.len() < 2 {
             continue;
         }
-        // Map data values to pixel coordinates; drop any row that fails scale projection.
         let pixels: Vec<(f64, f64, f64)> = indices
             .iter()
             .filter_map(|&i| {
-                let xv = xs[i]?;
+                let cx = x_pixels.get(i).and_then(|v| *v)?;
                 let yv = ys[i]?;
                 let y2v = y2s[i]?;
-                let cx = ctx.scales.x.to_pixel_f64(xv)?;
                 let cy = ctx.scales.y.to_pixel_f64(yv)?;
                 let cy2 = ctx.scales.y.to_pixel_f64(y2v)?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
@@ -144,7 +165,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
                 .unwrap_or(ctx.mark_style.fill);
             let fill = crate::render::color::categorical::with_opacity(solid, alpha_factor);
-            (Some(fill), Some(solid))
+            (Some(fill), ctx.mark_style.stroke)
         } else {
             (Some(ctx.mark_style.fill), ctx.mark_style.stroke)
         };

@@ -121,8 +121,8 @@ pub fn resolve_mark_style(
     match mark {
         Mark::Area | Mark::Ribbon | Mark::Polygon => {
             style.fill = with_opacity(theme.mark_color, theme.area_opacity);
-            style.stroke = Some(theme.mark_color);
-            style.stroke_width = theme.line_stroke_width;
+            style.stroke = None;
+            style.stroke_width = 0.0;
             style.opacity = 1.0;
         }
         Mark::Line => {
