@@ -54,12 +54,16 @@ def test_pca_variance_n_components_truncation():
     assert pca.height == 2
 
 
-def test_pca_variance_raises_without_capability():
+def test_pca_variance_fallback_without_capability():
+    """When the model lacks explained_variance_ratio_, pca_variance falls back
+    to Rust SVD on the raw X data."""
     model = load_fixture("regression_ridge")
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(model, df)
-    with pytest.raises(AttributeError, match="explained_variance_ratio_"):
-        source.pca_variance()
+    result = source.pca_variance()
+    assert result.height > 0
+    assert "explained_variance_ratio" in result.columns
+    assert "cumulative_variance_ratio" in result.columns
 
 
 # --- Chart builders --------------------------------------------------

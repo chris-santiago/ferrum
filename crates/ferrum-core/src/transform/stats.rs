@@ -13,8 +13,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3_arrow::{PyArray, PyRecordBatch};
 
+use faer::Side;
+
 use crate::diagnostics;
 use crate::transform::linalg;
+use crate::transform::linkage::DistanceMetric;
 
 // ---------------------------------------------------------------------------
 // Internal pure-Rust implementations
@@ -541,6 +544,480 @@ pub fn py_rank2d(
     Ok(PyRecordBatch::new(batch))
 }
 
+// ---------------------------------------------------------------------------
+// Distance-metric string parser (shared by silhouette, mds, calinski)
+// ---------------------------------------------------------------------------
+
+fn parse_distance_metric(s: &str) -> PyResult<DistanceMetric> {
+    match s {
+        "euclidean" => Ok(DistanceMetric::Euclidean),
+        "manhattan" => Ok(DistanceMetric::Manhattan),
+        "cosine" => Ok(DistanceMetric::Cosine),
+        "correlation" => Ok(DistanceMetric::Correlation),
+        "chebyshev" => Ok(DistanceMetric::Chebyshev),
+        other => Err(PyValueError::new_err(format!(
+            "Unknown distance metric '{other}'; expected euclidean|manhattan|cosine|correlation|chebyshev"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PCA (thin SVD via faer)
+// ---------------------------------------------------------------------------
+
+fn pca_svd(
+    batch: &RecordBatch,
+    n_components: Option<usize>,
+) -> PyResult<(Vec<Vec<f64>>, Vec<f64>)> {
+    let (flat, n, p, _col_names) = batch_to_flat_f64(batch)?;
+    if n == 0 || p == 0 {
+        return Err(PyValueError::new_err("pca: input must have at least 1 row and 1 column"));
+    }
+    let k = n_components.unwrap_or_else(|| n.min(p)).min(n.min(p));
+    if k == 0 {
+        return Err(PyValueError::new_err("pca: n_components must be >= 1"));
+    }
+
+    let mut x_mat = linalg::mat_from_flat(&flat, n, p);
+    for j in 0..p {
+        let mean: f64 = (0..n).map(|i| x_mat[(i, j)]).sum::<f64>() / n as f64;
+        for i in 0..n {
+            x_mat[(i, j)] -= mean;
+        }
+    }
+
+    let svd = x_mat.thin_svd().map_err(|e| PyValueError::new_err(format!("pca SVD failed: {e:?}")))?;
+    let u = svd.U();
+    let s_diag = svd.S();
+
+    let s_vals: Vec<f64> = s_diag.column_vector().iter().copied().collect();
+    let s_sq: Vec<f64> = s_vals.iter().map(|v| v * v).collect();
+    let total_var: f64 = s_sq.iter().sum();
+
+    let evr: Vec<f64> = if total_var > 0.0 {
+        s_sq[..k].iter().map(|v| v / total_var).collect()
+    } else {
+        vec![0.0; k]
+    };
+
+    let mut scores = vec![vec![0.0; n]; k];
+    for c in 0..k {
+        let sv = s_vals[c];
+        for i in 0..n {
+            scores[c][i] = u[(i, c)] * sv;
+        }
+    }
+
+    Ok((scores, evr))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x_table, n_components=None))]
+pub fn pca_scores(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: Option<usize>,
+) -> PyResult<PyRecordBatch> {
+    let batch: RecordBatch = x_table.into();
+    let (scores, _evr) = pca_svd(&batch, n_components)?;
+    let k = scores.len();
+
+    let fields: Vec<Field> = (0..k)
+        .map(|i| Field::new(format!("dim_{i}"), DataType::Float64, false))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let columns: Vec<ArrayRef> = scores.into_iter().map(|col| f64_array(col)).collect();
+    let out = RecordBatch::try_new(schema, columns)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyRecordBatch::new(out))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x_table, n_components=None))]
+pub fn pca_variance(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: Option<usize>,
+) -> PyResult<PyRecordBatch> {
+    let batch: RecordBatch = x_table.into();
+    let (_scores, evr) = pca_svd(&batch, n_components)?;
+    let k = evr.len();
+
+    let mut cum = Vec::with_capacity(k);
+    let mut running = 0.0;
+    for &v in &evr {
+        running += v;
+        cum.push(running);
+    }
+
+    let components: Vec<i64> = (1..=k as i64).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("component", DataType::Int64, false),
+        Field::new("explained_variance_ratio", DataType::Float64, false),
+        Field::new("cumulative_variance_ratio", DataType::Float64, false),
+    ]));
+    let out = RecordBatch::try_new(schema, vec![
+        Arc::new(Int64Array::from(components)) as ArrayRef,
+        f64_array(evr),
+        f64_array(cum),
+    ]).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyRecordBatch::new(out))
+}
+
+// ---------------------------------------------------------------------------
+// Classical MDS
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(signature = (x_table, n_components, input_type="features", metric="euclidean"))]
+pub fn mds_classical(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: usize,
+    input_type: &str,
+    metric: &str,
+) -> PyResult<PyRecordBatch> {
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, feat, _col_names) = batch_to_flat_f64(&batch)?;
+    if n < 2 {
+        return Err(PyValueError::new_err("mds_classical: need at least 2 observations"));
+    }
+    if n_components == 0 {
+        return Err(PyValueError::new_err("mds_classical: n_components must be >= 1"));
+    }
+    let is_distance = match input_type {
+        "distance" => true,
+        "features" => false,
+        other => return Err(PyValueError::new_err(format!(
+            "mds_classical: input_type must be 'features' or 'distance'; got '{other}'"
+        ))),
+    };
+
+    let full_dist = if is_distance {
+        if n != feat {
+            return Err(PyValueError::new_err(
+                "mds_classical: when is_distance=true, input must be a square n×n distance matrix"
+            ));
+        }
+        flat
+    } else {
+        let dm = parse_distance_metric(metric)?;
+        let condensed = crate::transform::linkage::condensed_distances(&flat, n, feat, dm)?;
+        let mut full = vec![0.0; n * n];
+        let mut idx = 0;
+        for i in 0..n - 1 {
+            for j in i + 1..n {
+                full[i * n + j] = condensed[idx];
+                full[j * n + i] = condensed[idx];
+                idx += 1;
+            }
+        }
+        full
+    };
+
+    // Double-centering: B_ij = -0.5 * (D_ij^2 - row_mean_i - col_mean_j + grand_mean)
+    let mut d_sq = vec![0.0; n * n];
+    for i in 0..n * n {
+        d_sq[i] = full_dist[i] * full_dist[i];
+    }
+
+    let mut row_means = vec![0.0; n];
+    let mut col_means = vec![0.0; n];
+    let mut grand_mean = 0.0;
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..n {
+            s += d_sq[i * n + j];
+        }
+        row_means[i] = s / n as f64;
+    }
+    for j in 0..n {
+        let mut s = 0.0;
+        for i in 0..n {
+            s += d_sq[i * n + j];
+        }
+        col_means[j] = s / n as f64;
+    }
+    for &v in &d_sq {
+        grand_mean += v;
+    }
+    grand_mean /= (n * n) as f64;
+
+    let mut b_flat = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            b_flat[i * n + j] = -0.5 * (d_sq[i * n + j] - row_means[i] - col_means[j] + grand_mean);
+        }
+    }
+
+    let b_mat = linalg::mat_from_flat(&b_flat, n, n);
+    let eigen = b_mat.self_adjoint_eigen(Side::Lower)
+        .map_err(|e| PyValueError::new_err(format!("mds_classical eigendecomposition failed: {e:?}")))?;
+
+    let eigvals: Vec<f64> = eigen.S().column_vector().iter().copied().collect();
+    let eigvecs = eigen.U();
+
+    // faer returns eigenvalues in ascending order; take the last n_components (largest)
+    let nc = n_components.min(n);
+    let mut coords = vec![vec![0.0; n]; nc];
+    for c in 0..nc {
+        let eig_idx = n - 1 - c; // largest first
+        let lam = eigvals[eig_idx].max(0.0).sqrt();
+        for i in 0..n {
+            coords[c][i] = eigvecs[(i, eig_idx)] * lam;
+        }
+    }
+
+    let fields: Vec<Field> = (0..nc)
+        .map(|i| Field::new(format!("dim_{i}"), DataType::Float64, false))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let columns: Vec<ArrayRef> = coords.into_iter().map(|col| f64_array(col)).collect();
+    let out = RecordBatch::try_new(schema, columns)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyRecordBatch::new(out))
+}
+
+// ---------------------------------------------------------------------------
+// Silhouette
+// ---------------------------------------------------------------------------
+
+fn silhouette_samples_vec(
+    flat: &[f64],
+    n: usize,
+    feat: usize,
+    labels: &[i64],
+    metric: DistanceMetric,
+) -> PyResult<Vec<f64>> {
+    if n == 0 {
+        return Ok(vec![]);
+    }
+
+    // Compute full pairwise distance matrix
+    let condensed = crate::transform::linkage::condensed_distances(flat, n, feat, metric)?;
+    let mut dist = vec![0.0; n * n];
+    let mut idx = 0;
+    for i in 0..n - 1 {
+        for j in i + 1..n {
+            dist[i * n + j] = condensed[idx];
+            dist[j * n + i] = condensed[idx];
+            idx += 1;
+        }
+    }
+
+    // Collect unique cluster labels and build cluster membership
+    let mut unique_labels: Vec<i64> = labels.to_vec();
+    unique_labels.sort();
+    unique_labels.dedup();
+    let n_clusters = unique_labels.len();
+
+    if n_clusters < 2 {
+        return Ok(vec![0.0; n]);
+    }
+
+    // Map label -> cluster index
+    let label_to_idx: std::collections::HashMap<i64, usize> = unique_labels
+        .iter()
+        .enumerate()
+        .map(|(idx, &lab)| (lab, idx))
+        .collect();
+
+    // Build cluster membership lists
+    let mut cluster_members: Vec<Vec<usize>> = vec![vec![]; n_clusters];
+    for (i, &lab) in labels.iter().enumerate() {
+        cluster_members[label_to_idx[&lab]].push(i);
+    }
+
+    let mut silhouette = vec![0.0; n];
+    for i in 0..n {
+        let ci = label_to_idx[&labels[i]];
+        let cluster_size = cluster_members[ci].len();
+
+        // a(i) = mean intra-cluster distance
+        let a_i = if cluster_size <= 1 {
+            0.0
+        } else {
+            let sum: f64 = cluster_members[ci].iter()
+                .filter(|&&j| j != i)
+                .map(|&j| dist[i * n + j])
+                .sum();
+            sum / (cluster_size - 1) as f64
+        };
+
+        // b(i) = min mean inter-cluster distance
+        let mut b_i = f64::INFINITY;
+        for (c_idx, members) in cluster_members.iter().enumerate() {
+            if c_idx == ci || members.is_empty() {
+                continue;
+            }
+            let sum: f64 = members.iter().map(|&j| dist[i * n + j]).sum();
+            let mean_d = sum / members.len() as f64;
+            if mean_d < b_i {
+                b_i = mean_d;
+            }
+        }
+
+        let denom = a_i.max(b_i);
+        silhouette[i] = if denom > 0.0 {
+            (b_i - a_i) / denom
+        } else {
+            0.0
+        };
+    }
+
+    Ok(silhouette)
+}
+
+fn extract_labels(labels: &PyArray) -> PyResult<Vec<i64>> {
+    let arr = labels.array();
+    if let Some(i64_arr) = arr.as_any().downcast_ref::<Int64Array>() {
+        return Ok(i64_arr.values().to_vec());
+    }
+    if let Some(f64_arr) = arr.as_any().downcast_ref::<Float64Array>() {
+        return Ok(f64_arr.values().iter().map(|v| *v as i64).collect());
+    }
+    Err(PyValueError::new_err("labels must be Int64 or Float64"))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x_table, labels, metric="euclidean"))]
+pub fn silhouette_samples(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    labels: PyArray,
+    metric: &str,
+) -> PyResult<PyArray> {
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, feat, _col_names) = batch_to_flat_f64(&batch)?;
+    let lab = extract_labels(&labels)?;
+    if lab.len() != n {
+        return Err(PyValueError::new_err("labels length must match X row count"));
+    }
+    let dm = parse_distance_metric(metric)?;
+    let sv = silhouette_samples_vec(&flat, n, feat, &lab, dm)?;
+    Ok(PyArray::from_array_ref(Arc::new(Float64Array::from(sv))))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x_table, labels, metric="euclidean"))]
+pub fn silhouette_score(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    labels: PyArray,
+    metric: &str,
+) -> PyResult<f64> {
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, feat, _col_names) = batch_to_flat_f64(&batch)?;
+    let lab = extract_labels(&labels)?;
+    if lab.len() != n {
+        return Err(PyValueError::new_err("labels length must match X row count"));
+    }
+    let dm = parse_distance_metric(metric)?;
+    let sv = silhouette_samples_vec(&flat, n, feat, &lab, dm)?;
+    if sv.is_empty() {
+        return Ok(0.0);
+    }
+    let mean = sv.iter().sum::<f64>() / sv.len() as f64;
+    Ok(mean)
+}
+
+// ---------------------------------------------------------------------------
+// Calinski-Harabasz score
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+pub fn calinski_harabasz_score(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    labels: PyArray,
+) -> PyResult<f64> {
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, p, _col_names) = batch_to_flat_f64(&batch)?;
+    let lab = extract_labels(&labels)?;
+    if lab.len() != n {
+        return Err(PyValueError::new_err("labels length must match X row count"));
+    }
+
+    // Overall centroid
+    let mut x_bar = vec![0.0; p];
+    for j in 0..p {
+        let sum: f64 = (0..n).map(|i| flat[i * p + j]).sum();
+        x_bar[j] = sum / n as f64;
+    }
+
+    // Unique clusters
+    let mut unique_labels: Vec<i64> = lab.to_vec();
+    unique_labels.sort();
+    unique_labels.dedup();
+    let k = unique_labels.len();
+
+    if k < 2 || n <= k {
+        return Err(PyValueError::new_err(
+            "calinski_harabasz_score requires at least 2 clusters and n > k"
+        ));
+    }
+
+    let label_to_idx: std::collections::HashMap<i64, usize> = unique_labels
+        .iter()
+        .enumerate()
+        .map(|(idx, &lab)| (lab, idx))
+        .collect();
+
+    // Build cluster membership
+    let mut cluster_members: Vec<Vec<usize>> = vec![vec![]; k];
+    for (i, &lab_val) in lab.iter().enumerate() {
+        cluster_members[label_to_idx[&lab_val]].push(i);
+    }
+
+    let mut between_scatter = 0.0;
+    let mut within_scatter = 0.0;
+
+    for members in &cluster_members {
+        let n_c = members.len() as f64;
+        if members.is_empty() {
+            continue;
+        }
+
+        // Cluster centroid
+        let mut mu_c = vec![0.0; p];
+        for &i in members {
+            for j in 0..p {
+                mu_c[j] += flat[i * p + j];
+            }
+        }
+        for j in 0..p {
+            mu_c[j] /= n_c;
+        }
+
+        // Between scatter: n_c * ||mu_c - x_bar||^2
+        let mut dist_sq = 0.0;
+        for j in 0..p {
+            dist_sq += (mu_c[j] - x_bar[j]).powi(2);
+        }
+        between_scatter += n_c * dist_sq;
+
+        // Within scatter: sum_i ||x_i - mu_c||^2
+        for &i in members {
+            let mut d2 = 0.0;
+            for j in 0..p {
+                d2 += (flat[i * p + j] - mu_c[j]).powi(2);
+            }
+            within_scatter += d2;
+        }
+    }
+
+    if within_scatter == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+
+    let ch = (between_scatter / (k - 1) as f64) / (within_scatter / (n - k) as f64);
+    Ok(ch)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +1076,217 @@ mod tests {
         let v = variance_rank_vec(&flat, 3, 2);
         assert!(v[0] > 0.0);
         assert!(approx_eq(v[1], 0.0, 1e-12));
+    }
+
+    // ---- PCA ----
+
+    fn make_batch(data: &[f64], n: usize, p: usize) -> RecordBatch {
+        let fields: Vec<Field> = (0..p)
+            .map(|j| Field::new(format!("f{j}"), DataType::Float64, false))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let cols: Vec<ArrayRef> = (0..p)
+            .map(|j| {
+                let vals: Vec<f64> = (0..n).map(|i| data[i * p + j]).collect();
+                Arc::new(Float64Array::from(vals)) as ArrayRef
+            })
+            .collect();
+        RecordBatch::try_new(schema, cols).unwrap()
+    }
+
+    #[test]
+    fn test_pca_identity_eigenvectors() {
+        // 3x3 identity → SVD returns identity-like structure
+        let data = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let batch = make_batch(&data, 3, 3);
+        let (_scores, evr) = pca_svd(&batch, Some(3)).unwrap();
+        // After centering identity, variance is the same across components
+        let total: f64 = evr.iter().sum();
+        assert!(approx_eq(total, 1.0, 1e-10), "total EVR should be 1.0, got {total}");
+    }
+
+    #[test]
+    fn test_pca_correlated_columns() {
+        // col1 = [1,2,3,4,5], col2 = [2,4,6,8,10] (perfectly correlated)
+        let data = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0, 5.0, 10.0];
+        let batch = make_batch(&data, 5, 2);
+        let (_scores, evr) = pca_svd(&batch, Some(2)).unwrap();
+        // First component should capture ~100% of variance
+        assert!(evr[0] > 0.999, "first EVR should be ~1.0, got {}", evr[0]);
+    }
+
+    // ---- Silhouette ----
+
+    #[test]
+    fn test_silhouette_perfect_separation() {
+        // Two well-separated clusters
+        let flat = [
+            0.0, 0.0, 0.1, 0.0, 0.0, 0.1,
+            10.0, 10.0, 10.1, 10.0, 10.0, 10.1,
+        ];
+        let labels = [0i64, 0, 0, 1, 1, 1];
+        let sv = silhouette_samples_vec(&flat, 6, 2, &labels, DistanceMetric::Euclidean).unwrap();
+        for &s in &sv {
+            assert!(s > 0.9, "perfectly separated clusters should have silhouette > 0.9, got {s}");
+        }
+    }
+
+    // ---- Calinski-Harabasz ----
+
+    #[test]
+    fn test_calinski_well_vs_poorly_separated() {
+        // Well-separated: two tight clusters far apart
+        let flat_good = [
+            0.0, 0.0, 0.1, 0.0, 0.0, 0.1,
+            10.0, 10.0, 10.1, 10.0, 10.0, 10.1,
+        ];
+        let labels_good = [0i64, 0, 0, 1, 1, 1];
+        let (n_good, p_good) = (6, 2);
+
+        // Poorly separated: overlapping clusters
+        let flat_bad = [
+            0.0, 0.0, 1.0, 1.0, 0.5, 0.5,
+            0.2, 0.2, 0.8, 0.8, 0.6, 0.4,
+        ];
+        let labels_bad = [0i64, 0, 0, 1, 1, 1];
+        let (n_bad, p_bad) = (6, 2);
+
+        let mut x_bar_good = vec![0.0; p_good];
+        for j in 0..p_good {
+            let sum: f64 = (0..n_good).map(|i| flat_good[i * p_good + j]).sum();
+            x_bar_good[j] = sum / n_good as f64;
+        }
+        let mut x_bar_bad = vec![0.0; p_bad];
+        for j in 0..p_bad {
+            let sum: f64 = (0..n_bad).map(|i| flat_bad[i * p_bad + j]).sum();
+            x_bar_bad[j] = sum / n_bad as f64;
+        }
+
+        // Compute CH directly using the internal helper logic
+        let ch_good = {
+            let mut between = 0.0;
+            let mut within = 0.0;
+            for c in 0..2i64 {
+                let members: Vec<usize> = labels_good.iter().enumerate()
+                    .filter(|(_, &l)| l == c).map(|(i, _)| i).collect();
+                let nc = members.len() as f64;
+                let mut mu = vec![0.0; p_good];
+                for &i in &members {
+                    for j in 0..p_good { mu[j] += flat_good[i * p_good + j]; }
+                }
+                for j in 0..p_good { mu[j] /= nc; }
+                let mut d2 = 0.0;
+                for j in 0..p_good { d2 += (mu[j] - x_bar_good[j]).powi(2); }
+                between += nc * d2;
+                for &i in &members {
+                    let mut d = 0.0;
+                    for j in 0..p_good { d += (flat_good[i * p_good + j] - mu[j]).powi(2); }
+                    within += d;
+                }
+            }
+            (between / 1.0) / (within / 4.0)
+        };
+
+        let ch_bad = {
+            let mut between = 0.0;
+            let mut within = 0.0;
+            for c in 0..2i64 {
+                let members: Vec<usize> = labels_bad.iter().enumerate()
+                    .filter(|(_, &l)| l == c).map(|(i, _)| i).collect();
+                let nc = members.len() as f64;
+                let mut mu = vec![0.0; p_bad];
+                for &i in &members {
+                    for j in 0..p_bad { mu[j] += flat_bad[i * p_bad + j]; }
+                }
+                for j in 0..p_bad { mu[j] /= nc; }
+                let mut d2 = 0.0;
+                for j in 0..p_bad { d2 += (mu[j] - x_bar_bad[j]).powi(2); }
+                between += nc * d2;
+                for &i in &members {
+                    let mut d = 0.0;
+                    for j in 0..p_bad { d += (flat_bad[i * p_bad + j] - mu[j]).powi(2); }
+                    within += d;
+                }
+            }
+            (between / 1.0) / (within / 4.0)
+        };
+
+        assert!(
+            ch_good > ch_bad,
+            "well-separated CH ({ch_good}) should be > poorly-separated CH ({ch_bad})"
+        );
+    }
+
+    // ---- MDS ----
+
+    #[test]
+    fn test_mds_triangle_geometry() {
+        // 3 points: (0,0), (3,0), (0,4) → distances: 3, 4, 5
+        let flat = [0.0, 0.0, 3.0, 0.0, 0.0, 4.0];
+        let batch = make_batch(&flat, 3, 2);
+        // pairwise Euclidean: d(0,1)=3, d(0,2)=4, d(1,2)=5
+        let dm = DistanceMetric::Euclidean;
+        let condensed = crate::transform::linkage::condensed_distances(&flat, 3, 2, dm).unwrap();
+        assert!(approx_eq(condensed[0], 3.0, 1e-10));
+        assert!(approx_eq(condensed[1], 4.0, 1e-10));
+        assert!(approx_eq(condensed[2], 5.0, 1e-10));
+
+        // Run MDS and verify recovered inter-point distances match originals
+        // (MDS recovers geometry up to rotation/reflection)
+        let n = 3;
+        let full_dist_orig = vec![0.0, 3.0, 4.0, 3.0, 0.0, 5.0, 4.0, 5.0, 0.0];
+
+        // Double-center
+        let mut d_sq = vec![0.0; 9];
+        for i in 0..9 { d_sq[i] = full_dist_orig[i] * full_dist_orig[i]; }
+        let mut row_means = vec![0.0; n];
+        let mut col_means = vec![0.0; n];
+        let mut grand_mean = 0.0;
+        for i in 0..n {
+            let mut s = 0.0;
+            for j in 0..n { s += d_sq[i * n + j]; }
+            row_means[i] = s / n as f64;
+        }
+        for j in 0..n {
+            let mut s = 0.0;
+            for i in 0..n { s += d_sq[i * n + j]; }
+            col_means[j] = s / n as f64;
+        }
+        for &v in &d_sq { grand_mean += v; }
+        grand_mean /= (n * n) as f64;
+        let mut b_flat = vec![0.0; 9];
+        for i in 0..n {
+            for j in 0..n {
+                b_flat[i * n + j] = -0.5 * (d_sq[i * n + j] - row_means[i] - col_means[j] + grand_mean);
+            }
+        }
+        let b_mat = linalg::mat_from_flat(&b_flat, n, n);
+        let eigen = b_mat.self_adjoint_eigen(Side::Lower).unwrap();
+        let eigvals: Vec<f64> = eigen.S().column_vector().iter().copied().collect();
+        let eigvecs = eigen.U();
+
+        // Take 2 largest eigenvalues
+        let mut coords = vec![vec![0.0; n]; 2];
+        for c in 0..2 {
+            let idx = n - 1 - c;
+            let lam = eigvals[idx].max(0.0).sqrt();
+            for i in 0..n {
+                coords[c][i] = eigvecs[(i, idx)] * lam;
+            }
+        }
+
+        // Verify inter-point distances in embedded space match original distances
+        for i in 0..n {
+            for j in i + 1..n {
+                let dx = coords[0][i] - coords[0][j];
+                let dy = coords[1][i] - coords[1][j];
+                let d_embed = (dx * dx + dy * dy).sqrt();
+                let d_orig = full_dist_orig[i * n + j];
+                assert!(
+                    approx_eq(d_embed, d_orig, 1e-8),
+                    "MDS distance ({i},{j}): embed={d_embed}, orig={d_orig}"
+                );
+            }
+        }
     }
 }

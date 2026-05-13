@@ -53,5 +53,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transform::stats::py_rank1d, m)?)?;
     m.add_function(wrap_pyfunction!(transform::stats::py_rank1d_with_y, m)?)?;
     m.add_function(wrap_pyfunction!(transform::stats::py_rank2d, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::pca_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::pca_variance, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::mds_classical, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::silhouette_samples, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::silhouette_score, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::calinski_harabasz_score, m)?)?;
     Ok(())
 }

@@ -1872,6 +1872,35 @@ def _pca_scree_chart_from_source(
     return chart
 
 
+def _pca_scree_chart_from_variance_df(
+    df: Any,
+    *,
+    cumulative_line: bool = True,
+    threshold: float | None = 0.95,
+    theme: Any = None,
+):
+    """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path)."""
+    import ferrum
+    from ferrum.layer import Layer
+
+    chart = ferrum.Chart(df).mark_pca_scree(
+        cumulative_line=cumulative_line,
+        threshold_line=threshold,
+    )
+    chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
+    if cumulative_line:
+        chart = chart.layer(
+            Layer(
+                mark="point",
+                encoding={"x": "component", "y": "cumulative_variance_ratio"},
+                mark_kwargs={"size": 40, "filled": True},
+            )
+        )
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
 def _intercluster_distance_chart_from_source(
     source: Any,
     *,
@@ -2389,12 +2418,16 @@ def _cluster_diagnostics_chart(
     """
     import ferrum
     import numpy as np
+    import pyarrow as pa
+    from ferrum import _core
     from sklearn.cluster import KMeans, AgglomerativeClustering
-    from sklearn.metrics import silhouette_score
 
     # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
     X_np = np.asarray(X, dtype=np.float64)
     X_np = np.ascontiguousarray(X_np)
+    x_arrow = pa.RecordBatch.from_pydict(
+        {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
+    )
     seed = 0 if random_state is None else int(random_state)
     rows: list[dict] = []
     for k in ks:
@@ -2409,19 +2442,17 @@ def _cluster_diagnostics_chart(
         else:  # hierarchical
             m = AgglomerativeClustering(n_clusters=int(k), linkage="ward").fit(X_np)
             labels = m.labels_
-            # AgglomerativeClustering doesn't expose inertia_; compute
-            # manually as the sum of squared distances from each sample
-            # to its cluster centroid (the same definition KMeans uses).
             inertia = 0.0
             for cluster_id in np.unique(labels):
                 mask = labels == cluster_id
                 centroid = X_np[mask].mean(axis=0)
                 inertia += float(np.sum((X_np[mask] - centroid) ** 2))
+        labels_arrow = pa.array(labels.astype(int).tolist(), type=pa.int64())
         rows.append(
             {
                 "k": int(k),
                 "inertia": inertia,
-                "silhouette": float(silhouette_score(X_np, labels)),
+                "silhouette": float(_core.silhouette_score(x_arrow, labels_arrow, "euclidean")),
             }
         )
     df = pl.DataFrame(rows)

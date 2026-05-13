@@ -164,7 +164,7 @@ fn std_scale_rows(mat: &mut [f64], n: usize, feat: usize) {
 
 /// Compute condensed pairwise distance matrix for n observations × feat features.
 /// Returns Vec of length n*(n-1)/2 in upper-triangle row-major order.
-fn condensed_distances(
+pub(crate) fn condensed_distances(
     mat: &[f64],
     n: usize,
     feat: usize,
