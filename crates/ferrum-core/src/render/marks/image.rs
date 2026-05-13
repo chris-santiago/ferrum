@@ -96,14 +96,20 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let scheme = ContinuousScheme::Named(named);
 
     // Decode f64 values and map through colormap to produce RGBA8 pixels.
+    // NaN sentinel (emitted by the Raster transform for empty / masked cells)
+    // becomes fully transparent so the plot background shows through.
     let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
     for chunk in pixel_bytes.chunks_exact(8) {
         let v = f64::from_le_bytes(chunk.try_into().unwrap());
-        let c = scheme.sample(v);
-        rgba.push(c.red);
-        rgba.push(c.green);
-        rgba.push(c.blue);
-        rgba.push(c.alpha);
+        if v.is_nan() {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let c = scheme.sample(v);
+            rgba.push(c.red);
+            rgba.push(c.green);
+            rgba.push(c.blue);
+            rgba.push(c.alpha);
+        }
     }
 
     let png_bytes = encode_png(width, height, &rgba);

@@ -266,14 +266,20 @@ pub(crate) fn apply_with_context(
     }
 
     // 8. Compute aggregated values per cell.
+    // Empty cells (count == 0) are marked NaN so the image renderer can emit
+    // fully-transparent pixels for them instead of sampling the colormap at 0.
     let cell_area = (dx / (nx as f64)) * (dy / (ny as f64));
     let mut values: Vec<f64> = vec![0.0; n_cells];
     for i in 0..n_cells {
         let c = counts[i];
         let v = match agg {
-            "count" => c as f64,
+            "count" => {
+                if c == 0 { f64::NAN } else { c as f64 }
+            }
             "density" => {
-                if n_total == 0 || cell_area == 0.0 {
+                if c == 0 {
+                    f64::NAN
+                } else if n_total == 0 || cell_area == 0.0 {
                     0.0
                 } else {
                     (c as f64) / ((n_total as f64) * cell_area)
@@ -286,12 +292,14 @@ pub(crate) fn apply_with_context(
                     value_sum[i] / (c as f64)
                 }
             }
-            "sum" => value_sum[i],
+            "sum" => {
+                if c == 0 { f64::NAN } else { value_sum[i] }
+            }
             "any" => {
                 if c > 0 {
                     1.0
                 } else {
-                    0.0
+                    f64::NAN
                 }
             }
             _ => unreachable!(),
@@ -299,11 +307,11 @@ pub(crate) fn apply_with_context(
         values[i] = v;
     }
 
-    // 9. Apply min_count masking.
+    // 9. Apply min_count masking — masked cells become NaN (transparent).
     if let Some(mc) = spec.min_count {
         for i in 0..n_cells {
             if counts[i] < mc as u64 {
-                values[i] = 0.0;
+                values[i] = f64::NAN;
             }
         }
     }
@@ -332,7 +340,8 @@ pub(crate) fn apply_with_context(
         .iter()
         .map(|v| {
             if !v.is_finite() {
-                return 0.0;
+                // Preserve NaN sentinel so the image renderer emits transparent pixels.
+                return f64::NAN;
             }
             if vmax <= 0.0 {
                 return 0.0;
@@ -612,9 +621,9 @@ mod tests {
         // Both nonempty cells have count=2 → max=2 → normalized=1.0.
         assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
         assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
-        // Empty cells = 0.0.
-        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
-        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
+        // Empty cells = NaN (transparent sentinel for the image renderer).
+        assert!(p01.is_nan(), "p01 should be NaN, got {p01}");
+        assert!(p10.is_nan(), "p10 should be NaN, got {p10}");
     }
 
     #[test]
@@ -638,18 +647,16 @@ mod tests {
         let out = apply(&spec, &b).unwrap();
 
         // Cell area = 0.7 * 0.7 / (2*2) — the extent is (0.1,0.8) by (0.1,0.8).
-        // We don't know exact extent without recomputing; instead verify
-        // (a) RGBA at filled cells equals 255 (max), (b) empty cells are 0.
         // Density values for the two filled cells are equal (count=2 each), so
-        // both normalize to 1.0.
+        // both normalize to 1.0. Empty cells are NaN (transparent).
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
         assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
         assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
-        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
-        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
+        assert!(p01.is_nan(), "p01 should be NaN, got {p01}");
+        assert!(p10.is_nan(), "p10 should be NaN, got {p10}");
 
         // Σ density · cell_area should be ≈ 1 (all mass within grid).
         // Reconstruct from extent + width/height.
@@ -742,8 +749,8 @@ mod tests {
         let p10 = pixel_at(&out, 1, 0);
         assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
         assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
-        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
-        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
+        assert!(p01.is_nan(), "p01 should be NaN, got {p01}");
+        assert!(p10.is_nan(), "p10 should be NaN, got {p10}");
     }
 
     #[test]
@@ -771,8 +778,8 @@ mod tests {
         let p11 = pixel_at(&out, 1, 1);
         // (0,0) survives: count=11 ≥ 10.
         assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
-        // (1,1) masked: count=1 < 10 → value set to 0.0.
-        assert!((p11 - 0.0).abs() < 1e-9, "p11={p11}");
+        // (1,1) masked: count=1 < 10 → NaN (transparent).
+        assert!(p11.is_nan(), "p11 should be NaN, got {p11}");
     }
 
     #[test]
