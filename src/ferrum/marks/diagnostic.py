@@ -1231,77 +1231,57 @@ def desugar_pca_scree(
     *,
     cumulative_line: bool = True,
     threshold_line: float | None = None,
+    n_components: int | None = None,
     **mark_kwargs: Any,
 ) -> tuple:
     """PCA scree plot: bar of per-component variance + optional cumulative
     line and threshold rule.
 
-    Data contract: ``component`` (Int64), ``explained_variance_ratio``
-    (Float64), ``cumulative_variance_ratio`` (Float64) as emitted by
-    ``ModelSource.pca_variance()`` plus the injected bar-bound columns
-    ``_pca_bar_x_lo``, ``_pca_bar_x_hi``, ``_pca_bar_y_lo``,
-    ``_pca_bar_y_hi`` (Float64) computed by ``Chart.mark_pca_scree``.
-    mark_bar has no quant-x / quant-y path; mark_rect with explicit
-    bounds renders the bars while preserving quantitative axes for the
-    cumulative-line and threshold-rule layers.
+    Data contract: ``component`` (Utf8, cast from Int64 by
+    ``_pca_scree_prep``), ``explained_variance_ratio`` (Float64),
+    ``cumulative_variance_ratio`` (Float64) as emitted by
+    ``ModelSource.pca_variance()``.
+
+    Component is cast to String by ``_pca_scree_prep`` so the x scale
+    resolves as ordinal — ``mark_bar`` uses native band positioning and
+    the axis shows integer-only labels ("1", "2", …) with no fractional
+    ticks.
 
     When ``threshold_line`` is non-None the data also carries
     ``_threshold_line`` (a sentinel single-non-null column for the
     horizontal reference rule).
     """
-    del x_field, y_field
-    # threshold_line is consumed by chart.py's mark_pca_scree which
-    # dispatches between desugar_pca_scree and
-    # desugar_pca_scree_with_threshold; informational at this level.
+    del x_field, y_field, n_components
     _ = threshold_line
     from ferrum.encoding import X, Y
 
     user_kw = _validate("pca_scree", mark_kwargs)
-    # Layer-0 drives axis-scale resolution (see render/prepare.rs:265 —
-    # only the first layer's encoding feeds resolve_scales). The
-    # cumulative line spans the widest y range, so emit it first so the
-    # y axis covers [0, max(cum)] rather than [0, max(evr)]. The rect
-    # bar layer follows and renders within the established axis.
+
     if cumulative_line:
         layers: list = [
             _Layer(
                 mark="line",
                 encoding={
-                    "x": X("component", title="component"),
-                    "x2": "_x_axis_anchor",
-                    "y": Y("cumulative_variance_ratio", title="explained variance ratio"),
-                    # x2/y2 here are scale-resolution hints — mark_line
-                    # ignores both when drawing, but
-                    # scale_resolve::build_axis_scale unions the paired
-                    # channel's extent into the axis domain. The anchor
-                    # columns hold [bar_x_lo_min, bar_x_hi_max] and
-                    # [0, max(cum, threshold)] so the axes cover the
-                    # bar baselines, the first/last bar edges, and any
-                    # threshold rule introduced by sibling layers.
+                    "x": X("component", title="Component"),
+                    "y": Y("cumulative_variance_ratio", title="Explained variance"),
                     "y2": "_y_axis_anchor",
                 },
             ),
             _Layer(
-                mark="rect",
+                mark="bar",
                 encoding={
-                    "x": "_pca_bar_x_lo",
-                    "x2": "_pca_bar_x_hi",
-                    "y": "_pca_bar_y_lo",
-                    "y2": "_pca_bar_y_hi",
+                    "x": "component",
+                    "y": "explained_variance_ratio",
                 },
             ),
         ]
     else:
-        # No cumulative line — the rect bar is the only y signal and
-        # leads the scale-resolution.
         layers = [
             _Layer(
-                mark="rect",
+                mark="bar",
                 encoding={
-                    "x": X("_pca_bar_x_lo", title="component"),
-                    "x2": "_pca_bar_x_hi",
-                    "y": Y("_pca_bar_y_lo", title="explained variance ratio"),
-                    "y2": "_pca_bar_y_hi",
+                    "x": X("component", title="Component"),
+                    "y": Y("explained_variance_ratio", title="Explained variance"),
                 },
             ),
         ]
@@ -1313,6 +1293,7 @@ def desugar_pca_scree_with_threshold(
     y_field: str | None,
     *,
     cumulative_line: bool = True,
+    n_components: int | None = None,
     **mark_kwargs: Any,
 ) -> tuple:
     """Variant of ``desugar_pca_scree`` that appends a threshold rule.

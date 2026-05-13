@@ -3357,27 +3357,7 @@ class Chart:
             if "component" not in df.columns or "explained_variance_ratio" not in df.columns:
                 return df
             df = df.with_columns(
-                [
-                    (pl.col("component").cast(pl.Float64) - 0.4).alias("_pca_bar_x_lo"),
-                    (pl.col("component").cast(pl.Float64) + 0.4).alias("_pca_bar_x_hi"),
-                    pl.lit(0.0).alias("_pca_bar_y_lo"),
-                    pl.col("explained_variance_ratio").alias("_pca_bar_y_hi"),
-                ]
-            )
-            # X-axis anchor: same scale-extension trick as _y_axis_anchor — the
-            # bar rects sit at component ± 0.4 but the line layer's x is the
-            # bare component column. Without this, bars at the first/last
-            # component get clipped by the narrower x domain.
-            n_anchor = df.height
-            x_lo = float(df["_pca_bar_x_lo"].min() or 0.0)
-            x_hi = float(df["_pca_bar_x_hi"].max() or 0.0)
-            x_anchor_vals = [x_lo, x_hi] + [None] * max(0, n_anchor - 2)
-            df = df.with_columns(
-                pl.Series(
-                    "_x_axis_anchor",
-                    x_anchor_vals[:n_anchor],
-                    dtype=pl.Float64,
-                ),
+                pl.col("component").cast(pl.Utf8).alias("component"),
             )
             # Scale-resolution anchor: render/prepare.rs:265 feeds layer-0's
             # y+y2 into the y-axis domain computation. Layer-0 here is the
