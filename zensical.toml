@@ -7,7 +7,7 @@
 site_name = "Ferrum"
 site_description = "Grammar-of-graphics statistical visualization for Python, with a Rust core. One chart model for statistical graphics, interactive views, and ML diagnostics."
 site_author = "The Ferrum authors"
-site_url = "https://chris-santiago.github.io/ferrum/"
+site_url = "https://ferrumviz.com/"
 docs_dir = "docs/site"
 copyright = """
 Copyright &copy; 2026 The Ferrum authors
@@ -15,6 +15,7 @@ Copyright &copy; 2026 The Ferrum authors
 
 repo_url = "https://github.com/chris-santiago/ferrum"
 repo_name = "chris-santiago/ferrum"
+extra_css = ["stylesheets/paper-ink.css"]
 
 nav = [
   { Home = "index.md" },
@@ -79,11 +80,15 @@ features = [
 
 [[project.theme.palette]]
 scheme = "default"
+primary = "indigo"
+accent = "indigo"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
 
 [[project.theme.palette]]
 scheme = "slate"
+primary = "indigo"
+accent = "light-blue"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 

@@ -2,13 +2,14 @@
 
 Composition is how Ferrum combines multiple charts (or multiple marks against shared axes) into a single output. Where encoding controls what one chart looks like, composition controls how charts relate to each other.
 
-Ferrum ships five composition operators, each producing a different kind of compound view:
+Ferrum ships six composition operators, each producing a different kind of compound view:
 
 | Operator | When to use |
 |---|---|
-| **`+` (Layer)** | Multiple marks against the same axes — scatter + smooth, line + ribbon, bars + text labels. |
+| **`+` (Layer)** | Multiple marks against the same axes — scatter + smooth, line + ribbon, bars + text labels. Always layers; never concatenates. |
 | **`\|` (HConcat)** | Independent charts laid out left-to-right. |
 | **`&` (VConcat)** | Independent charts stacked top-to-bottom. |
+| **`fm.hconcat()` / `fm.vconcat()`** | Convenience functions for building concat layouts from more than two charts. |
 | **`JointChart`** | Central plot with marginal distributions on the top and right. |
 | **`RepeatChart`** | Template chart repeated across a grid of field combinations. |
 | **`ClusterMapChart`** | Clustered heatmap with row and column dendrograms. |
@@ -19,7 +20,7 @@ The principles that govern these operators are the same as the rest of Ferrum's 
 
 Layering is the most common form of composition: you have one set of axes and you want more than one mark on it. Scatter + regression line. Bars + value labels. Line + ribbon for uncertainty.
 
-The `+` operator on `Chart` produces a layered view:
+The `+` operator on `Chart` **always produces a layered view** — it never concatenates. When both charts share the same data, the result reuses the original DataFrame. When data differs, the two DataFrames are merged via null-padded diagonal concatenation; each layer's encoding references only its own columns, so the padding is invisible at render time.
 
 ```python
 import ferrum as fm
@@ -122,6 +123,28 @@ assert trio.show_svg().startswith("<svg")
 ```
 
 The explicit form is useful when you want to control spacing or pass more than two charts in one call.
+
+### Top-level convenience functions
+
+`fm.hconcat()` and `fm.vconcat()` are shorthand for building concat layouts from variadic arguments:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+a = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
+b = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
+c = fm.Chart(iris).mark_boxplot().encode(x="species:N", y="sepal_length")
+row = fm.hconcat(a, b, c, spacing=20.0)
+assert row.show_svg().startswith("<svg")
+```
+
+These are equivalent to `HConcatChart([a, b, c])` / `VConcatChart([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
 
 ## Joint distribution with marginals
 

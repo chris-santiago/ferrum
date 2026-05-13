@@ -8,21 +8,21 @@ Ferrum runs on Python 3.10 or newer. The Rust core ships as a pre-built extensio
 
     <!--pytest.mark.skip-->
     ```bash
-    pip install ferrum
+    pip install ferrum-viz
     ```
 
 === "uv"
 
     <!--pytest.mark.skip-->
     ```bash
-    uv add ferrum
+    uv add ferrum-viz
     ```
 
 === "poetry"
 
     <!--pytest.mark.skip-->
     ```bash
-    poetry add ferrum
+    poetry add ferrum-viz
     ```
 
 That installs Ferrum and its four runtime dependencies (`polars`, `pyarrow`, `narwhals`, `numpy`). Nothing else is required to render charts.
