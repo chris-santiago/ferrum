@@ -119,7 +119,7 @@ def desugar_boxplot(
         return d
 
     layers = [
-        _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker"), data_source="box"),
+        _Layer(mark="rule", encoding=enc("lower_whisker", "upper_whisker", title=val), data_source="box"),
         _Layer(mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
         _Layer(
@@ -161,9 +161,9 @@ def desugar_errorbar(
     Layers emitted
     --------------
     1. ``rule``  — ``y=lower``, ``y2=upper`` (vertical error span).
-    2. ``tick``  — ``y=lower`` (bottom cap, ``band_size=6``).  When
+    2. ``tick``  — ``y=lower`` (bottom cap, ``band_size=0.3``).  When
        ``ticks=True`` only.
-    3. ``tick``  — ``y=upper`` (top cap, ``band_size=6``).  When
+    3. ``tick``  — ``y=upper`` (top cap, ``band_size=0.3``).  When
        ``ticks=True`` only.
 
     Parameters
@@ -213,13 +213,13 @@ def desugar_errorbar(
                 _Layer(
                     mark="tick",
                     encoding={"x": x_field, "y": "lower"},
-                    mark_kwargs={"band_size": 6},
+                    mark_kwargs={"band_size": 0.3},
                     data_source="err",
                 ),
                 _Layer(
                     mark="tick",
                     encoding={"x": x_field, "y": "upper"},
-                    mark_kwargs={"band_size": 6},
+                    mark_kwargs={"band_size": 0.3},
                     data_source="err",
                 ),
             ]

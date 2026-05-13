@@ -289,27 +289,27 @@ pub fn prepare_render_inputs(
         theme,
     )?;
 
-    // Axis title: prefer an explicit `encoding.title` over the field name when
-    // set, so layered diagnostic charts whose layer-0 encoding references a
-    // column with a non-semantic name (e.g. "lower" / "lower_whisker" /
-    // "param_value") can override the displayed axis label without renaming
-    // the underlying data column. Falls back to the field name when no
-    // explicit title is set — preserves byte-equality of all existing
-    // single-layer goldens (none of which set encoding.title).
+    // Axis title resolution priority:
+    //   1. Spec-level encoding title (set by user via .encode(y=Y(..., title=...)))
+    //   2. Layer-0 encoding title (set by desugar for internal column names)
+    //   3. Field name (fallback)
+    // User-explicit titles always win; layer-level titles override the field
+    // name for diagnostic charts whose layer-0 encoding references a column
+    // with a non-semantic name (e.g. "lower_whisker" / "param_value").
     let x_field = rendering_encoding
         .x
         .as_ref()
         .map(|e| {
-            e.title.clone()
-                .or_else(|| spec.encoding.x.as_ref().and_then(|p| p.title.clone()))
+            spec.encoding.x.as_ref().and_then(|p| p.title.clone())
+                .or_else(|| e.title.clone())
                 .unwrap_or_else(|| e.field.clone())
         });
     let y_field = rendering_encoding
         .y
         .as_ref()
         .map(|e| {
-            e.title.clone()
-                .or_else(|| spec.encoding.y.as_ref().and_then(|p| p.title.clone()))
+            spec.encoding.y.as_ref().and_then(|p| p.title.clone())
+                .or_else(|| e.title.clone())
                 .unwrap_or_else(|| e.field.clone())
         });
     let x_tick_labels = provisional_scales.x.tick_labels(10);
@@ -453,13 +453,27 @@ pub fn prepare_render_inputs(
                     let color = scheme.sample(t);
                     (t, super::color::fmt_svg(color))
                 }).collect();
-                // Tick labels: 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
-                let (lo, hi) = *domain;
-                let tick_labels: Vec<String> = (0..5).map(|i| {
-                    let t = i as f64 / 4.0;
-                    let v = lo + t * (hi - lo);
-                    format_colorbar_tick(v, lo, hi)
-                }).collect();
+                // Tick labels: check for explicit tickLabels override from
+                // legend extra (e.g. ["Low", "High"] for SHAP beeswarm),
+                // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
+                let custom_tick_labels: Option<Vec<String>> = spec
+                    .encoding
+                    .color
+                    .as_ref()
+                    .and_then(|c| c.legend.as_ref())
+                    .and_then(|l| l.extra.get("tickLabels"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
+                let tick_labels = if let Some(labels) = custom_tick_labels {
+                    labels
+                } else {
+                    let (lo, hi) = *domain;
+                    (0..5).map(|i| {
+                        let t = i as f64 / 4.0;
+                        let v = lo + t * (hi - lo);
+                        format_colorbar_tick(v, lo, hi)
+                    }).collect()
+                };
                 (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
             }
             None => (Vec::new(), None),

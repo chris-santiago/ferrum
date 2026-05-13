@@ -27,7 +27,7 @@ def desugar_density(
     # encoded). Ignored on the 1D path.
     thresholds: int = 6,
     smooth: bool = True,
-    cmap: str = "viridis",
+    cmap: str | None = None,
 ) -> tuple:
     """Kernel-density-estimate area/line mark desugar.
 
@@ -96,8 +96,9 @@ def desugar_density(
         Passed through to ``desugar_contour`` on the bivariate path.
     smooth : bool, default True
         Passed through to ``desugar_contour`` on the bivariate path.
-    cmap : str, default "viridis"
-        Passed through to ``desugar_contour`` on the bivariate path.
+    cmap : str or None, default None
+        Passed through to ``desugar_contour`` on the bivariate path.  ``None``
+        defers to the theme's sequential scheme.
 
     Returns
     -------

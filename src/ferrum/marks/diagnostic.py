@@ -174,7 +174,7 @@ def desugar_roc(
     builder is responsible for shaping the data appropriately before
     constructing the chart.
     """
-    del average  # informational at the mark layer
+    _ = average  # informational at the mark layer
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -231,7 +231,7 @@ def desugar_pr(
     desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
     """
-    del average  # informational at the mark layer
+    _ = average  # informational at the mark layer
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -304,7 +304,10 @@ def desugar_calibration(
     rows for the line endpoints — so the diagonal renders once per chart
     regardless of how many models are layered on top.
     """
-    del n_bins, strategy
+    # n_bins and strategy are consumed upstream by the chart builder
+    # (source.calibration_curve(n_bins=..., strategy=...)); informational
+    # at the mark layer — the data is already binned.
+    _ = n_bins, strategy
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
         "y": "fraction_positive",
@@ -350,7 +353,7 @@ def desugar_gain(
     ``class='baseline'`` rows that render as the diagonal reference when
     ``color_field='class'``; ``reference_lines`` is informational.
     """
-    del reference_lines  # baseline already in data
+    _ = reference_lines  # baseline already in data
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -379,7 +382,7 @@ def desugar_lift(
     the lift=1 reference line when ``color_field='class'``;
     ``reference_line`` is informational.
     """
-    del reference_line  # baseline already in data
+    _ = reference_line  # baseline already in data
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -423,7 +426,7 @@ def desugar_discrimination_threshold(
     feature works for both chart-API and figure-function entry points
     (Schwabish C7 audit-rework, 2026-05-12).
     """
-    del metrics, n_thresholds  # informational; data is pre-melted
+    _ = metrics, n_thresholds  # informational; data is pre-melted
     layers: list = [
         _Layer(mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}),
     ]
@@ -456,7 +459,7 @@ def desugar_confusion(
     normalize: str | None = None,
     annotate: bool = True,
     color_field: str = "value",
-    cmap: str = "blues",
+    cmap: str | None = None,
 ) -> tuple:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
@@ -471,13 +474,12 @@ def desugar_confusion(
     happens upstream in ``ModelSource.confusion_matrix``.
 
     ``cmap`` selects the sequential colormap applied to the heat cells.
-    Default ``"blues"`` gives a perceptually-uniform blue ramp recommended
-    for count/probability matrices (gallery feedback C2).
+    ``None`` (default) defers to the theme's sequential scheme.
     """
     from ferrum.encoding import Color
 
-    del normalize, x_field, y_field
-    color_enc = Color(color_field, scheme=cmap)
+    del x_field, y_field
+    color_enc = Color(color_field, scheme=cmap) if cmap is not None else Color(color_field)
     layers: list = [
         _Layer(
             mark="rect",
@@ -528,7 +530,10 @@ def desugar_importance(
     slightly past the max error-bar upper bound; without it bars look
     truncated by the auto-derived [min, max] domain.
     """
-    del x_field, y_field, top_k
+    del x_field, y_field
+    # top_k is wired via data_transform in mark_importance; informational
+    # at the desugar layer.
+    _ = top_k
     if orient not in ("horizontal", "vertical"):
         raise ValueError(
             f"mark_importance(orient={orient!r}) — expected 'horizontal' or 'vertical'."
@@ -601,7 +606,10 @@ def desugar_shap_beeswarm(
     the chart builder is responsible for any reordering / aggregation
     before constructing the chart.
     """
-    del x_field, y_field, max_display, color_bar, order
+    del x_field, y_field
+    # max_display is wired via data_transform in mark_shap_beeswarm;
+    # color_bar and order are consumed upstream by the chart builder.
+    _ = max_display, color_bar, order
 
     def _x_channel(field: str) -> Any:
         if x_scale_domain is None:
@@ -619,7 +627,12 @@ def desugar_shap_beeswarm(
             encoding={
                 "x": _x_channel("shap_value"),
                 "y": "feature",
-                "color": Color("feature_value_normalized", scheme="rdbu"),
+                "color": Color(
+                    "feature_value_normalized",
+                    scheme="rdbu",
+                    title="Feature value",
+                    legend={"tickLabels": ["Low", "", "", "", "High"]},
+                ),
             },
             position=Jitter(axis="y", width=0.6, seed=42),
         ),
@@ -648,7 +661,9 @@ def desugar_shap_bar(
     chart builder aggregates ``ModelSource.shap_values()`` and selects
     the top ``max_display`` features.
     """
-    del x_field, y_field, max_display
+    del x_field, y_field
+    # max_display is wired via data_transform in mark_shap_bar.
+    _ = max_display
 
     def _x_channel(field: str) -> Any:
         if x_scale_domain is None:
@@ -687,7 +702,9 @@ def desugar_shap_waterfall(
     per feature via the Phase 10d-pre quantitative-x + x2 + ordinal-y
     bar path.
     """
-    del x_field, y_field, max_display
+    del x_field, y_field
+    # max_display is wired via data_transform in mark_shap_waterfall.
+    _ = max_display
     if sample_idx < 0:
         raise ValueError(
             "mark_shap_waterfall(sample_idx=...) is required. Pass an "
@@ -1004,7 +1021,10 @@ def desugar_cv_scores(
     for ``kind="strip"`` the builder leaves raw rows and Jitter spreads
     them along the categorical axis.
     """
-    del x_field, y_field, split
+    del x_field, y_field
+    # split is consumed upstream by the chart builder (filters DataFrame
+    # to the requested split); informational at the mark layer.
+    _ = split
     from ferrum.encoding import Y
 
     user_kw = _validate("cv_scores", mark_kwargs)
@@ -1071,7 +1091,10 @@ def desugar_alpha_selection(
     renders a single curve without CI bands; the multi-fold spread
     surfaces in the companion ``cv_scores_chart``.
     """
-    del x_field, y_field, ci_style
+    del x_field, y_field
+    # ci_style is informational at the mark layer — alpha_selection
+    # renders a single curve without CI bands.
+    _ = ci_style
     from ferrum.encoding import Y
 
     user_kw = _validate("alpha_selection", mark_kwargs)
@@ -1213,7 +1236,11 @@ def desugar_pca_scree(
     ``_threshold_line`` (a sentinel single-non-null column for the
     horizontal reference rule).
     """
-    del x_field, y_field, threshold_line
+    del x_field, y_field
+    # threshold_line is consumed by chart.py's mark_pca_scree which
+    # dispatches between desugar_pca_scree and
+    # desugar_pca_scree_with_threshold; informational at this level.
+    _ = threshold_line
     from ferrum.encoding import X, Y
 
     user_kw = _validate("pca_scree", mark_kwargs)
@@ -1384,7 +1411,7 @@ def desugar_rank2d(
     annot: bool = True,
     color_field: str = "correlation",
     text_field: str = "correlation_fmt",
-    cmap: str = "rdbu",
+    cmap: str | None = None,
     **mark_kwargs: Any,
 ) -> tuple:
     """Pairwise feature ranking — long-form correlation matrix heatmap.
@@ -1397,15 +1424,14 @@ def desugar_rank2d(
     Rust-side number formatting per cell).
 
     ``cmap`` selects the diverging colormap applied to correlation cells.
-    Default ``"rdbu"`` centres the scale at zero with red for negative and
-    blue for positive correlations (gallery feedback C2).
+    ``None`` (default) defers to the theme's diverging scheme.
     """
     from ferrum.encoding import Color
 
     del x_field, y_field
 
     user_kw = _validate("rank2d", mark_kwargs)
-    color_enc = Color(color_field, scheme=cmap)
+    color_enc = Color(color_field, scheme=cmap) if cmap is not None else Color(color_field)
     rect_enc: dict[str, Any] = {
         "x": "feature_x",
         "y": "feature_y",
@@ -1485,7 +1511,11 @@ def desugar_decision_boundary(
     chooses the data and the renderer's continuous-color scale handles
     both kinds of ``z`` identically. Recorded for future overrides.
     """
-    del x_field, y_field, proba
+    del x_field, y_field
+    # proba is informational at the mark layer — the chart builder
+    # chooses the data and the renderer's continuous-color scale handles
+    # both kinds of z identically.
+    _ = proba
 
     user_kw = _validate("decision_boundary", mark_kwargs)
     layers: list = [

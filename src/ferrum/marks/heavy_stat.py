@@ -30,7 +30,7 @@ def desugar_contour(
     thresholds: int = 6,
     smooth: bool = True,
     fill: bool = False,
-    cmap: str = "viridis",
+    cmap: str | None = None,
 ) -> tuple:
     """Bivariate-density contour mark desugar.
 
@@ -68,8 +68,9 @@ def desugar_contour(
         Whether to smooth the KDE grid before contouring.
     fill : bool, default False
         Whether the contour polygons are filled (passed to ``Contour``).
-    cmap : str, default "viridis"
-        Colormap name applied to the polygon layer.
+    cmap : str or None, default None
+        Colormap name applied to the polygon layer.  ``None`` defers to the
+        theme's sequential scheme.
 
     Returns
     -------
@@ -98,11 +99,14 @@ def desugar_contour(
         Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
+    mk: dict = {"detail": "level_id"}
+    if cmap is not None:
+        mk["cmap"] = cmap
     layers = [
         _Layer(
             mark="polygon",
             encoding={"x": "contour_x", "y": "contour_y"},
-            mark_kwargs={"cmap": cmap, "detail": "level_id"},
+            mark_kwargs=mk,
             data_source="contour",
         )
     ]
@@ -323,7 +327,7 @@ def desugar_raster(
     *,
     aggregate: str = "count",
     field: Optional[str] = None,
-    cmap: str = "viridis",
+    cmap: str | None = None,
     resolution: Any = "screen",
     blend: str = "alpha",
     min_count: Optional[int] = None,
@@ -360,8 +364,9 @@ def desugar_raster(
     field : str or None, default None
         Column to aggregate for ``mean`` or ``sum``; required when
         ``aggregate`` is not ``"count"``.
-    cmap : str, default "viridis"
-        Colormap applied to the image layer.
+    cmap : str or None, default None
+        Colormap applied to the image layer.  ``None`` defers to the theme's
+        sequential scheme.
     resolution : int or "screen", default "screen"
         Pixel grid resolution.  ``"screen"`` infers from chart dimensions.
     blend : {"alpha", "additive"}, default "alpha"
@@ -415,11 +420,14 @@ def desugar_raster(
             name="raster",
         )
     ]
+    mk: dict = {}
+    if cmap is not None:
+        mk["cmap"] = cmap
     layers = [
         _Layer(
             mark="image",
             encoding={"x": x_field, "y": y_field},
-            mark_kwargs={"cmap": cmap},
+            mark_kwargs=mk if mk else None,
             data_source="raster",
         )
     ]
@@ -433,7 +441,7 @@ def desugar_hex(
     bin_size: Optional[float] = None,
     aggregate: str = "count",
     field: Optional[str] = None,
-    cmap: str = "viridis",
+    cmap: str | None = None,
     stroke: Optional[str] = None,
     stroke_width: float = 0,
 ) -> tuple:
@@ -469,8 +477,9 @@ def desugar_hex(
     field : str or None, default None
         Column to aggregate for ``mean`` or ``sum``; required when
         ``aggregate`` is not ``"count"``.
-    cmap : str, default "viridis"
-        Colormap name applied to the polygon layer.
+    cmap : str or None, default None
+        Colormap name applied to the polygon layer.  ``None`` defers to the
+        theme's sequential scheme.
     stroke : str or None, default None
         Reserved for future use (no-op today).
     stroke_width : float, default 0
@@ -518,11 +527,14 @@ def desugar_hex(
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
+    mk: dict = {"detail": "hex_id"}
+    if cmap is not None:
+        mk["cmap"] = cmap
     layers = [
         _Layer(
             mark="polygon",
             encoding={"x": "hex_x", "y": "hex_y"},
-            mark_kwargs={"cmap": cmap, "detail": "hex_id"},
+            mark_kwargs=mk,
             data_source="hex",
         )
     ]

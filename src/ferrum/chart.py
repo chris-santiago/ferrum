@@ -428,9 +428,13 @@ class Chart:
             from ferrum.encoding import X, X2, Y, Y2
 
             if "x" in remap:
-                new._encoding["x"] = X(remap["x"], type="Q")
+                # Preserve the original field name as axis title when the
+                # remap changes the field (e.g. "tip" → "bin_start").
+                title = x_field if (x_field and remap["x"] != x_field) else None
+                new._encoding["x"] = X(remap["x"], type="Q", title=title) if title else X(remap["x"], type="Q")
             if "y" in remap:
-                new._encoding["y"] = Y(remap["y"], type="Q")
+                title = y_field if (y_field and remap["y"] != y_field) else None
+                new._encoding["y"] = Y(remap["y"], type="Q", title=title) if title else Y(remap["y"], type="Q")
             if "x2" in remap:
                 new._encoding["x2"] = X2(remap["x2"], type="Q")
             if "y2" in remap:
@@ -1336,7 +1340,7 @@ class Chart:
         thresholds=6,
         smooth=True,
         fill=False,
-        cmap="viridis",
+        cmap=None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -1359,8 +1363,9 @@ class Chart:
         fill : bool, optional
             Render filled contour regions instead of contour lines.  Default is
             ``False``.
-        cmap : str, optional
-            Colour map name applied to contour levels.  Default is ``"viridis"``.
+        cmap : str or None, optional
+            Colour map name applied to contour levels.  ``None`` (default) defers
+            to the theme's sequential scheme.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -1501,7 +1506,7 @@ class Chart:
         *,
         aggregate="count",
         field=None,
-        cmap="viridis",
+        cmap=None,
         resolution="screen",
         blend="alpha",
         min_count=None,
@@ -1523,8 +1528,9 @@ class Chart:
             not ``"count"``, ``field`` must be provided.
         field : str or None, optional
             Column name to aggregate.  Required unless ``aggregate="count"``.
-        cmap : str, optional
-            Colour map name.  Default is ``"viridis"``.
+        cmap : str or None, optional
+            Colour map name.  ``None`` (default) defers to the theme's sequential
+            scheme.
         resolution : "screen" or int, optional
             Pixel grid resolution.  ``"screen"`` (default) matches the rendered
             chart dimensions; pass an integer to set an explicit grid width.
@@ -1579,7 +1585,7 @@ class Chart:
         bin_size=None,
         aggregate="count",
         field=None,
-        cmap="viridis",
+        cmap=None,
         stroke=None,
         stroke_width=0,
         position=None,
@@ -1600,8 +1606,9 @@ class Chart:
             ``"min"``, ``"max"``.
         field : str or None, optional
             Column to aggregate.  Required unless ``aggregate="count"``.
-        cmap : str, optional
-            Colour map name.  Default is ``"viridis"``.
+        cmap : str or None, optional
+            Colour map name.  ``None`` (default) defers to the theme's sequential
+            scheme.
         stroke : str or None, optional
             Hex border colour.  ``None`` (default) means no border.
         stroke_width : float, optional
@@ -2368,7 +2375,7 @@ class Chart:
         normalize: str | None = None,
         annotate: bool = True,
         color_field: str = "value",
-        cmap: str = "blues",
+        cmap: str | None = None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -2390,10 +2397,9 @@ class Chart:
         color_field : str, optional
             Column name driving the heatmap colour scale.  Default is
             ``"value"``.
-        cmap : str, optional
-            Sequential colormap name for the heat cells.  Default is
-            ``"blues"`` (gallery feedback C2 — blue ramp for count/probability
-            matrices).
+        cmap : str or None, optional
+            Sequential colormap name for the heat cells.  ``None`` (default)
+            defers to the theme's sequential scheme.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -2556,6 +2562,11 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_importance
 
+        def _importance_filter(df):
+            if top_k is not None and "importance" in df.columns:
+                return df.sort("importance", descending=True).head(top_k)
+            return df
+
         return self._set_composite_mark(
             "importance",
             desugar_importance,
@@ -2568,6 +2579,7 @@ class Chart:
             },
             placeholder="point",
             position=position,
+            data_transform=_importance_filter,
         )
 
     def mark_shap_beeswarm(
@@ -2626,8 +2638,20 @@ class Chart:
         from ferrum._sentinels import _inject_constant
 
         def _shap_beeswarm_prep(df):
+            import polars as pl
+
+            # Filter to top max_display features by mean |SHAP value|.
+            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+                ranked = (
+                    df.group_by("feature")
+                    .agg(pl.col("shap_value").abs().mean().alias("_score"))
+                    .sort("_score", descending=True)
+                    .head(max_display)
+                )
+                keep = ranked["feature"].to_list()
+                df = df.filter(pl.col("feature").is_in(keep))
             if zero_line and "shap_value" in df.columns:
-                return _inject_constant(df, "_ref_zero", 0.0)
+                df = _inject_constant(df, "_ref_zero", 0.0)
             return df
 
         return self._set_composite_mark(
@@ -2681,12 +2705,27 @@ class Chart:
         """
         from ferrum.marks.diagnostic import desugar_shap_bar
 
+        def _shap_bar_filter(df):
+            import polars as pl
+
+            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+                ranked = (
+                    df.group_by("feature")
+                    .agg(pl.col("shap_value").abs().mean().alias("_score"))
+                    .sort("_score", descending=True)
+                    .head(max_display)
+                )
+                keep = ranked["feature"].to_list()
+                df = df.filter(pl.col("feature").is_in(keep))
+            return df
+
         return self._set_composite_mark(
             "shap_bar",
             desugar_shap_bar,
             {"max_display": max_display, **mark_kwargs},
             placeholder="point",
             position=position,
+            data_transform=_shap_bar_filter,
         )
 
     def mark_pdp(
@@ -2808,6 +2847,20 @@ class Chart:
             )
         from ferrum.marks.diagnostic import desugar_shap_waterfall
 
+        def _shap_waterfall_filter(df):
+            import polars as pl
+
+            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+                ranked = (
+                    df.group_by("feature")
+                    .agg(pl.col("shap_value").abs().mean().alias("_score"))
+                    .sort("_score", descending=True)
+                    .head(max_display)
+                )
+                keep = ranked["feature"].to_list()
+                df = df.filter(pl.col("feature").is_in(keep))
+            return df
+
         return self._set_composite_mark(
             "shap_waterfall",
             desugar_shap_waterfall,
@@ -2818,6 +2871,7 @@ class Chart:
             },
             placeholder="point",
             position=position,
+            data_transform=_shap_waterfall_filter,
         )
 
     def mark_learning_curve(
@@ -3430,7 +3484,7 @@ class Chart:
         annot: bool = True,
         color_field: str = "correlation",
         text_field: str = "correlation_fmt",
-        cmap: str = "rdbu",
+        cmap: str | None = None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -3452,10 +3506,9 @@ class Chart:
             ``"correlation"``.
         text_field : str, optional
             Column read by the text layer.  Default is ``"correlation_fmt"``.
-        cmap : str, optional
-            Diverging colormap name for correlation cells.  Default is
-            ``"rdbu"`` — red for negative, blue for positive, white at zero
-            (gallery feedback C2).
+        cmap : str or None, optional
+            Diverging colormap name for correlation cells.  ``None`` (default)
+            defers to the theme's diverging scheme.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
