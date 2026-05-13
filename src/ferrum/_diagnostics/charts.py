@@ -63,12 +63,12 @@ def _inject_cook_outliers(
     )
 
 
-def _r2_score(y_true, y_pred) -> float:
+def _r2_score(y_true: pl.Series, y_pred: pl.Series) -> float:
     """Coefficient of determination — Schwabish SB3 corner-metrics helper."""
-    import numpy as np
-
-    ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - float(np.mean(y_true))) ** 2))
+    diff = y_true - y_pred
+    ss_res = float((diff ** 2).sum())
+    mean_y = float(y_true.mean())
+    ss_tot = float(((y_true - mean_y) ** 2).sum())
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
 
@@ -92,27 +92,23 @@ def _inject_metrics_corner(
     the y-anchor — must match what ``mark_residuals`` will render so the
     text lands at the correct corner.
     """
-    import numpy as np
-
     if df.height == 0:
         return df
     y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     from ferrum._metrics_fmt import format_corner_metrics
 
-    y_true = np.asarray(df["y_true"].to_list(), dtype=float)
-    y_pred = np.asarray(df["y_pred"].to_list(), dtype=float)
-    r2 = _r2_score(y_true, y_pred)
-    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-    mae = float(np.mean(np.abs(y_true - y_pred)))
+    diff = df["y_pred"] - df["y_true"]
+    r2 = _r2_score(df["y_true"], df["y_pred"])
+    rmse = float((diff ** 2).mean() ** 0.5)
+    mae = float(diff.abs().mean())
     corner_text = format_corner_metrics(r2, rmse, mae)
 
     n = df.height
-    anchor_idx = int(np.argmax(y_pred))
+    anchor_idx = df["y_pred"].arg_max()
     text_col: list[str | None] = [None] * n
     text_col[anchor_idx] = corner_text
-    resid_arr = np.asarray(df[y_col].to_list(), dtype=float)
     y_col_vals: list[float | None] = [None] * n
-    y_col_vals[anchor_idx] = float(np.max(resid_arr))
+    y_col_vals[anchor_idx] = float(df[y_col].max())
     return df.with_columns(
         pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
         pl.Series("_metrics_y", y_col_vals, dtype=pl.Float64),
@@ -1336,7 +1332,6 @@ def _shap_waterfall_chart_from_source(
     class_label group.
     """
     import ferrum
-    import numpy as np
 
     sv = source.shap_values(background=background)
     sv = _shap_select_class(sv, per_class=per_class)
@@ -1360,12 +1355,13 @@ def _shap_waterfall_chart_from_source(
         .sort("_rank")
         .drop("_rank")
     )
-    sv_arr = np.asarray(ordered["shap_value"])
-    cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
+    cumsum = ordered["shap_value"].cum_sum()
+    x0 = pl.concat([pl.Series("x0", [0.0]), cumsum.head(cumsum.len() - 1).alias("x0")])
+    x1 = cumsum.alias("x1")
     plot_df = ordered.with_columns(
         [
-            pl.Series("x0", cum[:-1]),
-            pl.Series("x1", cum[1:]),
+            x0,
+            x1,
             pl.when(pl.col("shap_value") >= 0)
             .then(pl.lit("positive"))
             .otherwise(pl.lit("negative"))
@@ -1373,8 +1369,8 @@ def _shap_waterfall_chart_from_source(
         ]
     )
 
-    x_lo = float(min(cum.min(), 0.0))
-    x_hi = float(max(cum.max(), 0.0))
+    x_lo = float(min(x0.min(), x1.min(), 0.0))
+    x_hi = float(max(x0.max(), x1.max(), 0.0))
     pad = max(abs(x_lo), abs(x_hi)) * 0.05 if (x_lo < x_hi) else 1.0
     domain = (x_lo - pad, x_hi + pad)
 
