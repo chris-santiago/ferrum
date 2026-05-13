@@ -196,22 +196,69 @@ pub fn prepare_render_inputs(
     // downcasts to StringArray succeed uniformly.
     let normalized = normalize_string_views(batch);
 
-    // Build the named-output map. When there are no transforms, the helper
-    // still publishes a `FINAL_OUTPUT_KEY` entry pointing at the input batch.
+    // Build the named-output map. When faceting is active, partition the input
+    // batch by the facet column(s) BEFORE running transforms so each panel gets
+    // its own data subset and transforms execute independently per panel.
+    // When there is no facet, the pipeline is unchanged (single partition = full batch).
     let ctx = TransformContext::default();
-    let mut transform_outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
-        .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
-    // D10: apply imputation (fill missing group×x combinations with a constant y)
-    // on the final batch, when encoding.y.impute = {"value": N} is set.
-    {
-        let final_batch = transform_outputs
-            .get(FINAL_OUTPUT_KEY)
-            .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
-        let imputed = apply_impute(final_batch, spec);
-        if imputed.num_rows() != final_batch.num_rows() {
-            transform_outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+    let transform_outputs = if let Some(fspec) = &spec.facet {
+        // Facet-before-transform: partition → per-panel transforms → inject facet column → concat
+        let partitions = partition_batch_by_field(&normalized, &fspec.field)?;
+        let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+        for (facet_value, partition_batch) in &partitions {
+            let mut panel_outputs = apply_transforms_named(&spec.transforms, partition_batch, &ctx)
+                .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+            // D10: per-panel imputation
+            {
+                let final_batch = panel_outputs
+                    .get(FINAL_OUTPUT_KEY)
+                    .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
+                let imputed = apply_impute(final_batch, spec);
+                if imputed.num_rows() != final_batch.num_rows() {
+                    panel_outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+                }
+            }
+            // Ensure every output batch has the facet column (transforms like
+            // Smooth replace the batch entirely, losing the facet column).
+            for batch in panel_outputs.values_mut() {
+                *batch = inject_facet_column(batch, &fspec.field, facet_value);
+            }
+            for (key, batch) in panel_outputs {
+                merged.entry(key).or_default().push(batch);
+            }
         }
-    }
+        // Concat per-key batches across all panels into a single map.
+        let mut combined: HashMap<String, RecordBatch> = HashMap::new();
+        for (key, batches) in merged {
+            if batches.len() == 1 {
+                combined.insert(key, batches.into_iter().next().unwrap());
+            } else {
+                let schema = batches[0].schema();
+                let merged_batch = arrow::compute::concat_batches(&schema, &batches)
+                    .map_err(|e| RenderError::TransformFailed(format!(
+                        "concat facet partitions for key '{key}': {e}"
+                    )))?;
+                combined.insert(key, merged_batch);
+            }
+        }
+        combined
+    } else {
+        // No facet: unchanged pipeline (single partition = full batch).
+        let mut outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
+            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+        // D10: apply imputation (fill missing group×x combinations with a constant y)
+        // on the final batch, when encoding.y.impute = {"value": N} is set.
+        {
+            let final_batch = outputs
+                .get(FINAL_OUTPUT_KEY)
+                .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
+            let imputed = apply_impute(final_batch, spec);
+            if imputed.num_rows() != final_batch.num_rows() {
+                outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+            }
+        }
+        outputs
+    };
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -742,6 +789,70 @@ fn apply_tick_format(
             }
         })
         .collect()
+}
+
+/// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
+/// pairs in first-appearance order. Used by facet-before-transform to split the
+/// input into per-panel subsets before running transforms.
+fn partition_batch_by_field(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<(String, RecordBatch)>, RenderError> {
+    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::compute::filter_record_batch;
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    let arr = col
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!(
+                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
+            ))
+        })?;
+    // Collect distinct values in first-appearance order.
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for v in arr.iter().flatten() {
+        let s = v.to_string();
+        if seen.insert(s.clone()) {
+            order.push(s);
+        }
+    }
+    let mut result = Vec::with_capacity(order.len());
+    for value in order {
+        let mask: BooleanArray = arr
+            .iter()
+            .map(|v| Some(v.map(|s| s == value.as_str()).unwrap_or(false)))
+            .collect();
+        let filtered = filter_record_batch(batch, &mask)
+            .map_err(|e| RenderError::ScaleResolutionFailed(format!("partition filter: {e}")))?;
+        result.push((value, filtered));
+    }
+    Ok(result)
+}
+
+/// Ensure a RecordBatch has a Utf8 column named `field` with the constant `value`.
+/// If the column already exists, return the batch unchanged. Otherwise, append a
+/// new Utf8 column filled with `value` repeated for every row. This is used to
+/// re-inject the facet column into transform outputs that replace the batch
+/// entirely (e.g. Smooth, KDE, Histogram).
+fn inject_facet_column(batch: &RecordBatch, field: &str, value: &str) -> RecordBatch {
+    if batch.column_by_name(field).is_some() {
+        return batch.clone();
+    }
+    let n = batch.num_rows();
+    let constant: ArrayRef = Arc::new(StringArray::from(vec![value; n]));
+    let mut fields: Vec<Arc<Field>> = batch.schema().fields().iter().cloned().collect();
+    fields.push(Arc::new(Field::new(field, DataType::Utf8, false)));
+    let new_schema = Arc::new(Schema::new(fields));
+    let mut columns: Vec<ArrayRef> = (0..batch.num_columns())
+        .map(|i| batch.column(i).clone())
+        .collect();
+    columns.push(constant);
+    RecordBatch::try_new(new_schema, columns)
+        .expect("inject_facet_column: schema + columns must be consistent")
 }
 
 fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGroup>, RenderError> {
