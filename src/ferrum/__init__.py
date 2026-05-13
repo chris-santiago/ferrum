@@ -112,7 +112,7 @@ from ferrum._diagnostics.visualizers import (
     Rank2DVisualizer,
     ParallelCoordinatesVisualizer,
 )
-from ferrum.figures import (
+from ferrum.plots import (
     residuals_chart,
     roc_chart,
     pr_chart,
@@ -140,10 +140,6 @@ from ferrum.figures import (
     rank1d_chart,
     rank2d_chart,
     parallel_coordinates_chart,
-)
-
-# Phase 9e — figure-level convenience functions
-from ferrum.figure import (
     displot,
     catplot,
     lmplot,
@@ -153,7 +149,7 @@ from ferrum.figure import (
     clustermap,
     jointplot,
 )
-import ferrum.figure as figure  # so users can also do ferrum.figure.displot
+import ferrum.plots as plots
 
 import ferrum.encoding as encoding
 from ferrum.encoding import (
@@ -347,7 +343,7 @@ __all__ = [
     "Jitter",
     "Stack",
     # Phase 9e figure-level convenience
-    "figure",
+    "plots",
     "displot",
     "catplot",
     "lmplot",

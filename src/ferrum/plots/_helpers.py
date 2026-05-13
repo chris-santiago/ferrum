@@ -183,3 +183,44 @@ def _coerce_to_polars(data: Any) -> pl.DataFrame:
     if arr.ndim != 2:
         raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
     return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+
+
+def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
+    """Raise ``ValueError`` when a required figure-function argument is ``None``."""
+    if value is None:
+        raise ValueError(
+            f"{func_name}({arg_name}=...) is required — {hint}.",
+        )
+    return value
+
+
+def _resolve_source(
+    model_or_source: Any,
+    X: Any = None,
+    y: Any = None,
+    *,
+    random_state: int | None = None,
+    compare: dict[str, Any] | None = None,
+) -> Any:
+    """Resolve a figure-function input into a ``ModelSource`` or ``ComparedModelSource``."""
+    import ferrum
+    from ferrum._diagnostics.source import ComparedModelSource
+
+    if isinstance(model_or_source, ComparedModelSource):
+        return model_or_source
+    if compare is not None:
+        if not isinstance(compare, dict):
+            raise TypeError(
+                f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
+            )
+        models = {"base": model_or_source, **compare}
+        return ferrum.ModelSource.compare(
+            models, X, y, random_state=random_state,
+        )
+    if isinstance(model_or_source, dict):
+        return ferrum.ModelSource.compare(
+            model_or_source, X, y, random_state=random_state,
+        )
+    if isinstance(model_or_source, ferrum.ModelSource):
+        return model_or_source
+    return ferrum.ModelSource(model_or_source, X, y, random_state=random_state)

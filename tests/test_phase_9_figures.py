@@ -18,9 +18,9 @@ def test_all_8_functions_importable():
     assert callable(fe.jointplot)
 
 
-def test_figure_submodule_accessible():
-    assert hasattr(fe, "figure")
-    assert callable(fe.figure.displot)
+def test_plots_submodule_accessible():
+    assert hasattr(fe, "plots")
+    assert callable(fe.plots.displot)
 
 
 @pytest.fixture

@@ -18,6 +18,7 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 3 — figure-level functions
     "displot", "catplot", "lmplot", "residplot",
     "pairplot", "heatmap", "clustermap", "jointplot",
+    "plots",
     # Task 4 — encoding channels (31)
     "X", "Y", "X2", "Y2", "XError", "YError", "XError2", "YError2",
     "Theta", "Radius",
