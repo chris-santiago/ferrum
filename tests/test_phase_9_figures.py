@@ -648,12 +648,12 @@ class TestClustermap:
             "cmap='rdbu' must be forwarded to the color encoding scheme"
         )
 
-    def test_cmap_magma_default(self, cluster_data):
-        """clustermap default cmap is magma (better perceptual uniformity for dense heatmaps)."""
+    def test_cmap_theme_default(self, cluster_data):
+        """clustermap default cmap defers to theme (no explicit scheme in spec)."""
         cm = fe.clustermap(cluster_data)
         d = json.loads(cm.heatmap.to_spec().to_json())
         color_enc = d.get("encoding", {}).get("color", {})
-        assert color_enc.get("scheme") == "magma"
+        assert "scheme" not in color_enc
 
     def test_dendrogram_panels_have_grid_disabled(self, cluster_data):
         """BUG-5 regression: dendrogram panels must have grid=False to suppress gridlines."""

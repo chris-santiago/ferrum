@@ -254,7 +254,7 @@ def heatmap(
     *,
     annot: bool = True,
     fmt: str = ".2f",
-    cmap: str = "blues",
+    cmap: str | None = None,
     linewidths: float = 0.5,
     linecolor: str = "white",
     vmin: float | None = None,
@@ -283,8 +283,9 @@ def heatmap(
         Overlay cell values as text using ``mark_text``.
     fmt : str, default ".2f"
         Python format specifier applied to cell values in the annotation layer.
-    cmap : str, default "blues"
+    cmap : str or None, optional
         Color scheme name (e.g. ``"blues"``, ``"viridis"``, ``"rdbu"``).
+        ``None`` (default) defers to the theme's sequential scheme.
     linewidths : float, default 0.5
         Width of the cell border stroke in pixels.  ``0`` disables borders.
     linecolor : str, default "white"
@@ -506,7 +507,7 @@ def clustermap(
     *,
     method: str = "ward",
     metric: str = "euclidean",
-    cmap: str = "magma",
+    cmap: str | None = None,
     z_score: Any = None,
     standard_scale: Any = None,
     figsize: Any = None,
@@ -535,7 +536,7 @@ def clustermap(
     metric : str, default "euclidean"
         Distance metric forwarded to ``Linkage`` (e.g. ``"euclidean"``,
         ``"cosine"``, ``"correlation"``).
-    cmap : str, default "magma"
+    cmap : str or None, optional
         Color scheme name for the center heatmap (e.g. ``"magma"``,
         ``"viridis"``, ``"rdbu"``).  Forwarded to the ``Color`` encoding's
         ``scheme`` scale option.  ``"magma"`` is preferred for dense heatmaps
