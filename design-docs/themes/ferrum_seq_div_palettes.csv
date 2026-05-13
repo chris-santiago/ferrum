@@ -1,0 +1,10 @@
+theme,type,name,step_1,step_2,step_3,step_4,step_5,step_6,step_7
+Paper Ink,Sequential,Cool Blue,#EFF6FF,#DBEAFE,#93C5FD,#60A5FA,#2563EB,#1D4ED8,#1E3A8A
+Paper Ink,Sequential,Warm Ochre,#FFF7E6,#FDECC8,#F8D88A,#D4A017,#B45309,#92400E,#78350F
+Paper Ink,Diverging,Blue to Red,#1E3A8A,#60A5FA,#DBEAFE,#FAF7F2,#FDE68A,#DC2626,#7F1D1D
+Slate Citrus,Sequential,Night Blue,#1E293B,#1D4ED8,#2563EB,#60A5FA,#93C5FD,#BFDBFE,#E0F2FE
+Slate Citrus,Sequential,Electric Lime,#365314,#4D7C0F,#65A30D,#84CC16,#A3E635,#BEF264,#D9F99D
+Slate Citrus,Diverging,Cyan to Amber,#155E75,#0891B2,#67E8F9,#111827,#FDE68A,#F59E0B,#B45309
+Arctic Signal,Sequential,Signal Blue,#F0F9FF,#E0F2FE,#7DD3FC,#38BDF8,#0284C7,#0369A1,#0C4A6E
+Arctic Signal,Sequential,Ember Orange,#FFF7ED,#FED7AA,#FDBA74,#EA580C,#C2410C,#9A3412,#7C2D12
+Arctic Signal,Diverging,Blue to Violet,#0C4A6E,#38BDF8,#BAE6FD,#F8FAFC,#E9D5FF,#A78BFA,#6D28D9
