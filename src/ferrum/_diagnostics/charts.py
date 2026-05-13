@@ -27,133 +27,15 @@ from ferrum._sentinels import _inject_constant  # noqa: F401  re-export
 register_layer_names("calibration", frozenset({"line", "reference", "point"}))
 
 
-def _inject_cook_outliers(
-    df: pl.DataFrame,
-    *,
-    kind: str = "studentized",
-    threshold: float | str = "auto",
-    x_col: str = "y_pred",
-) -> pl.DataFrame:
-    """Inject ``_cook_outlier_x`` / ``_cook_outlier_y`` columns.
-
-    For each row whose ``cooks_distance`` exceeds ``threshold``, the
-    outlier-coordinate columns hold the ``(x_col, y_col)`` pair; all
-    other rows are null so the residual mark's outlier-overlay layer
-    skips them. ``x_col`` defaults to ``"y_pred"`` (the residuals-vs-
-    fitted view); passing ``"leverage"`` produces an outlier overlay
-    keyed on the leverage panel's x axis.
-
-    ``threshold`` accepts:
-    - a float — use that value directly.
-    - ``"auto"`` — use the conventional ``4 / n`` rule (Hair et al.).
-    """
-    if df.height == 0 or "cooks_distance" not in df.columns:
-        return df
-    if threshold == "auto":
-        thr = 4.0 / df.height
-    else:
-        thr = float(threshold)
-    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
-    # Polars treats NaN > anything as True (NaN sorts after Infinity), so
-    # the comparison must be guarded with `is_not_nan()` to keep non-linear
-    # estimators (whose cooks_distance is NaN for every row) from
-    # silently flagging every observation as an outlier.
-    is_outlier = (
-        pl.col("cooks_distance").is_not_nan()
-        & pl.col("cooks_distance").is_not_null()
-        & (pl.col("cooks_distance") > thr)
-    )
-    return df.with_columns(
-        pl.when(is_outlier).then(pl.col(x_col)).otherwise(None).alias("_cook_outlier_x"),
-        pl.when(is_outlier).then(pl.col(y_col)).otherwise(None).alias("_cook_outlier_y"),
-    )
+from ferrum.plots._helpers import _inject_cook_outliers  # moved to plots/_helpers
 
 
-def _r2_score(y_true: pl.Series, y_pred: pl.Series) -> float:
-    """Coefficient of determination — Schwabish SB3 corner-metrics helper."""
-    diff = y_true - y_pred
-    ss_res = float((diff ** 2).sum())
-    mean_y = float(y_true.mean())
-    ss_tot = float(((y_true - mean_y) ** 2).sum())
-    return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+from ferrum.plots._helpers import _r2_score  # moved to plots/_helpers
+from ferrum.plots._helpers import _inject_metrics_corner  # moved to plots/_helpers
+from ferrum.plots._helpers import _overlay_metrics_corner  # moved to plots/_helpers
 
 
-def _inject_metrics_corner(
-    df: pl.DataFrame,
-    *,
-    kind: str = "studentized",
-) -> pl.DataFrame:
-    """Augment a residuals DataFrame with ``_metrics_text`` and ``_metrics_y``.
-
-    Reads ``y_true`` / ``y_pred`` to compute R² / RMSE / MAE, then writes
-    the formatted corner string on the single row with the largest
-    ``y_pred`` (other rows null, so ``mark_text`` skips them). ``_metrics_y``
-    anchors the text to the top of the residual-axis range so the
-    annotation lands in the top-right corner of the plot.
-
-    Schwabish SB3 (2026-05-11). Used by both the single-panel residuals
-    chart and the residuals-vs-fitted cell of the 4-panel layout; the
-    column is harmless on the other panels (their renderers do not read
-    it). ``kind`` selects ``studentized_residual`` vs ``residual`` for
-    the y-anchor — must match what ``mark_residuals`` will render so the
-    text lands at the correct corner.
-    """
-    if df.height == 0:
-        return df
-    y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
-    from ferrum._metrics_fmt import format_corner_metrics
-
-    diff = df["y_pred"] - df["y_true"]
-    r2 = _r2_score(df["y_true"], df["y_pred"])
-    rmse = float((diff ** 2).mean() ** 0.5)
-    mae = float(diff.abs().mean())
-    corner_text = format_corner_metrics(r2, rmse, mae)
-
-    n = df.height
-    anchor_idx = df["y_pred"].arg_max()
-    text_col: list[str | None] = [None] * n
-    text_col[anchor_idx] = corner_text
-    y_col_vals: list[float | None] = [None] * n
-    y_col_vals[anchor_idx] = float(df[y_col].max())
-    return df.with_columns(
-        pl.Series("_metrics_text", text_col, dtype=pl.Utf8),
-        pl.Series("_metrics_y", y_col_vals, dtype=pl.Float64),
-    )
-
-
-def _overlay_metrics_corner(chart):
-    """Add a same-data ``mark_text`` overlay reading the injected columns.
-
-    Assumes ``chart._data`` already carries ``_metrics_text`` / ``_metrics_y``
-    (see :func:`_inject_metrics_corner`). The overlay layer reuses
-    ``chart._data`` so ``+`` produces a true layer rather than the
-    HConcat fallback.
-
-    Schwabish SB3 (2026-05-11). Returns the original chart unchanged
-    when the columns are absent, so callers can invoke unconditionally.
-    """
-    from ferrum.layer import Layer
-
-    data = chart._data
-    if data is None or "_metrics_text" not in data.columns:
-        return chart
-    return chart.layer(
-        Layer(
-            mark="text",
-            encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
-            mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-            name="metrics",
-        )
-    )
-
-
-def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
-    """Sort the frame ascending by `col` so a downstream ``mark_line`` over
-    that column draws a monotonic polyline.
-    """
-    if col not in df.columns:
-        return df
-    return df.sort(col, nulls_last=True)
+from ferrum.plots._helpers import _sort_by  # moved to plots/_helpers
 
 
 # ---------------------------------------------------------------------------
@@ -333,19 +215,7 @@ def _residuals_panel(
     raise ValueError(f"unknown residuals panel: {name!r}")
 
 
-def _grid_panels(charts: list, theme: Any = None):
-    """Compose up to 4 panels into a grid using Phase 8a hstack/vstack."""
-    if len(charts) == 1:
-        c = charts[0]
-    elif len(charts) == 2:
-        c = charts[0] | charts[1]
-    elif len(charts) == 3:
-        c = (charts[0] | charts[1]) & charts[2]
-    else:
-        c = (charts[0] | charts[1]) & (charts[2] | charts[3])
-    if theme is not None:
-        c = c.theme(theme)
-    return c
+from ferrum.plots._helpers import _grid_panels  # moved to plots/_helpers
 
 
 def _prediction_error_chart_from_source(
@@ -412,11 +282,7 @@ def _prediction_error_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
-def _color_field_for(df: pl.DataFrame, default: str) -> str:
-    """Return ``'model'`` if a ``model`` column is present (compare-source
-    path), otherwise the supplied default.
-    """
-    return "model" if "model" in df.columns else default
+from ferrum.plots._helpers import _color_field_for  # moved to plots/_helpers
 
 
 def _roc_chart_from_source(
@@ -1686,13 +1552,7 @@ def _discrimination_threshold_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
-def _dedupe_aggregated(df: pl.DataFrame, *group_keys: str) -> pl.DataFrame:
-    """Drop per-fold duplicate rows when only the aggregated (mean/lower/upper)
-    columns are needed. Sorts ascending by the primary group key so a
-    downstream line layer renders a monotonic polyline.
-    """
-    keep = df.unique(subset=list(group_keys), keep="first", maintain_order=True)
-    return keep.sort(list(group_keys), nulls_last=True)
+from ferrum.plots._helpers import _dedupe_aggregated  # moved to plots/_helpers
 
 
 def _learning_curve_chart_from_source(
@@ -2211,18 +2071,7 @@ def _rank2d_chart_from_dataframe(
     return chart
 
 
-def _coerce_to_polars(data: Any) -> pl.DataFrame:
-    """Coerce a polars / pandas / 2D-numpy input into a polars DataFrame."""
-    import numpy as np
-
-    if isinstance(data, pl.DataFrame):
-        return data
-    if hasattr(data, "to_numpy") and hasattr(data, "columns"):
-        return pl.from_pandas(data)
-    arr = np.asarray(data, dtype=np.float64)
-    if arr.ndim != 2:
-        raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
-    return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+from ferrum.plots._helpers import _coerce_to_polars  # moved to plots/_helpers
 
 
 def _resolve_pc_features(

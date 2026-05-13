@@ -2059,7 +2059,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_prediction_error
-        from ferrum._diagnostics.charts import _sort_by
+        from ferrum.plots._helpers import _sort_by
 
         return self._set_composite_mark(
             "prediction_error",
@@ -2126,7 +2126,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_roc
-        from ferrum._diagnostics.charts import _sort_by
+        from ferrum.plots._helpers import _sort_by
 
         return self._set_composite_mark(
             "roc",
@@ -2256,7 +2256,7 @@ class Chart:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_calibration
-        from ferrum._diagnostics.charts import _sort_by
+        from ferrum.plots._helpers import _sort_by
 
         return self._set_composite_mark(
             "calibration",
