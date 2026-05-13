@@ -22,8 +22,9 @@
 //!
 //! Simplifications (vs. the spec):
 //!   - Per-segment output (not stitched polylines). Each segment = 2 vertex rows.
-//!   - Per-cell polygons (not ring assembly) for isoband mode.
-//!   - `smooth` field is accepted but ignored (TODO: pin smoothing semantics).
+//!   - Per-cell polygons (not ring assembly) for isoband mode (Sutherland-Hodgman clipping).
+//!   - `smooth=true` applies a 3×3 Gaussian kernel (center=4, edges=2, corners=1, /16)
+//!     to interior grid cells; border cells are copied unchanged.
 
 use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -172,8 +173,30 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         .map(|i| dmin + (dmax - dmin) * (i as f64) / ((t + 1) as f64))
         .collect();
 
-    // TODO(phase-8b+): smoothing not yet specified; `spec.smooth` is currently a no-op.
-    let _ = spec.smooth;
+    // R1: Gaussian smoothing. Apply a 3×3 kernel (center=4, edges=2, corners=1, /16)
+    // to all interior cells. Border cells are copied unchanged.
+    let density: Vec<f64> = if spec.smooth && nx >= 3 && ny >= 3 {
+        let mut smoothed = density.clone();
+        for gy in 1..(ny - 1) {
+            for gx in 1..(nx - 1) {
+                let tl = density[(gy - 1) * nx + (gx - 1)];
+                let tm = density[(gy - 1) * nx + gx];
+                let tr = density[(gy - 1) * nx + (gx + 1)];
+                let ml = density[gy * nx + (gx - 1)];
+                let mc = density[gy * nx + gx];
+                let mr = density[gy * nx + (gx + 1)];
+                let bl = density[(gy + 1) * nx + (gx - 1)];
+                let bm = density[(gy + 1) * nx + gx];
+                let br = density[(gy + 1) * nx + (gx + 1)];
+                smoothed[gy * nx + gx] =
+                    (tl + 2.0 * tm + tr + 2.0 * ml + 4.0 * mc + 2.0 * mr + bl + 2.0 * bm + br)
+                        / 16.0;
+            }
+        }
+        smoothed
+    } else {
+        density
+    };
 
     let mut level_ids: Vec<u32> = Vec::new();
     let mut level_vals: Vec<f64> = Vec::new();
@@ -285,61 +308,117 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             }
         }
     } else {
-        // ---------- Isoband mode (cell-rectangle approximation) ----------
-        // TODO(phase-8b+): replace cell-rectangle approximation with full 81-case
-        // isoband table + ring assembly when polygon mark drawer requires geometric correctness.
+        // ---------- Isoband mode (Sutherland-Hodgman polygon clipping) ----------
         // With t thresholds we emit t-1 bands [L_i, L_{i+1}].
+        // Each cell's four corners (TL, TR, BR, BL) carry (x, y, density).
+        // We clip the quadrilateral first against density >= lo, then against
+        // density <= hi.  If the result has >= 3 vertices it is emitted as a
+        // closed polygon (first vertex repeated as last).
         if levels.len() < 2 {
             return empty_output();
         }
+
+        // A vertex with position and density for S-H clipping.
+        #[derive(Clone, Copy)]
+        struct Vtx {
+            x: f64,
+            y: f64,
+            d: f64,
+        }
+
+        /// Sutherland-Hodgman clip against a single half-plane defined by
+        /// `inside(v) → true`.  Intersections are linearly interpolated.
+        fn sh_clip(poly: &[Vtx], inside: impl Fn(&Vtx) -> bool, t_at: impl Fn(&Vtx, &Vtx) -> f64) -> Vec<Vtx> {
+            if poly.is_empty() {
+                return Vec::new();
+            }
+            let mut out = Vec::with_capacity(poly.len() + 1);
+            let n = poly.len();
+            for i in 0..n {
+                let cur = poly[i];
+                let nxt = poly[(i + 1) % n];
+                let cur_in = inside(&cur);
+                let nxt_in = inside(&nxt);
+                if cur_in {
+                    out.push(cur);
+                }
+                if cur_in != nxt_in {
+                    // Edge crosses the clip boundary; interpolate.
+                    let t = t_at(&cur, &nxt);
+                    let ix = cur.x + t * (nxt.x - cur.x);
+                    let iy = cur.y + t * (nxt.y - cur.y);
+                    let id = cur.d + t * (nxt.d - cur.d);
+                    out.push(Vtx { x: ix, y: iy, d: id });
+                }
+            }
+            out
+        }
+
         for bi in 0..(levels.len() - 1) {
             let lo = levels[bi];
             let hi = levels[bi + 1];
             let mut cell_idx: u32 = 0;
             for gy in 0..(ny - 1) {
                 for gx in 0..(nx - 1) {
-                    let tl = density[gy * nx + gx];
-                    let tr = density[gy * nx + (gx + 1)];
-                    let br = density[(gy + 1) * nx + (gx + 1)];
-                    let bl = density[(gy + 1) * nx + gx];
-
-                    // Classify each corner: 0 = below lo, 1 = within [lo, hi], 2 = above hi.
-                    let cls = |v: f64| -> u8 {
-                        if v < lo {
-                            0
-                        } else if v <= hi {
-                            1
-                        } else {
-                            2
-                        }
-                    };
-                    let c = [cls(tl), cls(tr), cls(br), cls(bl)];
-
-                    // Emit a polygon if any corner is within the band, OR corners
-                    // straddle the band (some below + some above).
-                    let any_within = c.iter().any(|&v| v == 1);
-                    let any_below = c.iter().any(|&v| v == 0);
-                    let any_above = c.iter().any(|&v| v == 2);
-                    if !(any_within || (any_below && any_above)) {
-                        continue;
-                    }
-
                     let x0 = grid_x[gx];
                     let x1 = grid_x[gx + 1];
                     let y0 = grid_y[gy];
                     let y1 = grid_y[gy + 1];
 
-                    // Polygon: 4 corners (closed by repeating first vertex).
+                    let d_tl = density[gy * nx + gx];
+                    let d_tr = density[gy * nx + (gx + 1)];
+                    let d_br = density[(gy + 1) * nx + (gx + 1)];
+                    let d_bl = density[(gy + 1) * nx + gx];
+
+                    // CW winding: TL → TR → BR → BL.
+                    let quad = [
+                        Vtx { x: x0, y: y0, d: d_tl },
+                        Vtx { x: x1, y: y0, d: d_tr },
+                        Vtx { x: x1, y: y1, d: d_br },
+                        Vtx { x: x0, y: y1, d: d_bl },
+                    ];
+
+                    // Clip against density >= lo.
+                    let clipped_lo = sh_clip(
+                        &quad,
+                        |v| v.d >= lo,
+                        |a, b| {
+                            let denom = b.d - a.d;
+                            if denom.abs() < f64::EPSILON { 0.0 } else { (lo - a.d) / denom }
+                        },
+                    );
+                    if clipped_lo.len() < 3 {
+                        continue;
+                    }
+
+                    // Clip against density <= hi.
+                    let clipped = sh_clip(
+                        &clipped_lo,
+                        |v| v.d <= hi,
+                        |a, b| {
+                            let denom = b.d - a.d;
+                            if denom.abs() < f64::EPSILON { 0.0 } else { (hi - a.d) / denom }
+                        },
+                    );
+                    if clipped.len() < 3 {
+                        continue;
+                    }
+
+                    // Emit closed polygon (first vertex repeated as last).
                     let id = ((bi as u32) << 16) | cell_idx;
                     cell_idx = cell_idx.wrapping_add(1);
                     let band_value = lo;
-                    let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)];
-                    for (px, py) in pts {
+                    for v in &clipped {
                         level_ids.push(id);
                         level_vals.push(band_value);
-                        xs.push(px);
-                        ys.push(py);
+                        xs.push(v.x);
+                        ys.push(v.y);
                     }
+                    // Close the polygon.
+                    level_ids.push(id);
+                    level_vals.push(band_value);
+                    xs.push(clipped[0].x);
+                    ys.push(clipped[0].y);
                 }
             }
         }
@@ -538,8 +617,34 @@ mod tests {
         assert_eq!(s.field(2).name(), "contour_x");
         assert_eq!(s.field(3).name(), "contour_y");
         assert!(out.num_rows() > 0, "expected at least some polygons emitted");
-        // Each cell polygon = 5 vertices (closed).
-        assert_eq!(out.num_rows() % 5, 0, "isoband cell-polygon rows must be multiples of 5");
+        // S-H clipped polygons have variable vertex counts (3-8 corners + 1 closing vertex).
+        // Verify that every polygon is properly closed: first vertex == last vertex per level_id.
+        {
+            let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+            let cx_col = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+            let cy_col = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+            let n = out.num_rows();
+            let mut i = 0usize;
+            while i < n {
+                let cur_id = id_col.value(i);
+                let start = i;
+                while i < n && id_col.value(i) == cur_id {
+                    i += 1;
+                }
+                let end = i;
+                let len = end - start;
+                assert!(len >= 4, "polygon must have at least 3 vertices + closing (got {len})");
+                // First vertex == last vertex (closed polygon).
+                let fx = cx_col.value(start);
+                let fy = cy_col.value(start);
+                let lx = cx_col.value(end - 1);
+                let ly = cy_col.value(end - 1);
+                assert!(
+                    (fx - lx).abs() < 1e-12 && (fy - ly).abs() < 1e-12,
+                    "polygon {cur_id:#x}: first ({fx},{fy}) != last ({lx},{ly})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -725,5 +830,43 @@ mod tests {
         }
         assert!(found_band0, "expected at least one band 0 polygon");
         assert!(found_band1, "expected at least one band 1 polygon");
+    }
+
+    #[test]
+    fn contour_smooth_changes_output() {
+        pyo3::Python::initialize();
+        // 6×6 grid with a narrow Gaussian peak at (3,3). Smoothing should spread
+        // density to neighbours, changing the grid values and thus contour geometry.
+        let n = 6usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - 3.0;
+                let dy = (gy as f64) - 3.0;
+                // Very narrow Gaussian: falls off to near 0 within 1 cell of center.
+                density[gy * n + gx] = (-3.0 * (dx * dx + dy * dy)).exp();
+            }
+        }
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+
+        let spec_raw = ContourSpec { thresholds: 3, fill: false, smooth: false, name: None };
+        let spec_smooth = ContourSpec { thresholds: 3, fill: false, smooth: true, name: None };
+
+        let out_raw = apply(&spec_raw, &b).unwrap();
+        let out_smooth = apply(&spec_smooth, &b).unwrap();
+
+        // Both runs must produce segments — the Gaussian has enough range.
+        assert!(out_raw.num_rows() > 0, "raw contour must produce segments");
+        assert!(out_smooth.num_rows() > 0, "smoothed contour must produce segments");
+
+        // The two outputs must differ because smoothing redistributes density.
+        let xs_raw = out_raw.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let xs_smooth = out_smooth.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let min_rows = xs_raw.len().min(xs_smooth.len());
+        let any_diff = (0..min_rows).any(|i| (xs_raw.value(i) - xs_smooth.value(i)).abs() > 1e-12)
+            || xs_raw.len() != xs_smooth.len();
+        assert!(any_diff, "smooth=true must change contour geometry vs smooth=false");
     }
 }
