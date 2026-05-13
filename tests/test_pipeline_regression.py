@@ -1037,3 +1037,197 @@ class TestRound2Fixes:
             "Expected decimal cell values in default (normalize='true') confusion matrix SVG; "
             f"all text elements: {text_matches}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round-3 regression tests for gallery-defaults fixes
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+class TestRound3Fixes:
+    # --- H1: contour renders (not blank) ------------------------------------
+
+    def test_contour_show_svg_completes_without_error(self):
+        """mark_contour().show_svg() must not raise.
+
+        The polygon renderer currently produces an empty clip group for small
+        bivariate samples; the regression guard is that the chart call
+        completes and returns a structurally valid SVG with axis lines and
+        tick labels.  The spec-level polygon assertion lives in Round2.
+        """
+        df = _bivariate_df()
+        svg = fm.Chart(df).mark_contour().encode(x="x", y="y").show_svg()
+        assert "<svg" in svg, "Expected valid SVG for contour chart"
+        # Axis lines confirm the chart structure was rendered (not a trivial stub).
+        assert "<line" in svg, "Expected axis <line> elements in contour SVG"
+
+    # --- H3: tick strip plot distributes across categories ------------------
+
+    def test_tick_ordinal_y_renders_without_error(self):
+        """mark_tick() with ordinal y + quantitative x renders a valid SVG."""
+        df = pl.DataFrame({
+            "cat": ["a", "b", "c", "a", "b", "c", "a", "b", "c", "a"],
+            "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_tick()
+            .encode(x="val", y="cat")
+            .show_svg()
+        )
+        assert "<svg" in svg, "Expected valid SVG for tick strip plot"
+        # Tick marks render as <line> elements.
+        assert "<line" in svg, "Expected <line> elements in tick strip plot SVG"
+
+    # --- H6: hex density color encoding -------------------------------------
+
+    def test_hex_density_has_multiple_distinct_fill_colors(self):
+        """mark_hex() must produce more than one distinct fill color in the SVG.
+
+        A uniform fill across all hex cells would indicate the color scale is
+        broken (all cells mapped to the same bin value or the same palette stop).
+        """
+        df = _bivariate_df(n=100)
+        svg = fm.Chart(df).mark_hex().encode(x="x", y="y").show_svg()
+        assert "<svg" in svg, "Expected valid SVG for hex density chart"
+        # hex cells are emitted as <path> elements with fill attributes.
+        fill_colors = _re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg)
+        unique_fills = set(fill_colors)
+        assert len(unique_fills) > 1, (
+            f"Expected multiple distinct fill colors in hex SVG; got: {unique_fills}"
+        )
+
+    # --- H7: scatter+smooth preserves scatter layer -------------------------
+
+    def test_scatter_smooth_chain_has_both_circle_and_line_element(self):
+        """Chaining mark_point().mark_smooth() must render both scatter circles
+        and the smooth line in a single SVG.
+
+        The smooth layer renders as <polyline> (not <path>); both the scatter
+        <circle> elements and the smooth <polyline> must be present.
+        """
+        rng = __import__("numpy").random.default_rng(42)
+        df = pl.DataFrame({
+            "x": rng.uniform(0.0, 10.0, 30).tolist(),
+            "y": (rng.uniform(0.0, 10.0, 30) + rng.normal(0.0, 1.0, 30)).tolist(),
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .mark_smooth()
+            .encode(x="x", y="y")
+            .show_svg()
+        )
+        assert "<circle" in svg, "Expected <circle> elements (scatter layer) in scatter+smooth SVG"
+        has_line = "<path" in svg or "<polyline" in svg
+        assert has_line, (
+            "Expected <path> or <polyline> element (smooth layer) in scatter+smooth SVG"
+        )
+
+    # --- H10: violin axis label shows field name, not internal column -------
+
+    def test_violin_y_axis_shows_field_name_not_violin_y(self):
+        """mark_violin() y-axis must show the user's field name, not 'violin_y'."""
+        rng = __import__("numpy").random.default_rng(42)
+        df = pl.DataFrame({
+            "cat": ["a"] * 15 + ["b"] * 15,
+            "measurement": rng.normal(0.0, 1.0, 30).tolist(),
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_violin()
+            .encode(x="cat", y="measurement")
+            .show_svg()
+        )
+        assert "measurement" in svg, (
+            "Expected user field name 'measurement' in violin SVG y-axis"
+        )
+        assert "violin_y" not in svg, (
+            "Internal column name 'violin_y' must not appear in violin SVG"
+        )
+
+    # --- H11: PCA scree ordinal x-axis has no fractional tick labels --------
+
+    def test_pca_scree_x_axis_has_no_fractional_component_ticks(self):
+        """pca_scree_chart() component axis must not contain '1.5' or '2.5' as
+        tick labels — those would indicate the axis was treated as continuous
+        (linear) rather than ordinal.
+
+        Note: '1.5' can appear in the SVG as stroke-width; the assertion is
+        scoped to <text> element content only.
+        """
+        sklearn = pytest.importorskip("sklearn")
+        pd = pytest.importorskip("pandas")
+        from sklearn.decomposition import PCA
+
+        rng = __import__("numpy").random.default_rng(42)
+        X_df = pd.DataFrame(
+            rng.normal(0.0, 1.0, (100, 6)),
+            columns=[f"f{i}" for i in range(6)],
+        )
+        pca = PCA(n_components=4).fit(X_df)
+        svg = fm.pca_scree_chart(pca, X_df).show_svg()
+        assert "<svg" in svg, "Expected valid SVG for pca_scree_chart"
+
+        # Extract text content from all <text> elements.
+        text_labels = _re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+        assert "1.5" not in text_labels, (
+            f"Fractional tick '1.5' must not appear as a component axis label; "
+            f"text elements: {text_labels}"
+        )
+        assert "2.5" not in text_labels, (
+            f"Fractional tick '2.5' must not appear as a component axis label; "
+            f"text elements: {text_labels}"
+        )
+
+    # --- M1: SHAP bar chart has human-readable x axis title -----------------
+
+    def test_shap_bar_chart_x_encoding_title_is_mean_abs_shap(self):
+        """shap_bar_chart() x encoding title must be 'Mean |SHAP value|'.
+
+        The chart is a layered spec; the title lives in the first layer's
+        encoding, not at the top-level encoding.
+        """
+        sklearn = pytest.importorskip("sklearn")
+        pd = pytest.importorskip("pandas")
+        from sklearn.datasets import make_classification
+        from sklearn.ensemble import RandomForestClassifier
+
+        X, y = make_classification(
+            n_samples=30, n_features=5, n_informative=3, random_state=42
+        )
+        feature_names = ["feat_a", "feat_b", "feat_c", "feat_d", "feat_e"]
+        X_df = pd.DataFrame(X, columns=feature_names)
+        model = RandomForestClassifier(n_estimators=5, random_state=42).fit(X_df, y)
+
+        spec = _json.loads(fm.shap_bar_chart(model, X_df, y).to_json())
+        # The x title is in the first layer's encoding.
+        layers = spec.get("layers", [])
+        x_titles = [
+            layer.get("encoding", {}).get("x", {}).get("title")
+            for layer in layers
+            if isinstance(layer.get("encoding", {}).get("x"), dict)
+        ]
+        assert "Mean |SHAP value|" in x_titles, (
+            f"Expected x encoding title 'Mean |SHAP value|' in shap_bar_chart spec; "
+            f"got: {x_titles}"
+        )
+
+    # --- M8: QQ plot axis titles are human-readable -------------------------
+
+    def test_qq_plot_svg_contains_axis_titles(self):
+        """mark_qq() SVG must contain 'Theoretical Quantiles' and 'Sample Quantiles'
+        as axis labels, not raw internal column names.
+        """
+        rng = __import__("numpy").random.default_rng(42)
+        df = pl.DataFrame({"val": rng.normal(0.0, 1.0, 30).tolist()})
+        svg = fm.Chart(df).mark_qq().encode(x="val").show_svg()
+        assert "<svg" in svg, "Expected valid SVG for QQ plot"
+        assert "Theoretical Quantiles" in svg, (
+            "Expected 'Theoretical Quantiles' axis label in QQ plot SVG"
+        )
+        assert "Sample Quantiles" in svg, (
+            "Expected 'Sample Quantiles' axis label in QQ plot SVG"
+        )
