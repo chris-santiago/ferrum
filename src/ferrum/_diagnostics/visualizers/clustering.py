@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-import numpy as np
 import polars as pl
 
 from .base import FerrumVisualizer
@@ -151,7 +150,7 @@ class ElbowVisualizer(FerrumVisualizer):
         require_sklearn("ElbowVisualizer")
         import ferrum
 
-        X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+        X_fit = X
         seed = 0 if self.random_state is None else int(self.random_state)
         rows: list[dict] = []
         for k in self.ks:
@@ -163,7 +162,7 @@ class ElbowVisualizer(FerrumVisualizer):
                 n_clusters=k_int,
                 random_state=seed,
                 n_init=10,
-            ).fit(X_np)
+            ).fit(X_fit)
             if self.metric == "distortion":
                 score = float(m.inertia_)
             elif self.metric == "silhouette":
@@ -171,15 +170,15 @@ class ElbowVisualizer(FerrumVisualizer):
 
                 labels = getattr(m, "labels_", None)
                 if labels is None:
-                    labels = m.predict(X_np)
-                score = float(silhouette_score(X_np, labels))
+                    labels = m.predict(X_fit)
+                score = float(silhouette_score(X_fit, labels))
             else:  # "calinski_harabasz"
                 from sklearn.metrics import calinski_harabasz_score
 
                 labels = getattr(m, "labels_", None)
                 if labels is None:
-                    labels = m.predict(X_np)
-                score = float(calinski_harabasz_score(X_np, labels))
+                    labels = m.predict(X_fit)
+                score = float(calinski_harabasz_score(X_fit, labels))
             rows.append({"k": k_int, "score": score})
         if not rows:
             raise ValueError(
@@ -188,12 +187,11 @@ class ElbowVisualizer(FerrumVisualizer):
                 "silhouette/calinski_harabasz, ks must contain values >= 2."
             )
         df = pl.DataFrame(rows)
-        scores = df["score"].to_numpy()
         # distortion is minimized; silhouette and CH are maximized.
         if self.metric == "distortion":
-            idx = int(np.argmin(scores))
+            idx = df["score"].arg_min()
         else:
-            idx = int(np.argmax(scores))
+            idx = df["score"].arg_max()
         self._metrics["best_k"] = float(df["k"][idx])
         chart = ferrum.Chart(df).mark_line().encode(x="k", y="score")
         if self.theme is not None:
@@ -334,11 +332,11 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
     def _materialize(self) -> None:
         k = self._infer_k()
         icd = self._source.intercluster_distance(k=k, method=self.method)
-        xs = icd["x"].to_numpy()
-        ys = icd["y"].to_numpy()
+        xs = icd["x"]
+        ys = icd["y"]
         cx, cy = float(xs.mean()), float(ys.mean())
         self._metrics["max_intercluster_dist"] = float(
-            np.max(np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2))
+            ((xs - cx) ** 2 + (ys - cy) ** 2).max() ** 0.5
         )
 
     def _infer_k(self) -> int:

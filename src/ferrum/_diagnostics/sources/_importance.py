@@ -111,12 +111,10 @@ class FeatureImportanceMixin:
             raise ValueError(
                 "ModelSource.importances(method='permutation') requires y to be provided."
             )
-        X_np = self._X.to_numpy()
-        y_np = np.asarray(self._y.to_numpy())
         result = permutation_importance(
             self._model,
-            X_np,
-            y_np,
+            self._X,
+            self._y,
             n_repeats=n_repeats,
             scoring=scoring,
             random_state=random_state if random_state is not None else 0,
@@ -162,6 +160,7 @@ class FeatureImportanceMixin:
             return self._cache[key]
         shap = require_shap("shap_values")
 
+        # SHAP explainers do not reliably accept polars DataFrames (as of shap 0.45).
         X_np = self._X.to_numpy()
         if "coef_" in self._capabilities:
             explainer = shap.LinearExplainer(self._model, X_np)
@@ -238,6 +237,8 @@ class FeatureImportanceMixin:
         require_sklearn("partial_dependence")
 
         feature_idxs = [self._feature_names.index(f) if isinstance(f, str) else f for f in features]
+        # numpy required: sklearn.inspection.partial_dependence uses numpy integer
+        # column indexing internally, which polars does not support.
         X_np = self._X.to_numpy()
         rows: list[dict] = []
         for f_idx in feature_idxs:

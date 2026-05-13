@@ -32,17 +32,16 @@ class ClusteringMixin:
         require_sklearn("silhouette")
         from sklearn.metrics import silhouette_samples
 
-        X_np = self._X.to_numpy()
         if "labels_" in self._capabilities:
             labels = np.asarray(self._model.labels_)
         elif "predict" in self._capabilities:
-            labels = np.asarray(self._model.predict(X_np))
+            labels = np.asarray(self._model.predict(self._X))
         else:
             raise AttributeError(
                 "ModelSource.silhouette() requires the wrapped model to "
                 "expose 'labels_' or 'predict'."
             )
-        sv = silhouette_samples(X_np, labels)
+        sv = silhouette_samples(self._X, labels)
         clusters = sorted(set(int(c) for c in labels.tolist()))
         if k is not None:
             clusters = [c for c in clusters if c < int(k)]
@@ -117,7 +116,6 @@ class ClusteringMixin:
         )
         if key in self._cache:
             return self._cache[key]
-        X_np = self._X.to_numpy()
         seed = self._random_state if self._random_state is not None else 0
         if method == "umap":
             umap = require_umap("embeddings")
@@ -126,7 +124,7 @@ class ClusteringMixin:
                 random_state=seed,
                 **method_kwargs,
             )
-            emb = reducer.fit_transform(X_np)
+            emb = reducer.fit_transform(self._X)
         elif method == "tsne":
             require_sklearn("embeddings(tsne)")
             from sklearn.manifold import TSNE
@@ -135,7 +133,7 @@ class ClusteringMixin:
                 n_components=n_components,
                 random_state=seed,
                 **method_kwargs,
-            ).fit_transform(X_np)
+            ).fit_transform(self._X)
         elif method == "pca":
             require_sklearn("embeddings(pca)")
             from sklearn.decomposition import PCA
@@ -144,14 +142,14 @@ class ClusteringMixin:
                 n_components=n_components,
                 random_state=seed,
                 **method_kwargs,
-            ).fit_transform(X_np)
+            ).fit_transform(self._X)
         else:
             raise ValueError(
                 f"ModelSource.embeddings(method={method!r}) — expected 'umap', 'tsne', or 'pca'."
             )
         emb = np.asarray(emb, dtype=np.float64)
         if self._y is not None:
-            label_arr = np.asarray(self._y.to_numpy())
+            label_arr = np.asarray(self._y)
         else:
             label_arr = np.zeros(emb.shape[0])
         data: dict[str, Any] = {

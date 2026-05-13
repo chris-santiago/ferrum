@@ -103,10 +103,7 @@ class Rank1DVisualizer(FerrumVisualizer):
             if y is None:
                 raise ValueError("Rank1DVisualizer(algorithm='covariance') requires y.")
             cols, X_np = _columns_and_array(X)
-            y_np = np.asarray(
-                y.to_numpy() if hasattr(y, "to_numpy") else y,
-                dtype=np.float64,
-            )
+            y_np = np.asarray(y, dtype=np.float64)
             scores = covariance_rank(X_np, y_np)
             order = np.argsort(-scores, kind="mergesort")
             df = pl.DataFrame(
@@ -342,7 +339,7 @@ def _attach_hue_from_y(X: Any, y: Any) -> Any:
 def _columns_and_array(X: Any) -> tuple[list[str], np.ndarray]:
     """Coerce X (polars / pandas DataFrame / 2D numpy) to (cols, ndarray)."""
     if hasattr(X, "to_numpy") and hasattr(X, "columns"):
-        return list(X.columns), np.asarray(X.to_numpy(), dtype=np.float64)
+        return list(X.columns), np.asarray(X, dtype=np.float64)
     arr = np.asarray(X, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError(f"X must be 2D; got shape {arr.shape}")

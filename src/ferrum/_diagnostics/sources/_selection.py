@@ -44,13 +44,11 @@ class ModelSelectionMixin:
         require_sklearn("learning_curve")
         from sklearn.model_selection import learning_curve as _lc
 
-        X_np = self._X.to_numpy()
-        y_np = np.asarray(self._y.to_numpy())
         sizes = train_sizes if train_sizes is not None else np.linspace(0.1, 1.0, 5)
         ts, tr_scores, te_scores = _lc(
             self._model,
-            X_np,
-            y_np,
+            self._X,
+            self._y,
             train_sizes=sizes,
             cv=cv,
             scoring=scoring,
@@ -109,12 +107,10 @@ class ModelSelectionMixin:
         require_sklearn("validation_curve")
         from sklearn.model_selection import validation_curve as _vc
 
-        X_np = self._X.to_numpy()
-        y_np = np.asarray(self._y.to_numpy())
         tr, te = _vc(
             self._model,
-            X_np,
-            y_np,
+            self._X,
+            self._y,
             param_name=param,
             param_range=vals,
             cv=cv,
@@ -167,12 +163,10 @@ class ModelSelectionMixin:
         require_sklearn("cv_scores")
         from sklearn.model_selection import cross_validate
 
-        X_np = self._X.to_numpy()
-        y_np = np.asarray(self._y.to_numpy())
         result = cross_validate(
             self._model,
-            X_np,
-            y_np,
+            self._X,
+            self._y,
             cv=cv,
             scoring=scoring,
             return_train_score=True,
@@ -214,12 +208,10 @@ class ModelSelectionMixin:
         require_sklearn("alpha_selection")
         from sklearn.model_selection import validation_curve as _vc
 
-        X_np = self._X.to_numpy()
-        y_np = np.asarray(self._y.to_numpy())
         _, te = _vc(
             self._model,
-            X_np,
-            y_np,
+            self._X,
+            self._y,
             param_name="alpha",
             param_range=vals,
             cv=cv,

@@ -36,8 +36,8 @@ class RankingMixin:
         if algorithm == "covariance":
             if self._y is None:
                 raise ValueError("ModelSource.rank1d(algorithm='covariance') requires y.")
-            X_np = np.asarray(self._X.to_numpy(), dtype=np.float64)
-            y_np = np.asarray(self._y.to_numpy(), dtype=np.float64)
+            X_np = np.asarray(self._X, dtype=np.float64)
+            y_np = np.asarray(self._y, dtype=np.float64)
             scores = covariance_rank(X_np, y_np)
             order = np.argsort(-scores, kind="mergesort")
             df = pl.DataFrame(

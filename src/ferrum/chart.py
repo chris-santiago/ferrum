@@ -1902,7 +1902,7 @@ class Chart:
                 x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
                 tbl = to_arrow_table(self._data)
                 if x_field_name in tbl.column_names:
-                    parent_x_data = tbl[x_field_name].to_numpy()
+                    parent_x_data = tbl[x_field_name]
             except Exception:
                 pass
 

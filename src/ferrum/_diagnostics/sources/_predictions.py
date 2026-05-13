@@ -29,10 +29,11 @@ class PredictionsMixin:
             return self._cache[key]
 
         self._require_capability("predict", "predictions")
+        # numpy required: X_np feeds hat-matrix linalg (column_stack, pinv, einsum).
         X_np = self._X.to_numpy()
         y_pred = np.asarray(self._model.predict(X_np), dtype=np.float64)
         y_true = (
-            np.asarray(self._y.to_numpy(), dtype=np.float64)
+            np.asarray(self._y, dtype=np.float64)
             if self._y is not None
             else np.full_like(y_pred, np.nan)
         )
@@ -84,12 +85,11 @@ class PredictionsMixin:
             return self._cache[key]
 
         require_sklearn("probabilities")
-        X_np = self._X.to_numpy()
 
         if "predict_proba" in self._capabilities:
-            proba = np.asarray(self._model.predict_proba(X_np), dtype=np.float64)
+            proba = np.asarray(self._model.predict_proba(self._X), dtype=np.float64)
         elif "decision_function" in self._capabilities:
-            scores = np.asarray(self._model.decision_function(X_np), dtype=np.float64)
+            scores = np.asarray(self._model.decision_function(self._X), dtype=np.float64)
             if scores.ndim == 1:
                 # Binary classifier — apply sigmoid.
                 p1 = 1.0 / (1.0 + np.exp(-scores))
@@ -115,7 +115,7 @@ class PredictionsMixin:
 
         data: dict[str, Any] = {}
         if self._y is not None:
-            data["y_true"] = self._y.to_numpy()
+            data["y_true"] = self._y
         for i, c in enumerate(classes):
             data[f"proba_{c}"] = proba[:, i]
         df = pl.DataFrame(data)

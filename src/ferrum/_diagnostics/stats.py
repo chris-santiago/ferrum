@@ -264,7 +264,7 @@ def _columns_and_array(X) -> tuple[list[str], np.ndarray]:
     """Coerce X (polars DataFrame / pandas / 2D numpy) to (cols, ndarray)."""
     if hasattr(X, "to_numpy") and hasattr(X, "columns"):
         cols = list(X.columns)
-        X_np = np.asarray(X.to_numpy(), dtype=np.float64)
+        X_np = np.asarray(X, dtype=np.float64)
         return cols, X_np
     arr = np.asarray(X, dtype=np.float64)
     if arr.ndim != 2:

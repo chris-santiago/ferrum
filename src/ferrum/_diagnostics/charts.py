@@ -359,15 +359,15 @@ def _prediction_error_chart_from_source(
 
     df = source.predictions().sort("y_true")
     if ci is not None or reference_band:
-        residuals = (df["y_pred"] - df["y_true"]).to_numpy()
+        residuals = df["y_pred"] - df["y_true"]
         if ci is not None:
             if not 0.0 < ci < 1.0:
                 raise ValueError(f"mark_prediction_error(ci={ci!r}) — expected a value in (0, 1).")
             alpha = (1.0 - float(ci)) / 2.0
-            q_lo = float(np.quantile(residuals, alpha))
-            q_hi = float(np.quantile(residuals, 1.0 - alpha))
+            q_lo = float(residuals.quantile(alpha, interpolation="linear"))
+            q_hi = float(residuals.quantile(1.0 - alpha, interpolation="linear"))
         else:
-            sigma = float(np.sqrt(np.mean(residuals**2)))
+            sigma = float((residuals**2).mean() ** 0.5)
             q_lo = -sigma
             q_hi = sigma
         df = df.with_columns(
@@ -579,11 +579,10 @@ def _pr_chart_from_source(
     if y_series is None:
         y_series = getattr(source, "_y", None)
     if y_series is not None:
-        y_arr = np.asarray(y_series.to_numpy())
-        unique_y = np.unique(y_arr)
+        unique_y = y_series.unique().sort()
         if len(unique_y) == 2:
             positive = unique_y[1]
-            p = float((y_arr == positive).mean())
+            p = float((y_series == positive).mean())
             if 0.0 < p < 1.0:
                 baseline_prevalence = p
                 n = df.height
@@ -790,11 +789,10 @@ def _calibration_chart_from_source(
             if y_attr is None:
                 y_attr = getattr(source, "_y", None)
             if model_attr is not None and X_attr is not None and y_attr is not None:
-                X_np = X_attr.to_numpy()
-                proba = model_attr.predict_proba(X_np)
+                proba = model_attr.predict_proba(X_attr)
                 if proba.ndim == 2 and proba.shape[1] == 2:
                     p = np.asarray(proba[:, 1], dtype=float)
-                    obs = np.asarray(y_attr.to_numpy(), dtype=float)
+                    obs = np.asarray(y_attr, dtype=float)
                     brier_value = _brier_score(p, obs)
         except Exception:
             brier_value = None
@@ -1008,8 +1006,8 @@ def _classification_report_chart(source: Any, *, theme: Any = None):
 
     import ferrum
 
-    y_true = source.y.to_numpy()
-    y_pred = source.model.predict(source.X.to_numpy())
+    y_true = source.y
+    y_pred = source.model.predict(source.X)
     report = classification_report(
         y_true,
         y_pred,
@@ -1362,7 +1360,7 @@ def _shap_waterfall_chart_from_source(
         .sort("_rank")
         .drop("_rank")
     )
-    sv_arr = ordered["shap_value"].to_numpy()
+    sv_arr = np.asarray(ordered["shap_value"])
     cum = np.concatenate([[0.0], np.cumsum(sv_arr)])
     plot_df = ordered.with_columns(
         [
@@ -2272,6 +2270,7 @@ def _build_decision_boundary_grid(
     """
     import numpy as np
 
+    # numpy required: 2D positional column slicing (X_np[:, i]) and meshgrid operations.
     X_np = source.X.to_numpy()
     x_col = X_np[:, feat_idx[0]].astype(np.float64)
     y_col = X_np[:, feat_idx[1]].astype(np.float64)
@@ -2328,7 +2327,7 @@ def _build_decision_boundary_unified(source: Any, g: dict) -> pl.DataFrame:
     """
     import numpy as np
 
-    y_raw = source.y.to_numpy()
+    y_raw = np.asarray(source.y)
     if hasattr(source.model, "classes_"):
         class_order = list(source.model.classes_)
     else:
@@ -2397,8 +2396,9 @@ def _cluster_diagnostics_chart(
     from sklearn.cluster import KMeans, AgglomerativeClustering
     from sklearn.metrics import silhouette_score
 
-    X_np = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
-    X_np = np.ascontiguousarray(X_np, dtype=np.float64)
+    # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
+    X_np = np.asarray(X, dtype=np.float64)
+    X_np = np.ascontiguousarray(X_np)
     seed = 0 if random_state is None else int(random_state)
     rows: list[dict] = []
     for k in ks:
