@@ -3,18 +3,18 @@
 //! Output is a SINGLE-ROW batch:
 //!   x_min, x_max, y_min, y_max:  Float64
 //!   width, height:               UInt32
-//!   pixel_data:                  Binary  (RGBA8 grayscale of normalized values;
-//!                                         length = width*height*4)
+//!   pixel_data:                  Binary  (normalized f64 values packed as 8-byte
+//!                                         little-endian blobs; length = width*height*8)
 //!
-//! TODO: pixel_data is currently raw RGBA8 bytes (grayscale). The render::marks::image
-//! drawer (Task 21) is expected to apply a colormap and PNG-encode for embedding.
-//! Keeping the transform pure-data avoids coupling stat_raster to render::png.
+//! Each cell stores one f64 in [0.0, 1.0]. The render::marks::image drawer is
+//! responsible for resolving the colormap and encoding RGBA8 pixels from these
+//! values. This keeps the transform cmap-agnostic.
 //!
 //! Resolution mode `Screen` reads `panel_pixel_size` from the TransformContext;
 //! when no context is provided (apply() default), it falls back to 256x256.
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float64Array, Float64Builder, RecordBatch, UInt32Array,
+    Array, ArrayRef, BinaryArray, Float64Array, RecordBatch, UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -348,19 +348,15 @@ pub(crate) fn apply_with_context(
         })
         .collect();
 
-    // 12. Encode as RGBA8 grayscale.
-    let mut pixel_data: Vec<u8> = Vec::with_capacity(n_cells * 4);
+    // 12. Pack normalized f64 values as 8-byte little-endian blobs.
+    // The image drawer will apply the colormap and produce RGBA8 pixels.
+    let mut pixel_data: Vec<u8> = Vec::with_capacity(n_cells * 8);
     for i in 0..n_cells {
-        let g = (normalized[i] * 255.0).round() as u8;
-        pixel_data.push(g);
-        pixel_data.push(g);
-        pixel_data.push(g);
-        pixel_data.push(255);
+        pixel_data.extend_from_slice(&normalized[i].to_le_bytes());
     }
 
     // 13. Build single-row output batch.
     let pixel_array = BinaryArray::from(vec![pixel_data.as_slice()]);
-    let _ = Float64Builder::new(); // (unused, kept to ensure import path stable)
 
     let out_schema = Arc::new(Schema::new(vec![
         Field::new("x_min", DataType::Float64, false),
@@ -398,8 +394,8 @@ use crate::transform::core::TransformSpec;
 ///
 /// Output is a single-row batch: ``x_min``, ``x_max``, ``y_min``,
 /// ``y_max`` (Float64 data extent), ``width`` / ``height`` (UInt32 grid
-/// dimensions), and ``pixel_data`` (Binary, RGBA8 grayscale bytes of length
-/// ``width*height*4``).
+/// dimensions), and ``pixel_data`` (Binary, normalized f64 values packed as
+/// 8-byte little-endian blobs, length = ``width*height*8``).
 ///
 /// Parameters
 /// ----------
@@ -564,7 +560,7 @@ mod tests {
         .unwrap()
     }
 
-    fn pixel_at(batch: &RecordBatch, gx: u32, gy: u32) -> [u8; 4] {
+    fn pixel_at(batch: &RecordBatch, gx: u32, gy: u32) -> f64 {
         let width = batch
             .column_by_name("width")
             .unwrap()
@@ -579,8 +575,8 @@ mod tests {
             .downcast_ref::<BinaryArray>()
             .unwrap();
         let bytes = bin.value(0);
-        let i = ((gy as usize) * (width as usize) + (gx as usize)) * 4;
-        [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+        let i = ((gy as usize) * (width as usize) + (gx as usize)) * 8;
+        f64::from_le_bytes(bytes[i..i + 8].try_into().unwrap())
     }
 
     #[test]
@@ -613,12 +609,12 @@ mod tests {
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
 
-        // Both nonempty cells have count=2 → max=2 → normalized=1.0 → 255.
-        assert_eq!(p00, [255, 255, 255, 255]);
-        assert_eq!(p11, [255, 255, 255, 255]);
-        // Empty cells = 0 grayscale, alpha 255.
-        assert_eq!(p01, [0, 0, 0, 255]);
-        assert_eq!(p10, [0, 0, 0, 255]);
+        // Both nonempty cells have count=2 → max=2 → normalized=1.0.
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        // Empty cells = 0.0.
+        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
+        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
     }
 
     #[test]
@@ -650,10 +646,10 @@ mod tests {
         let p11 = pixel_at(&out, 1, 1);
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
-        assert_eq!(p00, [255, 255, 255, 255]);
-        assert_eq!(p11, [255, 255, 255, 255]);
-        assert_eq!(p01, [0, 0, 0, 255]);
-        assert_eq!(p10, [0, 0, 0, 255]);
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
+        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
 
         // Σ density · cell_area should be ≈ 1 (all mass within grid).
         // Reconstruct from extent + width/height.
@@ -686,7 +682,7 @@ mod tests {
             vec![10.0, 20.0, 3.0, 5.0],
         );
 
-        // mean: cell (0,0) = 15, (1,1) = 4 → max=15 → (0,0)=255, (1,1)=68.
+        // mean: cell (0,0) = 15, (1,1) = 4 → max=15 → (0,0)=1.0, (1,1)=4/15.
         let spec_mean = RasterSpec {
             x: "x".into(),
             y: "y".into(),
@@ -700,12 +696,10 @@ mod tests {
         let out_mean = apply(&spec_mean, &b).unwrap();
         let p00 = pixel_at(&out_mean, 0, 0);
         let p11 = pixel_at(&out_mean, 1, 1);
-        assert_eq!(p00[0], 255);
-        // (4/15)*255 = 68.0
-        let expected = ((4.0_f64 / 15.0) * 255.0).round() as u8;
-        assert_eq!(p11[0], expected);
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 4.0 / 15.0).abs() < 1e-9, "p11={p11}");
 
-        // sum: (0,0) = 30, (1,1) = 8 → max=30 → (0,0)=255, (1,1)=68.
+        // sum: (0,0) = 30, (1,1) = 8 → max=30 → (0,0)=1.0, (1,1)=8/30.
         let spec_sum = RasterSpec {
             x: "x".into(),
             y: "y".into(),
@@ -719,9 +713,8 @@ mod tests {
         let out_sum = apply(&spec_sum, &b).unwrap();
         let q00 = pixel_at(&out_sum, 0, 0);
         let q11 = pixel_at(&out_sum, 1, 1);
-        assert_eq!(q00[0], 255);
-        let expected_sum = ((8.0_f64 / 30.0) * 255.0).round() as u8;
-        assert_eq!(q11[0], expected_sum);
+        assert!((q00 - 1.0).abs() < 1e-9, "q00={q00}");
+        assert!((q11 - 8.0 / 30.0).abs() < 1e-9, "q11={q11}");
     }
 
     #[test]
@@ -747,10 +740,10 @@ mod tests {
         let p11 = pixel_at(&out, 1, 1);
         let p01 = pixel_at(&out, 0, 1);
         let p10 = pixel_at(&out, 1, 0);
-        assert_eq!(p00, [255, 255, 255, 255]);
-        assert_eq!(p11, [255, 255, 255, 255]);
-        assert_eq!(p01, [0, 0, 0, 255]);
-        assert_eq!(p10, [0, 0, 0, 255]);
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        assert!((p11 - 1.0).abs() < 1e-9, "p11={p11}");
+        assert!((p01 - 0.0).abs() < 1e-9, "p01={p01}");
+        assert!((p10 - 0.0).abs() < 1e-9, "p10={p10}");
     }
 
     #[test]
@@ -777,9 +770,9 @@ mod tests {
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
         // (0,0) survives: count=11 ≥ 10.
-        assert_eq!(p00, [255, 255, 255, 255]);
-        // (1,1) masked: count=1 < 10.
-        assert_eq!(p11, [0, 0, 0, 255]);
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
+        // (1,1) masked: count=1 < 10 → value set to 0.0.
+        assert!((p11 - 0.0).abs() < 1e-9, "p11={p11}");
     }
 
     #[test]
@@ -805,11 +798,11 @@ mod tests {
         let out = apply(&spec, &b).unwrap();
         let p00 = pixel_at(&out, 0, 0);
         let p11 = pixel_at(&out, 1, 1);
-        // (0,0) max value → 255.
-        assert_eq!(p00[0], 255);
+        // (0,0) max value → 1.0.
+        assert!((p00 - 1.0).abs() < 1e-9, "p00={p00}");
         // (1,1) ratio = log1p(1)/log1p(10) = ln(2)/ln(11) ≈ 0.2891.
-        let expected = ((2.0_f64.ln() / 11.0_f64.ln()) * 255.0).round() as u8;
-        assert_eq!(p11[0], expected);
+        let expected = 2.0_f64.ln() / 11.0_f64.ln();
+        assert!((p11 - expected).abs() < 1e-9, "p11={p11}, expected={expected}");
     }
 
     #[test]

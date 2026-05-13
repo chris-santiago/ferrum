@@ -1,20 +1,22 @@
-//! Image mark drawer: read RGBA pixel data from a single-row Raster batch,
-//! encode PNG, embed via SvgBuffer.image().
+//! Image mark drawer: decode normalized f64 cell values from a single-row
+//! Raster batch, apply a colormap, encode PNG, and embed via SvgBuffer.image().
 //!
-//! The Raster transform (Phase 8b Task 17) emits a single-row batch with
-//! columns: `x_min, x_max, y_min, y_max` (Float64), `width, height` (UInt32),
-//! and `pixel_data` (Binary, RGBA8 grayscale, length = width*height*4).
+//! The Raster transform emits a single-row batch with columns:
+//!   `x_min, x_max, y_min, y_max` (Float64), `width, height` (UInt32),
+//!   `pixel_data` (Binary, normalized f64 values packed as 8-byte LE blobs,
+//!                  length = width*height*8).
 //!
-//! TODO(phase-8b+): The `cmap` mark kwarg is currently a no-op for Raster
-//! output because Raster pre-bakes RGBA8 grayscale on the transform side.
-//! When a future composite mark needs colormap reinterpretation (e.g. Viridis
-//! via image), refactor: have Raster emit raw f64 cell values instead of RGBA8,
-//! and move colormap responsibility into this drawer (sample `ContinuousScheme`
-//! per cell, encode RGBA, pass to `encode_png`). Keep this drawer the single
-//! owner of pixel→PNG so the transform stays cmap-agnostic.
+//! Colormap resolution priority (three-step, same as polygon.rs):
+//!   1. `mark_style.cmap` name (explicit kwarg on the mark)
+//!   2. `theme.sequential_scheme` (theme default)
+//!   3. Viridis fallback
+//!
+//! Each f64 in [0.0, 1.0] is sampled through `ContinuousScheme::sample(v)`
+//! to produce an RGBA8 pixel, which is then PNG-encoded and embedded.
 
 use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 
+use crate::render::color::{ContinuousScheme, NamedContinuous};
 use crate::render::draw::DrawCtx;
 use crate::render::rasterize::encode_png;
 use crate::render::svg::SvgBuffer;
@@ -76,13 +78,35 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
 
     let n_cells = (width as usize) * (height as usize);
-    if pixel_bytes.len() != n_cells * 4 {
-        // Expect RGBA8 (4 bytes/cell). Skip silently on malformed input.
+    if pixel_bytes.len() != n_cells * 8 {
+        // Expect normalized f64 (8 bytes/cell). Skip silently on malformed input.
         return;
     }
 
-    // pixel_bytes is already RGBA8; pass through to PNG encoder as-is.
-    let png_bytes = encode_png(width, height, pixel_bytes);
+    // Resolve colormap: mark_style.cmap → theme.sequential_scheme → Viridis.
+    let named = ctx
+        .mark_style
+        .cmap
+        .as_deref()
+        .and_then(NamedContinuous::from_name)
+        .unwrap_or_else(|| {
+            NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+                .unwrap_or(NamedContinuous::Viridis)
+        });
+    let scheme = ContinuousScheme::Named(named);
+
+    // Decode f64 values and map through colormap to produce RGBA8 pixels.
+    let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
+    for chunk in pixel_bytes.chunks_exact(8) {
+        let v = f64::from_le_bytes(chunk.try_into().unwrap());
+        let c = scheme.sample(v);
+        rgba.push(c.red);
+        rgba.push(c.green);
+        rgba.push(c.blue);
+        rgba.push(c.alpha);
+    }
+
+    let png_bytes = encode_png(width, height, &rgba);
 
     // Map data extent to pixel space via scales. SVG y axis is inverted vs data y,
     // so the top edge of the image corresponds to data y_max.
@@ -204,15 +228,14 @@ mod tests {
 
     #[test]
     fn image_smoke_emits_data_url() {
-        // 2x2 RGBA = 16 bytes (one solid color per pixel)
-        let rgba: Vec<u8> = vec![
-            255, 0, 0, 255,
-            0, 255, 0, 255,
-            0, 0, 255, 255,
-            128, 128, 128, 255,
-        ];
+        // 2x2 grid: 4 f64 values packed as 8-byte LE blobs (32 bytes total).
+        let values: Vec<f64> = vec![0.0, 0.33, 0.67, 1.0];
+        let mut pixel_data: Vec<u8> = Vec::with_capacity(values.len() * 8);
+        for v in &values {
+            pixel_data.extend_from_slice(&v.to_le_bytes());
+        }
         let spec = image_spec((0.0, 1.0), (0.0, 1.0));
-        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, rgba);
+        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pixel_data);
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
@@ -236,16 +259,16 @@ mod tests {
 
     #[test]
     fn image_byte_size_correctness() {
-        // 8x8 RGBA = 256 bytes; verify drawer accepts a non-trivial payload.
+        // 8x8 grid: 64 f64 values packed as 8-byte LE blobs (512 bytes total).
         let n_cells = 8 * 8;
-        let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
+        let mut pixel_data: Vec<u8> = Vec::with_capacity(n_cells * 8);
         for i in 0..n_cells {
-            let g = (i * 4) as u8;
-            rgba.extend_from_slice(&[g, g, g, 255]);
+            let v = (i as f64) / ((n_cells - 1) as f64);
+            pixel_data.extend_from_slice(&v.to_le_bytes());
         }
-        assert_eq!(rgba.len(), 256);
+        assert_eq!(pixel_data.len(), 512);
         let spec = image_spec((0.0, 8.0), (0.0, 8.0));
-        let batch = raster_batch(0.0, 8.0, 0.0, 8.0, 8, 8, rgba);
+        let batch = raster_batch(0.0, 8.0, 0.0, 8.0, 8, 8, pixel_data);
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
@@ -265,9 +288,10 @@ mod tests {
     fn image_position_via_scales() {
         // Data extent x:[0,10], y:[0,10] → with linear scales mapping to [0,100]
         // pixel range, the image should cover the full plot area.
-        let rgba: Vec<u8> = vec![255, 255, 255, 255]; // 1x1 white pixel
+        // 1x1 grid: one f64 value (1.0 = fully saturated) as 8-byte LE blob.
+        let pixel_data: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
         let spec = image_spec((0.0, 10.0), (0.0, 10.0));
-        let batch = raster_batch(0.0, 10.0, 0.0, 10.0, 1, 1, rgba);
+        let batch = raster_batch(0.0, 10.0, 0.0, 10.0, 1, 1, pixel_data);
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
