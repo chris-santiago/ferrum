@@ -1015,6 +1015,152 @@ pub fn calinski_harabasz_score(
 }
 
 // ---------------------------------------------------------------------------
+// t-SNE embedding via manifolds-rs
+// ---------------------------------------------------------------------------
+
+fn flat_to_faer_compat(flat: &[f64], n: usize, p: usize) -> faer_compat::Mat<f64> {
+    let mut mat = faer_compat::Mat::<f64>::zeros(n, p);
+    for i in 0..n {
+        for j in 0..p {
+            mat[(i, j)] = flat[i * p + j];
+        }
+    }
+    mat
+}
+
+#[pyfunction]
+#[pyo3(signature = (x_table, n_components, seed, perplexity=None, learning_rate=None, n_iter=None))]
+pub fn tsne_embedding(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: usize,
+    seed: u64,
+    perplexity: Option<f64>,
+    learning_rate: Option<f64>,
+    n_iter: Option<usize>,
+) -> PyResult<PyRecordBatch> {
+    if n_components != 2 {
+        return Err(PyValueError::new_err(
+            "tsne_embedding: manifolds-rs only supports n_components=2"
+        ));
+    }
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, p, _col_names) = batch_to_flat_f64(&batch)?;
+    if n < 4 {
+        return Err(PyValueError::new_err(
+            "tsne_embedding: need at least 4 observations"
+        ));
+    }
+
+    let mat = flat_to_faer_compat(&flat, n, p);
+
+    let params = manifolds_rs::TsneParams::new(
+        Some(n_components),
+        perplexity,
+        None, // init_range
+        learning_rate,
+        n_iter,
+        None, // ann_type (default: kmknn)
+        None, // theta (default: 0.5)
+        None, // n_interp_points
+    );
+
+    let result = manifolds_rs::tsne(
+        mat.as_ref(),
+        None, // no precomputed kNN
+        &params,
+        "bh",
+        seed as usize,
+        false, // verbose
+    ).map_err(|e| PyValueError::new_err(format!("tsne_embedding failed: {e}")))?;
+
+    // result is Vec<Vec<f64>> with outer len = n_components, inner len = n_samples
+    embedding_to_record_batch(&result, n_components)
+}
+
+// ---------------------------------------------------------------------------
+// UMAP embedding via manifolds-rs
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(signature = (x_table, n_components, seed, n_neighbors=None, min_dist=None, n_epochs=None))]
+pub fn umap_embedding(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: usize,
+    seed: u64,
+    n_neighbors: Option<usize>,
+    min_dist: Option<f64>,
+    n_epochs: Option<usize>,
+) -> PyResult<PyRecordBatch> {
+    let batch: RecordBatch = x_table.into();
+    let (flat, n, p, _col_names) = batch_to_flat_f64(&batch)?;
+    if n < 4 {
+        return Err(PyValueError::new_err(
+            "umap_embedding: need at least 4 observations"
+        ));
+    }
+
+    let mat = flat_to_faer_compat(&flat, n, p);
+
+    let min_dist_val = min_dist.unwrap_or(0.1);
+    let spread = 1.0;
+    let params = manifolds_rs::UmapParams::new(
+        Some(n_components),
+        n_neighbors,
+        None, // optimiser (default: adam_parallel)
+        None, // ann_type (default: kmknn)
+        None, // initialisation (default: spectral)
+        None, // init_range
+        None, // nn_params
+        Some(manifolds_rs::prelude::UmapOptimParams::from_min_dist_spread(
+            min_dist_val,
+            spread,
+            None, // lr
+            None, // gamma
+            n_epochs,
+            None, // neg_sample_rate
+            None, // beta1
+            None, // beta2
+            None, // eps
+        )),
+        None, // umap_graph_params
+        None, // randomised
+    );
+
+    let result = manifolds_rs::umap(
+        mat.as_ref(),
+        None, // no precomputed kNN
+        &params,
+        seed as usize,
+        false, // verbose
+    ).map_err(|e| PyValueError::new_err(format!("umap_embedding failed: {e}")))?;
+
+    // result is Vec<Vec<f64>> with outer len = n_components, inner len = n_samples
+    embedding_to_record_batch(&result, n_components)
+}
+
+/// Convert manifolds-rs output (Vec<Vec<f64>> with [n_dim][n_samples]) to a
+/// RecordBatch with columns dim_0, dim_1, ...
+fn embedding_to_record_batch(
+    embedding: &[Vec<f64>],
+    n_components: usize,
+) -> PyResult<PyRecordBatch> {
+    let nc = embedding.len().min(n_components);
+    let fields: Vec<Field> = (0..nc)
+        .map(|i| Field::new(format!("dim_{i}"), DataType::Float64, false))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let columns: Vec<ArrayRef> = embedding[..nc]
+        .iter()
+        .map(|col| f64_array(col.clone()))
+        .collect();
+    let out = RecordBatch::try_new(schema, columns)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(PyRecordBatch::new(out))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

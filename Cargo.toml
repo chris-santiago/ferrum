@@ -60,6 +60,14 @@ twox-hash = { version = "1.6", default-features = false }
 # Used for hat-matrix diagonals, correlation matrices, and consolidating
 # hand-rolled 2x2/3x3 solvers across glm/logistic/robust/smooth transforms.
 faer = "0.24"
+# Phase 10: manifolds-rs for Rust-native t-SNE and UMAP embeddings.
+# manifolds-rs 0.2.4 depends on faer 0.23; our workspace uses faer 0.24.
+# faer-compat is a renamed faer 0.23 dep used solely at the manifolds-rs
+# interop boundary — construct a faer-0.23 MatRef to pass into manifolds_rs
+# functions, then read back the output as plain Vec<Vec<f64>>.
+# TODO: remove faer-compat when manifolds-rs supports faer >=0.24.
+manifolds-rs = { version = "0.2", default-features = false }
+faer-compat = { package = "faer", version = "0.23.2" }
 
 [profile.release]
 lto = "thin"

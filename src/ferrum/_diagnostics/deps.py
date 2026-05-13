@@ -53,31 +53,3 @@ def require_shap(method_name: str) -> ModuleType:
     return shap
 
 
-def require_umap(method_name: str) -> ModuleType:
-    """Lazy-import umap-learn; raise with ``ferrum[umap]`` install hint on failure.
-
-    Parameters
-    ----------
-    method_name : str
-        Diagnostic method name inserted into the error message so callers
-        see a precise hint (e.g. ``"embeddings"``).
-
-    Returns
-    -------
-    ModuleType
-        The ``umap`` module (``umap-learn`` package).
-
-    Raises
-    ------
-    ImportError
-        When ``umap-learn`` is not installed, with a ``pip install ferrum[umap]``
-        hint.
-    """
-    try:
-        import umap
-    except ImportError as e:
-        raise ImportError(
-            f"ferrum.ModelSource.{method_name}() requires umap-learn. "
-            f"Install it with `pip install ferrum[umap]` or `pip install umap-learn`."
-        ) from e
-    return umap

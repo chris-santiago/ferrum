@@ -59,5 +59,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transform::stats::silhouette_samples, m)?)?;
     m.add_function(wrap_pyfunction!(transform::stats::silhouette_score, m)?)?;
     m.add_function(wrap_pyfunction!(transform::stats::calinski_harabasz_score, m)?)?;
+    // Phase 10: Rust-native t-SNE and UMAP via manifolds-rs.
+    m.add_function(wrap_pyfunction!(transform::stats::tsne_embedding, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::umap_embedding, m)?)?;
     Ok(())
 }

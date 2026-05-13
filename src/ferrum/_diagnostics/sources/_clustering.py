@@ -9,7 +9,6 @@ import pyarrow as pa
 import polars as pl
 
 from ferrum import _core
-from ..deps import require_sklearn, require_umap
 
 
 def _x_to_arrow(x_df: pl.DataFrame) -> pa.RecordBatch:
@@ -128,42 +127,33 @@ class ClusteringMixin:
             return self._cache[key]
         seed = self._random_state if self._random_state is not None else 0
         if method == "umap":
-            umap = require_umap("embeddings")
-            reducer = umap.UMAP(
-                n_components=n_components,
-                random_state=seed,
-                **method_kwargs,
+            x_arrow = _x_to_arrow(self._X)
+            result = _core.umap_embedding(
+                x_arrow, n_components, seed,
+                method_kwargs.get("n_neighbors"),
+                method_kwargs.get("min_dist"),
+                method_kwargs.get("n_epochs"),
             )
-            emb = reducer.fit_transform(self._X)
-            emb = np.asarray(emb, dtype=np.float64)
+            df = pl.from_arrow(result)
             if self._y is not None:
                 label_arr = np.asarray(self._y)
             else:
-                label_arr = np.zeros(emb.shape[0])
-            data: dict[str, Any] = {
-                f"dim_{i}": [float(v) for v in emb[:, i]] for i in range(emb.shape[1])
-            }
-            data["label"] = label_arr.tolist()
-            df = pl.DataFrame(data)
+                label_arr = np.zeros(df.height)
+            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "tsne":
-            require_sklearn("embeddings(tsne)")
-            from sklearn.manifold import TSNE
-
-            emb = TSNE(
-                n_components=n_components,
-                random_state=seed,
-                **method_kwargs,
-            ).fit_transform(self._X)
-            emb = np.asarray(emb, dtype=np.float64)
+            x_arrow = _x_to_arrow(self._X)
+            result = _core.tsne_embedding(
+                x_arrow, n_components, seed,
+                method_kwargs.get("perplexity"),
+                method_kwargs.get("learning_rate"),
+                method_kwargs.get("n_iter"),
+            )
+            df = pl.from_arrow(result)
             if self._y is not None:
                 label_arr = np.asarray(self._y)
             else:
-                label_arr = np.zeros(emb.shape[0])
-            data = {
-                f"dim_{i}": [float(v) for v in emb[:, i]] for i in range(emb.shape[1])
-            }
-            data["label"] = label_arr.tolist()
-            df = pl.DataFrame(data)
+                label_arr = np.zeros(df.height)
+            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "pca":
             x_arrow = _x_to_arrow(self._X)
             scores_batch = _core.pca_scores(x_arrow, n_components)
@@ -215,14 +205,23 @@ class ClusteringMixin:
                 mds_df["dim_1"].to_numpy(),
             ])
         elif method == "tsne":
-            require_sklearn("intercluster_distance(tsne)")
-            from sklearn.manifold import TSNE
-
-            xy = TSNE(
-                n_components=2,
-                random_state=seed,
-                perplexity=max(1, min(5, int(k) - 1)),
-            ).fit_transform(centers[:k])
+            if int(k) < 4:
+                raise ValueError(
+                    f"intercluster_distance(method='tsne') requires at least 4 "
+                    f"clusters, got k={k}. Use method='mds' for small k."
+                )
+            centers_arrow = pa.RecordBatch.from_pydict(
+                {f"f{j}": centers[:k, j].tolist() for j in range(centers.shape[1])}
+            )
+            perplexity = float(max(1, min(5, int(k) - 1)))
+            tsne_batch = _core.tsne_embedding(
+                centers_arrow, 2, seed, perplexity,
+            )
+            tsne_df = pl.from_arrow(tsne_batch)
+            xy = np.column_stack([
+                tsne_df["dim_0"].to_numpy(),
+                tsne_df["dim_1"].to_numpy(),
+            ])
         else:
             raise ValueError(
                 f"ModelSource.intercluster_distance(method={method!r}) — expected 'mds' or 'tsne'."

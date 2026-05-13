@@ -1,4 +1,4 @@
-"""Parity tests: Rust-native PCA, silhouette, Calinski-Harabasz, MDS vs sklearn."""
+"""Parity tests: Rust-native PCA, silhouette, Calinski-Harabasz, MDS, t-SNE, UMAP vs sklearn."""
 
 from __future__ import annotations
 
@@ -201,3 +201,127 @@ class TestMDSClassical:
 
         embed_dists = pdist(coords)
         np.testing.assert_allclose(embed_dists, [3.0, 4.0, 5.0], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# t-SNE embedding (Rust via manifolds-rs)
+# ---------------------------------------------------------------------------
+
+
+class TestTsneEmbedding:
+    def test_knn_preservation_iris(self):
+        """Rust t-SNE preserves local structure (k-NN preservation on iris)."""
+        from sklearn.datasets import load_iris
+        from sklearn.neighbors import NearestNeighbors
+
+        X = load_iris().data
+        x_arrow = _make_arrow_batch(X)
+        result = _core.tsne_embedding(x_arrow, 2, 42)
+        df = pl.from_arrow(result)
+        rust_coords = np.column_stack(
+            [df[f"dim_{i}"].to_numpy() for i in range(2)]
+        )
+
+        # Measure k-NN preservation: fraction of true k-NN that remain neighbors
+        # in the embedded space.
+        k = 10
+        nn_orig = NearestNeighbors(n_neighbors=k).fit(X)
+        orig_neighbors = nn_orig.kneighbors(X, return_distance=False)
+        nn_emb = NearestNeighbors(n_neighbors=k).fit(rust_coords)
+        emb_neighbors = nn_emb.kneighbors(rust_coords, return_distance=False)
+        preservation = np.mean(
+            [
+                len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k
+                for i in range(len(X))
+            ]
+        )
+        assert preservation > 0.3, f"k-NN preservation {preservation:.3f} too low"
+
+    def test_output_shape(self):
+        """t-SNE returns n_samples x 2 embedding."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 4)
+        x_arrow = _make_arrow_batch(X)
+        result = _core.tsne_embedding(x_arrow, 2, 42)
+        df = pl.from_arrow(result)
+        assert df.height == 100
+        assert df.columns == ["dim_0", "dim_1"]
+
+    def test_rejects_non_2d(self):
+        """manifolds-rs only supports n_components=2 for t-SNE."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(50, 4)
+        x_arrow = _make_arrow_batch(X)
+        with pytest.raises(ValueError, match="n_components=2"):
+            _core.tsne_embedding(x_arrow, 3, 42)
+
+    def test_custom_perplexity(self):
+        """t-SNE with explicit perplexity runs without error."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 4)
+        x_arrow = _make_arrow_batch(X)
+        result = _core.tsne_embedding(x_arrow, 2, 42, 10.0)
+        df = pl.from_arrow(result)
+        assert df.height == 100
+
+
+# ---------------------------------------------------------------------------
+# UMAP embedding (Rust via manifolds-rs)
+# ---------------------------------------------------------------------------
+
+
+class TestUmapEmbedding:
+    def test_knn_preservation_iris(self):
+        """Rust UMAP preserves local structure (k-NN preservation on iris)."""
+        from sklearn.datasets import load_iris
+        from sklearn.neighbors import NearestNeighbors
+
+        X = load_iris().data
+        x_arrow = _make_arrow_batch(X)
+        result = _core.umap_embedding(x_arrow, 2, 42)
+        df = pl.from_arrow(result)
+        rust_coords = np.column_stack(
+            [df[f"dim_{i}"].to_numpy() for i in range(2)]
+        )
+
+        k = 10
+        nn_orig = NearestNeighbors(n_neighbors=k).fit(X)
+        orig_neighbors = nn_orig.kneighbors(X, return_distance=False)
+        nn_emb = NearestNeighbors(n_neighbors=k).fit(rust_coords)
+        emb_neighbors = nn_emb.kneighbors(rust_coords, return_distance=False)
+        preservation = np.mean(
+            [
+                len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k
+                for i in range(len(X))
+            ]
+        )
+        assert preservation > 0.3, f"k-NN preservation {preservation:.3f} too low"
+
+    def test_output_shape(self):
+        """UMAP returns n_samples x 2 embedding."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 4)
+        x_arrow = _make_arrow_batch(X)
+        result = _core.umap_embedding(x_arrow, 2, 42)
+        df = pl.from_arrow(result)
+        assert df.height == 100
+        assert df.columns == ["dim_0", "dim_1"]
+
+    def test_custom_n_neighbors(self):
+        """UMAP with explicit n_neighbors runs without error."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 4)
+        x_arrow = _make_arrow_batch(X)
+        result = _core.umap_embedding(x_arrow, 2, 42, 10)
+        df = pl.from_arrow(result)
+        assert df.height == 100
+
+    def test_3d_embedding(self):
+        """UMAP supports 3D embeddings (unlike t-SNE which is limited to 2D)."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 4)
+        x_arrow = _make_arrow_batch(X)
+        result = _core.umap_embedding(x_arrow, 3, 42)
+        df = pl.from_arrow(result)
+        assert df.height == 100
+        assert df.columns == ["dim_0", "dim_1", "dim_2"]
