@@ -55,6 +55,11 @@ kodama = "0.3"
 # different API surface). Used by render/position.rs to derive a deterministic
 # u64 from (x, y, group) per row when the user passes seed=None.
 twox-hash = { version = "1.6", default-features = false }
+# Pure-Rust linear algebra (Cholesky, QR, SVD, eigendecomposition). Zero
+# external dependencies — no LAPACK, no OpenBLAS, no platform-specific linking.
+# Used for hat-matrix diagonals, correlation matrices, and consolidating
+# hand-rolled 2x2/3x3 solvers across glm/logistic/robust/smooth transforms.
+faer = "0.24"
 
 [profile.release]
 lto = "thin"

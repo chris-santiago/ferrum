@@ -510,15 +510,7 @@ fn deviance(family: GlmFamily, ys: &[f64], mu: &[f64]) -> f64 {
     acc
 }
 
-fn invert_2x2(a: [[f64; 2]; 2]) -> Option<[[f64; 2]; 2]> {
-    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-    if det.abs() < 1e-15 { return None; }
-    let inv_det = 1.0 / det;
-    Some([
-        [ a[1][1] * inv_det, -a[0][1] * inv_det],
-        [-a[1][0] * inv_det,  a[0][0] * inv_det],
-    ])
-}
+use crate::transform::linalg::invert_2x2;
 
 fn build_glm_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,

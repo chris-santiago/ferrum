@@ -31,6 +31,7 @@ colorous    = { workspace = true }
 png         = { workspace = true }
 kodama      = { workspace = true }
 twox-hash   = { workspace = true }
+faer        = { workspace = true }
 
 [dev-dependencies]
 sha2 = "0.10"

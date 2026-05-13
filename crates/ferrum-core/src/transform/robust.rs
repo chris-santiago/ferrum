@@ -296,27 +296,7 @@ fn wls_2x2(xs: &[f64], ys: &[f64], w: &[f64]) -> Option<(f64, f64)> {
     Some((a, b))
 }
 
-/// Unweighted X'X for X = [1, x].
-fn xtx_unweighted(xs: &[f64]) -> [[f64; 2]; 2] {
-    let n = xs.len() as f64;
-    let sx: f64 = xs.iter().sum();
-    let sxx: f64 = xs.iter().map(|x| x * x).sum();
-    [[n, sx], [sx, sxx]]
-}
-
-fn invert_2x2(a: [[f64; 2]; 2]) -> Option<[[f64; 2]; 2]> {
-    let det = a[0][0] * a[1][1] - a[0][1] * a[1][0];
-    if !det.is_finite() || det.abs() < 1e-15 { return None; }
-    let inv_det = 1.0 / det;
-    Some([
-        [ a[1][1] * inv_det, -a[0][1] * inv_det],
-        [-a[1][0] * inv_det,  a[0][0] * inv_det],
-    ])
-}
-
-fn scale_2x2(a: [[f64; 2]; 2], k: f64) -> [[f64; 2]; 2] {
-    [[a[0][0] * k, a[0][1] * k], [a[1][0] * k, a[1][1] * k]]
-}
+use crate::transform::linalg::{invert_2x2, scale_2x2, xtx_unweighted};
 
 /// MAD-based robust scale estimate: s = 1.4826 · median(|r - median(r)|).
 fn mad_scale(r: &[f64]) -> f64 {
