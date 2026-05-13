@@ -163,11 +163,11 @@ Pure column arithmetic — no decomposition needed, but benefits from Rust's avo
 |---|---|---|
 | `pca_variance()` | Reads `model.explained_variance_ratio_` from fitted sklearn PCA | Two paths: (a) if model has `explained_variance_ratio_`, read it (backward compat); (b) new overload accepts raw X, calls `_core.pca_variance(x_arrow, n_components)` |
 | `embeddings(method="pca")` | `sklearn.decomposition.PCA.fit_transform()` | `_core.pca_scores(x_arrow, n_components)` |
-| `embeddings(method="tsne")` | `sklearn.manifold.TSNE.fit_transform()` | **Unchanged** (iterative) |
-| `embeddings(method="umap")` | `umap.UMAP.fit_transform()` | **Unchanged** (iterative) |
+| `embeddings(method="tsne")` | `sklearn.manifold.TSNE.fit_transform()` | `_core.tsne_embedding(x_arrow, n_components, seed)` via `manifolds-rs` |
+| `embeddings(method="umap")` | `umap.UMAP.fit_transform()` | `_core.umap_embedding(x_arrow, n_components, seed)` via `manifolds-rs` |
 | `silhouette()` | `sklearn.metrics.silhouette_samples()` | `_core.silhouette_samples(x_arrow, labels_arrow, metric)` |
 | `intercluster_distance(method="mds")` | `sklearn.manifold.MDS.fit_transform()` | `_core.mds_classical(centers_arrow, n_components=2)` |
-| `intercluster_distance(method="tsne")` | `sklearn.manifold.TSNE.fit_transform()` | **Unchanged** (iterative) |
+| `intercluster_distance(method="tsne")` | `sklearn.manifold.TSNE.fit_transform()` | `_core.tsne_embedding(centers_arrow, 2, seed)` via `manifolds-rs` |
 
 #### `charts.py` — `_cluster_diagnostics_chart`
 
@@ -218,6 +218,78 @@ pub fn calinski_harabasz_score(...) -> ...;
 
 Distance computation reuses `linkage.rs::condensed_distances` (make it `pub(crate)` if not already).
 
+### 7. Rust t-SNE and UMAP via `manifolds-rs`
+
+Add `manifolds-rs` (0.2.4+, MIT) to the workspace. It provides Barnes-Hut t-SNE and UMAP in pure Rust, built on the same `faer` foundation ferrum already uses. Input is `faer::MatRef<f64>` — compatible with our existing `mat_from_flat`.
+
+**Dependency:** `manifolds-rs = { version = "0.2", default-features = false }` in workspace `Cargo.toml`. No `fft_tsne`, `gpu`, or `parametric` features — just the core embedding algorithms. Pulls in `ann-search-rs` (approximate nearest neighbors via HNSW/NNDescent) and `rayon` (already a transitive dep via faer).
+
+**New PyO3 functions in `transform/stats.rs`:**
+
+```rust
+#[pyfunction]
+pub fn tsne_embedding(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,   // n x p feature matrix
+    n_components: usize,       // output dimensionality (usually 2)
+    seed: u64,
+    perplexity: Option<f64>,   // default 30.0
+    learning_rate: Option<f64>, // default 200.0
+    n_iter: Option<usize>,     // default 1000
+) -> PyResult<PyRecordBatch>;  // n x n_components: dim_0, dim_1, ...
+
+#[pyfunction]
+pub fn umap_embedding(
+    _py: Python<'_>,
+    x_table: PyRecordBatch,
+    n_components: usize,
+    seed: u64,
+    n_neighbors: Option<usize>, // default 15
+    min_dist: Option<f64>,      // default 0.1
+    n_epochs: Option<usize>,    // default None (auto)
+) -> PyResult<PyRecordBatch>;
+```
+
+**Integration with `manifolds-rs` API:**
+
+```rust
+use manifolds_rs::{umap, tsne, UmapParams, TsneParams, construct_umap_graph};
+
+fn embed_umap(x: &Mat<f64>, n_components: usize, seed: u64, ...) -> Vec<Vec<f64>> {
+    let params = UmapParams::new(n_neighbors, n_components, ...);
+    let knn = construct_umap_graph(x.as_ref(), &params, seed as usize, false)?;
+    umap(x.as_ref(), knn, &params, seed as usize, false)
+}
+```
+
+**Python caller rewiring in `_clustering.py`:**
+
+```python
+# Before (requires umap-learn):
+umap_mod = require_umap("embeddings")
+reducer = umap_mod.UMAP(n_components=n_components, random_state=seed)
+emb = reducer.fit_transform(self._X)
+
+# After (Rust-native):
+from ferrum._core import umap_embedding
+x_arrow = pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
+result = umap_embedding(x_arrow, n_components, seed)
+emb_df = pl.from_arrow(result)
+```
+
+Same pattern for t-SNE. The `require_umap` and `require_sklearn("embeddings(tsne)")` guards are eliminated — both methods work out of the box.
+
+**User-facing win:** `umap-learn` is currently an optional dependency that users must install separately. Moving to Rust means UMAP works with `pip install ferrum` — zero extra deps. t-SNE drops its sklearn dependency for the embedding path.
+
+**New embedding methods for free:** `manifolds-rs` also implements PHATE, Diffusion Maps, and PacMAP. These can be exposed as additional `method=` options in `embeddings()` with no additional dependency cost.
+
+**Numerical parity requirement:** `manifolds-rs` is version 0.2.4 (young crate, single maintainer). Before committing to it, the implementation must verify numerical parity:
+
+- t-SNE: Rust output vs `sklearn.manifold.TSNE` on the same data with the same seed. Embeddings are stochastic, so parity is measured by: (a) KL divergence of the final embedding is within 10% of sklearn's, (b) k-nearest-neighbor preservation (fraction of true neighbors preserved in the embedding) is within 5% of sklearn's, (c) visual inspection of the embedding on the iris dataset shows comparable cluster separation.
+- UMAP: Rust output vs `umap-learn` on the same data with the same seed. Same parity criteria as t-SNE (trustworthiness / neighbor preservation / visual check). Exact coordinate parity is not expected — both implementations use stochastic optimization with different random streams.
+
+If `manifolds-rs` fails parity on any of these checks, fall back to the Python implementations (sklearn/umap-learn) and file an upstream issue. The PyO3 function signatures stay the same; only the internal dispatch changes.
+
 ## Verification plan
 
 ### Parity tests
@@ -236,6 +308,15 @@ Each Rust implementation must match sklearn within tolerance on a sweep of test 
 **PCA sign convention:** SVD eigenvectors are determined up to a sign flip. The parity test must account for this by comparing `abs(ours)` vs `abs(theirs)` per component, or by applying a sign-correction step (flip columns where the max-absolute-value element differs in sign).
 
 **MDS rotation:** Classical MDS solutions are determined up to rotation/reflection. Parity test uses Procrustes alignment before comparing coordinates.
+
+**t-SNE / UMAP stochasticity:** These are iterative stochastic algorithms — exact coordinate parity across implementations is not meaningful. Parity is measured structurally:
+
+| Function | Reference | Parity metric | Acceptance threshold |
+|---|---|---|---|
+| `tsne_embedding` | `sklearn.manifold.TSNE` | k-NN preservation (k=10) on iris dataset | Rust ≥ 90% of sklearn's score |
+| `umap_embedding` | `umap.UMAP` | k-NN preservation (k=10) on iris dataset | Rust ≥ 90% of sklearn's score |
+
+k-NN preservation = fraction of each point's true k-nearest neighbors (in the original high-dimensional space) that remain among its k-nearest neighbors in the embedding. This measures whether the embedding preserves local structure, which is the entire point of both algorithms.
 
 ### Integration tests
 
@@ -263,7 +344,6 @@ Each Rust implementation must match sklearn within tolerance on a sweep of test 
 ## Non-goal
 
 This spec does not implement:
-- t-SNE (iterative Barnes-Hut; no decomposition analogue)
-- UMAP (iterative stochastic optimization)
 - Incremental/streaming PCA (out of scope; batch SVD is sufficient for ferrum's diagnostic use case)
 - Sparse SVD / randomized SVD (faer's dense SVD is sufficient for the feature-count ranges in diagnostic charts — typically p < 100)
+- Parametric UMAP / parametric t-SNE (`manifolds-rs` supports these behind the `burn` feature flag, but they require a neural network runtime — out of scope for a charting library)
