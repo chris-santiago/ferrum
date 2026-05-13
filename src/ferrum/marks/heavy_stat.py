@@ -94,22 +94,46 @@ def desugar_contour(
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
-    # downstream polygon layer can route through data_source="contour".
+    # downstream layer can route through data_source="contour".
     transforms = [
         Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
-    mk: dict = {"detail": "level_id"}
-    if cmap is not None:
-        mk["cmap"] = cmap
-    layers = [
-        _Layer(
-            mark="polygon",
-            encoding={"x": "contour_x", "y": "contour_y"},
-            mark_kwargs=mk,
-            data_source="contour",
-        )
-    ]
+    if fill:
+        # Isoband mode: Contour emits polygon vertex rows (x, y per vertex).
+        # Use polygon mark grouped by level_id; color by level_value so each
+        # density band gets a distinct fill from the sequential colormap.
+        mk: dict = {"detail": "level_id"}
+        if cmap is not None:
+            mk["cmap"] = cmap
+        layers = [
+            _Layer(
+                mark="polygon",
+                encoding={"x": "contour_x", "y": "contour_y", "color": "level_value"},
+                mark_kwargs=mk,
+                data_source="contour",
+            )
+        ]
+    else:
+        # Isoline mode: Contour emits one row per segment with
+        # (contour_x, contour_y, contour_x2, contour_y2).
+        # Use segment mark -- each row draws one line from (x,y) to (x2,y2).
+        mk = {}
+        if cmap is not None:
+            mk["cmap"] = cmap
+        layers = [
+            _Layer(
+                mark="segment",
+                encoding={
+                    "x": "contour_x",
+                    "y": "contour_y",
+                    "x2": "contour_x2",
+                    "y2": "contour_y2",
+                },
+                mark_kwargs=mk if mk else None,
+                data_source="contour",
+            )
+        ]
     return ("__layered__", transforms, None, None, layers)
 
 

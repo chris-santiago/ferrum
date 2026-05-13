@@ -55,7 +55,8 @@ pub(crate) struct ContourSpec {
     pub name: Option<String>,
 }
 
-fn out_schema() -> Arc<Schema> {
+/// Output schema for isoband (fill=true): 4 columns, one row per polygon vertex.
+fn out_schema_isoband() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("level_id", DataType::UInt32, false),
         Field::new("level_value", DataType::Float64, false),
@@ -64,16 +65,42 @@ fn out_schema() -> Arc<Schema> {
     ]))
 }
 
-fn empty_output() -> PyResult<RecordBatch> {
-    let schema = out_schema();
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(UInt32Array::from(Vec::<u32>::new())),
-        Arc::new(Float64Array::from(Vec::<f64>::new())),
-        Arc::new(Float64Array::from(Vec::<f64>::new())),
-        Arc::new(Float64Array::from(Vec::<f64>::new())),
-    ];
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+/// Output schema for isoline (fill=false): 6 columns, one row per segment.
+fn out_schema_isoline() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("level_id", DataType::UInt32, false),
+        Field::new("level_value", DataType::Float64, false),
+        Field::new("contour_x", DataType::Float64, false),
+        Field::new("contour_y", DataType::Float64, false),
+        Field::new("contour_x2", DataType::Float64, false),
+        Field::new("contour_y2", DataType::Float64, false),
+    ]))
+}
+
+fn empty_output(fill: bool) -> PyResult<RecordBatch> {
+    if fill {
+        let schema = out_schema_isoband();
+        let cols: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(Vec::<u32>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+        ];
+        RecordBatch::try_new(schema, cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    } else {
+        let schema = out_schema_isoline();
+        let cols: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(Vec::<u32>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+        ];
+        RecordBatch::try_new(schema, cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    }
 }
 
 fn extract_list_f64(batch: &RecordBatch, name: &str) -> PyResult<Vec<f64>> {
@@ -136,7 +163,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     }
 
     if batch.num_rows() == 0 {
-        return empty_output();
+        return empty_output(spec.fill);
     }
     if batch.num_rows() != 1 {
         return Err(PyValueError::new_err(format!(
@@ -159,14 +186,14 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     }
 
     if nx < 2 || ny < 2 {
-        return empty_output();
+        return empty_output(spec.fill);
     }
 
     // Compute thresholds: t evenly-spaced interior levels.
     let dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
     let dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if !dmin.is_finite() || !dmax.is_finite() || dmax <= dmin {
-        return empty_output();
+        return empty_output(spec.fill);
     }
     let t = spec.thresholds;
     let levels: Vec<f64> = (1..=t)
@@ -205,6 +232,12 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
 
     if !spec.fill {
         // ---------- Isoline mode (Marching Squares) ----------
+        // Output: one row per segment with columns
+        //   (level_id, level_value, contour_x, contour_y, contour_x2, contour_y2)
+        // Each segment is a single row; x2s/y2s hold the segment's end point.
+        let mut x2s: Vec<f64> = Vec::new();
+        let mut y2s: Vec<f64> = Vec::new();
+
         for (li, &level) in levels.iter().enumerate() {
             let mut seg_idx: u32 = 0;
             for gy in 0..(ny - 1) {
@@ -294,19 +327,29 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                     for (p0, p1) in segs {
                         let id = ((li as u32) << 16) | seg_idx;
                         seg_idx = seg_idx.wrapping_add(1);
+                        // One row per segment: start point in (x,y), end in (x2,y2).
                         level_ids.push(id);
                         level_vals.push(level);
                         xs.push(p0.0);
                         ys.push(p0.1);
-
-                        level_ids.push(id);
-                        level_vals.push(level);
-                        xs.push(p1.0);
-                        ys.push(p1.1);
+                        x2s.push(p1.0);
+                        y2s.push(p1.1);
                     }
                 }
             }
         }
+
+        let schema = out_schema_isoline();
+        let cols: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(level_ids)),
+            Arc::new(Float64Array::from(level_vals)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float64Array::from(x2s)),
+            Arc::new(Float64Array::from(y2s)),
+        ];
+        return RecordBatch::try_new(schema, cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")));
     } else {
         // ---------- Isoband mode (Sutherland-Hodgman polygon clipping) ----------
         // With t thresholds we emit t-1 bands [L_i, L_{i+1}].
@@ -315,7 +358,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         // density <= hi.  If the result has >= 3 vertices it is emitted as a
         // closed polygon (first vertex repeated as last).
         if levels.len() < 2 {
-            return empty_output();
+            return empty_output(spec.fill);
         }
 
         // A vertex with position and density for S-H clipping.
@@ -424,7 +467,8 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         }
     }
 
-    let schema = out_schema();
+    // Isoband output: 4 columns (vertex rows, no x2/y2).
+    let schema = out_schema_isoband();
     let cols: Vec<ArrayRef> = vec![
         Arc::new(UInt32Array::from(level_ids)),
         Arc::new(Float64Array::from(level_vals)),
@@ -575,7 +619,8 @@ mod tests {
         };
         let out = apply(&spec, &b).unwrap();
         let s = out.schema();
-        assert_eq!(s.fields().len(), 4);
+        // Isoline output: 6 columns — one row per segment, (x,y) start + (x2,y2) end.
+        assert_eq!(s.fields().len(), 6);
         assert_eq!(s.field(0).name(), "level_id");
         assert_eq!(s.field(0).data_type(), &DataType::UInt32);
         assert_eq!(s.field(1).name(), "level_value");
@@ -584,9 +629,18 @@ mod tests {
         assert_eq!(s.field(2).data_type(), &DataType::Float64);
         assert_eq!(s.field(3).name(), "contour_y");
         assert_eq!(s.field(3).data_type(), &DataType::Float64);
+        assert_eq!(s.field(4).name(), "contour_x2");
+        assert_eq!(s.field(4).data_type(), &DataType::Float64);
+        assert_eq!(s.field(5).name(), "contour_y2");
+        assert_eq!(s.field(5).data_type(), &DataType::Float64);
         assert!(out.num_rows() > 0, "expected at least some segments emitted");
-        // Each segment contributes 2 vertex rows.
-        assert_eq!(out.num_rows() % 2, 0, "isoline rows must come in pairs");
+        // Each row is exactly one segment (start + end); no pairing constraint.
+        // All level_ids must be unique (each segment gets a distinct id).
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..id_col.len() {
+            assert!(seen.insert(id_col.value(i)), "duplicate level_id in isoline output");
+        }
     }
 
     #[test]
@@ -675,8 +729,10 @@ mod tests {
             .unwrap();
         assert!(lv.len() > 0);
         assert!((lv.value(0) - 5.0).abs() < 1e-9, "expected level 5.0 got {}", lv.value(0));
-        // Saddle resolution: 2 segments = 4 vertex rows.
-        assert_eq!(out.num_rows(), 4, "saddle must produce exactly 2 segments (4 vertex rows)");
+        // Saddle resolution: 2 segments = 2 rows (one row per segment in the new schema).
+        assert_eq!(out.num_rows(), 2, "saddle must produce exactly 2 segments (2 rows, one per segment)");
+        // Verify each row has 6 columns (isoline schema).
+        assert_eq!(out.schema().fields().len(), 6, "isoline output must have 6 columns");
     }
 
     #[test]
