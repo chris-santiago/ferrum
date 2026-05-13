@@ -302,6 +302,7 @@ def desugar_smooth(
     x_bins: Any = None,
     x_estimator: Any = None,
     show_metrics: bool = False,
+    groupby: Any = None,
     name: str | None = None,
 ) -> tuple:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
@@ -352,6 +353,11 @@ def desugar_smooth(
         Optional number of x bins for aggregated scatter smoothing.
     x_estimator : str or None, default None
         Aggregation function per x bin (e.g. ``"mean"``).
+    groupby : str or None, default None
+        Optional grouping column forwarded to the ``Smooth`` transform.
+        When set, the smoothing is computed per group and the output
+        retains the group column so a downstream ``color=`` encoding
+        can map to it.
 
     Returns
     -------
@@ -379,6 +385,8 @@ def desugar_smooth(
             smooth_kwargs["x_bins"] = x_bins
         if x_estimator is not None:
             smooth_kwargs["x_estimator"] = x_estimator
+        if groupby is not None:
+            smooth_kwargs["groupby"] = groupby
         if name is not None:
             smooth_kwargs["name"] = name
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
@@ -393,6 +401,8 @@ def desugar_smooth(
         smooth_kwargs["x_bins"] = x_bins
     if x_estimator is not None:
         smooth_kwargs["x_estimator"] = x_estimator
+    if groupby is not None:
+        smooth_kwargs["groupby"] = groupby
     if show_metrics:
         # Schwabish SB-followup (2026-05-12): emit R²/RMSE/MAE columns
         # on the fit-grid output so a same-source mark_text layer reads

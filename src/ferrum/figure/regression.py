@@ -238,38 +238,29 @@ def lmplot(
     # ---- Fit layer (per method) ----------------------------------------
     lkw = dict(line_kws) if line_kws else {}
 
-    # When hue is set and the method is smooth-based (lm, loess), build
-    # separate fit charts per hue level and compose them. Smooth has no
-    # groupby support, so a single Smooth over the full data produces one
-    # regression line across all groups instead of per-group fits.
+    # When hue is set and the method is smooth-based (lm, loess), use
+    # Smooth's groupby support to fit per-group smoothing in one pass.
     if hue is not None and method in ("lm", "loess"):
-        import polars as pl
-
-        _data_pl = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         hue_col = hue.field if hasattr(hue, "field") else str(hue)
-        hue_levels = _data_pl[hue_col].unique().sort().to_list()
-        fit_charts = []
-        for level in hue_levels:
-            subset = _data_pl.filter(pl.col(hue_col) == level)
-            if method == "lm":
-                fc = (
-                    Chart(subset)
-                    .mark_smooth(
-                        method="lm",
-                        ci=ci_frac,
-                        degree=order,
-                        x_bins=x_bins,
-                        x_estimator=x_estimator,
-                    )
-                    .encode(x=x, y=y)
+        if method == "lm":
+            fit = (
+                Chart(data)
+                .mark_smooth(
+                    method="lm",
+                    ci=ci_frac,
+                    degree=order,
+                    x_bins=x_bins,
+                    x_estimator=x_estimator,
+                    groupby=hue_col,
                 )
-            else:
-                fc = Chart(subset).mark_smooth(method="loess", ci=ci_frac).encode(x=x, y=y)
-            fit_charts.append(fc)
-        # Compose all fit charts with + (layer composition)
-        fit = fit_charts[0]
-        for fc in fit_charts[1:]:
-            fit = fit + fc
+                .encode(x=x, y=y, color=hue)
+            )
+        else:
+            fit = (
+                Chart(data)
+                .mark_smooth(method="loess", ci=ci_frac, groupby=hue_col)
+                .encode(x=x, y=y, color=hue)
+            )
     elif method == "lm":
         fit = (
             Chart(data)

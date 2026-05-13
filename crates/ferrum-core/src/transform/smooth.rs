@@ -70,11 +70,20 @@ pub(crate) struct SmoothSpec {
     #[serde(default)]
     pub inject_metrics: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub groupby: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs_raw, ys_raw) = extract_xy(spec, batch)?;
+    if let Some(g) = &spec.groupby {
+        return apply_grouped(spec, batch, g);
+    }
+    apply_one_group(spec, batch, None)
+}
+
+fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<RecordBatch> {
+    let (xs_raw, ys_raw) = extract_xy(spec, batch, only_indices)?;
 
     // Pre-aggregate xs/ys into n equal-width bins if x_bins is set.
     let (xs, ys) = if let Some(n_bins) = spec.x_bins {
@@ -136,6 +145,111 @@ pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBa
             metrics,
         ),
     }
+}
+
+/// Partition input batch by `group_col` (Utf8), call apply_one_group per
+/// partition, then stack the results into a single batch with the group
+/// column preserved as an additional field.
+fn apply_grouped(
+    spec: &SmoothSpec,
+    batch: &RecordBatch,
+    group_col: &str,
+) -> PyResult<RecordBatch> {
+    use arrow::array::StringArray;
+    use std::collections::BTreeMap;
+
+    let schema = batch.schema();
+    let gi = schema.index_of(group_col).map_err(|_|
+        PyValueError::new_err(format!(
+            "stat_smooth: groupby column '{}' not found", group_col)))?;
+    let gtype = schema.field(gi).data_type();
+    if gtype != &DataType::Utf8 {
+        return Err(PyValueError::new_err(format!(
+            "stat_smooth: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
+    }
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+
+    // Group row indices by first-appearance order of the group value.
+    let mut group_order: Vec<String> = Vec::new();
+    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..garr.len() {
+        if garr.is_null(i) { continue; }
+        let gv = garr.value(i).to_string();
+        if seen.insert(gv.clone()) {
+            group_order.push(gv.clone());
+        }
+        group_idx_map.entry(gv).or_default().push(i);
+    }
+
+    // Collect per-group outputs and stack them.
+    let mut per_group_batches: Vec<(String, RecordBatch)> = Vec::new();
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).unwrap();
+        let out = apply_one_group(spec, batch, Some(ixs))?;
+        per_group_batches.push((g.clone(), out));
+    }
+
+    if per_group_batches.is_empty() {
+        // Fallback: ungrouped empty output.
+        return apply_one_group(spec, batch, None);
+    }
+
+    // Build the concatenated output dynamically based on the per-group output schema.
+    let ref_schema = per_group_batches[0].1.schema();
+    let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
+
+    // For each field in the per-group output, collect values across all groups.
+    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(ref_schema.fields().len() + 1);
+    let mut out_fields: Vec<Field> = Vec::with_capacity(ref_schema.fields().len() + 1);
+
+    for (fi, field) in ref_schema.fields().iter().enumerate() {
+        out_fields.push(field.as_ref().clone());
+        match field.data_type() {
+            DataType::Float64 => {
+                let mut vals = Vec::with_capacity(total_rows);
+                for (_, b) in &per_group_batches {
+                    let arr = b.column(fi).as_any().downcast_ref::<Float64Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if arr.is_null(i) { vals.push(f64::NAN); } else { vals.push(arr.value(i)); }
+                    }
+                }
+                out_cols.push(Arc::new(Float64Array::from(vals)));
+            }
+            DataType::Utf8 => {
+                let mut vals: Vec<Option<String>> = Vec::with_capacity(total_rows);
+                for (_, b) in &per_group_batches {
+                    let arr = b.column(fi).as_any().downcast_ref::<StringArray>().unwrap();
+                    for i in 0..arr.len() {
+                        if arr.is_null(i) { vals.push(None); } else { vals.push(Some(arr.value(i).to_string())); }
+                    }
+                }
+                out_cols.push(Arc::new(StringArray::from(
+                    vals.iter().map(|v| v.as_deref()).collect::<Vec<_>>()
+                )));
+            }
+            dt => {
+                return Err(PyValueError::new_err(format!(
+                    "stat_smooth: unsupported column dtype {:?} in grouped output", dt)));
+            }
+        }
+    }
+
+    // Append the group column.
+    out_fields.push(Field::new(group_col, DataType::Utf8, false));
+    let mut group_vals: Vec<String> = Vec::with_capacity(total_rows);
+    for (g, b) in &per_group_batches {
+        for _ in 0..b.num_rows() {
+            group_vals.push(g.clone());
+        }
+    }
+    out_cols.push(Arc::new(StringArray::from(
+        group_vals.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+    )));
+
+    let out_schema = Arc::new(Schema::new(out_fields));
+    RecordBatch::try_new(out_schema, out_cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
 }
 
 fn pre_aggregate_xy(
@@ -298,7 +412,7 @@ fn residuals_fit(
     build_residuals_batch(out_x, out_r, spec.inject_zero_ref, metrics)
 }
 
-fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
+fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<(Vec<f64>, Vec<f64>)> {
     let schema = batch.schema();
     let xi = schema.index_of(&spec.x)
         .map_err(|_| PyValueError::new_err(format!("stat_smooth: column '{}' not found", spec.x)))?;
@@ -314,11 +428,15 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec
     let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>().unwrap();
     let mut xs = Vec::with_capacity(xa.len());
     let mut ys = Vec::with_capacity(ya.len());
-    for i in 0..xa.len() {
-        if xa.is_null(i) || ya.is_null(i) { continue; }
+    let push = |i: usize, xs: &mut Vec<f64>, ys: &mut Vec<f64>| {
+        if xa.is_null(i) || ya.is_null(i) { return; }
         let xv = xa.value(i); let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() { continue; }
+        if xv.is_nan() || yv.is_nan() { return; }
         xs.push(xv); ys.push(yv);
+    };
+    match only_indices {
+        Some(ixs) => for &i in ixs { push(i, &mut xs, &mut ys); },
+        None => for i in 0..xa.len() { push(i, &mut xs, &mut ys); },
     }
     Ok((xs, ys))
 }
@@ -678,7 +796,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, name = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
@@ -692,6 +810,7 @@ impl PySmooth {
         output: &str,
         inject_zero_ref: bool,
         inject_metrics: bool,
+        groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
@@ -766,6 +885,7 @@ impl PySmooth {
             output: output_parsed,
             inject_zero_ref,
             inject_metrics,
+            groupby,
             name,
         })))
     }
@@ -773,10 +893,10 @@ impl PySmooth {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, name={:?})",
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
                 s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.n, s.seed,
                 s.x_bins, s.x_estimator, s.output,
-                s.inject_zero_ref, s.inject_metrics, s.name,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -821,6 +941,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -848,6 +969,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -875,6 +997,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -893,6 +1016,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -910,6 +1034,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -940,6 +1065,7 @@ mod tests {
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
+                groupby: None,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -975,6 +1101,7 @@ mod tests {
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
+                groupby: None,
                 name: None,
             };
             let out = apply(&spec, &batch).unwrap();
@@ -1004,6 +1131,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         // Primary goal: no panic with k == n == degree+1.
@@ -1036,6 +1164,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let spec2 = spec1.clone();
@@ -1065,6 +1194,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1089,6 +1219,7 @@ mod tests {
             output: SmoothOutput::Residuals,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1114,6 +1245,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();

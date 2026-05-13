@@ -1047,6 +1047,10 @@ class Chart:
         ci : float or None, optional
             Confidence level for the interval band, e.g. ``0.95``.  When set,
             produces a layered ribbon + line chart.  Default is ``None``.
+        groupby : str, optional
+            Group-key column (Utf8).  When set, the smooth is computed
+            independently per group and the group column is preserved in
+            the output so downstream ``color=`` encoding maps to it.
         position : Position, optional
             Position adjustment.
 
