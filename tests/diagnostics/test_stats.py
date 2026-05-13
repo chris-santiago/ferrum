@@ -67,7 +67,7 @@ def test_pearson_parity_vs_scipy(n, rng):
     y = rng.randn(n)
     ours = _pearson_r_rust(X, y)
     theirs = np.array([ss.pearsonr(X[:, j], y).statistic for j in range(X.shape[1])])
-    np.testing.assert_allclose(ours, theirs, atol=1e-10, rtol=1e-10)
+    np.testing.assert_allclose(ours, theirs, atol=1e-12, rtol=1e-12)
 
 
 @pytest.mark.parametrize("n", [10, 100, 1000])
@@ -78,7 +78,7 @@ def test_spearman_parity_vs_scipy(n, rng):
     y = rng.randn(n)
     ours = _spearman_rho_rust(X, y)
     theirs = np.array([ss.spearmanr(X[:, j], y).statistic for j in range(X.shape[1])])
-    np.testing.assert_allclose(ours, theirs, atol=1e-8, rtol=1e-8)
+    np.testing.assert_allclose(ours, theirs, atol=1e-10, rtol=1e-10)
 
 
 @pytest.mark.parametrize("n", [10, 50, 200, 1000])
