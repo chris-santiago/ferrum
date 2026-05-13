@@ -45,5 +45,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
+    // Tier 3: Rust-native statistics (replaces stats.py).
+    m.add_function(wrap_pyfunction!(transform::stats::hat_matrix_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::studentized_residual_no_x, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::py_shapiro_w, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::py_rankdata_average, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::py_rank1d, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::py_rank1d_with_y, m)?)?;
+    m.add_function(wrap_pyfunction!(transform::stats::py_rank2d, m)?)?;
     Ok(())
 }

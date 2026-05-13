@@ -80,7 +80,7 @@ pub(crate) fn solve_3x3_spd(m: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
 
 // ---- faer-backed routines ----
 
-#[allow(dead_code)] // wired in Tier 3 (stats.py → Rust migration)
+
 /// Hat matrix diagonal h_ii via Cholesky of the normal equations.
 ///
 /// Given design matrix X (n × p), computes h_ii = X_i' (X'X)^{-1} X_i
@@ -120,7 +120,7 @@ pub(crate) fn hat_diagonal(x: &Mat<f64>) -> Vec<f64> {
     h
 }
 
-#[allow(dead_code)] // wired in Tier 3 (stats.py → Rust migration)
+
 /// Pearson correlation matrix for X (n × p). Returns a p × p Mat<f64>.
 ///
 /// Each entry C\[i,j\] = cor(X\[:,i\], X\[:,j\]). Diagonal is pinned to 1.0
@@ -177,7 +177,7 @@ pub(crate) fn corrcoef(x: &Mat<f64>) -> Mat<f64> {
     c
 }
 
-#[allow(dead_code)] // wired in Tier 3 (stats.py → Rust migration)
+
 /// Build a faer Mat<f64> from a flat row-major slice and dimensions.
 ///
 /// # Panics

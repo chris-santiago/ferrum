@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import numpy as np
 import polars as pl
+import pyarrow as pa
 
 
 class RankingMixin:
@@ -25,30 +23,25 @@ class RankingMixin:
         ``score: Float64``, ``rank: Int64``. Rows are pre-sorted by descending
         score so ``rank=1`` is always the top feature.
         """
-        from ..stats import (
-            covariance_rank,
-            rank1d_compute,
-        )
-
         key = self._cache_key("rank1d", algorithm=algorithm)
         if key in self._cache:
             return self._cache[key]
+
+        x_arrow = pa.RecordBatch.from_pydict(
+            {c: self._X[c].to_arrow() for c in self._X.columns}
+        )
         if algorithm == "covariance":
+            from ferrum._core import py_rank1d_with_y
+
             if self._y is None:
                 raise ValueError("ModelSource.rank1d(algorithm='covariance') requires y.")
-            X_np = np.asarray(self._X, dtype=np.float64)
-            y_np = np.asarray(self._y, dtype=np.float64)
-            scores = covariance_rank(X_np, y_np)
-            order = np.argsort(-scores, kind="mergesort")
-            df = pl.DataFrame(
-                {
-                    "feature": [str(self._feature_names[int(i)]) for i in order],
-                    "score": [float(scores[int(i)]) for i in order],
-                    "rank": list(range(1, len(order) + 1)),
-                }
-            )
+            y_arrow = pa.array(self._y.to_list(), type=pa.float64())
+            result = py_rank1d_with_y(x_arrow, y_arrow, algorithm, None)
         else:
-            df = rank1d_compute(self._X, algorithm=algorithm)
+            from ferrum._core import py_rank1d
+
+            result = py_rank1d(x_arrow, algorithm, None)
+        df = pl.from_arrow(result)
         self._cache[key] = df
         return df
 
@@ -56,18 +49,21 @@ class RankingMixin:
         """Pairwise feature ranking — long-form correlation matrix.
 
         ``algorithm`` in ``{"pearson", "spearman", "kendall", "covariance"}``.
-        ``"kendall"`` routes through ``ferrum._core.kendall_tau_b``
-        (Knight's O(n log n)).
+        All algorithms now run in Rust (Kendall uses Knight's O(n log n)).
 
         Output schema (``SCHEMA_RANK2D``): ``feature_x: Utf8``,
         ``feature_y: Utf8``, ``correlation: Float64`` — one row per
         ordered pair of features, p × p rows total.
         """
-        from ..stats import rank2d_compute
+        from ferrum._core import py_rank2d
 
         key = self._cache_key("rank2d", algorithm=algorithm)
         if key in self._cache:
             return self._cache[key]
-        df = rank2d_compute(self._X, algorithm=algorithm)
+        x_arrow = pa.RecordBatch.from_pydict(
+            {c: self._X[c].to_arrow() for c in self._X.columns}
+        )
+        result = py_rank2d(x_arrow, algorithm)
+        df = pl.from_arrow(result)
         self._cache[key] = df
         return df

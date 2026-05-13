@@ -20,11 +20,7 @@ from ..charts import (
     _rank1d_chart_from_dataframe,
     _rank2d_chart_from_dataframe,
 )
-from ..stats import (
-    covariance_rank,
-    rank1d_compute,
-    rank2d_compute,
-)
+from .._rank_helpers import rank1d_compute, rank1d_compute_with_y, rank2d_compute
 
 
 class Rank1DVisualizer(FerrumVisualizer):
@@ -102,17 +98,7 @@ class Rank1DVisualizer(FerrumVisualizer):
         if self.algorithm == "covariance":
             if y is None:
                 raise ValueError("Rank1DVisualizer(algorithm='covariance') requires y.")
-            cols, X_np = _columns_and_array(X)
-            y_np = np.asarray(y, dtype=np.float64)
-            scores = covariance_rank(X_np, y_np)
-            order = np.argsort(-scores, kind="mergesort")
-            df = pl.DataFrame(
-                {
-                    "feature": [str(cols[int(i)]) for i in order],
-                    "score": [float(scores[int(i)]) for i in order],
-                    "rank": list(range(1, len(order) + 1)),
-                }
-            )
+            df = rank1d_compute_with_y(X, y, algorithm="covariance")
         else:
             df = rank1d_compute(X, algorithm=self.algorithm)
         self._metrics["top_feature_score"] = float(df["score"][0])

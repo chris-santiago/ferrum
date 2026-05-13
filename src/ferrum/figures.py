@@ -68,7 +68,7 @@ from ferrum._diagnostics.charts import (
 )
 from ferrum._diagnostics.deps import require_sklearn
 from ferrum._diagnostics.source import ComparedModelSource
-from ferrum._diagnostics.stats import rank1d_compute, rank2d_compute
+from ferrum._diagnostics._rank_helpers import rank1d_compute, rank2d_compute
 
 
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
@@ -1944,7 +1944,7 @@ def rank1d_chart(
         )
         df = source.rank1d(algorithm=algo)
     else:
-        from ferrum._diagnostics.stats import rank1d_compute
+        from ferrum._diagnostics._rank_helpers import rank1d_compute
 
         data = data_or_source if X is None else X
         df = rank1d_compute(data, algorithm=algo)
@@ -1997,7 +1997,7 @@ def rank2d_chart(
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank2d(algorithm=algo)
     else:
-        from ferrum._diagnostics.stats import rank2d_compute
+        from ferrum._diagnostics._rank_helpers import rank2d_compute
 
         data = data_or_source if X is None else X
         df = rank2d_compute(data, algorithm=algo)
