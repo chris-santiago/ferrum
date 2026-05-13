@@ -1504,7 +1504,10 @@ def _pdp_chart_from_source(
             center=center,
             color_field=None,  # one feature per facet — color is redundant
         )
-        .encode(y=Y("pd_value", title="Partial dependence"))
+        .encode(
+            x=X("feature_value", title="Feature value"),
+            y=Y("pd_value", title="Partial dependence"),
+        )
         .facet(col="feature")
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
@@ -1546,6 +1549,16 @@ def _discrimination_threshold_chart_from_source(
         on=list(metrics),
         variable_name="metric",
         value_name="value",
+    )
+    # Rename internal metric names to human-readable legend labels.
+    _metric_labels = {
+        "precision": "Precision",
+        "recall": "Recall",
+        "f1": "F1",
+        "queue_rate": "Queue rate",
+    }
+    long_df = long_df.with_columns(
+        pl.col("metric").replace(_metric_labels).alias("metric")
     )
     chart = ferrum.Chart(long_df).mark_discrimination_threshold(
         metrics=metrics,
@@ -1850,7 +1863,7 @@ def _pca_scree_chart_from_source(
         threshold_line=threshold,
     )
     chart = chart.encode(
-        x=X("component", title="Component"),
+        x=X("component", title="Component", type="O"),
         y=Y("explained_variance", title="Explained variance"),
     )
     chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))

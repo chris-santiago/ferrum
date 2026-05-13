@@ -37,3 +37,4 @@ class _PendingMark:
     kind: str
     kwargs: dict
     desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], tuple]
+    prior_mark: str | None = None  # Existing primitive mark to preserve as a layer

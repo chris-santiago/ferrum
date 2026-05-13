@@ -29,7 +29,7 @@ def desugar_contour(
     bandwidth: str | float = "scott",
     thresholds: int = 6,
     smooth: bool = True,
-    fill: bool = False,
+    fill: bool = True,
     cmap: str | None = None,
 ) -> tuple:
     """Bivariate-density contour mark desugar.
@@ -187,10 +187,12 @@ def desugar_violin(
             f"mark_violin inner must be one of 'box', 'quartile', 'point', or None; got {inner!r}"
         )
 
+    from ferrum.encoding import Y
+
     transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
     violin_layer = _Layer(
         mark="polygon",
-        encoding={"x": x_field, "y": "violin_y"},
+        encoding={"x": x_field, "y": Y("violin_y", title=y_field)},
         mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
         data_source="violin",
     )
@@ -298,10 +300,15 @@ def desugar_qq(
             name="qq_main",
         )
     ]
+    from ferrum.encoding import X, Y
+
     layers = [
         _Layer(
             mark="point",
-            encoding={"x": "theoretical", "y": "sample"},
+            encoding={
+                "x": X("theoretical", title="Theoretical Quantiles"),
+                "y": Y("sample", title="Sample Quantiles"),
+            },
             data_source="qq_main",
         )
     ]
@@ -408,6 +415,9 @@ def desugar_raster(
             "mark_raster blend='additive' deferred to Phase 11; using alpha blending",
         )
 
+    # Default to log-scale for count/density aggregates to improve contrast
+    # when most cells are empty and a few have high counts.
+    effective_log_scale = log_scale if log_scale else (aggregate in ("count", "density"))
     transforms = [
         Raster(
             x=x_field,
@@ -416,7 +426,7 @@ def desugar_raster(
             field=field,
             resolution=resolution,
             min_count=min_count,
-            log_scale=log_scale,
+            log_scale=effective_log_scale,
             name="raster",
         )
     ]
@@ -533,7 +543,7 @@ def desugar_hex(
     layers = [
         _Layer(
             mark="polygon",
-            encoding={"x": "hex_x", "y": "hex_y"},
+            encoding={"x": "hex_x", "y": "hex_y", "color": "value"},
             mark_kwargs=mk,
             data_source="hex",
         )

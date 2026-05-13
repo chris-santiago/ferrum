@@ -1,7 +1,8 @@
-//! mark_tick: two modes —
+//! mark_tick: three modes —
 //!   quantitative x → rug-style vertical segment at panel bottom (original);
 //!   ordinal x + quantitative y → horizontal tick at y position (boxplot median,
-//!   Phase 10c-pre).
+//!   Phase 10c-pre);
+//!   ordinal y + quantitative x → vertical tick at x position (strip plot).
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
@@ -38,6 +39,30 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 let cx = cx + x_offsets[i];
                 let py = py + y_offsets[i];
                 out.line(cx - tick_half, py, cx + tick_half, py, &style);
+            }
+            return;
+        }
+    }
+
+    // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
+    if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
+        if let Some(yf) = y_field(ctx, spec) {
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
+            let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
+            let n_cats = {
+                let mut set = std::collections::HashSet::<&str>::new();
+                for v in ys.iter().flatten() { set.insert(v.as_str()); }
+                set.len().max(1)
+            };
+            let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            for i in 0..xs.len() {
+                let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+                let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                let px = px + x_offsets[i];
+                let cy = cy + y_offsets[i];
+                out.line(px, cy - tick_half, px, cy + tick_half, &style);
             }
             return;
         }

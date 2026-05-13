@@ -290,7 +290,7 @@ def desugar_errorband(
     layers = [
         _Layer(
             mark="ribbon",
-            encoding={"x": x_field, "y": "lower", "y2": "upper"},
+            encoding={"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"},
             mark_kwargs={"opacity": 0.2, "stroke": "none"},
             data_source="err",
         ),
@@ -389,7 +389,7 @@ def desugar_boxen(
     x_field: str | None,
     y_field: str | None,
     *,
-    k_depth: str = "proportion",
+    k_depth: str = "tukey",
     k_proportion: float = 0.007,
     outlier_threshold: float = 1.5,
     palette=None,

@@ -410,18 +410,61 @@ class Chart:
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 kwargs = {**kwargs, "y2_field": y2_field}
+        # When mark_smooth was called on a chart that already had a primitive
+        # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
+        # the existing mark as a scatter layer. Force the Smooth transform
+        # to be named so __final__ stays as the raw data for the scatter layer.
+        _prior_mark = self._pending_stat_mark.prior_mark if hasattr(self._pending_stat_mark, "prior_mark") else None
+        if _prior_mark is not None and kind == "smooth" and "name" not in kwargs:
+            kwargs = {**kwargs, "name": "smooth"}
         result = desugar_fn(x_field, y_field, **kwargs)
         new = self._clone()
         new._pending_stat_mark = None
+
+        # Build a scatter layer from the prior mark if present.
+        _prior_layer = None
+        if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
+            from ferrum._layer import _Layer as _PriorLyr
+
+            _prior_layer = _PriorLyr(
+                mark=_prior_mark,
+                encoding=dict(self._encoding),
+                mark_kwargs=dict(self._mark_kwargs) if self._mark_kwargs else None,
+                position=self._position,
+            )
+
         if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
             # ("__layered__", transforms, _, _, layers)
             _, transforms, _ignored1, _ignored2, layers_list = result
             new._transforms = list(self._transforms) + list(transforms or [])
-            new._layers = list(layers_list)
+            all_layers = list(layers_list)
+            if _prior_layer is not None:
+                all_layers = [_prior_layer] + all_layers
+            new._layers = all_layers
             new._mark = None  # signals layered mode in to_spec
             return new
         # Legacy single-mark 3-tuple: (mark, transforms, remap)
         mark, transforms, remap = result
+        if _prior_layer is not None:
+            from ferrum._layer import _Layer as _SmoothLyr
+            from ferrum.encoding import X as _XS, Y as _YS
+
+            smooth_enc = dict(self._encoding)
+            if remap:
+                if "x" in remap:
+                    smooth_enc["x"] = _XS(remap["x"], type="Q")
+                if "y" in remap:
+                    smooth_enc["y"] = _YS(remap["y"], type="Q")
+            smooth_layer = _SmoothLyr(
+                mark=mark,
+                encoding=smooth_enc,
+                mark_kwargs=None,
+                data_source="smooth",
+            )
+            new._transforms = list(self._transforms) + list(transforms or [])
+            new._layers = [_prior_layer, smooth_layer]
+            new._mark = None
+            return new
         new._mark = mark
         new._transforms = list(self._transforms) + list(transforms or [])
         if remap:
@@ -470,6 +513,7 @@ class Chart:
         placeholder: str,
         position=None,
         data_transform=None,
+        prior_mark: str | None = None,
     ) -> "Chart":
         # Shared scaffold for composite/diagnostic mark_* methods. Validates the
         # position adjustment, clones, sets the placeholder mark (overridden by
@@ -490,7 +534,7 @@ class Chart:
                     new._data = data_transform(new._data)
             except ImportError:
                 pass
-        new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn)
+        new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
         new._position = position
         return new
 
@@ -1022,12 +1066,16 @@ class Chart:
         x_enc = self._encoding.get("x")
         y_enc = self._encoding.get("y")
         if x_enc is None or y_enc is None:
+            # Record the prior primitive mark (if any) so _resolve_pending
+            # can preserve it as a scatter layer alongside the smooth layers.
+            _pm = self._mark if (self._mark is not None and self._mark in _PRIMITIVE_MARKS) else None
             return self._set_composite_mark(
                 "smooth",
                 _resolve_smooth,
                 kwargs,
                 placeholder="line",
                 position=position,
+                prior_mark=_pm,
             )
         if position is not None:
             from ferrum.position import validate_position_eligibility
@@ -1035,26 +1083,74 @@ class Chart:
             validate_position_eligibility("smooth", position)
         x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
         y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
+        # When mark_smooth is called on a chart that already has a primitive
+        # mark (e.g. chart.mark_point().mark_smooth()), preserve the existing
+        # mark as a layer so both render.  The scatter layer reads from the
+        # original data (data_source=None → __final__), while the smooth
+        # layers read from a NAMED Smooth transform output so the unnamed
+        # pipeline chain stays as the original data.
+        has_existing_mark = self._mark is not None and self._mark in _PRIMITIVE_MARKS
+        if has_existing_mark:
+            # Force the Smooth transform to be named so it doesn't overwrite
+            # __final__. The scatter layer needs __final__ to be the raw data.
+            if "name" not in kwargs:
+                kwargs = {**kwargs, "name": "smooth"}
         result = desugar_smooth(x_field, y_field, **kwargs)
         new = self._clone()
+        existing_mark_layer = None
+        if has_existing_mark:
+            from ferrum._layer import _Layer as _LyrSmooth
+
+            existing_mark_layer = _LyrSmooth(
+                mark=self._mark,
+                encoding=dict(self._encoding),
+                mark_kwargs=dict(self._mark_kwargs) if self._mark_kwargs else None,
+                position=self._position,
+            )
         if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
             _, transforms, _ignored1, _ignored2, layers_list = result
             new._transforms = list(self._transforms) + list(transforms or [])
-            new._layers = list(layers_list)
+            all_layers = list(layers_list)
+            if existing_mark_layer is not None:
+                all_layers = [existing_mark_layer] + all_layers
+            new._layers = all_layers
             new._mark = None  # signals layered mode
         else:
             mark, transforms, remap = result
-            new._mark = mark
-            new._transforms = list(self._transforms) + transforms
-            # Smooth's output schema uses literal "x"/"y" columns; apply the
-            # remap so the encoding references the post-transform schema.
-            if remap:
-                from ferrum.encoding import X, Y
+            if existing_mark_layer is not None:
+                from ferrum._layer import _Layer as _LyrSmooth2
+                from ferrum.encoding import X as _XSmooth, Y as _YSmooth
 
-                if "x" in remap:
-                    new._encoding["x"] = X(remap["x"], type="Q")
-                if "y" in remap:
-                    new._encoding["y"] = Y(remap["y"], type="Q")
+                # Apply the remap to the smooth layer's encoding so it references
+                # the Smooth transform's output columns ("x", "y") rather than the
+                # original field names.
+                smooth_enc = dict(self._encoding)
+                if remap:
+                    if "x" in remap:
+                        smooth_enc["x"] = _XSmooth(remap["x"], type="Q")
+                    if "y" in remap:
+                        smooth_enc["y"] = _YSmooth(remap["y"], type="Q")
+                smooth_layer = _LyrSmooth2(
+                    mark=mark,
+                    encoding=smooth_enc,
+                    mark_kwargs=None,
+                    data_source="smooth",
+                )
+                new._transforms = list(self._transforms) + transforms
+                new._layers = [existing_mark_layer, smooth_layer]
+                new._mark = None
+            else:
+                new._mark = mark
+                new._transforms = list(self._transforms) + transforms
+                # Smooth's output schema uses literal "x"/"y" columns; apply the
+                # remap so the encoding references the post-transform schema.
+                if remap:
+                    from ferrum.encoding import X, Y
+
+                    if "x" in remap:
+                        new._encoding["x"] = X(remap["x"], type="Q")
+                    if "y" in remap:
+                        new._encoding["y"] = Y(remap["y"], type="Q")
         new._position = position
         return new
 
@@ -1129,7 +1225,7 @@ class Chart:
     def mark_boxen(
         self,
         *,
-        k_depth: str = "proportion",
+        k_depth: str = "tukey",
         k_proportion: float = 0.007,
         outlier_threshold: float = 1.5,
         palette=None,

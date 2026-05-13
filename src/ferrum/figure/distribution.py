@@ -181,11 +181,17 @@ def displot(
         # ECDF: cumulative bin → step line.
         if x is None:
             raise ValueError("displot(kind='ecdf') requires x=")
+        from ferrum.encoding import X as _X_ecdf
+        from ferrum.encoding.base import ChannelBase as _CB_ecdf
+
         bin_count = bins if isinstance(bins, int) else None
-        chart = chart.transform(Bin(field=x, bin_count=bin_count, cumulative=True))
+        # Extract the original field name for the axis title.
+        _ecdf_x_name = x.field if isinstance(x, _CB_ecdf) else str(x)
+        chart = chart.transform(Bin(field=_ecdf_x_name, bin_count=bin_count, cumulative=True))
         chart = chart.mark_line()
-        # Re-route encoding to bin output columns.
-        enc["x"] = "bin_start"
+        # Re-route encoding to bin output columns, preserving the original
+        # variable name as the x-axis title.
+        enc["x"] = _X_ecdf("bin_start", title=_ecdf_x_name)
         enc["y"] = "count"
     elif kind == "rug":
         chart = chart.mark_tick()

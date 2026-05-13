@@ -302,6 +302,7 @@ def desugar_smooth(
     x_bins: Any = None,
     x_estimator: Any = None,
     show_metrics: bool = False,
+    name: str | None = None,
 ) -> tuple:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
@@ -378,6 +379,8 @@ def desugar_smooth(
             smooth_kwargs["x_bins"] = x_bins
         if x_estimator is not None:
             smooth_kwargs["x_estimator"] = x_estimator
+        if name is not None:
+            smooth_kwargs["name"] = name
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": "x", "y": "y"}
         return ("line", transforms, encoding_remap)

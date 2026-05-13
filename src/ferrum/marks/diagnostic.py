@@ -665,12 +665,17 @@ def desugar_shap_bar(
     # max_display is wired via data_transform in mark_shap_bar.
     _ = max_display
 
-    def _x_channel(field: str) -> Any:
-        if x_scale_domain is None:
-            return field
+    def _x_channel(field: str, title: str | None = None) -> Any:
         from ferrum.encoding import X
 
-        return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+        kw: dict[str, Any] = {}
+        if title is not None:
+            kw["title"] = title
+        if x_scale_domain is not None:
+            kw["scale"] = {"type": "linear", "domain": list(x_scale_domain)}
+        if kw:
+            return X(field, **kw)
+        return field
 
     return (
         "__layered__",
@@ -680,7 +685,10 @@ def desugar_shap_bar(
         [
             _Layer(
                 mark="bar",
-                encoding={"x": _x_channel("abs_mean_shap"), "y": "feature"},
+                encoding={
+                    "x": _x_channel("abs_mean_shap", title="Mean |SHAP value|"),
+                    "y": "feature",
+                },
             ),
         ],
     )
@@ -711,12 +719,17 @@ def desugar_shap_waterfall(
             "explicit non-negative sample index."
         )
 
-    def _x_channel(field: str) -> Any:
-        if x_scale_domain is None:
-            return field
+    def _x_channel(field: str, title: str | None = None) -> Any:
         from ferrum.encoding import X
 
-        return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
+        kw: dict[str, Any] = {}
+        if title is not None:
+            kw["title"] = title
+        if x_scale_domain is not None:
+            kw["scale"] = {"type": "linear", "domain": list(x_scale_domain)}
+        if kw:
+            return X(field, **kw)
+        return field
 
     return (
         "__layered__",
@@ -727,7 +740,7 @@ def desugar_shap_waterfall(
             _Layer(
                 mark="bar",
                 encoding={
-                    "x": _x_channel("x0"),
+                    "x": _x_channel("x0", title="SHAP value"),
                     "x2": "x1",
                     "y": "feature",
                     "color": "shap_sign",
@@ -1430,11 +1443,13 @@ def desugar_rank2d(
 
     del x_field, y_field
 
+    from ferrum.encoding import X, Y
+
     user_kw = _validate("rank2d", mark_kwargs)
     color_enc = Color(color_field, scheme=cmap) if cmap is not None else Color(color_field)
     rect_enc: dict[str, Any] = {
-        "x": "feature_x",
-        "y": "feature_y",
+        "x": X("feature_x", title="Feature"),
+        "y": Y("feature_y", title="Feature"),
         "color": color_enc,
     }
     layers: list = [_Layer(mark="rect", encoding=rect_enc)]
