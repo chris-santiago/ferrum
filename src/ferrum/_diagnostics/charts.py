@@ -1769,6 +1769,41 @@ def _alpha_selection_chart_from_source(
             mark_kwargs={"size": 40, "filled": True},
         )
     )
+    # Schwabish C11: annotate the best-alpha point with a text label.
+    # The desugar already draws a vertical rule via the _best_alpha sentinel
+    # (injected by the data_transform at render time); here we inject
+    # companion sentinel columns for a text layer that reads the same
+    # _best_alpha x position.
+    if highlight_best and "mean_score" in df.columns:
+        best_idx = int(df["mean_score"].arg_max())
+        best_alpha = float(df["alpha"][best_idx])
+        best_score = float(df["mean_score"][best_idx])
+        label_text = f"α = {best_alpha:.3f}"
+        n = df.height
+        df = df.with_columns(
+            pl.Series("_best_alpha_y", [best_score] + [None] * (n - 1), dtype=pl.Float64),
+            pl.Series("_best_alpha_text", [label_text] + [None] * (n - 1), dtype=pl.Utf8),
+        )
+        # Rebuild the chart with the augmented DataFrame so that the
+        # text layer shares the same data identity.
+        chart = ferrum.Chart(df).mark_alpha_selection(
+            log_scale=log_scale,
+            highlight_best=highlight_best,
+        )
+        chart = chart.encode(y=Y("mean_score", title="Score"))
+        chart = chart.properties(title=ferrum.Title("Alpha Selection"))
+        chart = chart.layer(
+            Layer(
+                mark="point",
+                encoding={"x": "alpha", "y": "mean_score"},
+                mark_kwargs={"size": 40, "filled": True},
+            ),
+            Layer(
+                mark="text",
+                encoding={"x": "_best_alpha", "y": "_best_alpha_y", "text": "_best_alpha_text"},
+                mark_kwargs={"dx": 8, "dy": -8, "align": "left"},
+            ),
+        )
     if theme is not None:
         chart = chart.theme(theme)
     return chart
@@ -2052,7 +2087,7 @@ def _parallel_coords_chart_from_dataframe(
     features: list[str] | None = None,
     hue: str | None = None,
     rescale: str | None = "minmax",
-    alpha: float = 0.5,
+    alpha: float = 0.3,
     theme: Any = None,
 ):
     """Parallel coordinates chart from a wide DataFrame.
@@ -2377,24 +2412,58 @@ def _cluster_diagnostics_chart(
 
     from ferrum.layer import Layer
 
+    # Schwabish C11: elbow detection via second derivative of inertia.
+    # Inject sentinel columns for the elbow vline + text before building
+    # the chart so both layers share the same DataFrame.
+    inertias = np.array([r["inertia"] for r in rows])
+    ks_list = list(ks)
+    elbow_layers: list[Layer] = []
+    if len(inertias) >= 3:
+        second_diff = np.diff(inertias, n=2)
+        elbow_detect_idx = int(np.argmax(second_diff)) + 1
+        elbow_k_val = int(ks_list[elbow_detect_idx])
+        elbow_score_val = float(inertias[elbow_detect_idx])
+        n = df.height
+        df = df.with_columns(
+            pl.Series("_elbow_k", [float(elbow_k_val)] + [None] * (n - 1), dtype=pl.Float64),
+            pl.Series("_elbow_y", [elbow_score_val] + [None] * (n - 1), dtype=pl.Float64),
+            pl.Series(
+                "_elbow_text",
+                [f"elbow at k={elbow_k_val}"] + [None] * (n - 1),
+                dtype=pl.Utf8,
+            ),
+        )
+        elbow_layers = [
+            Layer(
+                mark="rule",
+                encoding={"x": "_elbow_k"},
+                mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
+            ),
+            Layer(
+                mark="text",
+                encoding={"x": "_elbow_k", "y": "_elbow_y", "text": "_elbow_text"},
+                mark_kwargs={"dx": 8, "dy": -8, "align": "left"},
+            ),
+        ]
     elbow = (
         ferrum.Chart(df)
         .mark_line()
         .encode(x=XEnc("k", title="k"), y=YEnc("inertia", title="Distortion score"))
-        .properties(title=ferrum.Title("Cluster Diagnostics"))
+        .properties(title=ferrum.Title("Distortion Score Elbow"))
         .layer(
             Layer(
                 mark="point",
                 encoding={"x": "k", "y": "inertia"},
                 mark_kwargs={"size": 40, "filled": True},
-            )
+            ),
+            *elbow_layers,
         )
     )
     sil = (
         ferrum.Chart(df)
         .mark_line()
         .encode(x=XEnc("k", title="k"), y=YEnc("silhouette", title="Silhouette score"))
-        .properties(title=ferrum.Title("Cluster Diagnostics"))
+        .properties(title=ferrum.Title("Silhouette Score"))
         .layer(
             Layer(
                 mark="point",
