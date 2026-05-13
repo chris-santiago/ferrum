@@ -144,10 +144,12 @@ df_violin = df_box
 qq_vals = rng.normal(0, 1, 200)
 df_qq = pl.DataFrame({"value": qq_vals})
 
-# Raster (2D density-like)
-raster_x = rng.uniform(0, 10, 1000)
-raster_y = raster_x * 0.5 + rng.normal(0, 1.5, 1000)
-df_raster = pl.DataFrame({"x": raster_x, "y": raster_y})
+# Raster (2D density — concentrated bivariate normal)
+raster_xy = np.vstack([
+    rng.multivariate_normal([0, 0], [[1.0, 0.6], [0.6, 1.0]], 800),
+    rng.multivariate_normal([3, 3], [[0.5, -0.3], [-0.3, 0.5]], 400),
+])
+df_raster = pl.DataFrame({"x": raster_xy[:, 0], "y": raster_xy[:, 1]})
 
 # Swarm
 df_swarm = pl.DataFrame(
