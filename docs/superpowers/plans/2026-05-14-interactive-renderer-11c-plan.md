@@ -39,11 +39,19 @@ Wire the full interaction system onto the SceneGraph IR (11a) and WASM renderer 
 
 ## 4. Constraints
 
-- `FieldValue` must use a tagged serde enum, not `serde_json::Value` (spec §6.1)
+- `FieldValue` must use a tagged serde enum (`#[serde(tag = "type", rename_all = "snake_case")]`), not `serde_json::Value` — exactly four variants: String, Number(f64), Bool, Null (spec §6.1)
 - `selections`/`conditionals` fields default to empty vec with `skip_serializing_if` — existing JSON specs must remain byte-compatible
+- **PyO3 constructor:** `selections`/`conditionals` accept `Option<&str>` (JSON strings deserialized via `serde_json::from_str`), not native Python lists/dicts
 - Hit testing must handle all mark types in spec §6.2 (circle, rect, path, polygon, line, segment)
+- **Hit testing strategy:** reverse z-order iteration (last batch = topmost); skip `Raw`/`Group` as non-data marks; line/polyline minimum 3px hit tolerance (`style.width.max(3.0)`)
 - Conditional resolution updates GPU instance buffers in-place — no SceneGraph rebuild (spec §6.4)
 - Zoom/pan uses per-panel `Affine2` transforms, not scale domain mutation (spec §6.5)
+- **Double-click resets zoom/pan** to identity transform
+- **Tick levels:** 4 pre-computed density levels at zoom breakpoints (count_hint 4/8/16/32 at ranges 0–0.5, 0.5–2.0, 2.0–4.0, 4.0–∞); ordinal scales return empty tick levels. Requires `tick_values(count_hint)` method on `ScaleKind`
+- **Tooltips/hrefs:** safe DOM nodes only (no `innerHTML`); CSS opacity transition (0.1s ease); href opens with `noopener,noreferrer` security attrs
+- **`selection_single`/`selection_multi`** are `functools.partial` wrappers around `selection_point` (not separate classes) — `toggle=False` and `toggle="event.shiftKey"` respectively
+- **`SceneNode::Raw` NOT offset** during compound view scene graph merge (known limitation — legend colorbars will be mis-positioned until Raw is replaced with typed gradient nodes)
+- **Transitions:** cubic ease-in-out timing, 300ms default duration; finalize via `load_scene()` with new scene on completion (do not leave interpolated state); key matching via `HashMap<&str, usize>` for O(1) lookup
 - anywidget bidirectional sync via traitlets — selection state flows Python↔JS (spec §11.2)
 - SVG/PNG renderers silently ignore selections and conditionals
 - All existing golden SVGs and tests must continue to pass

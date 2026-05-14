@@ -37,6 +37,14 @@ Deliver the `ferrum-wasm` crate — a WASM-compiled GPU renderer that consumes t
 - WebGL2 fallback required via `wgpu` `webgl` feature (spec §5.1)
 - Byte-deterministic randomness constraint does not apply to WASM crate (no transforms)
 - All existing golden SVGs and Python/Rust tests must continue to pass unchanged
+- **One `WasmRenderer` per canvas** — no global singleton; each chart on the page gets its own instance
+- **wgpu device config:** `Limits::downlevel_webgl2_defaults()`, `PowerPreference::LowPower`, `CompositeAlphaMode::PreMultiplied` (transparency compositing with CSS overlay)
+- **Group flattening:** `Group` nodes recurse children at load time, discard group attrs (read `stroke_cap`/`stroke_join` from `MarkBatch` fields). `Raw` nodes: skip + console.warn (typed gradient representation deferred)
+- **Draw order:** mesh (areas/lines/polygons) → rect (bars) → circle (points on top). Painter's algorithm, no depth/stencil buffer. Fully correct interleaved-batch z-order deferred to 11c
+- **Pipeline blend/topology:** all four pipelines use alpha blending (`SrcAlpha, OneMinusSrcAlpha`); mesh = `TriangleList` (indexed, from lyon); circle/rect = `TriangleStrip` (instanced quads)
+- **`ferrum-interactive.js` is hand-authored and committed** — it imports from wasm-pack-generated glue but is NOT itself generated. Only wasm-pack output (`ferrum_wasm.js`, `ferrum_wasm_bg.wasm`) is gitignored
+- **Build order is load-bearing:** `wasm-pack build` must run before `maturin develop`, otherwise WASM files won't be included in the wheel
+- **WASM inlining for single-file HTML:** wasm-pack's `init()` accepts a `BufferSource` (Uint8Array), so `init(wasmBytes)` works with base64-decoded bytes
 
 ## 5. Tasks
 

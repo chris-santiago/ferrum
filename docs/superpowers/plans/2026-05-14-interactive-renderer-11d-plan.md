@@ -43,7 +43,12 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 - **String coord path preserved:** `ChartSpec(..., coord="flip")` must still work (back-compat for existing tests).
 - **Projection functions are free functions**, not methods on `GeoProjection` — orphan rule forbids inherent impls on foreign types.
 - **Arc marks only make sense in CoordPolar.** Return empty result without error if coord is not Polar.
+- **`inner_radius`** (donut) flows through `mark_style` kwargs, NOT through `CoordPolar` — the coord carries only theta/start/direction.
+- **Polar theta scale:** normalized to [0,1] in `scale_resolve.rs`; the arc mark builder multiplies by 2π itself.
+- **mark_label collision avoidance (dodging) is out of scope for 11d** — basic offset positioning only.
 - **mark_image is inherently Cartesian.** Return empty result for Polar/Geo coords.
+- **Geoshape rendering is two-pass:** first pass computes projected bounding extent across all geometries, second pass projects and scales to pixel space.
+- **Polygon exterior ring only** for 11d; interior rings (holes) skipped.
 - All existing golden SVGs must pass unchanged.
 
 ## 5. Tasks

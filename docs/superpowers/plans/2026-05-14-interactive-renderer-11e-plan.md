@@ -53,6 +53,8 @@ Close every remaining `NotImplementedError`, warn-fallback, and feature gap in t
 - **calendar ticks:** Changing time_ticks() will break all temporal-axis golden SVGs. Regenerate and re-inspect — the new positions are intentionally better.
 - **mark_function multi-layer:** Deferred evaluation (not eager) — store callable, evaluate in `_render_inputs()` when domain info from co-layers is available.
 - All existing non-temporal golden SVGs must pass byte-identically.
+- **Calendar ticks backward compat:** keep existing `nice_time_interval_ms()` (may be called from other modules); new code path uses `nice_calendar_interval()` + `calendar_ticks()`.
+- **Execution order matters:** recommended 11e2→11e3→11e4→11e7→11e1→11e5→11e6→11e8→11e9→11e10. Coordination: 11e1/11e2 share KdeSpec changes, 11e7/11e8 share `_honored_kwargs` in `appearance.py`, 11e8/11e10 both modify `scene_build.rs`.
 
 ## 5. Tasks
 
