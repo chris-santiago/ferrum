@@ -212,6 +212,73 @@ def _resolve_smooth(x_field, y_field, **kwargs):
     return desugar_smooth(x_field, y_field, **kwargs)
 
 
+def _build_prior_layer(mark, encoding, mark_kwargs, position):
+    """Build a ``_Layer`` preserving a prior primitive mark as a scatter layer.
+
+    Used by ``_resolve_pending`` when ``mark_smooth()`` is called on a chart
+    that already has a primitive mark set (e.g. ``chart.mark_point().mark_smooth()``).
+    """
+    return _Layer(
+        mark=mark,
+        encoding=dict(encoding),
+        mark_kwargs=dict(mark_kwargs) if mark_kwargs else None,
+        position=position,
+    )
+
+
+def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
+    """Apply channel-alias rules, mapping convenience channels to their targets.
+
+    Operates on shallow copies of the encoding and mark-kwargs dicts from
+    ``to_spec()`` — does not mutate the chart's internal state.
+
+    Alias rules (order matters — earlier aliases take priority):
+
+    1. ``fill`` → ``color`` when ``color`` is not already present.
+    2. ``stroke`` → ``color`` when ``color`` is not already present;
+       when ``color`` IS present, the stroke encoding is silently dropped.
+    3. ``fill_opacity`` → ``opacity`` when ``opacity`` is not already present.
+    4. ``detail`` → ``mk["detail"]`` via ``setdefault`` (always, regardless
+       of other channels).
+
+    Returns the (possibly-modified) ``(enc, mk)`` pair.
+    """
+    from ferrum.repeat import _RepeatPlaceholder
+
+    # Fill → color
+    if "fill" in enc and "color" not in enc:
+        enc["color"] = enc["fill"]
+
+    # Stroke → color (when color absent); silent drop otherwise.
+    if "stroke" in enc:
+        stroke_ch = enc["stroke"]
+        if "color" not in enc:
+            enc["color"] = stroke_ch
+        elif stroke_ch.field is not None and not isinstance(
+            stroke_ch.field, _RepeatPlaceholder
+        ):
+            # Can't map to a scale — inject as a mark_style grouping hint.
+            # mark_style.stroke expects a hex color, not a field name, so
+            # this is a best-effort: when the user maps a field to stroke
+            # while color is already mapped, the stroke encoding is silently
+            # stored but produces no visual effect.
+            pass
+
+    # FillOpacity → opacity
+    if "fill_opacity" in enc and "opacity" not in enc:
+        enc["opacity"] = enc["fill_opacity"]
+
+    # Detail → mark_style.detail
+    if "detail" in enc:
+        detail_ch = enc["detail"]
+        if detail_ch.field is not None and not isinstance(
+            detail_ch.field, _RepeatPlaceholder
+        ):
+            mk.setdefault("detail", detail_ch.field)
+
+    return enc, mk
+
+
 def _expand_layers(c: "Chart") -> tuple[list, list]:
     """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
 
@@ -430,7 +497,7 @@ class Chart:
         # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
         # the existing mark as a scatter layer. Force the Smooth transform
         # to be named so __final__ stays as the raw data for the scatter layer.
-        _prior_mark = self._pending_stat_mark.prior_mark if hasattr(self._pending_stat_mark, "prior_mark") else None
+        _prior_mark = self._pending_stat_mark.prior_mark
         if _prior_mark is not None and kind == "smooth" and "name" not in kwargs:
             kwargs = {**kwargs, "name": "smooth"}
         result = desugar_fn(x_field, y_field, **kwargs)
@@ -440,13 +507,8 @@ class Chart:
         # Build a scatter layer from the prior mark if present.
         _prior_layer = None
         if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
-            from ferrum._layer import _Layer as _PriorLyr
-
-            _prior_layer = _PriorLyr(
-                mark=_prior_mark,
-                encoding=dict(self._encoding),
-                mark_kwargs=dict(self._mark_kwargs) if self._mark_kwargs else None,
-                position=self._position,
+            _prior_layer = _build_prior_layer(
+                _prior_mark, self._encoding, self._mark_kwargs, self._position,
             )
 
         if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
@@ -930,44 +992,13 @@ class Chart:
         >>> fm.Chart(df).mark_density().encode(x="val")
         Chart(mark='area', encoding=['x'])
         """
-        orientation = kwargs.get("orientation", "vertical")
-        # For horizontal orientation, the data field is bound to y rather
-        # than x (JointChart's right-marginal pattern).
-        field_channel = "y" if orientation == "horizontal" else "x"
-        enc = self._encoding.get(field_channel)
-        if enc is None:
-            # Encoding not yet set — defer resolution to render time via the
-            # generic 3-tuple sentinel + closure adapter.
-            return self._set_composite_mark(
-                "density",
-                _resolve_density,
-                kwargs,
-                placeholder="area",
-                position=position,
-            )
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-
-            validate_position_eligibility("density", position)
-        field = enc.field if isinstance(enc, ChannelBase) else enc
-        result = desugar_density(field, chart_encoding=self._encoding, **kwargs)
-        new = self._clone()
-        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
-            # Bivariate density routed through desugar_contour(fill=True).
-            _, transforms, _ignored1, _ignored2, layers_list = result
-            new._transforms = list(self._transforms) + list(transforms or [])
-            new._layers = list(layers_list)
-            new._mark = None  # signals layered mode
-        else:
-            mark, transforms, remap = result
-            new._mark = mark
-            new._transforms = list(self._transforms) + transforms
-            from ferrum.encoding import X, Y
-
-            new._encoding["x"] = X(remap["x"], type="Q")
-            new._encoding["y"] = Y(remap["y"], type="Q")
-        new._position = position
-        return new
+        return self._set_composite_mark(
+            "density",
+            _resolve_density,
+            kwargs,
+            placeholder="area",
+            position=position,
+        )
 
     def mark_histogram(self, *, position=None, **kwargs) -> "Chart":
         """Render data as a histogram.
@@ -1008,40 +1039,13 @@ class Chart:
         >>> fm.Chart(df).mark_histogram(bin_count=5).encode(x="val")
         Chart(mark='bar', encoding=['x', 'x2', 'y'])
         """
-        orientation = kwargs.get("orientation", "vertical")
-        # For horizontal orientation, the binned column is bound to y rather
-        # than x (JointChart's right-marginal pattern).
-        field_channel = "y" if orientation == "horizontal" else "x"
-        enc = self._encoding.get(field_channel)
-        if enc is None:
-            return self._set_composite_mark(
-                "histogram",
-                _resolve_histogram,
-                kwargs,
-                placeholder="bar",
-                position=position,
-            )
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-
-            validate_position_eligibility("histogram", position)
-        field = enc.field if isinstance(enc, ChannelBase) else enc
-        mark, transforms, remap = desugar_histogram(field, **kwargs)
-        new = self._clone()
-        new._mark = mark
-        new._transforms = list(self._transforms) + transforms
-        from ferrum.encoding import X, X2, Y, Y2
-
-        if orientation == "horizontal":
-            new._encoding["y"] = Y(remap["y"], type="Q")
-            new._encoding["y2"] = Y2(remap["y2"], type="Q")
-            new._encoding["x"] = X(remap["x"], type="Q")
-        else:
-            new._encoding["x"] = X(remap["x"], type="Q")
-            new._encoding["x2"] = X2(remap["x2"], type="Q")
-            new._encoding["y"] = Y(remap["y"], type="Q")
-        new._position = position
-        return new
+        return self._set_composite_mark(
+            "histogram",
+            _resolve_histogram,
+            kwargs,
+            placeholder="bar",
+            position=position,
+        )
 
     def mark_smooth(self, *, position=None, **kwargs) -> "Chart":
         """Render a smoothed regression line with optional confidence interval band.
@@ -1084,96 +1088,15 @@ class Chart:
         >>> fm.Chart(df).mark_smooth(method="linear", ci=0.95).encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
         """
-        x_enc = self._encoding.get("x")
-        y_enc = self._encoding.get("y")
-        if x_enc is None or y_enc is None:
-            # Record the prior primitive mark (if any) so _resolve_pending
-            # can preserve it as a scatter layer alongside the smooth layers.
-            _pm = self._mark if (self._mark is not None and self._mark in _PRIMITIVE_MARKS) else None
-            return self._set_composite_mark(
-                "smooth",
-                _resolve_smooth,
-                kwargs,
-                placeholder="line",
-                position=position,
-                prior_mark=_pm,
-            )
-        if position is not None:
-            from ferrum.position import validate_position_eligibility
-
-            validate_position_eligibility("smooth", position)
-        x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-        y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-        # When mark_smooth is called on a chart that already has a primitive
-        # mark (e.g. chart.mark_point().mark_smooth()), preserve the existing
-        # mark as a layer so both render.  The scatter layer reads from the
-        # original data (data_source=None → __final__), while the smooth
-        # layers read from a NAMED Smooth transform output so the unnamed
-        # pipeline chain stays as the original data.
-        has_existing_mark = self._mark is not None and self._mark in _PRIMITIVE_MARKS
-        if has_existing_mark:
-            # Force the Smooth transform to be named so it doesn't overwrite
-            # __final__. The scatter layer needs __final__ to be the raw data.
-            if "name" not in kwargs:
-                kwargs = {**kwargs, "name": "smooth"}
-        result = desugar_smooth(x_field, y_field, **kwargs)
-        new = self._clone()
-        existing_mark_layer = None
-        if has_existing_mark:
-            from ferrum._layer import _Layer as _LyrSmooth
-
-            existing_mark_layer = _LyrSmooth(
-                mark=self._mark,
-                encoding=dict(self._encoding),
-                mark_kwargs=dict(self._mark_kwargs) if self._mark_kwargs else None,
-                position=self._position,
-            )
-        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
-            _, transforms, _ignored1, _ignored2, layers_list = result
-            new._transforms = list(self._transforms) + list(transforms or [])
-            all_layers = list(layers_list)
-            if existing_mark_layer is not None:
-                all_layers = [existing_mark_layer] + all_layers
-            new._layers = all_layers
-            new._mark = None  # signals layered mode
-        else:
-            mark, transforms, remap = result
-            if existing_mark_layer is not None:
-                from ferrum._layer import _Layer as _LyrSmooth2
-                from ferrum.encoding import X as _XSmooth, Y as _YSmooth
-
-                # Apply the remap to the smooth layer's encoding so it references
-                # the Smooth transform's output columns ("x", "y") rather than the
-                # original field names.
-                smooth_enc = dict(self._encoding)
-                if remap:
-                    if "x" in remap:
-                        smooth_enc["x"] = _XSmooth(remap["x"], type="Q")
-                    if "y" in remap:
-                        smooth_enc["y"] = _YSmooth(remap["y"], type="Q")
-                smooth_layer = _LyrSmooth2(
-                    mark=mark,
-                    encoding=smooth_enc,
-                    mark_kwargs=None,
-                    data_source="smooth",
-                )
-                new._transforms = list(self._transforms) + transforms
-                new._layers = [existing_mark_layer, smooth_layer]
-                new._mark = None
-            else:
-                new._mark = mark
-                new._transforms = list(self._transforms) + transforms
-                # Smooth's output schema uses literal "x"/"y" columns; apply the
-                # remap so the encoding references the post-transform schema.
-                if remap:
-                    from ferrum.encoding import X, Y
-
-                    if "x" in remap:
-                        new._encoding["x"] = X(remap["x"], type="Q")
-                    if "y" in remap:
-                        new._encoding["y"] = Y(remap["y"], type="Q")
-        new._position = position
-        return new
+        _pm = self._mark if self._mark in _PRIMITIVE_MARKS else None
+        return self._set_composite_mark(
+            "smooth",
+            _resolve_smooth,
+            kwargs,
+            placeholder="line",
+            position=position,
+            prior_mark=_pm,
+        )
 
     # ---- Marks (deferred) ----
 
@@ -4477,39 +4400,7 @@ class Chart:
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
         mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
-
-        # Fill → color (fill IS the fill color for filled marks). Fill wins
-        # over color when both are present.
-        if "fill" in enc and "color" not in enc:
-            enc["color"] = enc["fill"]
-
-        # Stroke → if no color channel, treat as color; otherwise inject into
-        # mark_style as a constant stroke color override.
-        if "stroke" in enc:
-            stroke_ch = enc["stroke"]
-            if "color" not in enc:
-                enc["color"] = stroke_ch
-            elif stroke_ch.field is not None and not isinstance(
-                stroke_ch.field, _RepeatPlaceholder
-            ):
-                # Can't map to a scale — inject as a mark_style grouping hint.
-                # mark_style.stroke expects a hex color, not a field name, so
-                # this is a best-effort: when the user maps a field to stroke
-                # while color is already mapped, the stroke encoding is silently
-                # stored but produces no visual effect.
-                pass
-
-        # FillOpacity → opacity (fill opacity IS what the opacity channel controls).
-        if "fill_opacity" in enc and "opacity" not in enc:
-            enc["opacity"] = enc["fill_opacity"]
-
-        # Detail → inject into mark_style.detail (the Rust renderer reads it there).
-        if "detail" in enc:
-            detail_ch = enc["detail"]
-            if detail_ch.field is not None and not isinstance(
-                detail_ch.field, _RepeatPlaceholder
-            ):
-                mk.setdefault("detail", detail_ch.field)
+        enc, mk = _apply_channel_aliases(enc, mk)
 
         # Safety net: any channel not in honored/silent/polar/facet sets would
         # fall through to this warning. After all 18 channels are wired this

@@ -154,12 +154,45 @@ class _ChartLike:
 
         return self._rebuild_with_charts(_apply)
 
+    def theme(self, t):
+        """Apply a theme to every sub-chart and return a new composition.
+
+        Parameters
+        ----------
+        t : Theme
+            Theme value to apply.
+
+        Returns
+        -------
+        _ChartLike
+            A new instance of the same composition class with *t* applied
+            to each sub-chart.
+        """
+        return self._rebuild_with_charts(lambda c: c.theme(t))
+
+    def properties(self, **kwargs):
+        """Forward ``properties(**kwargs)`` to every sub-chart.
+
+        Parameters
+        ----------
+        **kwargs
+            Keyword arguments accepted by ``Chart.properties`` (e.g.
+            ``width``, ``height``, ``title``, ``background``).
+
+        Returns
+        -------
+        _ChartLike
+            A new instance of the same composition class with updated
+            sub-chart properties.
+        """
+        return self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+
     def _rebuild_with_charts(self, fn):  # pragma: no cover - abstract
         """Return a new composition with each member chart transformed by *fn*.
 
         Subclasses must implement this — it's the seam between the
-        generic ``share_scale`` plumbing on the base and each
-        composition's constructor signature.
+        generic ``share_scale`` / ``theme`` / ``properties`` plumbing on
+        the base and each composition's constructor signature.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement _rebuild_with_charts")
 
@@ -181,39 +214,6 @@ class _CompositeBase(_ChartLike):
 
     def __and__(self, other):
         return VConcatChart([self, other])
-
-    def theme(self, t):
-        """Apply a theme to every child chart and return a new composition.
-
-        Parameters
-        ----------
-        t : Theme
-            Theme value to apply.
-
-        Returns
-        -------
-        _CompositeBase
-            A new instance of the same composition class with *t* applied
-            to each child chart.
-        """
-        return type(self)([c.theme(t) for c in self.charts], spacing=self.spacing)
-
-    def properties(self, **kwargs):
-        """Forward ``properties(**kwargs)`` to every child chart.
-
-        Parameters
-        ----------
-        **kwargs
-            Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``, ``background``).
-
-        Returns
-        -------
-        _CompositeBase
-            A new instance of the same composition class with updated
-            child-chart properties.
-        """
-        return type(self)([c.properties(**kwargs) for c in self.charts], spacing=self.spacing)
 
     def _rebuild_with_charts(self, fn):
         return type(self)([fn(c) for c in self.charts], spacing=self.spacing)
@@ -384,27 +384,6 @@ class JointChart(_ChartLike):
             "spacing": self.spacing,
             "share": {"x": share_x, "y": share_y},
         }
-
-    def theme(self, t):
-        """Apply a theme to all sub-charts and return a new ``JointChart``.
-
-        Parameters
-        ----------
-        t : Theme
-            Theme value to apply.
-
-        Returns
-        -------
-        JointChart
-            A new instance with *t* applied to every sub-chart.
-        """
-        return JointChart(
-            self.center.theme(t),
-            top=(self.top.theme(t) if self.top is not None else None),
-            right=(self.right.theme(t) if self.right is not None else None),
-            ratio=self.ratio,
-            spacing=self.spacing,
-        )
 
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to the center chart.
@@ -790,52 +769,13 @@ class RepeatChart(_ChartLike):
             return layer_field
         raise ValueError(f"unknown Repeat placeholder axis '{placeholder_axis}'")
 
-    def theme(self, t):
-        """Apply a theme to all sub-charts and return a new ``RepeatChart``.
-
-        Parameters
-        ----------
-        t : Theme
-            Theme value to apply.
-
-        Returns
-        -------
-        RepeatChart
-            A new instance with *t* applied to the template and diagonal.
-        """
+    def _rebuild_with_charts(self, fn):
         return RepeatChart(
-            self.template.theme(t),
+            fn(self.template),
             row=self.row,
             column=self.column,
             layer=self.layer,
-            diagonal=(self.diagonal.theme(t) if self.diagonal is not None else None),
-            corner=self.corner,
-            spacing=self.spacing,
-            columns=self.columns,
-            resolve=self.resolve,
-        )
-
-    def properties(self, **kwargs):
-        """Forward ``properties(**kwargs)`` to the template (and diagonal).
-
-        Parameters
-        ----------
-        **kwargs
-            Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``).
-
-        Returns
-        -------
-        RepeatChart
-            A new instance with updated template-chart properties.
-        """
-        new_diagonal = self.diagonal.properties(**kwargs) if self.diagonal is not None else None
-        return RepeatChart(
-            self.template.properties(**kwargs),
-            row=self.row,
-            column=self.column,
-            layer=self.layer,
-            diagonal=new_diagonal,
+            diagonal=(fn(self.diagonal) if self.diagonal is not None else None),
             corner=self.corner,
             spacing=self.spacing,
             columns=self.columns,
@@ -1031,31 +971,6 @@ class ClusterMapChart(_ChartLike):
             "dendrogram_ratio": self.dendrogram_ratio,
             "spacing": self.spacing,
         }
-
-    def theme(self, t):
-        """Apply a theme to all sub-charts and return a new ``ClusterMapChart``.
-
-        Parameters
-        ----------
-        t : Theme
-            Theme value to apply.
-
-        Returns
-        -------
-        ClusterMapChart
-            A new instance with *t* applied to every sub-chart.
-        """
-        return ClusterMapChart(
-            self.heatmap.theme(t),
-            row_dendrogram=(
-                self.row_dendrogram.theme(t) if self.row_dendrogram is not None else None
-            ),
-            col_dendrogram=(
-                self.col_dendrogram.theme(t) if self.col_dendrogram is not None else None
-            ),
-            dendrogram_ratio=self.dendrogram_ratio,
-            spacing=self.spacing,
-        )
 
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to the heatmap chart.
