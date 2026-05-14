@@ -45,6 +45,8 @@ layered = points + trend
 assert layered.show_svg().startswith("<svg")
 ```
 
+![Layered scatter + trend](img/composition_01.png)
+
 Layered charts share axes by construction: both marks are drawn against the same x/y scales, the same color scale, and the same plot region. Each layer keeps its own mark and any layer-specific encoding overrides, but the shared encodings apply uniformly.
 
 Use layering when:
@@ -85,6 +87,8 @@ side_by_side = scatter | distribution
 assert side_by_side.show_svg().startswith("<svg")
 ```
 
+![Horizontal concat](img/composition_02.png)
+
 The `&` operator stacks the same two charts vertically:
 
 ```python
@@ -101,6 +105,8 @@ distribution = fm.Chart(iris).mark_boxplot().encode(x="species:N", y="sepal_leng
 stacked = scatter & distribution
 assert stacked.show_svg().startswith("<svg")
 ```
+
+![Vertical concat](img/composition_03.png)
 
 You can chain operators to compose deeper trees: `(a | b) & (c | d)` produces a 2 × 2 grid where the two rows have different charts and the left and right columns differ within each row. The operators are left-associative and follow normal Python precedence.
 
@@ -121,6 +127,8 @@ c = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
 trio = fm.HConcatChart([a, b, c], spacing=24.0)
 assert trio.show_svg().startswith("<svg")
 ```
+
+![Three-chart HConcat](img/composition_04.png)
 
 The explicit form is useful when you want to control spacing or pass more than two charts in one call.
 
@@ -143,6 +151,8 @@ c = fm.Chart(iris).mark_boxplot().encode(x="species:N", y="sepal_length")
 row = fm.hconcat(a, b, c, spacing=20.0)
 assert row.show_svg().startswith("<svg")
 ```
+
+![fm.hconcat convenience](img/composition_05.png)
 
 These are equivalent to `HConcatChart([a, b, c])` / `VConcatChart([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
 
@@ -168,6 +178,8 @@ top = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
 joint = fm.JointChart(center, top=top)
 assert joint.show_svg().startswith("<svg")
 ```
+
+![JointChart with marginal](img/composition_06.png)
 
 The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis; the `right` marginal needs to be a chart authored with the correct orientation for that side. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal.
 
@@ -200,6 +212,8 @@ grid = fm.RepeatChart(
 )
 assert grid.show_svg().startswith("<svg")
 ```
+
+![RepeatChart 2x2 grid](img/composition_07.png)
 
 This produces a 2 × 2 grid of scatter plots, each cell pairing one row field on the y axis with one column field on the x axis. Pass only `column=` (with a fixed `y` in the template) for a single row of plots; pass only `row=` (with a fixed `x`) for a single column.
 

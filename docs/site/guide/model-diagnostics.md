@@ -30,6 +30,8 @@ roc = fm.roc_chart(model, X_test, y_test)
 assert roc.show_svg().startswith("<svg")
 ```
 
+![ROC curve](img/model-diagnostics_01.png)
+
 The same pattern produces a confusion matrix:
 
 ```python
@@ -46,6 +48,8 @@ cm = fm.confusion_matrix_chart(model, X_test, y_test, normalize="true")
 assert cm.show_svg().startswith("<svg")
 ```
 
+![Confusion matrix](img/model-diagnostics_02.png)
+
 Or feature importances, with the helper handling whichever importance method the estimator exposes (`feature_importances_`, permutation importance, coefficients):
 
 ```python
@@ -61,6 +65,8 @@ model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_t
 importances = fm.importance_chart(model, X_test, y_test)
 assert importances.show_svg().startswith("<svg")
 ```
+
+![Feature importance](img/model-diagnostics_03.png)
 
 ## The full helper menu
 
@@ -100,6 +106,8 @@ report = (roc | cm) & importances
 assert report.show_svg().startswith("<svg")
 ```
 
+![Three-panel diagnostic report](img/model-diagnostics_04.png)
+
 The `report` value is a regular composed chart — `(roc | cm) & importances` lays the three diagnostics into a 2 × 2 grid (with the importance chart spanning the bottom row), and you can save it, theme it, or further compose it as one artifact. The composition operators are the same `|` and `&` you use for any other charts (see [Composition](composition.md)).
 
 ### Why `ModelSource` matters
@@ -127,6 +135,8 @@ visualizer.fit(X_train, y_train).score(X_test, y_test)
 chart = visualizer.show()
 assert chart.show_svg().startswith("<svg")
 ```
+
+![ROC via visualizer](img/model-diagnostics_05.png)
 
 The full visualizer menu mirrors the helpers:
 
@@ -188,6 +198,8 @@ chart = fm.roc_chart(
 )
 assert chart.show_svg().startswith("<svg")
 ```
+
+![ROC with overrides](img/model-diagnostics_06.png)
 
 The same `mark=`, `encode=`, `properties=`, `layers=` pattern works on every diagnostic helper — `confusion_matrix_chart`, `calibration_chart`, `importance_chart`, and all the rest.
 

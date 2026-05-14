@@ -49,6 +49,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Slate Citrus theme](img/themes_01.png)
+
 Switching themes is one method call away; the rest of the chart spec is untouched.
 
 ## Theme as a value
@@ -222,6 +224,8 @@ assert chart.show_svg().startswith("<svg")
 fm.set_default_theme(fm.themes.default)
 ```
 
+![Dark theme via process default](img/themes_02.png)
+
 `set_default_theme()` does not mutate a module-level config object. It writes to a per-thread `contextvars.ContextVar`, which means:
 
 - The default is scoped to the current Python interpreter context.
@@ -252,6 +256,8 @@ with fm.theme_context(fm.themes.publication):
     assert publication_chart.show_svg().startswith("<svg")
 assert fm.get_default_theme() == fm.themes.default
 ```
+
+![Publication theme via context manager](img/themes_03.png)
 
 The previous default is restored on `__exit__`. This is the right scope for a single section of a notebook, a single figure-rendering function, or a test fixture.
 
@@ -295,6 +301,8 @@ chart = (
 )
 assert chart.show_svg().startswith("<svg")
 ```
+
+![Custom brand theme](img/themes_04.png)
 
 You can also derive from a built-in using `.update()`:
 

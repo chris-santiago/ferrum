@@ -25,6 +25,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Basic scatter](img/marks-encodings_01.png)
+
 The three pieces — data, mark, encoding — compose freely. You can change the mark without touching the encoding (`mark_line()` instead of `mark_point()`), change the encoding without touching the mark, or compose multiple marks against the same encoding (see [Composition](composition.md)).
 
 ## Encoding channels
@@ -122,6 +124,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Explicit encoding](img/marks-encodings_02.png)
+
 ## Mark families
 
 Ferrum ships 28+ mark methods on `Chart`. They group into five families by what they're for.
@@ -165,6 +169,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Scatter with size](img/marks-encodings_03.png)
+
 ### Statistical marks
 
 These marks compute a transform on your data before rendering — KDE, binning, smoothing, contours, quantile-quantile reference, or arbitrary functions. The transform happens in Rust, declared in the chart spec.
@@ -198,6 +204,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![KDE density](img/marks-encodings_04.png)
+
 Stat marks are described in detail in [Stats in the rendering pipeline](concepts/stats-pipeline.md).
 
 ### Distribution-summary marks
@@ -228,6 +236,8 @@ chart = (
 )
 assert chart.show_svg().startswith("<svg")
 ```
+
+![Boxplot by species](img/marks-encodings_05.png)
 
 ### Uncertainty marks
 
@@ -294,6 +304,8 @@ trend = (
 combined = points + trend
 assert combined.show_svg().startswith("<svg")
 ```
+
+![Points + LOESS trend](img/marks-encodings_06.png)
 
 This puts a per-species LOESS overlay on top of a scatter. Same encoding, two marks, one layered chart — the `+` operator on `Chart` produces a layered view that renders both marks against the same axes.
 

@@ -50,6 +50,8 @@ chart = fm.displot(iris, x="sepal_length", kind="hist")
 assert chart.show_svg().startswith("<svg")
 ```
 
+![displot histogram](img/figure-helpers_01.png)
+
 `displot` follows seaborn's signature: `x`, `y`, `hue`, `col`, `row` for encoding; `kind` for the geometry; `bins`, `bandwidth`, `bw_adjust`, `multiple`, `kde`, `rug` for the statistical details.
 
 ## Categorical: `catplot`
@@ -68,6 +70,8 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart = fm.catplot(iris, x="species", y="sepal_length", kind="box")
 assert chart.show_svg().startswith("<svg")
 ```
+
+![catplot box](img/figure-helpers_02.png)
 
 `catplot` is the one-call entry point for the boxplot / violin / strip / swarm family. It selects the right composite mark based on `kind=` and applies sensible defaults (jitter for strip plots, dodge for grouped bars, bootstrap CIs for point and bar estimates).
 
@@ -88,6 +92,8 @@ chart = fm.lmplot(iris, x="sepal_length", y="petal_length")
 assert chart.show_svg().startswith("<svg")
 ```
 
+![lmplot](img/figure-helpers_03.png)
+
 `residplot` plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a `Chart`.
 
 ```python
@@ -102,6 +108,8 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart = fm.residplot(iris, x="sepal_length", y="petal_length")
 assert chart.show_svg().startswith("<svg")
 ```
+
+![residplot](img/figure-helpers_04.png)
 
 Pass `lowess=True` to overlay a lowess smoother on the residuals; `robust=True` switches the fit to a robust regression so outliers don't pull the line.
 
@@ -122,6 +130,8 @@ chart = fm.pairplot(iris, vars=["sepal_length", "petal_length"], hue="species")
 assert chart.show_svg().startswith("<svg")
 ```
 
+![pairplot](img/figure-helpers_05.png)
+
 For a triangular instead of square layout, pass `corner=True`. To set diagonal cells separately (typically univariate distributions), use `diag_kind="hist"` or `"kde"`.
 
 `heatmap` renders a 2-D heatmap from a wide-format DataFrame. Each row of the input becomes a row of the heatmap; each numeric column becomes a column. Returns a `Chart`.
@@ -141,6 +151,8 @@ table = pl.DataFrame({
 chart = fm.heatmap(table, annot=True, cmap="blues")
 assert chart.show_svg().startswith("<svg")
 ```
+
+![heatmap](img/figure-helpers_06.png)
 
 `clustermap` returns a `ClusterMapChart` — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
 
@@ -164,6 +176,8 @@ chart = fm.jointplot(iris, x="sepal_length", y="petal_length", kind="scatter", m
 assert chart.show_svg().startswith("<svg")
 ```
 
+![jointplot](img/figure-helpers_07.png)
+
 `kind=` controls the center plot (`"scatter"`, `"kde"`, `"hist"`, `"hex"`, `"reg"`); `marginal_kind=` controls both marginals (`"hist"`, `"kde"`, `"rug"`, `"box"`). The marginals share their data axis with the center.
 
 ## Customizing helper output
@@ -182,6 +196,8 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart = fm.displot(iris, x="sepal_length", kind="hist").properties(title="Sepal length distribution")
 assert chart.show_svg().startswith("<svg")
 ```
+
+![displot with title](img/figure-helpers_08.png)
 
 Composite marks (boxplot, errorbar, smooth with CI, etc.) have **named sub-layers** you can inspect:
 
@@ -224,6 +240,8 @@ distribution = fm.displot(iris, x="sepal_length", kind="hist")
 report = fit | distribution
 assert report.show_svg().startswith("<svg")
 ```
+
+![lmplot | displot composition](img/figure-helpers_09.png)
 
 The regression fit and the distribution plot are concatenated horizontally with the same `|` operator that works for any two charts.
 

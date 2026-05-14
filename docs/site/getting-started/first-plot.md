@@ -23,6 +23,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Iris scatter plot](img/first-plot_01.png)
+
 That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a `Chart` object — call `.show_svg()` to render it, `.save("chart.svg")` to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
 
 ## Add a trend line
@@ -52,6 +54,8 @@ chart = points + trend
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Scatter with LOESS trend](img/first-plot_02.png)
+
 The `+` operator always layers — both marks share the same axes. The LOESS smooth is computed in Rust; you declared what you wanted, not how to compute it.
 
 ## Try a different mark
@@ -75,6 +79,8 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Boxplot by species](img/first-plot_03.png)
+
 ## Apply a theme
 
 Themes are one method call:
@@ -96,6 +102,8 @@ chart = (
 )
 assert chart.show_svg().startswith("<svg")
 ```
+
+![Publication theme](img/first-plot_04.png)
 
 Ferrum ships [twelve built-in themes](../guide/themes.md) — from Paper Ink (the warm default) to dark, publication, and editorial styles.
 
