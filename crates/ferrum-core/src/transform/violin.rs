@@ -35,6 +35,8 @@ pub(crate) struct ViolinSpec {
     pub groupby: Vec<String>,
     #[serde(default = "default_bandwidth")]
     pub bandwidth: BandwidthSpec,
+    #[serde(default = "kde::default_bw_adjust")]
+    pub bw_adjust: f64,
     #[serde(default = "default_violin_n")]
     pub n: usize,
     #[serde(default = "default_violin_width")]
@@ -219,6 +221,8 @@ pub(crate) fn apply_with_context(
         let kde_spec = KdeSpec {
             field: spec.field.clone(),
             bandwidth: spec.bandwidth.clone(),
+            bw_adjust: spec.bw_adjust,
+            shared_extent: false,
             n: spec.n,
             extent: Some((lo, hi)),
             cumulative: false,
@@ -377,15 +381,19 @@ pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyViolin {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, n = 256, width = 0.4, name = None))]
+    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, name = None))]
     fn new(
         field: &str,
         groupby: Vec<String>,
         bandwidth: Option<&Bound<'_, PyAny>>,
+        bw_adjust: f64,
         n: usize,
         width: f64,
         name: Option<String>,
     ) -> PyResult<Self> {
+        if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
+            return Err(PyValueError::new_err("Violin: bw_adjust must be a positive finite number"));
+        }
         if field.is_empty() {
             return Err(PyValueError::new_err("Violin: field must be non-empty"));
         }
@@ -437,6 +445,7 @@ impl PyViolin {
                 field: field.to_string(),
                 groupby,
                 bandwidth: bw,
+                bw_adjust,
                 n,
                 width,
                 name,
@@ -516,6 +525,7 @@ mod tests {
             field: "v".into(),
             groupby: vec![],
             bandwidth: BandwidthSpec::Scott,
+        bw_adjust: 1.0,
             n: 64,
             width: 0.5,
             name: None,
@@ -563,6 +573,7 @@ mod tests {
             field: "v".into(),
             groupby: vec!["group".into()],
             bandwidth: BandwidthSpec::Scott,
+        bw_adjust: 1.0,
             n: 32,
             width: 0.4,
             name: None,
@@ -614,6 +625,7 @@ mod tests {
                 field: "v".into(),
                 groupby: vec![],
                 bandwidth: bw.clone(),
+        bw_adjust: 1.0,
                 n,
                 width: 0.4,
                 name: None,

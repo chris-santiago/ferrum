@@ -69,6 +69,10 @@ pub(crate) struct SwarmSpec {
     pub side: SwarmSide,
     #[serde(default)]
     pub orient: SwarmOrient,
+    /// When set, partition within each category by this field and offset each
+    /// sub-group's swarm so the groups appear side by side within the band.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dodge: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -77,11 +81,103 @@ pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBat
     apply_with_context(spec, batch, &TransformContext::default())
 }
 
+/// Partition by (category, dodge) and run swarm per sub-group, offsetting
+/// each group's cross-axis position so the groups sit side by side.
+fn apply_dodged(
+    spec: &SwarmSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    dodge_field: &str,
+) -> PyResult<RecordBatch> {
+    use std::collections::BTreeSet;
+    let schema = batch.schema();
+    let dodge_idx = schema.index_of(dodge_field).map_err(|_| {
+        PyValueError::new_err(format!("stat_swarm: dodge column '{}' not found", dodge_field))
+    })?;
+    if schema.field(dodge_idx).data_type() != &DataType::Utf8 {
+        return Err(PyValueError::new_err(format!(
+            "stat_swarm: dodge column '{}' must be Utf8", dodge_field
+        )));
+    }
+    let dodge_arr = batch.column(dodge_idx).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err(format!("stat_swarm: dodge column '{dodge_field}' is Utf8 but downcast failed")))?;
+    let dodge_values: Vec<Option<String>> = (0..batch.num_rows())
+        .map(|i| if dodge_arr.is_null(i) { None } else { Some(dodge_arr.value(i).to_string()) })
+        .collect();
+
+    // Collect unique dodge groups in sorted order for deterministic sub-band assignment.
+    let dodge_groups: Vec<String> = {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        for s in dodge_values.iter().flatten() { set.insert(s.clone()); }
+        set.into_iter().collect()
+    };
+    let n_groups = dodge_groups.len().max(1);
+
+    // Sub-band width in cross-axis pixels: separate groups by (point_size + spacing).
+    let sub_band_px = spec.point_size + spec.spacing;
+    // Center offsets for each dodge group, symmetric around 0.
+    let centers: Vec<f64> = (0..n_groups)
+        .map(|i| (i as f64 - (n_groups as f64 - 1.0) / 2.0) * sub_band_px)
+        .collect();
+
+    // Run a sub-spec swarm per dodge group using the restricted SwarmSpec.
+    // The beeswarm offsets from this are then shifted by the group's center.
+    let mut combined_out: Option<RecordBatch> = None;
+    for (gi, group_val) in dodge_groups.iter().enumerate() {
+        let center_px = centers[gi];
+        // Filter batch to rows belonging to this dodge group.
+        let mask: Vec<bool> = dodge_values.iter().map(|v| {
+            v.as_deref() == Some(group_val.as_str())
+        }).collect();
+        let indices: Vec<u32> = mask.iter().enumerate()
+            .filter(|(_, &b)| b)
+            .map(|(i, _)| i as u32)
+            .collect();
+        if indices.is_empty() { continue; }
+        let idx_arr = arrow::array::UInt32Array::from(indices.clone());
+        let sub_batch = arrow::compute::take_record_batch(batch, &idx_arr)
+            .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))?;
+
+        // Run swarm on sub-batch.
+        let sub_spec = SwarmSpec { dodge: None, ..spec.clone() };
+        let sub_out = apply_with_context(&sub_spec, &sub_batch, ctx)?;
+
+        // Add the dodge group center offset to __pos_x_offset__ / __pos_y_offset__.
+        let offset_col_name = match spec.orient {
+            SwarmOrient::Vertical => "__pos_x_offset__",
+            SwarmOrient::Horizontal => "__pos_y_offset__",
+        };
+        let oci = sub_out.schema().index_of(offset_col_name)
+            .map_err(|_| PyValueError::new_err(format!("stat_swarm: offset col '{offset_col_name}' missing")))?;
+        let orig_offsets = sub_out.column(oci).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err(format!("stat_swarm: offset col '{offset_col_name}' not Float64")))?;
+        let shifted: Float64Array = orig_offsets.iter()
+            .map(|v| Some(v.unwrap_or(0.0) + center_px))
+            .collect();
+        let mut cols: Vec<ArrayRef> = sub_out.columns().to_vec();
+        cols[oci] = Arc::new(shifted);
+        let shifted_out = RecordBatch::try_new(sub_out.schema(), cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge shift: {e}")))?;
+
+        // Merge into combined output by concatenating batches.
+        combined_out = Some(match combined_out {
+            None => shifted_out,
+            Some(existing) => arrow::compute::concat_batches(&existing.schema(), &[existing, shifted_out])
+                .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge concat: {e}")))?,
+        });
+    }
+
+    combined_out.ok_or_else(|| PyValueError::new_err("stat_swarm: dodge produced no output"))
+}
+
 pub(crate) fn apply_with_context(
     spec: &SwarmSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
+    if let Some(dodge_field) = &spec.dodge {
+        return apply_dodged(spec, batch, ctx, dodge_field);
+    }
     // 1. Validate columns.
     let schema = batch.schema();
     let cat_idx = schema
@@ -394,12 +490,14 @@ pub(crate) struct PySwarm(pub(crate) TransformSpec);
 #[pymethods]
 impl PySwarm {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         category, value, *,
         point_size = 5.0,
         spacing = 1.0,
         side = "both",
         orient = "vertical",
+        dodge = None,
         name = None,
     ))]
     fn new(
@@ -409,6 +507,7 @@ impl PySwarm {
         spacing: f64,
         side: &str,
         orient: &str,
+        dodge: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if category.is_empty() || value.is_empty() {
@@ -452,6 +551,7 @@ impl PySwarm {
             spacing,
             side: parsed_side,
             orient: parsed_orient,
+            dodge,
             name,
         })))
     }
@@ -521,6 +621,7 @@ mod tests {
             side: SwarmSide::Both,
             orient: SwarmOrient::Vertical,
             name: None,
+            dodge: None,
         };
         // Big panel → small radius.
         let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
@@ -561,6 +662,7 @@ mod tests {
             side: SwarmSide::Left,
             orient: SwarmOrient::Vertical,
             name: None,
+            dodge: None,
         };
         let out_l = apply_with_context(&spec_l, &b, &ctx_with_panel(400, 400)).unwrap();
         let sx_l = col_f64(&out_l, "swarm_x");
@@ -580,6 +682,7 @@ mod tests {
             side: SwarmSide::Right,
             orient: SwarmOrient::Vertical,
             name: None,
+            dodge: None,
         };
         let out_r = apply_with_context(&spec_r, &b, &ctx_with_panel(400, 400)).unwrap();
         let sx_r = col_f64(&out_r, "swarm_x");
@@ -608,6 +711,7 @@ mod tests {
             side: SwarmSide::Both,
             orient: SwarmOrient::Vertical,
             name: None,
+            dodge: None,
         };
         let ctx = ctx_with_panel(400, 400);
         let o1 = apply_with_context(&spec, &b1, &ctx).unwrap();
@@ -647,6 +751,7 @@ mod tests {
             side: SwarmSide::Both,
             orient: SwarmOrient::Vertical,
             name: None,
+            dodge: None,
         };
         let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
         let sx = col_f64(&out, "swarm_x");
@@ -685,6 +790,7 @@ mod tests {
             side: SwarmSide::Both,
             orient: SwarmOrient::Horizontal,
             name: None,
+            dodge: None,
         };
         let out = apply_with_context(&spec, &b, &ctx_with_panel(400, 400)).unwrap();
         // Output must have 5 columns: cat, v, swarm_x, swarm_y, __pos_y_offset__

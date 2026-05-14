@@ -70,8 +70,8 @@ pub(crate) fn nice_time_interval_ms(span_ms: f64, count: usize) -> f64 {
     const HOUR:   f64 = 60.0 * MINUTE;
     const DAY:    f64 = 24.0 * HOUR;
     const WEEK:   f64 = 7.0 * DAY;
-    const MONTH:  f64 = 30.0 * DAY;   // approximate; calendar-aware deferred
-    const YEAR:   f64 = 365.0 * DAY;  // approximate
+    const MONTH:  f64 = 30.0 * DAY;
+    const YEAR:   f64 = 365.0 * DAY;
 
     if count == 0 || !span_ms.is_finite() || span_ms <= 0.0 {
         return f64::NAN;
@@ -96,6 +96,119 @@ pub(crate) fn nice_time_interval_ms(span_ms: f64, count: usize) -> f64 {
         }
     }
     chosen
+}
+
+// ── Calendar-aware tick generation ──────────────────────────────────────────
+//
+// For month/year spans, `nice_time_interval_ms` returns approximate 30-day or
+// 365-day intervals. `calendar_ticks` instead snaps tick positions to real
+// calendar boundaries: the 1st of each month, or Jan 1 of each year.
+
+use chrono::{Datelike, TimeZone, Timelike, Utc};
+
+/// Categorise a millisecond span into a calendar tick interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CalendarInterval {
+    SubSecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+const _SECOND: f64 = 1_000.0;
+const _MINUTE: f64 = 60.0 * _SECOND;
+const _HOUR:   f64 = 60.0 * _MINUTE;
+const _DAY:    f64 = 24.0 * _HOUR;
+const _WEEK:   f64 = 7.0  * _DAY;
+const _MONTH:  f64 = 30.0 * _DAY;
+const _YEAR:   f64 = 365.0 * _DAY;
+
+pub(crate) fn nice_calendar_interval(span_ms: f64, count: usize) -> CalendarInterval {
+    if count == 0 || !span_ms.is_finite() || span_ms <= 0.0 {
+        return CalendarInterval::Second;
+    }
+    let target = span_ms / count as f64;
+    match target {
+        t if t < _SECOND  => CalendarInterval::SubSecond,
+        t if t < _MINUTE  => CalendarInterval::Second,
+        t if t < _HOUR    => CalendarInterval::Minute,
+        t if t < _DAY     => CalendarInterval::Hour,
+        t if t < _WEEK    => CalendarInterval::Day,
+        t if t < _MONTH   => CalendarInterval::Week,
+        t if t < _YEAR    => CalendarInterval::Month,
+        _                  => CalendarInterval::Year,
+    }
+}
+
+/// Generate calendar-snapped tick positions (ms since Unix epoch) for a time axis.
+///
+/// Month ticks snap to the 1st of each month at 00:00 UTC; year ticks snap to
+/// Jan 1 of each year. Sub-month intervals fall back to the approximate math in
+/// `nice_time_interval_ms`.
+pub(crate) fn calendar_ticks(lo_ms: f64, hi_ms: f64, count: usize) -> Vec<f64> {
+    if count == 0 || !lo_ms.is_finite() || !hi_ms.is_finite() {
+        return Vec::new();
+    }
+    let (lo, hi, reversed) = if lo_ms <= hi_ms {
+        (lo_ms, hi_ms, false)
+    } else {
+        (hi_ms, lo_ms, true)
+    };
+    let span = hi - lo;
+
+    let interval = nice_calendar_interval(span, count);
+    let mut ticks: Vec<f64> = match interval {
+        CalendarInterval::Month => {
+            let Some(start_dt) = Utc.timestamp_millis_opt(lo as i64).single() else {
+                return Vec::new(); // out-of-range timestamp
+            };
+            let mut year = start_dt.year();
+            let mut month = start_dt.month();
+            if start_dt.day() > 1 || start_dt.hour() > 0 || start_dt.minute() > 0 {
+                month += 1;
+                if month > 12 { month = 1; year += 1; }
+            }
+            let mut out = Vec::new();
+            while let Some(t) = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single() {
+                let ms = t.timestamp_millis() as f64;
+                if ms > hi { break; }
+                out.push(ms);
+                month += 1;
+                if month > 12 { month = 1; year += 1; }
+            }
+            out
+        }
+        CalendarInterval::Year => {
+            let Some(start_dt) = Utc.timestamp_millis_opt(lo as i64).single() else {
+                return Vec::new();
+            };
+            let mut year = start_dt.year();
+            if start_dt.month() > 1 || start_dt.day() > 1 { year += 1; }
+            let mut out = Vec::new();
+            while let Some(t) = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single() {
+                let ms = t.timestamp_millis() as f64;
+                if ms > hi { break; }
+                out.push(ms);
+                year += 1;
+            }
+            out
+        }
+        _ => {
+            // Sub-month intervals: use the approximate math.
+            let iv = nice_time_interval_ms(span, count);
+            if !iv.is_finite() || iv <= 0.0 { return Vec::new(); }
+            let start = (lo / iv).ceil() * iv;
+            let n = ((hi - start) / iv).floor() as usize + 1;
+            (0..n).map(|i| start + i as f64 * iv).collect()
+        }
+    };
+
+    if reversed { ticks.reverse(); }
+    ticks
 }
 
 #[cfg(test)]

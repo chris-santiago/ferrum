@@ -53,6 +53,11 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         // Marks (non-text first, inside clip)
         for batch in &panel.marks {
             if batch.kind == ferrum_scene::MarkBatchKind::Text { continue; }
+            // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
+            let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
+            if blend_wrap {
+                svg.raw("<g style=\"mix-blend-mode:screen\">");
+            }
             // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
             // matching the old draw() pattern.
             let cap_join_wrap = if batch.stroke_cap.is_some() || batch.stroke_join.is_some() {
@@ -114,6 +119,9 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
             }
             if cap_join_wrap.is_some() {
                 svg.g_close();
+            }
+            if blend_wrap {
+                svg.raw("</g>");
             }
         }
 

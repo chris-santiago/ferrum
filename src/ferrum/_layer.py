@@ -23,6 +23,7 @@ class _Layer:
     mark_kwargs: Optional[dict] = None
     data_source: Optional[str] = None
     position: Any = None
+    blend: Optional[str] = None
 
 
 @dataclass(frozen=True)

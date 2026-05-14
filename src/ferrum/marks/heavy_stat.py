@@ -453,14 +453,6 @@ def desugar_raster(
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
     if aggregate in ("mean", "sum") and field is None:
         raise ValueError(f"mark_raster aggregate={aggregate!r} requires field=...")
-    if blend == "additive":
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_raster",
-            "blend_additive",
-            "mark_raster blend='additive' deferred to Phase 11; using alpha blending",
-        )
 
     # Default to log-scale for count/density aggregates to improve contrast
     # when most cells are empty and a few have high counts.
@@ -487,6 +479,7 @@ def desugar_raster(
             encoding={"x": x_field, "y": y_field},
             mark_kwargs=mk if mk else None,
             data_source="raster",
+            blend="additive" if blend == "additive" else None,
         )
     ]
     return ("__layered__", transforms, None, None, layers)
@@ -576,17 +569,13 @@ def desugar_hex(
         raise ValueError(f"mark_hex(stroke={stroke!r}) is not supported")
     if stroke_width != 0:
         raise ValueError(f"mark_hex(stroke_width={stroke_width!r}) is not supported")
-    if aggregate in ("mean", "sum") and field is None:
-        raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
-    if aggregate not in ("count", "mean", "sum"):
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_hex",
-            "aggregate_unsupported",
-            f"mark_hex aggregate={aggregate!r} deferred; falling back to 'count'",
+    _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
+    if aggregate not in _VALID_AGGREGATES:
+        raise ValueError(
+            f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}"
         )
-        aggregate = "count"
+    if aggregate != "count" and field is None:
+        raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
@@ -684,27 +673,20 @@ def desugar_swarm(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
-    if dodge is not None:
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_swarm",
-            "dodge",
-            "mark_swarm dodge= is not yet supported; rendering single-group swarm",
-        )
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
-    transforms = [
-        Swarm(
-            category=cat,
-            value=val,
-            point_size=float(size),
-            spacing=spacing,
-            side=side,
-            orient=orient,
-            name="swarm",
-        )
-    ]
+    swarm_kwargs: dict = dict(
+        category=cat,
+        value=val,
+        point_size=float(size),
+        spacing=spacing,
+        side=side,
+        orient=orient,
+        name="swarm",
+    )
+    if dodge is not None:
+        swarm_kwargs["dodge"] = str(dodge)
+    transforms = [Swarm(**swarm_kwargs)]
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform

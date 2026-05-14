@@ -36,6 +36,7 @@ manifolds-rs = { workspace = true }
 faer-compat = { workspace = true }
 ferrum-scene = { path = "../ferrum-scene" }
 geojson     = "0.24"
+chrono      = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 sha2 = "0.10"

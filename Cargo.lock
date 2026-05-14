@@ -1077,6 +1077,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "base64",
+ "chrono",
  "colorous",
  "faer 0.23.2",
  "faer 0.24.0",

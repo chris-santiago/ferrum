@@ -184,7 +184,7 @@ pub fn build_scene(
                 hrefs: result.hrefs,
                 descriptions: result.descriptions,
                 keys,
-                blend: BlendMode::Normal,
+                blend: layer.blend.unwrap_or(BlendMode::Normal),
                 stroke_cap: mark_style.stroke_cap.as_deref().and_then(|s| match s {
                     "round" => Some(ferrum_scene::StrokeCap::Round),
                     "square" => Some(ferrum_scene::StrokeCap::Square),

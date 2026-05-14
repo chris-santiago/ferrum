@@ -231,6 +231,8 @@ pub struct EncodingSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impute: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
@@ -256,7 +258,7 @@ impl EncodingSpec {
         field, type_ = None, *,
         scale = None, title = None,
         axis = None, legend = None, sort = None, stack = None,
-        impute = None, scheme = None, format = None, format_type = None,
+        condition = None, impute = None, scheme = None, format = None, format_type = None,
     ))]
     fn new(
         py: Python,
@@ -268,6 +270,7 @@ impl EncodingSpec {
         legend: Option<&Bound<'_, PyAny>>,
         sort: Option<&Bound<'_, PyAny>>,
         stack: Option<String>,
+        condition: Option<&Bound<'_, PyAny>>,
         impute: Option<&Bound<'_, PyAny>>,
         scheme: Option<String>,
         format: Option<String>,
@@ -307,6 +310,7 @@ impl EncodingSpec {
             legend: json_round(py, legend, "legend")?,
             sort: json_round(py, sort, "sort")?,
             stack,
+            condition: json_round(py, condition, "condition")?,
             impute: json_round(py, impute, "impute")?,
             scheme,
             format,

@@ -45,10 +45,20 @@ pub(crate) struct HexSpec {
     pub name: Option<String>,
 }
 
-#[derive(Default)]
 struct Aggregator {
     count: u64,
     sum: f64,
+    sum_sq: f64,
+    min: f64,
+    max: f64,
+    /// Populated only for aggregates requiring order statistics (median).
+    values: Option<Vec<f64>>,
+}
+
+impl Default for Aggregator {
+    fn default() -> Self {
+        Self { count: 0, sum: 0.0, sum_sq: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY, values: None }
+    }
 }
 
 /// Cube-round fractional axial (q_frac, r_frac) to integer (q, r).
@@ -102,13 +112,13 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 
     // Validate aggregate.
     let agg = spec.aggregate.as_str();
-    if !matches!(agg, "count" | "mean" | "sum") {
+    if !matches!(agg, "count" | "mean" | "sum" | "min" | "max" | "median" | "std" | "var") {
         return Err(PyValueError::new_err(format!(
-            "stat_hex: unknown aggregate '{}'; expected 'count' | 'mean' | 'sum'",
+            "stat_hex: unknown aggregate '{}'; expected one of count/mean/sum/min/max/median/std/var",
             agg
         )));
     }
-    let needs_field = matches!(agg, "mean" | "sum");
+    let needs_field = !matches!(agg, "count");
     if needs_field && spec.field.is_none() {
         return Err(PyValueError::new_err(format!(
             "stat_hex: aggregate='{}' requires `field`",
@@ -242,8 +252,15 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         let (q, r) = cube_round(q_frac, r_frac);
         let entry = hexes.entry((q, r)).or_default();
         entry.count += 1;
-        if matches!(agg, "mean" | "sum") {
-            entry.sum += fs[i];
+        if !matches!(agg, "count") {
+            let v = fs[i];
+            entry.sum += v;
+            entry.sum_sq += v * v;
+            if v < entry.min { entry.min = v; }
+            if v > entry.max { entry.max = v; }
+            if matches!(agg, "median") {
+                entry.values.get_or_insert_with(Vec::new).push(v);
+            }
         }
     }
 
@@ -254,7 +271,7 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     let mut values: Vec<f64> = Vec::with_capacity(hexes.len() * 6);
 
     let r_radius = bin_size; // distance from center to vertex (pointy-top)
-    for ((q, r), agg_state) in hexes.iter() {
+    for ((q, r), agg_state) in hexes.iter_mut() {
         // Center in data space.
         let cx = xmin + bin_size * (sqrt3 * (*q as f64) + (sqrt3 / 2.0) * (*r as f64));
         let cy = ymin + bin_size * (1.5 * (*r as f64));
@@ -263,14 +280,27 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         let hex_id = (*q) * 65536 + (*r);
 
         // Aggregated value.
+        let n = agg_state.count as f64;
         let value = match agg {
-            "count" => agg_state.count as f64,
-            "sum" => agg_state.sum,
-            "mean" => {
-                if agg_state.count == 0 {
-                    f64::NAN
-                } else {
-                    agg_state.sum / (agg_state.count as f64)
+            "count"  => n,
+            "sum"    => agg_state.sum,
+            "mean"   => if agg_state.count == 0 { f64::NAN } else { agg_state.sum / n },
+            "min"    => if agg_state.count == 0 { f64::NAN } else { agg_state.min },
+            "max"    => if agg_state.count == 0 { f64::NAN } else { agg_state.max },
+            "median" => {
+                if agg_state.count == 0 { f64::NAN } else {
+                    let vs = agg_state.values.get_or_insert_default();
+                    vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let mid = vs.len() / 2;
+                    if vs.len() % 2 == 0 { (vs[mid - 1] + vs[mid]) / 2.0 } else { vs[mid] }
+                }
+            }
+            "std" | "var" => {
+                if agg_state.count < 2 { f64::NAN } else {
+                    let mean = agg_state.sum / n;
+                    let variance = (agg_state.sum_sq - n * mean * mean) / (n - 1.0);
+                    let variance = variance.max(0.0); // clamp floating-point noise
+                    if agg == "std" { variance.sqrt() } else { variance }
                 }
             }
             _ => unreachable!(),
@@ -382,7 +412,7 @@ impl PyHex {
         }
         match aggregate {
             "count" => {}
-            "mean" | "sum" => {
+            "mean" | "sum" | "min" | "max" | "median" | "std" | "var" => {
                 if field.is_none() {
                     return Err(PyValueError::new_err(format!(
                         "Hex: aggregate='{aggregate}' requires field"
@@ -391,7 +421,7 @@ impl PyHex {
             }
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "Hex: unknown aggregate '{other}'; expected count|mean|sum"
+                    "Hex: unknown aggregate '{other}'; expected count|mean|sum|min|max|median|std|var"
                 )))
             }
         }

@@ -505,6 +505,13 @@ class Chart:
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 kwargs = {**kwargs, "y2_field": y2_field}
+        # density: auto-set groupby from color encoding when not explicit.
+        if kind == "density" and "groupby" not in kwargs:
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    kwargs = {**kwargs, "groupby": color_field}
         # When mark_smooth was called on a chart that already had a primitive
         # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
         # the existing mark as a scatter layer. Force the Smooth transform
@@ -533,8 +540,12 @@ class Chart:
             new._layers = all_layers
             new._mark = None  # signals layered mode in to_spec
             return new
-        # Legacy single-mark 3-tuple: (mark, transforms, remap)
-        mark, transforms, remap = result
+        # Single-mark tuple: (mark, transforms, remap) or (mark, transforms, remap, position)
+        if len(result) == 4:
+            mark, transforms, remap, _stack_position = result
+        else:
+            mark, transforms, remap = result
+            _stack_position = None
         if _prior_layer is not None:
             from ferrum._layer import _Layer as _SmoothLyr
             from ferrum.encoding import X as _XS, Y as _YS
@@ -557,6 +568,8 @@ class Chart:
             return new
         new._mark = mark
         new._transforms = list(self._transforms) + list(transforms or [])
+        if _stack_position is not None:
+            new._position = _stack_position
         if remap:
             from ferrum.encoding import X, X2, Y, Y2
 
@@ -1806,8 +1819,6 @@ class Chart:
 
         Raises
         ------
-        NotImplementedError
-            When called on a chart that already has layers (use ``+`` instead).
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
             inferred.
@@ -1824,22 +1835,26 @@ class Chart:
             from ferrum.position import validate_position_eligibility
 
             validate_position_eligibility("function", position)
-        if self._layers is not None and self._layers:
-            raise NotImplementedError(
-                "mark_function as a layer in a multi-layer Chart is deferred to Phase 9+; "
-                "use a separate Chart composed via + instead"
-            )
         from ferrum.marks.heavy_stat import desugar_function
 
-        # Try to infer parent x data for domain inference
+        # Infer parent x data for domain resolution.
+        # For multi-layer charts, try the first layer's data; for single-chart,
+        # use self._data.
         parent_x_data = None
         x_enc = self._encoding.get("x")
-        if x_enc is not None and self._data is not None:
+        data_source = self._data
+        if data_source is None and self._layers:
+            # Extract data from the first non-function layer.
+            for existing_layer in self._layers:
+                if hasattr(existing_layer, "_data") and existing_layer._data is not None:  # type: ignore[attr-defined]
+                    data_source = existing_layer._data  # type: ignore[attr-defined]
+                    break
+        if x_enc is not None and data_source is not None:
             try:
                 from ferrum._coerce import to_arrow_table
 
                 x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-                tbl = to_arrow_table(self._data)
+                tbl = to_arrow_table(data_source)
                 if x_field_name in tbl.column_names:
                     parent_x_data = tbl[x_field_name]
             except Exception:
@@ -1853,13 +1868,26 @@ class Chart:
             clip=clip,
             **mark_kwargs,
         )
+        if self._layers is not None and self._layers:
+            # Multi-layer: build a fresh single-chart with the function data and
+            # compose via + so it becomes a proper layer alongside existing layers.
+            from ferrum.encoding import X as _X, Y as _Y
+            fn_chart = self.__class__(synthetic)
+            fn_chart._mark = mark
+            if remap:
+                if "x" in remap:
+                    fn_chart._encoding["x"] = _X(remap["x"], type="Q")
+                if "y" in remap:
+                    fn_chart._encoding["y"] = _Y(remap["y"], type="Q")
+            fn_chart._position = position
+            return self + fn_chart
+
         new = self._clone()
         new._mark = mark
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if remap:
             from ferrum.encoding import X, Y
-
             if "x" in remap:
                 new._encoding["x"] = X(remap["x"], type="Q")
             if "y" in remap:
@@ -4335,6 +4363,8 @@ class Chart:
                     if hasattr(layer.position, "to_spec_dict")
                     else layer.position
                 )
+            if layer.blend is not None:
+                layer_dict["blend"] = layer.blend
             out.append(layer_dict)
         return out
 

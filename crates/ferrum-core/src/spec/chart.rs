@@ -719,8 +719,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));

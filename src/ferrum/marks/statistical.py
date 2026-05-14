@@ -65,9 +65,8 @@ def desugar_density(
     bandwidth : str or float, default "scott"
         KDE bandwidth rule or numeric value.
     bw_adjust : float, default 1.0
-        Multiplier applied to a numeric ``bandwidth``.  Raises
-        ``NotImplementedError`` when combined with a string bandwidth rule
-        (e.g. ``"scott"``).
+        Multiplier applied to the resolved bandwidth after rule evaluation.
+        Works with all bandwidth rules (``"scott"``, ``"silverman"``, numeric).
     kernel : str, default "gaussian"
         Reserved for future use (no-op today — the ``Kde`` transform uses
         Gaussian exclusively).
@@ -77,9 +76,9 @@ def desugar_density(
         Explicit ``[min, max]`` range for the KDE.
     cumulative : bool, default False
         Whether to emit the cumulative density rather than the PDF.
-    multiple : str, default "layer"
-        Reserved for future use (only ``"layer"`` is supported today;
-        other values raise ``NotImplementedError``).
+    multiple : {"layer", "stack", "fill", "dodge"}, default "layer"
+        How to render multiple density curves.  ``"stack"`` and ``"fill"``
+        stack areas; ``"dodge"`` is not yet implemented.
     fill : bool, default True
         If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
     groupby : str, optional
@@ -104,14 +103,16 @@ def desugar_density(
     Returns
     -------
     tuple
-        3-tuple ``(mark, transforms, remap)`` on the 1D path, or 5-tuple
-        ``("__layered__", transforms, None, None, layers)`` on the 2D path.
+        3-tuple ``(mark, transforms, remap)`` for ``multiple="layer"``;
+        4-tuple ``(mark, transforms, remap, position)`` for ``multiple="stack"``
+        or ``"fill"``; or 5-tuple ``("__layered__", transforms, None, None, layers)``
+        on the 2D bivariate path.
 
     Raises
     ------
-    NotImplementedError
-        If ``multiple != "layer"`` or if ``bw_adjust`` is combined with a
-        string bandwidth rule.
+    ValueError
+        If ``multiple`` is not one of ``"layer"``, ``"stack"``, ``"fill"``,
+        ``"dodge"`` (dodge raises because it is not yet implemented).
     """
     # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
     # contour fill instead of a 1D KDE area.
@@ -138,23 +139,11 @@ def desugar_density(
         raise ValueError(
             f"mark_density(kernel={kernel!r}) is not supported; only 'gaussian' is available"
         )
-    if multiple != "layer":
-        # `multiple` parameter from spec §3.3 deferred (no stack support yet).
-        raise NotImplementedError(
-            f"mark_density(multiple={multiple!r}) lands in Phase 11; "
-            "only 'layer' is supported today."
+    if multiple not in ("layer", "stack", "fill", "dodge"):
+        raise ValueError(
+            f"mark_density(multiple={multiple!r}) must be one of "
+            "'layer', 'stack', 'fill' (dodge not yet implemented)"
         )
-    # Resolve bw_adjust on the numeric path; raise on the "scott" path.
-    if bw_adjust != 1.0:
-        if isinstance(bandwidth, (int, float)):
-            bandwidth = float(bandwidth) * float(bw_adjust)
-        else:
-            raise NotImplementedError(
-                "mark_density(bw_adjust=...) with a string bandwidth rule "
-                "('scott', etc.) requires resolving the rule on the data "
-                "first; pass a numeric bandwidth (and bw_adjust multiplies "
-                "it), or land bw_adjust support inside the Rust Kde."
-            )
 
     if orientation not in ("vertical", "horizontal"):
         raise ValueError(
@@ -162,21 +151,41 @@ def desugar_density(
         )
     kde_kwargs: dict = dict(
         bandwidth=bandwidth,
+        bw_adjust=float(bw_adjust),
         n=n,
         extent=extent,
         cumulative=cumulative,
+        # shared_extent=True forces a global x-grid across groups (required for stack/fill).
+        shared_extent=(multiple in ("stack", "fill")),
     )
     if groupby is not None:
         kde_kwargs["groupby"] = groupby
     transforms = [Kde(field, **kde_kwargs)]
-    # Phase 5 Kde produces columns ("value", "density") — remap both x and y.
+    # Kde produces columns ("value", "density") — remap both x and y.
     # With groupby, output also contains the group column for color encoding.
     if orientation == "horizontal":
         encoding_remap = {"y": "value", "x": "density"}
     else:
         encoding_remap = {"x": "value", "y": "density"}
     mark = "area" if fill else "line"
-    return (mark, transforms, encoding_remap)
+
+    # multiple="stack" and "fill" use the Stack position adjuster.
+    # multiple="dodge": Rust KDE normalize_mode handles per-group normalization.
+    if multiple == "stack":
+        from ferrum.position import Stack
+        position = Stack(offset="zero")
+    elif multiple == "fill":
+        from ferrum.position import Stack
+        position = Stack(offset="normalize")
+    elif multiple == "dodge":
+        raise ValueError(
+            "mark_density(multiple='dodge') is not yet supported; "
+            "use 'layer', 'stack', or 'fill'."
+        )
+    else:
+        position = None
+
+    return (mark, transforms, encoding_remap) if position is None else (mark, transforms, encoding_remap, position)
 
 
 def desugar_histogram(
