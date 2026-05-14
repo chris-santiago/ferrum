@@ -534,6 +534,25 @@ impl Encoding {
         inherit(&mut self.href, &parent.href);
         inherit(&mut self.description, &parent.description);
     }
+
+    /// Overlay channels from `overlay` onto `self`.
+    ///
+    /// For each of the 12 channels: if `overlay.{channel}.is_some()`,
+    /// replace `self.{channel}` with `overlay`'s value. Channels where
+    /// `overlay` is `None` are left untouched.
+    ///
+    /// This is the semantic inverse of [`inherit_from`](Self::inherit_from):
+    /// `inherit_from` fills gaps (child inherits absent channels from
+    /// parent), while `overlay_from` replaces present channels (overlay
+    /// wins when `Some`).
+    pub fn overlay_from(&mut self, overlay: &Encoding) {
+        macro_rules! ov {
+            ($($ch:ident),*) => {
+                $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
+            };
+        }
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description);
+    }
 }
 
 #[cfg(test)]
@@ -846,5 +865,55 @@ mod tests {
         };
         child.inherit_from(&parent);
         assert_eq!(child.x.as_ref().unwrap().title, None);
+    }
+
+    #[test]
+    fn overlay_from_replaces_present_channels() {
+        let mut base = Encoding::default();
+        base.x = Some(EncodingSpec { field: "base_x".into(), ..Default::default() });
+        base.y = Some(EncodingSpec { field: "base_y".into(), ..Default::default() });
+
+        let mut overlay = Encoding::default();
+        overlay.x = Some(EncodingSpec { field: "overlay_x".into(), ..Default::default() });
+        // overlay.y is None — should NOT replace base.y
+
+        base.overlay_from(&overlay);
+        assert_eq!(base.x.as_ref().unwrap().field, "overlay_x");
+        assert_eq!(base.y.as_ref().unwrap().field, "base_y");
+    }
+
+    #[test]
+    fn overlay_from_covers_all_12_channels() {
+        let mut base = Encoding {
+            x: Some(EncodingSpec { field: "bx".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "by".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "bc".into(), ..Default::default() }),
+            size: Some(EncodingSpec { field: "bs".into(), ..Default::default() }),
+            shape: Some(EncodingSpec { field: "bsh".into(), ..Default::default() }),
+            opacity: Some(EncodingSpec { field: "bo".into(), ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bx2".into(), ..Default::default() }),
+            y2: Some(EncodingSpec { field: "by2".into(), ..Default::default() }),
+            text: Some(EncodingSpec { field: "bt".into(), ..Default::default() }),
+            tooltip: Some(EncodingSpec { field: "btt".into(), ..Default::default() }),
+            href: Some(EncodingSpec { field: "bh".into(), ..Default::default() }),
+            description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
+        };
+        // Overlay only tooltip, href, description (the three that were missed
+        // by the old inline merge).
+        let overlay = Encoding {
+            tooltip: Some(EncodingSpec { field: "ott".into(), ..Default::default() }),
+            href: Some(EncodingSpec { field: "oh".into(), ..Default::default() }),
+            description: Some(EncodingSpec { field: "od".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        base.overlay_from(&overlay);
+        // Replaced channels:
+        assert_eq!(base.tooltip.as_ref().unwrap().field, "ott");
+        assert_eq!(base.href.as_ref().unwrap().field, "oh");
+        assert_eq!(base.description.as_ref().unwrap().field, "od");
+        // Untouched channels:
+        assert_eq!(base.x.as_ref().unwrap().field, "bx");
+        assert_eq!(base.y.as_ref().unwrap().field, "by");
+        assert_eq!(base.color.as_ref().unwrap().field, "bc");
     }
 }

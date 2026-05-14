@@ -34,6 +34,34 @@ pub enum ScaleKind {
     Symlog(SymlogScale),
 }
 
+/// Dispatch a method call to all five `ScaleKind` variants.
+macro_rules! dispatch_all {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            ScaleKind::Linear(s) => s.$method($($arg),*),
+            ScaleKind::Ordinal(s) => s.$method($($arg),*),
+            ScaleKind::Time(s) => s.$method($($arg),*),
+            ScaleKind::Log(s) => s.$method($($arg),*),
+            ScaleKind::Symlog(s) => s.$method($($arg),*),
+        }
+    };
+}
+
+/// Dispatch a method call to the four continuous `ScaleKind` variants
+/// (Linear, Time, Log, Symlog). Ordinal is excluded — callers must
+/// handle it separately.
+macro_rules! dispatch_continuous {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            ScaleKind::Linear(s) => s.$method($($arg),*),
+            ScaleKind::Time(s) => s.$method($($arg),*),
+            ScaleKind::Log(s) => s.$method($($arg),*),
+            ScaleKind::Symlog(s) => s.$method($($arg),*),
+            ScaleKind::Ordinal(_) => unreachable!(),
+        }
+    };
+}
+
 impl ScaleKind {
     /// Map a quantitative or temporal value to a pixel coordinate.
     /// Returns `None` for ordinal scales (use `to_pixel_str` instead) and for
@@ -41,13 +69,8 @@ impl ScaleKind {
     /// adjustments such as Jitter can push values past the original domain;
     /// the underlying scale returns `NaN` rather than `None` in that case).
     pub fn to_pixel_f64(&self, x: f64) -> Option<f64> {
-        let p = match self {
-            Self::Linear(s) => s.scale_internal(x),
-            Self::Time(s) => s.scale_internal(x),
-            Self::Log(s) => s.scale_internal(x),
-            Self::Symlog(s) => s.scale_internal(x),
-            Self::Ordinal(_) => return None,
-        };
+        if matches!(self, Self::Ordinal(_)) { return None; }
+        let p = dispatch_continuous!(self, scale_internal, x);
         if p.is_finite() { Some(p) } else { None }
     }
 
@@ -100,28 +123,8 @@ impl ScaleKind {
 
     /// Pixel-range used when constructing this scale (lo, hi).
     pub fn pixel_range(&self) -> (f64, f64) {
-        match self {
-            Self::Linear(s) => {
-                let r = s.range_pair();
-                (r[0], r[1])
-            }
-            Self::Ordinal(s) => {
-                let r = s.range_pair();
-                (r[0], r[1])
-            }
-            Self::Time(s) => {
-                let r = s.range_pair();
-                (r[0], r[1])
-            }
-            Self::Log(s) => {
-                let r = s.range_pair();
-                (r[0], r[1])
-            }
-            Self::Symlog(s) => {
-                let r = s.range_pair();
-                (r[0], r[1])
-            }
-        }
+        let r = dispatch_all!(self, range_pair);
+        (r[0], r[1])
     }
 }
 

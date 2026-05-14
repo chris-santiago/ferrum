@@ -235,57 +235,7 @@ pub fn render_svg(
 
     let mut out = svg::SvgBuffer::new(layout.viewport, background, config.embed_fonts);
 
-    // Chart-level title (Themes-T2.5a). Emits at the position computed by
-    // compute_layout in the reserved top band. Schwabish SB1 adds an
-    // optional subtitle drawn as a second line below the title at a
-    // smaller font size and theme label_color.
-    if let Some(title) = &layout.chart_title {
-        // D1-D6: per-chart TitleSpec overrides, falling back to theme.
-        let title_spec = spec.title.as_ref();
-        let resolved_font_size = title_spec
-            .and_then(|t| t.font_size)
-            .unwrap_or(theme.title_font_size);
-        let resolved_font_weight: String = title_spec
-            .and_then(|t| t.font_weight.clone())
-            .unwrap_or_else(|| theme.title_font_weight.clone());
-        let resolved_color = title_spec
-            .and_then(|t| t.color.as_deref())
-            .and_then(|hex| color::from_hex_str(hex).ok())
-            .unwrap_or(theme.title_color);
-        let style = svg::TextStyle {
-            fill: resolved_color,
-            font_size: resolved_font_size,
-            anchor: title.anchor,
-            angle: 0.0,
-            font_family: &theme.title_font_family,
-            font_weight: if resolved_font_weight == "normal" {
-                None
-            } else {
-                Some(&resolved_font_weight)
-            },
-            dominant_baseline: None,
-        };
-        out.text(title.x, title.y, &title.text, &style);
-        if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
-            let resolved_sub_color = title_spec
-                .and_then(|t| t.subtitle_color.as_deref())
-                .and_then(|hex| color::from_hex_str(hex).ok())
-                .unwrap_or(theme.font_color);
-            let resolved_sub_font_size = title_spec
-                .and_then(|t| t.subtitle_font_size)
-                .unwrap_or(resolved_font_size * 0.85);
-            let sub_style = svg::TextStyle {
-                fill: resolved_sub_color,
-                font_size: resolved_sub_font_size,
-                anchor: title.anchor,
-                angle: 0.0,
-                font_family: &theme.font_family,
-                font_weight: None,
-                dominant_baseline: None,
-            };
-            out.text(title.x, sy, subtitle, &sub_style);
-        }
-    }
+    render_title(&layout, spec, theme, &mut out);
 
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
@@ -362,16 +312,7 @@ pub fn render_svg(
         // layer overrides). For single-layer non-flipped specs this is
         // structurally identical to `spec`, since layer-0.encoding == spec.encoding.
         let mut merged_encoding = spec.encoding.clone();
-        let layer0_enc = &prep.layers[0].encoding;
-        if layer0_enc.x.is_some()       { merged_encoding.x       = layer0_enc.x.clone(); }
-        if layer0_enc.y.is_some()       { merged_encoding.y       = layer0_enc.y.clone(); }
-        if layer0_enc.color.is_some()   { merged_encoding.color   = layer0_enc.color.clone(); }
-        if layer0_enc.size.is_some()    { merged_encoding.size    = layer0_enc.size.clone(); }
-        if layer0_enc.shape.is_some()   { merged_encoding.shape   = layer0_enc.shape.clone(); }
-        if layer0_enc.opacity.is_some() { merged_encoding.opacity = layer0_enc.opacity.clone(); }
-        if layer0_enc.x2.is_some()      { merged_encoding.x2      = layer0_enc.x2.clone(); }
-        if layer0_enc.y2.is_some()      { merged_encoding.y2      = layer0_enc.y2.clone(); }
-        if layer0_enc.text.is_some()    { merged_encoding.text    = layer0_enc.text.clone(); }
+        merged_encoding.overlay_from(&prep.layers[0].encoding);
         let rendering_spec_for_panel = ChartSpec {
             encoding: merged_encoding,
             ..spec.clone()
@@ -439,27 +380,7 @@ pub fn render_svg(
         out.use_clip_close();
     }
 
-    if let Some(legend) = &layout.legend {
-        // Use rendering encoding (first layer, accounts for CoordFlip) for legend scale.
-        let rendering_spec_for_legend = ChartSpec {
-            encoding: prep.layers[0].encoding.clone(),
-            ..spec.clone()
-        };
-        let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
-            let (gs, _) = scale_resolve::resolve_scales_with_outputs(
-                &rendering_spec_for_legend,
-                prep.final_batch(),
-                &prep.transform_outputs,
-                (0.0, 1.0),
-                (0.0, 1.0),
-                theme,
-            )?;
-            gs.color
-        } else {
-            None
-        };
-        marks::legend::draw(legend, color_scale.as_ref(), theme, &mut out);
-    }
+    render_legend(&layout, spec, &prep, theme, &mut out)?;
 
     let svg_string = out.finish();
     Ok(RenderOutput { bytes: svg_string, layout, warnings })
@@ -477,6 +398,99 @@ pub fn render_png(
     let h = (svg_out.layout.viewport.h * config.scale).round() as u32;
     let bytes = png::svg_string_to_png_bytes(&svg_out.bytes, w, h, config.scale)?;
     Ok(RenderOutput { bytes, layout: svg_out.layout, warnings: svg_out.warnings })
+}
+
+/// Emit the chart-level title and optional subtitle into the SVG buffer.
+///
+/// Resolves per-chart `TitleSpec` overrides (font size, weight, color,
+/// subtitle color/size) falling back to `theme` defaults. Pure output —
+/// no state escapes beyond what is written to `out`.
+fn render_title(
+    layout: &crate::layout::LayoutResult,
+    spec: &ChartSpec,
+    theme: &ThemeInputs,
+    out: &mut svg::SvgBuffer,
+) {
+    let Some(title) = &layout.chart_title else { return };
+    let title_spec = spec.title.as_ref();
+    let resolved_font_size = title_spec
+        .and_then(|t| t.font_size)
+        .unwrap_or(theme.title_font_size);
+    let resolved_font_weight: String = title_spec
+        .and_then(|t| t.font_weight.clone())
+        .unwrap_or_else(|| theme.title_font_weight.clone());
+    let resolved_color = title_spec
+        .and_then(|t| t.color.as_deref())
+        .and_then(|hex| color::from_hex_str(hex).ok())
+        .unwrap_or(theme.title_color);
+    let style = svg::TextStyle {
+        fill: resolved_color,
+        font_size: resolved_font_size,
+        anchor: title.anchor,
+        angle: 0.0,
+        font_family: &theme.title_font_family,
+        font_weight: if resolved_font_weight == "normal" {
+            None
+        } else {
+            Some(&resolved_font_weight)
+        },
+        dominant_baseline: None,
+    };
+    out.text(title.x, title.y, &title.text, &style);
+    if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
+        let resolved_sub_color = title_spec
+            .and_then(|t| t.subtitle_color.as_deref())
+            .and_then(|hex| color::from_hex_str(hex).ok())
+            .unwrap_or(theme.font_color);
+        let resolved_sub_font_size = title_spec
+            .and_then(|t| t.subtitle_font_size)
+            .unwrap_or(resolved_font_size * 0.85);
+        let sub_style = svg::TextStyle {
+            fill: resolved_sub_color,
+            font_size: resolved_sub_font_size,
+            anchor: title.anchor,
+            angle: 0.0,
+            font_family: &theme.font_family,
+            font_weight: None,
+            dominant_baseline: None,
+        };
+        out.text(title.x, sy, subtitle, &sub_style);
+    }
+}
+
+/// Emit the legend (categorical or colorbar) into the SVG buffer.
+///
+/// Builds a rendering spec from the first layer's encoding (accounts for
+/// CoordFlip), re-resolves the color scale for the legend palette, and
+/// dispatches to `marks::legend::draw`. Returns `Err` only if scale
+/// resolution fails.
+fn render_legend(
+    layout: &crate::layout::LayoutResult,
+    spec: &ChartSpec,
+    prep: &prepare::PreparedInputs,
+    theme: &ThemeInputs,
+    out: &mut svg::SvgBuffer,
+) -> Result<(), RenderError> {
+    let Some(legend) = &layout.legend else { return Ok(()) };
+    let rendering_spec_for_legend = ChartSpec {
+        encoding: prep.layers[0].encoding.clone(),
+        ..spec.clone()
+    };
+    let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
+        let (gs, _) = scale_resolve::resolve_scales_with_outputs(
+            &rendering_spec_for_legend,
+            prep.final_batch(),
+            &prep.transform_outputs,
+            (0.0, 1.0),
+            (0.0, 1.0),
+            theme,
+        )?;
+        gs.color
+    } else {
+        None
+    };
+    marks::legend::draw(legend, color_scale.as_ref(), theme, out);
+    Ok(())
 }
 
 fn filter_batch_by_facet(
