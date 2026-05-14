@@ -1,6 +1,6 @@
-# ferrum.figure
+# ferrum.plots
 
-::: ferrum.figure
+::: ferrum.plots
     options:
       members_order: source
       show_root_heading: false

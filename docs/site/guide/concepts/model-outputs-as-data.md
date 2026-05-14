@@ -56,7 +56,7 @@ The commitment to model-outputs-as-data is structural, not cosmetic. If diagnost
 
 None of those qualifiers exist in Ferrum because diagnostics are not a parallel system. They live inside the same grammar, the same composition operators, the same rendering pipeline, and the same dataframe ingestion path.
 
-That is the load-bearing claim. Every other choice in the library either follows from it (the visualizer base class returning `Chart`, the diagnostic helpers in `ferrum.figure`, the encoding channels working uniformly across diagnostic and non-diagnostic plots) or is consistent with it.
+That is the load-bearing claim. Every other choice in the library either follows from it (the visualizer base class returning `Chart`, the diagnostic helpers in `ferrum.plots`, the encoding channels working uniformly across diagnostic and non-diagnostic plots) or is consistent with it.
 
 ## What this does not mean
 

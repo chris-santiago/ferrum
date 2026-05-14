@@ -49,7 +49,7 @@ nav = [
   { "API Reference" = [
     { "ferrum" = "api/ferrum.md" },
     { "ferrum.encoding" = "api/encoding.md" },
-    { "ferrum.figure" = "api/figure.md" },
+    { "ferrum.plots" = "api/plots.md" },
     { "ferrum.themes" = "api/themes.md" },
   ] },
   { Changelog = "changelog.md" },

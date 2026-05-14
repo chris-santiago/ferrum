@@ -2,7 +2,7 @@
 
 Figure-level helpers are one-line entry points for common chart patterns. They are convenience over the grammar, not parallel objects: each helper builds a `Chart` (or a compound view like `JointChart` / `RepeatChart` / `ClusterMapChart`) and returns it. The result is themeable, composable, savable, and renderable in exactly the same way as a chart you wrote from primitives.
 
-This page covers the eight helpers in `ferrum.figure`. Each is also available at the top level (`fm.displot` ≡ `fm.figure.displot`).
+This page covers the eight helpers in `ferrum.plots`. Each is also available at the top level (`fm.displot` ≡ `fm.plots.displot`).
 
 ## When to use a helper
 
@@ -251,4 +251,4 @@ The regression fit and the distribution plot are concatenated horizontally with 
 - [Composition](composition.md) for the operators (`+`, `|`, `&`, `JointChart`, `RepeatChart`) the helpers use internally.
 - [Themes](themes.md) — every helper accepts a `theme=` keyword to apply a theme at the call site.
 - [Model diagnostics](model-diagnostics.md) for the Phase 10 family of helpers (ROC, calibration, confusion, SHAP, etc.) that follow the same pattern.
-- The [API Reference](../api/figure.md) for the full keyword signatures of each helper.
+- The [API Reference](../api/plots.md) for the full keyword signatures of each helper.

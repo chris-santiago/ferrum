@@ -183,7 +183,7 @@ assert joint.show_svg().startswith("<svg")
 
 The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis; the `right` marginal needs to be a chart authored with the correct orientation for that side. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal.
 
-If you want a one-line entry point that handles both marginals and the orientation for you, [`jointplot`](figure-helpers.md) in `ferrum.figure` is the convenience helper that builds a `JointChart` automatically.
+If you want a one-line entry point that handles both marginals and the orientation for you, [`jointplot`](figure-helpers.md) in `ferrum.plots` is the convenience helper that builds a `JointChart` automatically.
 
 ## Repeating a template across fields
 
@@ -224,13 +224,13 @@ Use `RepeatChart` when:
 
 For a small-multiples layout where the data is *partitioned* across cells (one panel per group), use the `facet` encoding channel instead. The difference is structural: faceting splits one chart by a categorical field; `RepeatChart` substitutes a different encoding into a template.
 
-`ferrum.figure.pairplot` is the figure-level helper that uses `RepeatChart` internally to produce a full pairs grid.
+`ferrum.plots.pairplot` is the figure-level helper that uses `RepeatChart` internally to produce a full pairs grid.
 
 ## Clustered heatmap with dendrograms
 
 `ClusterMapChart` is a specialized composition: a heatmap with row and column dendrograms attached, computed from a hierarchical clustering of the data. The output is a 2 × 2 grid — heatmap (bottom-right), column dendrogram (top-right), row dendrogram (bottom-left, rotated), empty (top-left).
 
-For most use cases, the figure-level helper [`clustermap`](figure-helpers.md) in `ferrum.figure` is the right entry point. Direct `ClusterMapChart` construction is for when you want fine control over the linkage method, the dendrogram styling, or the heatmap encoding details.
+For most use cases, the figure-level helper [`clustermap`](figure-helpers.md) in `ferrum.plots` is the right entry point. Direct `ClusterMapChart` construction is for when you want fine control over the linkage method, the dendrogram styling, or the heatmap encoding details.
 
 ## Picking a composition operator
 
