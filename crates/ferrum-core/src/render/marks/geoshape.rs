@@ -10,8 +10,7 @@ use geojson::{Geometry, Value as GeoValue};
 use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
 use crate::render::draw::{to_scene_color, DrawCtx, MarkBuildResult};
-use crate::render::scale_resolve::ScaleKind;
-use crate::spec::coord::{CoordKind as SpecCoord, GeoProjection};
+use crate::spec::coord::CoordKind as SpecCoord;
 
 const GEOMETRY_COL: &str = "__geometry__";
 
@@ -76,12 +75,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let offset_y = pa.y + pa.h - (pa.h - data_h * scale) / 2.0;
 
     let fill_style = FillStroke {
-        fill: if ctx.mark_style.stroke_width > 0.0 || ctx.mark_style.stroke.is_some() {
-            Some(crate::render::draw::to_scene_color(fill))
-        } else {
-            Some(crate::render::draw::to_scene_color(fill))
-        },
-        stroke: stroke.map(|s| crate::render::draw::to_scene_color(s)),
+        fill: Some(to_scene_color(fill)),
+        stroke: stroke.map(to_scene_color),
         stroke_width: ctx.mark_style.stroke_width,
         opacity: ctx.mark_style.opacity,
         stroke_dash: None,

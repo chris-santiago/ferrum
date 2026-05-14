@@ -507,6 +507,24 @@ pub fn compute_layout(
             None
         };
 
+        // CoordFixed: shrink the binding dimension so w/h == ratio, center.
+        if let Some(crate::spec::coord::CoordKind::Fixed { ratio, .. }) = &spec.coord {
+            if rect != Rect::ZERO && *ratio > 0.0 {
+                let current_ratio = rect.w / rect.h;
+                if current_ratio > *ratio {
+                    // Too wide — shrink width.
+                    let new_w = rect.h * ratio;
+                    let dx = (rect.w - new_w) / 2.0;
+                    rect = Rect { x: rect.x + dx, y: rect.y, w: new_w, h: rect.h };
+                } else {
+                    // Too tall — shrink height.
+                    let new_h = rect.w / ratio;
+                    let dy = (rect.h - new_h) / 2.0;
+                    rect = Rect { x: rect.x, y: rect.y + dy, w: rect.w, h: new_h };
+                }
+            }
+        }
+
         panels.push(PanelLayout {
             plot_area: rect,
             facet_key,

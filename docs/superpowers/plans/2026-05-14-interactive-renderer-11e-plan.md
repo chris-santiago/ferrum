@@ -150,3 +150,16 @@ are additive — no spec fields were removed or renamed.
 | 8 | `PathCmd` field style | positional tuples: `MoveTo(f64, f64)` | named fields: `MoveTo { x: f64, y: f64 }` | serde `#[serde(tag = "op")]` requires struct variants, not tuple variants. |
 | 9 | `StrokeStyle` | `color`, `width`, `opacity`, `dash` | + `stroke_cap: Option<StrokeCap>`, `stroke_join: Option<StrokeJoin>` | Needed on `Polyline` nodes so the SVG walker can detect and emit the `<g>` wrapper. (Plan §"Type gaps" identified this pre-implementation.) |
 | 10 | `TextStyle` | no `font_family` | + `font_family: String` | Every SVG `<text>` needs a `font-family` attribute. (Plan §"Type gaps" identified this pre-implementation.) |
+
+## Deferred gaps from 11d to address in 11e
+
+| Item | Spec ref | Notes |
+|---|---|---|
+| Polar transform for non-arc marks (mark_point, mark_line in polar) | §7.3 | Only arc has polar geometry. point/line still render at Cartesian positions. |
+| Polar axis rendering (circular + radial) | §7.3 | No circular angular axis or radial tick marks emitted for CoordPolar panels. |
+| Per-slice color from color encoding (mark_arc) | §7.3 | Arc slices all render in the same mark_style fill; color encoding is ignored in `arc.rs`. |
+| Interactive polar hit-testing | §7.3 | WASM `hit_test` uses Cartesian; inverse polar (atan2/sqrt) not wired. |
+| Interactive zoom recomputation with xlim/ylim | §7.1, §7.2 | CoordCartesian/CoordFixed bounds are set at spec-build time only; no round-trip from WASM on zoom. |
+| `inverse()` un-gate from `#[cfg(test)]` | §7.4 | Needed for interactive geo hit-testing. Currently test-only to pass clippy. |
+| GeoJSON non-FeatureCollection input (Geometry, GeometryCollection) | §7.4 | `_coerce.py` only detects FeatureCollection root; single Geometry input not handled. |
+| Golden SVGs for new coord systems and marks | §12.4 | Smoke tests confirm rendering; pixel-level goldens not generated in 11d. |

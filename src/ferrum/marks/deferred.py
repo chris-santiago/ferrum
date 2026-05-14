@@ -1,25 +1,18 @@
-"""Marks deferred beyond Phase 9. Phase 8b's PHASE_8B_MARKS is empty; Phase 9
-removed `segment` from PHASE_9_PLUS_MARKS (now in 9d). The remaining four marks
-(`arc`, `image`, `geoshape`, `label`) are not blocked by any §3.14 Group A figure
-function and stay deferred consistent with the no-defer rule applying to spec
-contracts ferrum currently advertises (see ferrum-spec.md §3.3 — these aren't
-referenced by any §3.14 figure-level signature)."""
+"""Marks deferred beyond Phase 9.
+
+Phase 8b's PHASE_8B_MARKS is empty.  Phase 9 removed `segment`.
+Phase 11d closed arc (11d3), label (11d4), geoshape (11d5), and
+added coord-awareness to image (11d6 — no longer deferred).
+PHASE_9_PLUS_MARKS is now empty.
+"""
 
 from __future__ import annotations
 
 # Phase 8b marks (Sub-batches E + F landed; list now empty).
 PHASE_8B_MARKS: frozenset[str] = frozenset()
 
-# Marks deferred to Phase 11+ (arc, image, geoshape, label).
-# Phase 9 closed; these four marks remain unscheduled.
-PHASE_9_PLUS_MARKS = frozenset(
-    [
-        "arc",
-        "image",
-        "geoshape",
-        "label",
-    ]
-)
+# All four Phase 9+ deferred marks are closed by Phase 11d.
+PHASE_9_PLUS_MARKS: frozenset[str] = frozenset()
 
 
 def deferred_mark_error(mark_name: str) -> NotImplementedError:
@@ -38,8 +31,8 @@ def deferred_mark_error(mark_name: str) -> NotImplementedError:
 
     Examples
     --------
-    >>> err = deferred_mark_error("arc")
-    >>> "Phase 11+" in str(err)
+    >>> err = deferred_mark_error("unknown_mark")
+    >>> "not implemented" in str(err)
     True
     """
     if mark_name in PHASE_8B_MARKS:

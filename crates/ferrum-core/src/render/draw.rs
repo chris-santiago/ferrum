@@ -153,8 +153,16 @@ pub fn resolve_mark_style(
         Mark::Point => {
             style.opacity = theme.point_opacity;
         }
-        Mark::Tick | Mark::Text | Mark::Image => {
+        Mark::Tick | Mark::Text | Mark::Image | Mark::Label => {
             // Baseline applies as-is.
+        }
+        Mark::Arc => {
+            style.stroke_width = 0.0;
+        }
+        Mark::Geoshape => {
+            style.fill = theme.mark_color;
+            style.stroke = Some(theme.mark_color);
+            style.stroke_width = 0.5;
         }
     }
 
@@ -279,6 +287,12 @@ pub struct MarkBuildResult {
     pub tooltips: Option<Vec<FsTooltipContent>>,
     pub hrefs: Option<Vec<Option<String>>>,
     pub descriptions: Option<Vec<Option<String>>>,
+}
+
+impl MarkBuildResult {
+    pub fn empty(kind: MarkBatchKind) -> Self {
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None }
+    }
 }
 
 impl MetadataColumns {

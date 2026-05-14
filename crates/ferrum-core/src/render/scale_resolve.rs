@@ -382,6 +382,22 @@ pub fn resolve_scales_with_outputs(
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
 
+    // Geoshape marks read geometry from __geometry__ column and don't use x/y scales.
+    // Return dummy unit scales so the renderer can proceed; the mark builder ignores them.
+    if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
+        let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
+        ));
+        let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
+        ));
+        return Ok((
+            ResolvedScales { x: dummy_x, y: dummy_y, color: None, size: None, shape: None, opacity: None,
+                x2: None, y2: None },
+            warnings,
+        ));
+    }
+
     let x_enc = spec
         .encoding
         .x
@@ -406,13 +422,16 @@ pub fn resolve_scales_with_outputs(
     // resolved range and produce non-finite pixels downstream.
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
-    let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
-
+    let mut x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+
+    // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
+    // data domain; expand=false removes the default 5% inward padding.
+    apply_coord_domain_overrides(spec, &mut x, &mut y, x_pixel_range, y_pixel_range);
 
     // Color/size/shape/opacity scales are primary-batch only. These channels
     // do not currently participate in cross-layer scale unification: each is
@@ -1034,6 +1053,67 @@ fn distinct_values_in_order(
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
     super::arrow_cast::distinct_values_in_order(batch, field)
+}
+
+/// Apply coord-level domain and padding overrides to the x/y scales.
+///
+/// For `CoordCartesian` and `CoordFixed`, explicit `x_domain`/`y_domain` pins
+/// the data domain; `expand=false` removes the 5% inward padding.
+fn apply_coord_domain_overrides(
+    spec: &ChartSpec,
+    x: &mut ScaleKind,
+    y: &mut ScaleKind,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+) {
+    use crate::spec::coord::CoordKind;
+
+    let (x_domain_override, y_domain_override, expand) = match &spec.coord {
+        Some(CoordKind::Cartesian { x_domain, y_domain, expand, .. }) => {
+            (*x_domain, *y_domain, *expand)
+        }
+        Some(CoordKind::Fixed { x_domain, y_domain, expand, .. }) => {
+            (*x_domain, *y_domain, *expand)
+        }
+        _ => return,
+    };
+
+    if let Some((lo, hi)) = x_domain_override {
+        let pr = if expand {
+            inset_pixel_range(x_pixel_range, resolve_padding_fraction(None, false))
+        } else {
+            x_pixel_range
+        };
+        *x = ScaleKind::Linear(LinearScale::new_internal(
+            vec![lo, hi], vec![pr.0, pr.1], false, false,
+        ));
+    } else if !expand {
+        // No explicit domain, but expand=false: rebuild with raw pixel range.
+        if let ScaleKind::Linear(ref inner) = x {
+            let d = inner.domain_pair().to_vec();
+            *x = ScaleKind::Linear(LinearScale::new_internal(
+                d, vec![x_pixel_range.0, x_pixel_range.1], false, false,
+            ));
+        }
+    }
+
+    if let Some((lo, hi)) = y_domain_override {
+        let pr = if expand {
+            inset_pixel_range(y_pixel_range, resolve_padding_fraction(None, false))
+        } else {
+            y_pixel_range
+        };
+        *y = ScaleKind::Linear(LinearScale::new_internal(
+            vec![lo, hi], vec![pr.1, pr.0], false, false, // y is flipped (pixel y increases downward)
+        ));
+    } else if !expand {
+        if let ScaleKind::Linear(ref inner) = y {
+            let d = inner.domain_pair().to_vec();
+            *y = ScaleKind::Linear(LinearScale::new_internal(
+                d, vec![y_pixel_range.1, y_pixel_range.0], false, false,
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

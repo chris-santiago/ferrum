@@ -3,6 +3,7 @@ use ferrum_scene::{
     BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, PanelTickLevels, SceneGraph,
     SceneNode, TickLevel,
 };
+use crate::spec::coord::to_scene_coord;
 
 use crate::layout::{LayoutResult, ThemeInputs};
 use crate::spec::chart::ChartSpec;
@@ -56,15 +57,25 @@ pub fn build_scene(
             .find(|a| matches!(a.orient,
                 crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
 
-        // Gridlines
-        let grid_nodes = marks::axis::build_grid(
-            panel.plot_area, panel_x_axis, panel_y_axis, theme,
+        // Polar and Geo coordinates suppress Cartesian axes and gridlines.
+        let suppress_axes = matches!(
+            &spec.coord,
+            Some(crate::spec::coord::CoordKind::Polar { .. })
+            | Some(crate::spec::coord::CoordKind::Geo { .. })
         );
+
+        let grid_nodes = if suppress_axes {
+            Vec::new()
+        } else {
+            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme)
+        };
 
         // Axes
         let mut axes_nodes: Vec<SceneNode> = Vec::new();
-        for axis in &panel_axes_layout {
-            axes_nodes.extend(marks::axis::build_axis(axis, theme));
+        if !suppress_axes {
+            for axis in &panel_axes_layout {
+                axes_nodes.extend(marks::axis::build_axis(axis, theme));
+            }
         }
 
         // Strip title — emitted as separate nodes in the panel, not a group
@@ -196,16 +207,38 @@ pub fn build_scene(
             h: panel.plot_area.h,
         };
 
-        panels.push(Panel {
-            id: panel_idx,
-            plot_area,
-            clip: plot_area,
-            coord: CoordKind::Cartesian {
+        // Determine clip rect: clip=false expands to the full panel area.
+        let panel_clip = match &spec.coord {
+            Some(crate::spec::coord::CoordKind::Cartesian { clip: false, .. })
+            | Some(crate::spec::coord::CoordKind::Fixed { clip: false, .. }) => {
+                // Expand clip to the full viewport so marks render outside plot area.
+                ferrum_scene::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: layout.viewport.w,
+                    h: layout.viewport.h,
+                }
+            }
+            _ => plot_area,
+        };
+
+        // Convert spec-side CoordKind to scene-side CoordKind.
+        // outer_radius_px defaults to half the smaller plot dimension for polar.
+        let outer_radius_px = (panel.plot_area.w.min(panel.plot_area.h)) / 2.0;
+        let scene_coord = spec.coord.as_ref()
+            .map(|c| to_scene_coord(c, outer_radius_px))
+            .unwrap_or(CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
                 expand: true,
                 clip: true,
-            },
+            });
+
+        panels.push(Panel {
+            id: panel_idx,
+            plot_area,
+            clip: panel_clip,
+            coord: scene_coord,
             grid: grid_nodes,
             marks: mark_batches,
             axes: axes_nodes,

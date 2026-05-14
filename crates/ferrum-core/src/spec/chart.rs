@@ -96,7 +96,7 @@ impl ChartSpec {
         tooltip = None, href = None, description = None,      // Phase 10 gallery-defaults
         data = None, transforms = None,
         layers = None,                                        // from Task 1
-        coord = None,                                         // from Task 4
+        coord = None,                                         // from Task 4 (11d: accepts str or dict)
         facet = None,                                         // NEW here
         mark_style = None,                                    // NEW here
         position = None,                                      // Phase 9c
@@ -124,7 +124,7 @@ impl ChartSpec {
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
-        coord: Option<&str>,
+        coord: Option<&Bound<'_, PyAny>>,
         facet: Option<&Bound<'_, PyAny>>,
         mark_style: Option<&Bound<'_, PyAny>>,
         position: Option<&Bound<'_, PyAny>>,
@@ -172,11 +172,27 @@ impl ChartSpec {
 
         let coord = match coord {
             None => None,
-            Some("cartesian") => Some(crate::spec::coord::CoordKind::Cartesian),
-            Some("flip") => Some(crate::spec::coord::CoordKind::Flip),
-            Some(other) => return Err(PyValueError::new_err(format!(
-                "unknown coord kind: '{other}'; expected 'cartesian' or 'flip'"
-            ))),
+            Some(obj) => {
+                // Accept a plain string ("flip", "cartesian") for back-compat,
+                // or a dict produced by CoordXxx._to_spec_dict() for new coord types.
+                if let Ok(s) = obj.extract::<String>() {
+                    Some(match s.as_str() {
+                        "cartesian" => crate::spec::coord::CoordKind::Cartesian {
+                            x_domain: None,
+                            y_domain: None,
+                            expand: true,
+                            clip: true,
+                        },
+                        "flip" => crate::spec::coord::CoordKind::Flip,
+                        other => return Err(PyValueError::new_err(format!(
+                            "unknown coord kind: '{other}'; expected 'cartesian', 'flip', \
+                             'fixed', 'polar', or 'geo'"
+                        ))),
+                    })
+                } else {
+                    Some(crate::pyo3_serde::from_py(obj, "coord")?)
+                }
+            }
         };
 
         let facet = facet
@@ -339,14 +355,13 @@ impl ChartSpec {
             .map(Some)
     }
 
-    /// Coordinate system name (``"cartesian"``, ``"flip"``), or ``None``.
+    /// Coordinate system dict (serialized ``CoordKind``), or ``None``.
     #[getter]
-    fn coord(&self) -> Option<&'static str> {
-        match self.coord {
-            None => None,
-            Some(CoordKind::Cartesian) => Some("cartesian"),
-            Some(CoordKind::Flip) => Some("flip"),
-        }
+    fn coord(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.coord
+            .as_ref()
+            .map(|c| crate::pyo3_serde::to_py(py, c))
+            .transpose()
     }
 
     /// Position adjustment dict (Jitter, Dodge, Stack, ...), or ``None``.
@@ -763,6 +778,28 @@ mod tests {
         spec.coord = Some(CoordKind::Flip);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""coord":{"kind":"flip"}"#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_coord_cartesian_with_xlim_round_trip() {
+        use crate::spec::coord::CoordKind;
+        let mut spec = minimal_scatter();
+        spec.coord = Some(CoordKind::Cartesian { x_domain: Some((0.0, 100.0)), y_domain: None, expand: true, clip: true });
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""kind":"cartesian""#));
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_coord_geo_round_trip() {
+        use crate::spec::coord::{CoordKind, GeoProjection};
+        let mut spec = minimal_scatter();
+        spec.coord = Some(CoordKind::Geo { projection: GeoProjection::Mercator });
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""kind":"geo""#));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
     }

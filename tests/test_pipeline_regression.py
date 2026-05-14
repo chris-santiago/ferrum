@@ -709,27 +709,38 @@ class TestEncodingChannels:
             f"Unexpected UserWarning for Detail channel: {detail_warnings}"
         )
 
-    def test_theta_channel_raises_not_implemented_error(self):
-        """encode(theta=Theta('x')) should raise NotImplementedError for static SVG."""
+    def test_theta_channel_with_coord_polar_remaps_to_x(self):
+        """Phase 11d: theta remaps to x when CoordPolar(theta='x') is set."""
+        import json
         df = _numeric_df()
-        with pytest.raises(NotImplementedError, match="[Pp]olar|theta"):
-            (
-                fm.Chart(df)
-                .mark_point()
-                .encode(x="x", y="y", theta=fm.Theta("x"))
-                .show_svg()
-            )
+        spec = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(theta=fm.Theta("y"))
+            .coord(fm.CoordPolar(theta="x"))
+            .to_spec()
+        )
+        j = json.loads(spec.to_json())
+        # theta should have been remapped to the x channel
+        assert j["encoding"].get("x") is not None
+        assert j["encoding"].get("theta") is None
 
-    def test_radius_channel_raises_not_implemented_error(self):
-        """encode(radius=Radius('x')) should raise NotImplementedError for static SVG."""
+    def test_radius_channel_with_coord_polar_remaps_to_y(self):
+        """Phase 11d: radius remaps to y when CoordPolar(theta='x') is set."""
+        import json
         df = _numeric_df()
-        with pytest.raises(NotImplementedError, match="[Pp]olar|radius"):
-            (
-                fm.Chart(df)
-                .mark_point()
-                .encode(x="x", y="y", radius=fm.Radius("x"))
-                .show_svg()
-            )
+        spec = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(theta=fm.Theta("y"), radius=fm.Radius("x"))
+            .coord(fm.CoordPolar(theta="x"))
+            .to_spec()
+        )
+        j = json.loads(spec.to_json())
+        assert j["encoding"].get("x") is not None
+        assert j["encoding"].get("y") is not None
+        assert j["encoding"].get("theta") is None
+        assert j["encoding"].get("radius") is None
 
 
 # ---------------------------------------------------------------------------

@@ -50,8 +50,9 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         svg.clip_open(&clip_id, clip_rect);
         svg.use_clip_open(&clip_id);
 
-        // Marks
+        // Marks (non-text first, inside clip)
         for batch in &panel.marks {
+            if batch.kind == ferrum_scene::MarkBatchKind::Text { continue; }
             // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
             // matching the old draw() pattern.
             let cap_join_wrap = if batch.stroke_cap.is_some() || batch.stroke_join.is_some() {
@@ -117,6 +118,32 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         }
 
         svg.use_clip_close();
+
+        // Text-kind mark batches (mark_text, mark_label) outside clip so
+        // dy/dx offsets near panel edges are not cut off.
+        for batch in &panel.marks {
+            if batch.kind != ferrum_scene::MarkBatchKind::Text { continue; }
+            for (i, node) in batch.nodes.iter().enumerate() {
+                let href = batch.hrefs.as_ref().and_then(|h| h.get(i).and_then(|o| o.as_deref()));
+                let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
+                let desc = batch.descriptions.as_ref().and_then(|d| d.get(i).and_then(|o| o.as_deref()));
+                let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
+                if needs_wrap {
+                    if let Some(url) = href { svg.a_open(url); }
+                    svg.g_open(None);
+                    if let Some(tt) = tooltip {
+                        let text: String = tt.fields.iter().map(|f| f.value.clone()).collect::<Vec<_>>().join(", ");
+                        if !text.is_empty() { svg.title_elem(&text); }
+                    }
+                    if let Some(d) = desc { svg.desc_elem(d); }
+                    emit_node(&mut svg, node);
+                    svg.g_close();
+                    if href.is_some() { svg.a_close(); }
+                } else {
+                    emit_node(&mut svg, node);
+                }
+            }
+        }
     }
 
     // Legend (after panels, matching old render_svg order)

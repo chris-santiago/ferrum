@@ -226,6 +226,12 @@ def _build_prior_layer(mark, encoding, mark_kwargs, position):
     )
 
 
+def _get_coord_polar_class():
+    """Lazy import of CoordPolar to avoid circular imports at module load."""
+    from ferrum.coord import CoordPolar
+    return CoordPolar
+
+
 def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     """Apply channel-alias rules, mapping convenience channels to their targets.
 
@@ -3627,56 +3633,87 @@ class Chart:
         )
 
     def mark_arc(self, **kwargs):
-        """Render data as arcs (pie/donut slices).
+        """Render data as arcs (pie or donut slices).
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Requires ``Chart.coord(fm.CoordPolar(theta="x"))`` to be set.
+        The theta-mapped encoding channel (``x`` by default) determines
+        each slice's angular sweep proportional to its value.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_arc().encode(x="value", color="category").coord(
+        ...     fm.CoordPolar(theta="x")
+        ... )
         """
-        raise deferred_mark_error("arc")
+        return self._set_mark("arc", **kwargs)
 
     def mark_image(self, **kwargs):
         """Render data as raster images.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Each row in the dataset becomes one image tile.  Supply a base64-encoded
+        PNG/JPEG via the ``url`` encoding channel.  Requires Cartesian coordinates;
+        returns an empty scene for Polar or Geo coord systems.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``width``, ``height``, ``opacity``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_image().encode(x="x", y="y", url="data_url")
         """
-        raise deferred_mark_error("image")
+        return self._set_mark("image", **kwargs)
 
     def mark_geoshape(self, **kwargs):
-        """Render geographic shape data.
+        """Render geographic shapes from a GeoJSON FeatureCollection.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Pass a GeoJSON FeatureCollection dict to ``Chart(data)`` — ferrum
+        auto-detects the format and splits properties into encoding channels
+        and geometry into a ``__geometry__`` column.  Set the projection via
+        ``Chart.coord(fm.CoordGeo(projection="mercator"))``.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(geojson_data).mark_geoshape().coord(
+        ...     fm.CoordGeo(projection="equal_earth")
+        ... )
         """
-        raise deferred_mark_error("geoshape")
+        return self._set_mark("geoshape", **kwargs)
 
     def mark_label(self, **kwargs):
-        """Render smart text labels with automatic collision avoidance.
+        """Render positioned text labels near data points.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Each row in the dataset becomes one text label placed at (x, y) +
+        optional (dx, dy) offset.  Use the ``text`` encoding channel to
+        specify label content; omitting it formats the x value.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        dx : float, optional
+            Horizontal offset from the data position (pixels, default 0).
+        dy : float, optional
+            Vertical offset from the data position (pixels, default -8).
+        font_size : float, optional
+            Label font size in points.
+        **kwargs
+            Additional mark style overrides.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_label(dy=-10).encode(x="x", y="y", text="label")
         """
-        raise deferred_mark_error("label")
+        return self._set_mark("label", **kwargs)
 
     # ---- Encoding ----
 
@@ -4204,14 +4241,15 @@ class Chart:
         >>> fm.Chart(df).mark_bar().encode(x="cat", y="val").coord(fm.CoordFlip())
         Chart(mark='bar', encoding=['x', 'y'])
         """
-        from ferrum.coord import CoordFlip
+        from ferrum.coord import CoordCartesian, CoordFixed, CoordFlip, CoordGeo, CoordPolar
 
         new = self._clone()
-        if isinstance(coord, CoordFlip):
-            new._coord = "flip"
+        if isinstance(coord, (CoordFlip, CoordCartesian, CoordFixed, CoordPolar, CoordGeo)):
+            new._coord = coord
         else:
             raise TypeError(
-                f"unsupported coord: {type(coord).__name__}; only CoordFlip supported in Phase 8a"
+                f"unsupported coord: {type(coord).__name__}; "
+                "expected CoordFlip, CoordCartesian, CoordFixed, CoordPolar, or CoordGeo"
             )
         return new
 
@@ -4391,22 +4429,30 @@ class Chart:
         from ferrum import ChartSpec, EncodingSpec
         from ferrum.repeat import _RepeatPlaceholder
 
-        # --- Polar channels: raise early if theta/radius are actually used ---
-        for polar_ch in _POLAR_CHANNELS:
-            if polar_ch in resolved._encoding:
-                ch = resolved._encoding[polar_ch]
-                field = getattr(ch, "field", None)
-                if field is not None and not isinstance(field, _RepeatPlaceholder):
-                    raise NotImplementedError(
-                        f"Polar coordinates ({polar_ch!r}) require interactive "
-                        "rendering mode (planned for Phase 11+). Static SVG "
-                        "rendering does not support polar coordinate channels."
-                    )
-
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
         mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         enc, mk = _apply_channel_aliases(enc, mk)
+
+        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
+        # When CoordPolar is set, the spec-side declares theta (angular variable)
+        # and optionally radius (radial variable).  Rust's encoding layer only
+        # knows x/y; the spec-side coord conversion in scene_build.rs handles
+        # the polar→Cartesian pixel transformation.
+        if isinstance(resolved._coord, _get_coord_polar_class()):
+            theta_ch = resolved._coord.theta  # "x" or "y"
+            radius_ch = "y" if theta_ch == "x" else "x"
+            if "theta" in enc:
+                enc[theta_ch] = enc.pop("theta")
+            if "radius" in enc:
+                enc[radius_ch] = enc.pop("radius")
+            # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
+            # only one axis is encoded.  The arc builder ignores the dummy scale.
+            if resolved._mark == "arc":
+                if theta_ch == "x" and "y" not in enc and "x" in enc:
+                    enc["y"] = enc["x"]
+                elif theta_ch == "y" and "x" not in enc and "y" in enc:
+                    enc["x"] = enc["y"]
 
         # Safety net: any channel not in honored/silent/polar/facet sets would
         # fall through to this warning. After all 18 channels are wired this
@@ -4469,7 +4515,10 @@ class Chart:
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:
-            kw["coord"] = resolved._coord
+            c = resolved._coord
+            # Back-compat: orient_coord_flip sets _coord = "flip" (a string).
+            # New coord objects expose _to_spec_dict(); CoordFlip returns "flip".
+            kw["coord"] = c._to_spec_dict() if hasattr(c, "_to_spec_dict") else c
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:

@@ -8,6 +8,7 @@ pub(crate) mod transform;
 pub(crate) mod layout;
 pub(crate) mod render;
 pub(crate) mod diagnostics;
+pub(crate) mod projection;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {

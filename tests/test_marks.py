@@ -23,10 +23,11 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
 
 
 def test_deferred_mark_error_for_9_plus_mark():
+    # Phase 11d closed all Phase 9+ deferred marks (arc, label, geoshape, image).
+    # deferred_mark_error now returns a generic "not implemented" message for unknown marks.
     from ferrum.marks import deferred_mark_error
-    e = deferred_mark_error("arc")
-    # Phase 9 is closed; these marks are now planned for Phase 11+.
-    assert "Phase 11+" in str(e)
+    e = deferred_mark_error("future_mark")
+    assert "not implemented" in str(e)
 
 
 def test_phase_8b_marks_set_is_empty_after_subbatch_f():
@@ -80,18 +81,20 @@ def test_desugar_smooth_with_ci_returns_layered_tuple():
 # Task 36: deferred-mark NotImplementedError parametrized test
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("method,phase,extra_args", [
-    # Phase 9 closed. arc/geoshape/label remain deferred to Phase 11+.
-    ("mark_arc", "11", ()),
-    ("mark_geoshape", "11", ()),
-    ("mark_label", "11", ()),
+@pytest.mark.parametrize("method,extra_args", [
+    # Phase 11d closed arc, geoshape, and label — they no longer raise NotImplementedError.
+    # These tests verify that the mark methods are callable (return a Chart, not raise).
+    ("mark_arc", ()),
+    ("mark_geoshape", ()),
+    ("mark_label", ()),
 ])
-def test_deferred_mark_methods_raise_with_phase_pointer(method, phase, extra_args):
+def test_phase_11d_marks_are_callable(method, extra_args):
+    """Phase 11d marks (arc, geoshape, label) must not raise on construction."""
     df = pl.DataFrame({"a": [1]})
     from ferrum import Chart
     c = Chart(df).encode(x="a", y="a")
-    with pytest.raises(NotImplementedError, match=f"Phase {phase}"):
-        getattr(c, method)(*extra_args)
+    result = getattr(c, method)(*extra_args)
+    assert result is not None
 
 
 # ---------------------------------------------------------------------------

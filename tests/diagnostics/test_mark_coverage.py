@@ -48,9 +48,10 @@ def test_phase_10_marks_available_on_chart():
 
 
 def test_phase_9_plus_marks_unchanged():
+    # Phase 11d closed all four deferred marks (arc 11d3, label 11d4, geoshape 11d5, image 11d6).
     from ferrum.marks.deferred import PHASE_9_PLUS_MARKS
 
-    assert PHASE_9_PLUS_MARKS == frozenset({"arc", "image", "geoshape", "label"})
+    assert PHASE_9_PLUS_MARKS == frozenset()
 
 
 def test_phase_8b_marks_empty():

@@ -1,8 +1,9 @@
 use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
 
-use crate::render::arrow_cast::col_as_f64;
+use crate::render::arrow_cast::{col_as_f64, col_as_str};
 use crate::render::color::with_opacity;
 use crate::render::draw::{to_scene_fill_stroke, DrawCtx, MarkBuildResult};
+use crate::render::scale_resolve::ColorScale;
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 
 /// Build arc (wedge) nodes for pie/donut charts.
@@ -43,7 +44,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let half_min = ctx.panel.plot_area.w.min(ctx.panel.plot_area.h) / 2.0;
     let outer_radius = outer_radius_opt.unwrap_or(half_min);
 
-    let fill_color = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
+    // Per-slice color: read color encoding field and look up in the color scale.
+    let cfield = ctx.spec.encoding.color.as_ref().map(|e| e.field.as_str());
+    let color_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
 
     let mut nodes: Vec<SceneNode> = Vec::with_capacity(values.len());
     let mut data_indices: Vec<usize> = Vec::with_capacity(values.len());
@@ -59,6 +69,22 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         let angle_start = cum_angle;
         let angle_end = cum_angle + sweep;
         cum_angle = angle_end;
+
+        // Resolve per-slice fill from color scale, fall back to mark_style.fill.
+        let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(vals), _) => {
+                vals.get(i).and_then(|v| *v)
+                    .and_then(|v| if v.is_finite() { scale.lookup_f64(v) } else { None })
+                    .unwrap_or(ctx.mark_style.fill)
+            }
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(vals)) => {
+                vals.get(i).and_then(|v| v.as_deref())
+                    .and_then(|v| scale.lookup(v))
+                    .unwrap_or(ctx.mark_style.fill)
+            }
+            _ => ctx.mark_style.fill,
+        };
+        let fill_color = with_opacity(fill_base, ctx.mark_style.opacity);
 
         let commands = wedge_path(cx, cy, inner_radius, outer_radius, angle_start, angle_end);
         nodes.push(SceneNode::Path {

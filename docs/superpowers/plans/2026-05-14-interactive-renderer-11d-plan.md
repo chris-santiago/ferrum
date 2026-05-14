@@ -22,8 +22,8 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 | Create | `crates/ferrum-core/src/render/marks/geoshape.rs` | mark_geoshape: GeoJSON → projected Polygon nodes |
 | Create | `crates/ferrum-core/src/render/marks/label.rs` | mark_label: positioned text + optional leader lines |
 | Create | `tests/test_phase_11d/` | All coord and deferred mark tests + goldens |
-| Modify | `crates/ferrum-core/src/spec/coord.rs` | Extend `CoordKind` from 2 bare variants to 6 field-carrying variants |
-| Modify | `crates/ferrum-core/src/spec/chart.rs` | `coord` param: `Option<&str>` → `Option<&Bound<'_, PyAny>>`; add `geojson_geometries` field |
+| Modify | `crates/ferrum-core/src/spec/coord.rs` | Extend `CoordKind` from 2 bare variants to 5: Cartesian (with fields), Flip (bare, unchanged), Fixed, Polar, Geo |
+| Modify | `crates/ferrum-core/src/spec/chart.rs` | `coord` param: `Option<&str>` → `Option<&Bound<'_, PyAny>>`; no `geojson_geometries` field (geometry travels as `__geometry__` column in RecordBatch) |
 | Modify | `crates/ferrum-core/src/spec/mark.rs` | Add Arc, Geoshape, Label to Mark enum + `for_each_mark!` |
 | Modify | `crates/ferrum-core/src/render/marks/mod.rs` | Register arc, geoshape, label modules |
 | Modify | `crates/ferrum-core/src/render/scene_build.rs` | Spec→scene coord conversion; polar/geo code paths; suppress axes for Geo |
@@ -33,12 +33,12 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 | Modify | `src/ferrum/coord.py` | Replace NotImplementedError stubs with frozen dataclasses per spec §10.6 |
 | Modify | `src/ferrum/chart.py` | Wire all coord types; remove polar channel gate (lines ~4388-4398); wire mark_arc/geoshape/label; theta/radius→x/y remapping in `to_spec()` |
 | Modify | `src/ferrum/marks/deferred.py` | Remove arc, geoshape, label, image from PHASE_9_PLUS_MARKS |
-| Modify | `src/ferrum/_coerce.py` | GeoJSON FeatureCollection detection: split properties→DataFrame, geometry→JSON string |
+| Modify | `src/ferrum/_coerce.py` | GeoJSON FeatureCollection detection: split `features[*].properties`→DataFrame columns, `features[*].geometry`→`__geometry__` string column in the same RecordBatch |
 | Modify | `src/ferrum/__init__.py` | Export CoordCartesian, CoordFixed, CoordPolar, CoordGeo |
 
 ## 4. Constraints
 
-- **Two CoordKind enums must stay in sync:** spec-side (`ferrum-core/src/spec/coord.rs`) and scene-side (`ferrum-scene/src/types.rs`). Scene-side is NOT modified — spec-side is extended to match.
+- **CoordKind in ferrum-scene is NOT modified.** The scene-side `CoordKind` in `ferrum-scene/src/types.rs` is already fully field-carrying (Cartesian/Fixed/Polar/Geo) — extend the spec-side to match it. `MarkBatchKind` in ferrum-scene is also NOT modified: `Label` reuses `MarkBatchKind::Text`, `Geoshape` reuses `MarkBatchKind::Polygon`.
 - **Backward compat:** Old JSON `{"kind":"cartesian"}` must round-trip with all fields defaulted. Old `Some(CoordKind::Cartesian)` match sites → `Some(CoordKind::Cartesian { .. })`.
 - **String coord path preserved:** `ChartSpec(..., coord="flip")` must still work (back-compat for existing tests).
 - **Projection functions are free functions**, not methods on `GeoProjection` — orphan rule forbids inherent impls on foreign types.
@@ -49,12 +49,15 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 - **mark_image is inherently Cartesian.** Return empty result for Polar/Geo coords.
 - **Geoshape rendering is two-pass:** first pass computes projected bounding extent across all geometries, second pass projects and scales to pixel space.
 - **Polygon exterior ring only** for 11d; interior rings (holes) skipped.
+- **GeoJSON geometry storage:** `__geometry__` column in RecordBatch (not a ChartSpec sidecar field). `_coerce.py` adds it during FeatureCollection detection. `geoshape.rs` reads it as a string column. This preserves the one-batch-per-panel invariant and ensures facet filtering trims geometries correctly.
+- **Flip → scene-Cartesian:** `CoordKind::Flip` in the spec must have an explicit arm in `scene_build.rs` that emits `CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true }`. Python handles channel swapping before `to_spec()` — Rust never sees the flip.
+- **Newton-Raphson convergence (EqualEarth/NaturalEarth inverse):** tolerance `1e-12`, max 20 iterations. AlbersUsa round-trip test tolerance `1e-4` (conic inset boundaries accumulate error); Mercator/Equirectangular/Orthographic round-trip tolerance `1e-10`.
 - All existing golden SVGs must pass unchanged.
 
 ## 5. Tasks
 
 ### Task 11d0: Coord serialization plumbing (critical path — all others depend on this)
-- [ ] Extend spec-side `CoordKind` to 6 field-carrying variants with serde defaults per spec §7
+- [ ] Extend spec-side `CoordKind` to 5 variants: `Cartesian` (add fields matching scene-side), `Flip` (keep bare), `Fixed`, `Polar`, `Geo` — all with serde defaults so old `{"kind":"cartesian"}` JSON round-trips
 - [ ] Change PyO3 `coord` param to accept dicts via `pyo3_serde::from_py`; preserve string back-compat
 - [ ] Replace Python coord stubs with frozen dataclasses + `_to_spec_dict()` per spec §10.6
 - [ ] Wire `Chart.coord()` for all types; add theta/radius→x/y remapping in `to_spec()`; remove polar channel gate
@@ -85,8 +88,8 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 
 ### Task 11d5: CoordGeo + mark_geoshape (projections + GeoJSON)
 - [ ] Create `projection.rs`: 6 forward/inverse free functions (Mercator, Equirectangular, EqualEarth, NaturalEarth, Orthographic, AlbersUsa)
-- [ ] Add `geojson = "0.24"` dep; add Geoshape to Mark enum; create `geoshape.rs`: deserialize GeoJSON, project, emit Polygon nodes
-- [ ] Add `geojson_geometries` field to ChartSpec; implement GeoJSON detection in `_coerce.py`
+- [ ] Add `geojson = "0.24"` dep; add Geoshape to Mark enum; create `geoshape.rs`: read `__geometry__` string column from RecordBatch, deserialize GeoJSON, project, emit `Polygon` nodes (`MarkBatchKind::Polygon`)
+- [ ] Implement GeoJSON FeatureCollection detection in `_coerce.py`: split properties→DataFrame columns, geometry→`__geometry__` string column; no ChartSpec sidecar field needed
 - [ ] Suppress axes for Geo coord in `scene_build.rs`
 - [ ] Verify: projection round-trip Rust tests (1e-10 tolerance, AlbersUsa 1e-4/1e-6); golden tests for mercator + equal_earth
 
@@ -117,10 +120,26 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 | `CoordFixed` uniform scale constraint on zoom (§6.5) | `zoom_pan.rs` supports arbitrary zoom; CoordFixed panels should constrain sx=sy. |
 | `Chart.conditional()` convenience method (§10.4) | Primary `.when().otherwise()` path works. `.conditional()` is sugar. |
 
-## 8. Open questions
+## 9. Intentional gaps from 11d (→ 11e)
 
-- Does `MarkBatchKind` in ferrum-scene need an `Arc` and/or `Label` variant, or should they reuse `Polygon`/`Text`? Check existing variants before deciding.
-- EqualEarth and NaturalEarth inverse projections require Newton-Raphson iteration — what convergence tolerance and max iterations?
+| Item | Spec reference | Notes |
+|---|---|---|
+| Polar transform for non-arc marks | §7.3 | `mark_point` / `mark_line` in polar would use Cartesian x/y scales rather than angle/radius mapping. Only `mark_arc` has full polar support. |
+| Polar axis rendering | §7.3 | Circular angular axis + radial tick marks are not emitted. |
+| Per-slice color from color encoding (mark_arc) | §7.3 | All arc slices use the same mark_style fill; `color="category"` encoding does not produce per-slice colors. Needs color-scale lookup in `arc.rs`. |
+| CoordFixed uniform scale constraint on zoom | §7.2, §6.5 | `zoom_pan.rs` supports arbitrary zoom; CoordFixed panels should constrain sx=sy. Carried from 11c. |
+| Interactive zoom recomputation with xlim/ylim | §7.1 | CoordCartesian/CoordFixed are passive (Python sets bounds at spec time). Sending new bounds from WASM on zoom requires the 11e anywidget round-trip flow. |
+| Interactive polar hit-testing | §7.3 | WASM `hit_test` uses Cartesian geometry; inverse polar transform (`atan2`, sqrt) not implemented. |
+| `GeoProjection.forward()` / `.inverse()` as enum methods | §7.4 | Spec says "methods on GeoProjection" but orphan rule forbids implementing on foreign types. Used free functions in `projection.rs` instead — behavior identical. |
+| `inverse()` gated to `#[cfg(test)]` | §7.4 | `inverse` is needed for interactive geo hit-testing (Phase 11e). Gated under test for 11d to avoid dead-code clippy. Un-gate when 11e wires it. |
+| Golden SVGs with visual inspection | §12.4 | Smoke tests confirm SVG renders without error. Pixel-level goldens (`coord_cartesian_xlim.svg`, `polar_pie.svg`, `geo_mercator.svg`, etc.) were not generated. |
+| GeoJSON GeometryCollection / Geometry input (non-FeatureCollection) | §7.4 | `_coerce.py` detects FeatureCollection only. Single Geometry or GeometryCollection root is not coerced. |
+
+## 8. Open questions (all resolved)
+
+- **MarkBatchKind for Label/Geoshape:** RESOLVED — `MarkBatchKind::Arc` already exists in ferrum-scene. `Label` reuses `MarkBatchKind::Text`; `Geoshape` reuses `MarkBatchKind::Polygon`. No ferrum-scene MarkBatchKind changes needed.
+- **Newton-Raphson convergence:** RESOLVED — tolerance `1e-12`, max 20 iterations for EqualEarth/NaturalEarth inverse. Test tolerances: AlbersUsa `1e-4` (conic inset error), all others `1e-10`.
+- **GeoJSON geometry storage:** RESOLVED — `__geometry__` column in RecordBatch (geometry-as-column). See §4 Constraints for rationale.
 
 ### Intentional divergences from spec §3 (required for byte-identical golden SVGs)
 

@@ -24,13 +24,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Image,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Image);
+
+    // mark_image is inherently Cartesian — return empty for Polar/Geo coords.
+    match &ctx.spec.coord {
+        Some(crate::spec::coord::CoordKind::Polar { .. }) |
+        Some(crate::spec::coord::CoordKind::Geo { .. }) => return empty(),
+        _ => {}
+    }
 
     let batch = ctx.batch;
     if batch.num_rows() != 1 {

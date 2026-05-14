@@ -78,6 +78,9 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
 
     # Direct conversions: dict, list, numpy
     if isinstance(data, dict):
+        # GeoJSON FeatureCollection detection: split properties→columns, geometry→column.
+        if _is_geojson_feature_collection(data):
+            return _geojson_to_arrow(data)
         return pa.Table.from_pydict(data)
     if isinstance(data, list):
         if not data:
@@ -124,3 +127,42 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
             f"Supported: polars, pyarrow, pandas, modin, cuDF, dask, ibis, dict, list, numpy 2D. "
             f"Underlying error: {e}"
         ) from e
+
+
+# ── GeoJSON FeatureCollection support ────────────────────────────────────────
+
+def _is_geojson_feature_collection(data: dict) -> bool:
+    """Return True if *data* looks like a GeoJSON FeatureCollection."""
+    return (
+        data.get("type") == "FeatureCollection"
+        and isinstance(data.get("features"), list)
+    )
+
+
+def _geojson_to_arrow(data: dict) -> "pyarrow.Table":
+    """Convert a GeoJSON FeatureCollection to a ``pyarrow.Table``.
+
+    Feature properties become regular columns.  Each feature's geometry is
+    serialized to a JSON string and stored in a ``__geometry__`` column so
+    that ``mark_geoshape`` can read and project it without a sidecar field
+    on ``ChartSpec``.
+    """
+    import json
+    import pyarrow as pa
+
+    features = data.get("features", [])
+    if not features:
+        return pa.table({"__geometry__": pa.array([], type=pa.string())})
+
+    # Collect property columns and geometry strings.
+    rows: list[dict] = []
+    geom_strings: list[str] = []
+    for feat in features:
+        props = dict(feat.get("properties") or {})
+        geom = feat.get("geometry")
+        geom_strings.append(json.dumps(geom) if geom is not None else "null")
+        rows.append(props)
+
+    tbl = pa.Table.from_pylist(rows)
+    geom_col = pa.array(geom_strings, type=pa.string())
+    return tbl.append_column("__geometry__", geom_col)

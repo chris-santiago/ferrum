@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 
-_REQUIRED_FOR_PHASE_10 = ("sklearn", "shap", "umap", "scipy", "skops")
+# umap removed from Python deps in Phase 11d — handled at Rust level (manifolds-rs).
+_REQUIRED_FOR_PHASE_10 = ("sklearn", "shap", "scipy", "skops")
 
 
 @pytest.fixture(scope="session", autouse=True)
