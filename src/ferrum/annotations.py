@@ -334,7 +334,7 @@ def _apply_metric_label(
     base_aug._data = augmented
     annot_layer = (
         Chart(augmented)
-        .mark_text(align="right", dx=-4, dy=-2)
+        .mark_text(align="right", baseline="hanging", dx=-4, dy=4)
         .encode(x=x_col, y="_label_y", text="_label_text")
     )
     return base_aug + annot_layer
