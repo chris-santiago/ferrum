@@ -13,7 +13,6 @@ use ferrum_scene::{
 
 use super::color::{from_hex_str, with_opacity, Color};
 use super::scale_resolve::ResolvedScales;
-use super::svg::SvgBuffer;
 
 pub struct DrawCtx<'a> {
     pub spec: &'a crate::spec::chart::ChartSpec,

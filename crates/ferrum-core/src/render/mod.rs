@@ -188,7 +188,6 @@ pub fn render_svg(
         width: config.width.unwrap_or(viewport.width),
         height: config.height.unwrap_or(viewport.height),
     };
-    let background = config.background.or(Some(theme.background_color));
 
     let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
@@ -322,65 +321,6 @@ pub fn render_scene_json(
     serde_json::to_string(&scene)
         .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))
 }
-
-/// Emit the chart-level title and optional subtitle into the SVG buffer.
-///
-/// Resolves per-chart `TitleSpec` overrides (font size, weight, color,
-/// subtitle color/size) falling back to `theme` defaults. Pure output —
-/// no state escapes beyond what is written to `out`.
-fn render_title(
-    layout: &crate::layout::LayoutResult,
-    spec: &ChartSpec,
-    theme: &ThemeInputs,
-    out: &mut svg::SvgBuffer,
-) {
-    let Some(title) = &layout.chart_title else { return };
-    let title_spec = spec.title.as_ref();
-    let resolved_font_size = title_spec
-        .and_then(|t| t.font_size)
-        .unwrap_or(theme.title_font_size);
-    let resolved_font_weight: String = title_spec
-        .and_then(|t| t.font_weight.clone())
-        .unwrap_or_else(|| theme.title_font_weight.clone());
-    let resolved_color = title_spec
-        .and_then(|t| t.color.as_deref())
-        .and_then(|hex| color::from_hex_str(hex).ok())
-        .unwrap_or(theme.title_color);
-    let style = svg::TextStyle {
-        fill: resolved_color,
-        font_size: resolved_font_size,
-        anchor: title.anchor,
-        angle: 0.0,
-        font_family: &theme.title_font_family,
-        font_weight: if resolved_font_weight == "normal" {
-            None
-        } else {
-            Some(&resolved_font_weight)
-        },
-        dominant_baseline: None,
-    };
-    out.text(title.x, title.y, &title.text, &style);
-    if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
-        let resolved_sub_color = title_spec
-            .and_then(|t| t.subtitle_color.as_deref())
-            .and_then(|hex| color::from_hex_str(hex).ok())
-            .unwrap_or(theme.font_color);
-        let resolved_sub_font_size = title_spec
-            .and_then(|t| t.subtitle_font_size)
-            .unwrap_or(resolved_font_size * 0.85);
-        let sub_style = svg::TextStyle {
-            fill: resolved_sub_color,
-            font_size: resolved_sub_font_size,
-            anchor: title.anchor,
-            angle: 0.0,
-            font_family: &theme.font_family,
-            font_weight: None,
-            dominant_baseline: None,
-        };
-        out.text(title.x, sy, subtitle, &sub_style);
-    }
-}
-
 
 pub(crate) fn filter_batch_by_facet(
     batch: &RecordBatch,

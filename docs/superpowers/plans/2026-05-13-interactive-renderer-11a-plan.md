@@ -841,3 +841,24 @@ are additive — no spec fields were removed or renamed.
 | 1 | `description` encoding channel dropped by `build_tooltips_and_hrefs()` — charts with `Description(field)` lost `<desc>` SVG elements | `build_tooltips_and_hrefs` now returns a third `descriptions` vec; `MarkBuildResult` carries it; `MarkBatch` gains `descriptions: Option<Vec<Option<String>>>`; `svg_walk` emits `<desc>` when present |
 | 2 | `FillStroke`-styled Path nodes (area/ribbon) don't carry `stroke_cap`/`stroke_join` — 11b WASM renderer would need to read batch-level field instead of node style | Documented as a known design seam; batch-level `stroke_cap`/`stroke_join` is the canonical source for all backends. Node-level `FillStroke` intentionally does not duplicate this. |
 | 3 | Tooltip `name` field hardcoded to `"value"` instead of the encoding field name | `build_tooltips_and_hrefs` now accepts the field name from the encoding and uses it as `TooltipField.name` |
+
+### Tasks 8-9 completion notes (2026-05-14)
+
+**Task 8 (render_interactive):** `render_scene_json()` and `render_interactive` PyO3 binding added. The preamble (prepare + layout + theme patching) is duplicated between `render_svg` and `render_scene_json` — a future cleanup could extract a shared `build_scene_from_inputs()` helper, but both paths are short and correct.
+
+**Task 9 (old draw path removal):**
+- `dispatch_mark`, `MetadataColumns::open/close`, `render_title`, `render_legend` deleted from `mod.rs`/`draw.rs`
+- `draw()` deleted from all 12 mark modules and 3 decoration modules
+- Dead SVG-only helpers deleted: `emit_shape` (point), `build_line_path` (line), `build_top_line_path`/`build_area_path`/`build_stacked_area_path` (area), `draw_ordinal`/`draw_ordinal_y`/`draw_quantitative`/`draw_quantitative_horizontal` (bar), `draw_quantitative_range`/`draw_ordinal_range`/`draw_heatmap` (rect)
+- Rust-side mark tests migrated from SVG string assertions (`s.matches("<circle ").count()`) to SceneNode variant counting (`result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count()`). Test coverage equivalent; no assertion logic dropped.
+- `SvgBuffer` import removed from `draw.rs` — it is now only used by `svg_walk.rs` and `svg.rs` itself.
+- No Python tests or golden SVGs were changed.
+
+### Known design seams for 11b+
+
+| Seam | Impact | Notes |
+|---|---|---|
+| `FillStroke` lacks `stroke_cap`/`stroke_join` | Low | WASM renderer reads `MarkBatch.stroke_cap`/`stroke_join` for line/area batches, not individual node styles. |
+| `SceneNode::Raw` used by legend colorbar | Low | Colorbar gradient `<defs>` emitted as raw SVG. WASM renderer will need a typed gradient representation; this is a 11c/11d concern. |
+| `render_svg`/`render_scene_json` preamble duplication | Cosmetic | Extract shared helper when a third consumer (e.g. `render_html`) arrives in 11b. |
+| `SceneGraph.title`/`legend` split from spec's `decorations` | None for WASM | WASM renderer can concatenate `title + decorations + legend` into a single decoration list if needed. The split exists solely for SVG emit ordering. |
