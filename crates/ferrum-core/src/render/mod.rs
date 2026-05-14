@@ -257,6 +257,72 @@ pub fn render_png(
     Ok(RenderOutput { bytes, layout: svg_out.layout, warnings: svg_out.warnings })
 }
 
+pub fn render_scene_json(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    config: &config::RenderConfig,
+) -> Result<String, RenderError> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(RenderError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+
+    let viewport = Viewport {
+        width: config.width.unwrap_or(viewport.width),
+        height: config.height.unwrap_or(viewport.height),
+    };
+
+    let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
+    let mut warnings = prep.warnings.clone();
+
+    let mut effective_theme;
+    let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
+        || prep.legend_title_font_size_override.is_some()
+    {
+        effective_theme = theme.clone();
+        if let Some(orient) = prep.legend_orient_override {
+            effective_theme.legend_orient = orient;
+        }
+        if let Some(fs) = prep.legend_title_font_size_override {
+            effective_theme.legend_title_font_size = fs;
+        }
+        &effective_theme
+    } else {
+        theme
+    };
+    let effective_legend_title = prep
+        .legend_title_override
+        .clone()
+        .or_else(|| prep.legend_title.clone());
+
+    let metrics = font::FontdueMetrics::new();
+    let layout = compute_layout(
+        spec,
+        theme_ref,
+        viewport,
+        &prep.axes,
+        &prep.facet_groups,
+        &prep.legend_entries,
+        effective_legend_title,
+        prep.colorbar.as_ref(),
+        &metrics,
+    )
+    .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
+    for w in &layout.warnings {
+        warnings.push(RenderWarning::Layout(w.clone()));
+    }
+
+    let scene = scene_build::build_scene(
+        spec, &prep, &layout, theme_ref, config, &mut warnings,
+    )?;
+    serde_json::to_string(&scene)
+        .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))
+}
+
 /// Emit the chart-level title and optional subtitle into the SVG buffer.
 ///
 /// Resolves per-chart `TitleSpec` overrides (font size, weight, color,
@@ -315,40 +381,6 @@ fn render_title(
     }
 }
 
-/// Emit the legend (categorical or colorbar) into the SVG buffer.
-///
-/// Builds a rendering spec from the first layer's encoding (accounts for
-/// CoordFlip), re-resolves the color scale for the legend palette, and
-/// dispatches to `marks::legend::draw`. Returns `Err` only if scale
-/// resolution fails.
-fn render_legend(
-    layout: &crate::layout::LayoutResult,
-    spec: &ChartSpec,
-    prep: &prepare::PreparedInputs,
-    theme: &ThemeInputs,
-    out: &mut svg::SvgBuffer,
-) -> Result<(), RenderError> {
-    let Some(legend) = &layout.legend else { return Ok(()) };
-    let rendering_spec_for_legend = ChartSpec {
-        encoding: prep.layers[0].encoding.clone(),
-        ..spec.clone()
-    };
-    let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
-        let (gs, _) = scale_resolve::resolve_scales_with_outputs(
-            &rendering_spec_for_legend,
-            prep.final_batch(),
-            &prep.transform_outputs,
-            (0.0, 1.0),
-            (0.0, 1.0),
-            theme,
-        )?;
-        gs.color
-    } else {
-        None
-    };
-    marks::legend::draw(legend, color_scale.as_ref(), theme, out);
-    Ok(())
-}
 
 pub(crate) fn filter_batch_by_facet(
     batch: &RecordBatch,

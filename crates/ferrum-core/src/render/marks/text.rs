@@ -10,7 +10,6 @@ use crate::layout::TextAnchor;
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::format::{format_numeric, format_time};
 use crate::render::scale_resolve::ScaleKind;
-use crate::render::svg::{SvgBuffer, TextStyle};
 
 /// Format a numeric value per a tiny subset of d3-format specs. The full grammar
 /// is deliberately out of scope; we honor only ".Nf" (fixed N decimals) and
@@ -30,162 +29,6 @@ fn format_with_spec(v: f64, spec: Option<&str>) -> String {
         'e' => format!("{v:.*e}", n),
         'g' => format_numeric(v),
         _ => format_numeric(v),
-    }
-}
-
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
-    let spec = ctx.spec;
-    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b), _ => return,
-    };
-
-    let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
-    let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
-
-    let xs_f: Option<Vec<Option<f64>>> =
-        if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
-    let xs_s: Option<Vec<Option<String>>> =
-        if x_ordinal { col_as_str(ctx.batch, xf).ok() } else { None };
-    let ys_f: Option<Vec<Option<f64>>> =
-        if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
-    let ys_s: Option<Vec<Option<String>>> =
-        if y_ordinal { col_as_str(ctx.batch, yf).ok() } else { None };
-
-    let n_x = match (&xs_f, &xs_s) {
-        (Some(v), _) => v.len(),
-        (_, Some(v)) => v.len(),
-        _ => return,
-    };
-    let n_y = match (&ys_f, &ys_s) {
-        (Some(v), _) => v.len(),
-        (_, Some(v)) => v.len(),
-        _ => return,
-    };
-    if n_x != n_y { return; }
-
-    // Explicit text channel: Utf8 column of labels, or numeric column whose
-    // values are formatted via format_numeric (heatmap-annot path). When the
-    // EncodingSpec carries a `format` string (e.g. ".2f"), it is honored for
-    // numeric columns. When `format_type` is `"time"`, the value is treated
-    // as epoch-ms and formatted via format_time with a 1-day spacing heuristic.
-    // Absent text channel → format_numeric(y) (legacy).
-    let text_enc = spec.encoding.text.as_ref();
-    let text_field = text_enc.map(|e| e.field.as_str());
-    let text_format = text_enc.and_then(|e| e.format.as_deref());
-    let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
-    let texts: Option<Vec<Option<String>>> = match text_field {
-        None => None,
-        Some(f) => col_as_str(ctx.batch, f).ok().or_else(|| {
-            col_as_f64(ctx.batch, f).ok().map(|nums| {
-                nums.into_iter()
-                    .map(|opt_v| {
-                        opt_v.and_then(|v| {
-                            if !v.is_finite() {
-                                return None;
-                            }
-                            if text_format_type == Some("time") {
-                                // Use the format string as a strftime-like granularity hint;
-                                // we approximate with a 1-day inter-tick spacing so the
-                                // date/time formatter picks a reasonable default.
-                                Some(format_time(v as i64, 86_400_000))
-                            } else {
-                                Some(format_with_spec(v, text_format))
-                            }
-                        })
-                    })
-                    .collect()
-            })
-        }),
-    };
-
-    // Schwabish SB3 (2026-05-11): honor mark_style.align/dx/dy/font_size/
-    // font_weight/angle on mark_text so AUCLabel / APLabel / BrierLabel /
-    // _direct_label / corner-metrics overlays render where the Python author
-    // asked. ``align`` maps "left"→Start, "center"→Middle, "right"→End;
-    // ``dx`` / ``dy`` are pixel offsets applied AFTER the scale-to-pixel
-    // step so the user sees the same dx as in
-    // ``mark_text(align=..., dx=..., dy=...)``.
-    let anchor = match ctx.mark_style.align.as_deref() {
-        Some("left") => TextAnchor::Start,
-        Some("right") => TextAnchor::End,
-        _ => TextAnchor::Middle,
-    };
-    let dx = ctx.mark_style.dx.unwrap_or(0.0);
-    let dy = ctx.mark_style.dy.unwrap_or(0.0);
-    let style = TextStyle {
-        fill: ctx.theme.font_color,
-        font_size: ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size),
-        anchor,
-        angle: ctx.mark_style.angle.unwrap_or(0.0),
-        font_family: &ctx.theme.font_family,
-        font_weight: ctx.mark_style.font_weight.as_deref(),
-        dominant_baseline: ctx.mark_style.baseline.as_deref(),
-    };
-    let meta = MetadataColumns::from_ctx(ctx);
-
-    for i in 0..n_x {
-        let px = if let Some(xs) = &xs_f {
-            match xs[i] {
-                Some(v) if v.is_finite() => match ctx.scales.x.to_pixel_f64(v) {
-                    Some(p) => p, None => continue,
-                },
-                _ => continue,
-            }
-        } else if let Some(xs) = &xs_s {
-            match xs[i].as_deref() {
-                Some(s) => match ctx.scales.x.to_pixel_str(s) {
-                    Some(p) => p, None => continue,
-                },
-                None => continue,
-            }
-        } else { continue };
-
-        let py = if let Some(ys) = &ys_f {
-            match ys[i] {
-                Some(v) if v.is_finite() => match ctx.scales.y.to_pixel_f64(v) {
-                    Some(p) => p, None => continue,
-                },
-                _ => continue,
-            }
-        } else if let Some(ys) = &ys_s {
-            match ys[i].as_deref() {
-                Some(s) => match ctx.scales.y.to_pixel_str(s) {
-                    Some(p) => p, None => continue,
-                },
-                None => continue,
-            }
-        } else { continue };
-
-        let raw_label: String = if let Some(t) = &texts {
-            match &t[i] {
-                Some(s) => s.clone(),
-                None => continue,
-            }
-        } else {
-            match &ys_f {
-                Some(ys) => match ys[i] {
-                    Some(v) if v.is_finite() => format_numeric(v),
-                    _ => continue,
-                },
-                None => continue,
-            }
-        };
-
-        // S7: truncate label to `limit` characters (including the ellipsis).
-        let label = if let Some(limit) = ctx.mark_style.limit {
-            if limit > 0 && raw_label.chars().count() > limit {
-                let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
-                format!("{truncated}\u{2026}") // …
-            } else {
-                raw_label
-            }
-        } else {
-            raw_label
-        };
-
-        let wrapped = meta.open(i, out);
-        out.text(px + dx, py + dy, &label, &style);
-        if wrapped { meta.close(i, out); }
     }
 }
 
@@ -405,10 +248,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<text ").count(), 2);
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(), 2);
     }
 
     #[test]
@@ -454,11 +295,13 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<text ").count(), 2);
-        assert!(s.contains(">42<"), "expected literal '42' label, got: {s}");
-        assert!(s.contains(">hello<"), "expected literal 'hello' label, got: {s}");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(), 2);
+        // Check that the explicit label content is present in the Text nodes.
+        let contents: Vec<&str> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { content, .. } = n { Some(content.as_str()) } else { None }
+        }).collect();
+        assert!(contents.contains(&"42"), "expected literal '42' label, got: {contents:?}");
+        assert!(contents.contains(&"hello"), "expected literal 'hello' label, got: {contents:?}");
     }
 }

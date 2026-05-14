@@ -2,45 +2,6 @@
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
 use crate::render::draw::{col_as_f64, x_field, y_field, DrawCtx};
-use crate::render::svg::{Stroke, SvgBuffer};
-
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
-    let spec = ctx.spec;
-    let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return; };
-    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else { return; };
-    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else { return; };
-
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
-
-    let style = Stroke {
-        stroke: ctx.mark_style.fill,
-        stroke_width: ctx.mark_style.stroke_width,
-        stroke_dash: ctx.mark_style.stroke_dash.clone(),
-    };
-
-    // Phase 9c — per-row pixel offsets from a position adjustment.
-    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-
-    let n = xs.len().min(ys.len()).min(x2s.len()).min(y2s.len());
-    for i in 0..n {
-        let (xv, yv, x2v, y2v) = match (xs[i], ys[i], x2s[i], y2s[i]) {
-            (Some(a), Some(b), Some(c), Some(d))
-                if a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite() =>
-                (a, b, c, d),
-            _ => continue,
-        };
-        let p1x = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-        let p1y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-        let p2x = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
-        let p2y = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
-        let xo = x_offsets.get(i).copied().unwrap_or(0.0);
-        let yo = y_offsets.get(i).copied().unwrap_or(0.0);
-        out.line(p1x + xo, p1y + yo, p2x + xo, p2y + yo, &style);
-    }
-}
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
@@ -182,9 +143,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<line ").count(), 2);
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 2);
     }
 }

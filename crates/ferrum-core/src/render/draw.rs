@@ -259,49 +259,6 @@ impl MetadataColumns {
         MetadataColumns { tooltip, href, description }
     }
 
-    /// True when at least one metadata channel is present.
-    pub fn has_any(&self) -> bool {
-        self.tooltip.is_some() || self.href.is_some() || self.description.is_some()
-    }
-
-    /// Open wrapping elements for row `i`: `<a>` if href is set, then `<g>`
-    /// containing `<title>` and/or `<desc>` if tooltip/description are set.
-    /// Returns `true` if any wrapper was opened (caller must call `close`).
-    pub fn open(&self, i: usize, out: &mut super::svg::SvgBuffer) -> bool {
-        if !self.has_any() {
-            return false;
-        }
-        let tooltip_val = self.tooltip.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        let desc_val = self.description.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-
-        let needs_wrap = tooltip_val.is_some() || desc_val.is_some() || href_val.is_some();
-        if !needs_wrap {
-            return false;
-        }
-
-        if let Some(url) = href_val {
-            out.a_open(url);
-        }
-        // Wrap in <g> to attach <title>/<desc> to the next mark element.
-        out.g_open(None);
-        if let Some(tip) = tooltip_val {
-            out.title_elem(tip);
-        }
-        if let Some(desc) = desc_val {
-            out.desc_elem(desc);
-        }
-        true
-    }
-
-    /// Close wrapping elements opened by `open`.
-    pub fn close(&self, i: usize, out: &mut super::svg::SvgBuffer) {
-        out.g_close();
-        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        if href_val.is_some() {
-            out.a_close();
-        }
-    }
 }
 
 pub fn x_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpec) -> Option<&'a str> {
@@ -312,16 +269,6 @@ pub fn y_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpec) -
 }
 pub fn color_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpec) -> Option<&'a str> {
     spec.encoding.color.as_ref().map(|e| e.field.as_str())
-}
-
-pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
-    use crate::spec::mark::for_each_mark;
-    macro_rules! arm {
-        ($($V:ident => $m:ident,)*) => {
-            match mark { $( Mark::$V => super::marks::$m::draw(ctx, out), )* }
-        };
-    }
-    for_each_mark!(arm)
 }
 
 // ── Scene-graph path (11a) ──────────────────────────────────────────
