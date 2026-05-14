@@ -190,6 +190,7 @@ dist/
 *.pyc
 *.egg-info/
 **/.claude/worktrees
+TODO.md
 
 # Gallery audit generated artifacts (panel images, verdicts, REPORT.md).
 # Inputs (skill, panel scripts, rubric, judge_prompt, RESUME) stay tracked.

@@ -197,6 +197,203 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_fill_stroke, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Polygon,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let spec = ctx.spec;
+    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return empty(),
+    };
+
+    // Pre-resolve per-row x pixel positions (numeric or ordinal).
+    let xpx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, xf) {
+        v.into_iter()
+            .map(|opt| opt.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
+            .collect()
+    } else if let Ok(v) = col_as_str(ctx.batch, xf) {
+        v.into_iter()
+            .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+            .collect()
+    } else {
+        return empty();
+    };
+    let ys = match col_as_f64(ctx.batch, yf) {
+        Ok(v) => v,
+        Err(_) => return empty(),
+    };
+
+    // --- Group rows by detail column (or single group if unset) ---
+    let detail_field = ctx.mark_style.detail.as_deref();
+    let groups: BTreeMap<i64, Vec<usize>> = match detail_field {
+        Some(field) => {
+            let arr = match ctx.batch.column_by_name(field) {
+                Some(a) => a,
+                None => return empty(),
+            };
+            let mut g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+            if let Some(u) = arr.as_any().downcast_ref::<UInt32Array>() {
+                for i in 0..u.len() {
+                    if !u.is_null(i) {
+                        g.entry(u.value(i) as i64).or_default().push(i);
+                    }
+                }
+            } else if let Some(f) = arr.as_any().downcast_ref::<Float64Array>() {
+                for i in 0..f.len() {
+                    if !f.is_null(i) {
+                        g.entry(f.value(i).to_bits() as i64).or_default().push(i);
+                    }
+                }
+            } else {
+                g.insert(0, (0..xpx.len()).collect());
+            }
+            g
+        }
+        None => {
+            let mut g = BTreeMap::new();
+            g.insert(0, (0..xpx.len()).collect());
+            g
+        }
+    };
+
+    // --- Resolve color encoding mode ---
+    let cf = color_field(ctx, spec);
+    let color_arr = cf.and_then(|f| ctx.batch.column_by_name(f));
+    let color_is_quantitative = color_arr
+        .map(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
+        .unwrap_or(false);
+
+    let color_str_values: Option<Vec<Option<String>>> =
+        if !color_is_quantitative {
+            cf.and_then(|f| col_as_str(ctx.batch, f).ok())
+        } else {
+            None
+        };
+
+    let scheme = if color_is_quantitative {
+        let named = ctx
+            .mark_style
+            .cmap
+            .as_deref()
+            .and_then(NamedContinuous::from_name)
+            .unwrap_or_else(|| {
+                NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+                    .unwrap_or(NamedContinuous::Viridis)
+            });
+        Some(ContinuousScheme::Named(named))
+    } else {
+        None
+    };
+    let (vmin, vmax) = if color_is_quantitative {
+        if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for i in 0..a.len() {
+                if !a.is_null(i) {
+                    let v = a.value(i);
+                    if v.is_finite() {
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+            }
+            (lo, hi)
+        } else {
+            (0.0, 1.0)
+        }
+    } else {
+        (0.0, 1.0)
+    };
+    let denom = (vmax - vmin).max(f64::EPSILON);
+
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    // --- Emit one polygon per group ---
+    for (_id, group_indices) in &groups {
+        let ring: Vec<(f64, f64)> = group_indices
+            .iter()
+            .filter_map(|&i| {
+                let cx = xpx.get(i).copied().flatten()?;
+                let yv = ys[i]?;
+                if !yv.is_finite() {
+                    return None;
+                }
+                let cy = ctx.scales.y.to_pixel_f64(yv)?;
+                let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+                let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+                Some((cx + xo, cy + yo))
+            })
+            .collect();
+        if ring.len() < 3 {
+            continue;
+        }
+
+        // Resolve fill for this group.
+        let fill = if color_is_quantitative {
+            let first_row = group_indices[0];
+            if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
+                if a.is_null(first_row) {
+                    ctx.mark_style.fill
+                } else {
+                    let v = a.value(first_row);
+                    let t = ((v - vmin) / denom).clamp(0.0, 1.0);
+                    scheme.as_ref().map(|s| s.sample(t)).unwrap_or(ctx.mark_style.fill)
+                }
+            } else {
+                ctx.mark_style.fill
+            }
+        } else if let (Some(values), Some(scale)) =
+            (color_str_values.as_ref(), &ctx.scales.color)
+        {
+            let first_row = group_indices[0];
+            match values.get(first_row).and_then(|v| v.as_deref()) {
+                Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                None => ctx.mark_style.fill,
+            }
+        } else {
+            ctx.mark_style.fill
+        };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        let points: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
+        nodes.push(SceneNode::Polygon {
+            points,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                None,
+            ),
+        });
+        indices.push(group_indices[0]);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Polygon,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

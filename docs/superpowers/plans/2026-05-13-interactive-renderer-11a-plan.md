@@ -805,3 +805,39 @@ refactor(render): remove old draw-to-SvgBuffer path — all rendering goes throu
 - [ ] `uv run python scripts/snapshot-goldens.py` — regenerate all golden PNGs, visually inspect
 - [ ] `render_interactive` PyO3 binding is importable and returns valid JSON
 - [ ] No byte differences in any golden SVG compared to pre-refactor output
+
+---
+
+## 11a Implementation Audit (2026-05-14)
+
+Audit of the completed 11a implementation against the design spec
+`docs/superpowers/specs/2026-05-13-interactive-renderer-design.md` §3–§4.
+Future sessions need this to understand what changed and why.
+
+### Intentional divergences from spec §3 (required for byte-identical golden SVGs)
+
+The spec's type definitions assumed a clean WASM-first design. The actual
+implementation needed adjustments so the SVG walker (`svg_walk.rs`) could
+reproduce the *exact* byte output of the old `render_svg` path. All changes
+are additive — no spec fields were removed or renamed.
+
+| # | Type | Spec says | Implementation has | Reason |
+|---|---|---|---|---|
+| 1 | `SceneGraph` | `decorations: Vec<SceneNode>` | `title: Vec<SceneNode>`, `legend: Vec<SceneNode>`, `decorations: Vec<SceneNode>` | Old `render_svg` emits title → panels → legend in that order. A single `decorations` vec loses this ordering, producing different SVG. |
+| 2 | `Panel.strip_title` | `Option<SceneNode>` | `Vec<SceneNode>` | Strip title is 2 nodes (background rect + text). `Option<SceneNode>` forces a `Group` wrapper → extra `<g>` in SVG not present in old output. |
+| 3 | `MarkBatch` | no cap/join fields | `stroke_cap: Option<StrokeCap>`, `stroke_join: Option<StrokeJoin>` | `mark_line` and `mark_area` wrap output in `<g stroke-linecap="..." stroke-linejoin="...">`. This is a batch-level attribute, not per-node. |
+| 4 | `SceneNode` | 7 variants (Rect, Circle, Line, Path, Text, Image, Polygon) | +3 variants: `Polyline`, `Group`, `Raw` | `Polyline`: old `mark_line` emits `<polyline>` for linear interpolation, not `<path>`. `Group`: needed for `<g>` attribute wrappers. `Raw`: legend colorbar gradient `<defs>` can't be expressed as typed nodes (`fill="url(#...)"` is not a `Color`). |
+| 5 | `FontWeight` | `Normal`, `Bold` | + `Custom(String)` | Themes use numeric CSS weights like `"600"` for axis titles. |
+| 6 | `TextBaseline` | `Top`, `Middle`, `Bottom`, `Alphabetic` | + `Custom(String)` | `mark_text(baseline="top")` passes the user-facing string verbatim to SVG `dominant-baseline`; `"top"` ≠ `"hanging"` (the SVG-canonical name). |
+| 7 | `PathCmd` | `MoveTo`, `LineTo`, `QuadTo`, `CubicTo`, `ArcTo`, `Close` | + `HLineTo`, `VLineTo` | Step interpolation in `mark_line` emits `H`/`V` SVG path commands. |
+| 8 | `PathCmd` field style | positional tuples: `MoveTo(f64, f64)` | named fields: `MoveTo { x: f64, y: f64 }` | serde `#[serde(tag = "op")]` requires struct variants, not tuple variants. |
+| 9 | `StrokeStyle` | `color`, `width`, `opacity`, `dash` | + `stroke_cap: Option<StrokeCap>`, `stroke_join: Option<StrokeJoin>` | Needed on `Polyline` nodes so the SVG walker can detect and emit the `<g>` wrapper. (Plan §"Type gaps" identified this pre-implementation.) |
+| 10 | `TextStyle` | no `font_family` | + `font_family: String` | Every SVG `<text>` needs a `font-family` attribute. (Plan §"Type gaps" identified this pre-implementation.) |
+
+### Resolved gaps (found during audit, fixed same session)
+
+| # | Gap | Fix |
+|---|---|---|
+| 1 | `description` encoding channel dropped by `build_tooltips_and_hrefs()` — charts with `Description(field)` lost `<desc>` SVG elements | `build_tooltips_and_hrefs` now returns a third `descriptions` vec; `MarkBuildResult` carries it; `MarkBatch` gains `descriptions: Option<Vec<Option<String>>>`; `svg_walk` emits `<desc>` when present |
+| 2 | `FillStroke`-styled Path nodes (area/ribbon) don't carry `stroke_cap`/`stroke_join` — 11b WASM renderer would need to read batch-level field instead of node style | Documented as a known design seam; batch-level `stroke_cap`/`stroke_join` is the canonical source for all backends. Node-level `FillStroke` intentionally does not duplicate this. |
+| 3 | Tooltip `name` field hardcoded to `"value"` instead of the encoding field name | `build_tooltips_and_hrefs` now accepts the field name from the encoding and uses it as `TooltipField.name` |

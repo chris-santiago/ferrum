@@ -82,6 +82,160 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let _ = y_field(ctx, spec);
 }
 
+// ── Scene-graph build path (11a) ────────────────────────────────────
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_stroke, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let spec = ctx.spec;
+    let panel = ctx.panel.plot_area;
+    let xf = match x_field(ctx, spec) {
+        Some(f) => f,
+        None => return MarkBuildResult {
+            kind: MarkBatchKind::Tick,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+        },
+    };
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let stroke_style = to_scene_stroke(
+        ctx.mark_style.fill,
+        ctx.mark_style.stroke_width.max(1.0),
+        ctx.mark_style.opacity,
+        None,
+        None,
+        None,
+    );
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    // Ordinal x + quantitative y → horizontal tick at data y position.
+    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
+        if let Some(yf) = y_field(ctx, spec) {
+            let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                tooltips: None, hrefs: None, descriptions: None,
+            }};
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                tooltips: None, hrefs: None, descriptions: None,
+            }};
+            let n_cats = {
+                let mut set = std::collections::HashSet::<&str>::new();
+                for v in xs.iter().flatten() { set.insert(v.as_str()); }
+                set.len().max(1)
+            };
+            let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            for i in 0..xs.len() {
+                let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+                let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+                let cx = cx + x_offsets[i];
+                let py = py + y_offsets[i];
+                nodes.push(SceneNode::Line {
+                    x1: cx - tick_half,
+                    y1: py,
+                    x2: cx + tick_half,
+                    y2: py,
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
+            }
+            return MarkBuildResult {
+                kind: MarkBatchKind::Tick,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
+        }
+    }
+
+    // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
+    if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
+        if let Some(yf) = y_field(ctx, spec) {
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                tooltips: None, hrefs: None, descriptions: None,
+            }};
+            let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                tooltips: None, hrefs: None, descriptions: None,
+            }};
+            let n_cats = {
+                let mut set = std::collections::HashSet::<&str>::new();
+                for v in ys.iter().flatten() { set.insert(v.as_str()); }
+                set.len().max(1)
+            };
+            let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            for i in 0..xs.len() {
+                let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+                let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                let px = px + x_offsets[i];
+                let cy = cy + y_offsets[i];
+                nodes.push(SceneNode::Line {
+                    x1: px,
+                    y1: cy - tick_half,
+                    x2: px,
+                    y2: cy + tick_half,
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
+            }
+            return MarkBuildResult {
+                kind: MarkBatchKind::Tick,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
+        }
+    }
+
+    // Quantitative x → rug-style vertical tick at panel baseline.
+    let tick_len = ctx.theme.tick_size * 2.0;
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+        tooltips: None, hrefs: None, descriptions: None,
+    }};
+    let baseline_y = panel.y + panel.h;
+    for (i, xopt) in xs.iter().enumerate() {
+        let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
+        let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+        let px = px + x_offsets[i];
+        let by = baseline_y + y_offsets[i];
+        nodes.push(SceneNode::Line {
+            x1: px,
+            y1: by,
+            x2: px,
+            y2: by - tick_len,
+            style: stroke_style.clone(),
+        });
+        indices.push(i);
+    }
+    let _ = y_field(ctx, spec);
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Tick,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -138,6 +138,145 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     out.image(svg_x, svg_y_top, svg_w, svg_h, &png_bytes);
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Image,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,    };
+
+    let batch = ctx.batch;
+    if batch.num_rows() != 1 {
+        return empty();
+    }
+
+    let x_min = match batch
+        .column_by_name("x_min")
+        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let x_max = match batch
+        .column_by_name("x_max")
+        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let y_min = match batch
+        .column_by_name("y_min")
+        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let y_max = match batch
+        .column_by_name("y_max")
+        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let width = match batch
+        .column_by_name("width")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let height = match batch
+        .column_by_name("height")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+    let pixel_bytes = match batch
+        .column_by_name("pixel_data")
+        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
+    {
+        Some(a) => a.value(0),
+        None => return empty(),
+    };
+
+    let n_cells = (width as usize) * (height as usize);
+    if pixel_bytes.len() != n_cells * 8 {
+        return empty();
+    }
+
+    // Resolve colormap: mark_style.cmap → theme.sequential_scheme → Viridis.
+    let named = ctx
+        .mark_style
+        .cmap
+        .as_deref()
+        .and_then(NamedContinuous::from_name)
+        .unwrap_or_else(|| {
+            NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+                .unwrap_or(NamedContinuous::Viridis)
+        });
+    let scheme = ContinuousScheme::Named(named);
+
+    // Decode f64 values and map through colormap to produce RGBA8 pixels.
+    let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
+    for chunk in pixel_bytes.chunks_exact(8) {
+        let v = f64::from_le_bytes(chunk.try_into().unwrap());
+        if v.is_nan() {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let c = scheme.sample(v);
+            rgba.push(c.red);
+            rgba.push(c.green);
+            rgba.push(c.blue);
+            rgba.push(c.alpha);
+        }
+    }
+
+    let png_bytes = encode_png(width, height, &rgba);
+
+    // Map data extent to pixel space via scales.
+    let svg_x = match ctx.scales.x.to_pixel_f64(x_min) {
+        Some(p) => p,
+        None => return empty(),
+    };
+    let svg_x_far = match ctx.scales.x.to_pixel_f64(x_max) {
+        Some(p) => p,
+        None => return empty(),
+    };
+    let svg_y_top = match ctx.scales.y.to_pixel_f64(y_max) {
+        Some(p) => p,
+        None => return empty(),
+    };
+    let svg_y_bot = match ctx.scales.y.to_pixel_f64(y_min) {
+        Some(p) => p,
+        None => return empty(),
+    };
+    let svg_w = (svg_x_far - svg_x).abs();
+    let svg_h = (svg_y_bot - svg_y_top).abs();
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Image,
+        nodes: vec![SceneNode::Image {
+            x: svg_x,
+            y: svg_y_top,
+            w: svg_w,
+            h: svg_h,
+            data: ImageData::Inline {
+                bytes: png_bytes,
+                mime: ImageMime::Png,
+            },
+        }],
+        data_indices: Some(vec![0]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -189,6 +189,178 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Text,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let spec = ctx.spec;
+    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
+        (Some(a), Some(b)) => (a, b), _ => return empty(),
+    };
+
+    let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
+    let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
+
+    let xs_f: Option<Vec<Option<f64>>> =
+        if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
+    let xs_s: Option<Vec<Option<String>>> =
+        if x_ordinal { col_as_str(ctx.batch, xf).ok() } else { None };
+    let ys_f: Option<Vec<Option<f64>>> =
+        if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
+    let ys_s: Option<Vec<Option<String>>> =
+        if y_ordinal { col_as_str(ctx.batch, yf).ok() } else { None };
+
+    let n_x = match (&xs_f, &xs_s) {
+        (Some(v), _) => v.len(),
+        (_, Some(v)) => v.len(),
+        _ => return empty(),
+    };
+    let n_y = match (&ys_f, &ys_s) {
+        (Some(v), _) => v.len(),
+        (_, Some(v)) => v.len(),
+        _ => return empty(),
+    };
+    if n_x != n_y { return empty(); }
+
+    // Explicit text channel (same resolution as draw()).
+    let text_enc = spec.encoding.text.as_ref();
+    let text_field = text_enc.map(|e| e.field.as_str());
+    let text_format = text_enc.and_then(|e| e.format.as_deref());
+    let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
+    let texts: Option<Vec<Option<String>>> = match text_field {
+        None => None,
+        Some(f) => col_as_str(ctx.batch, f).ok().or_else(|| {
+            col_as_f64(ctx.batch, f).ok().map(|nums| {
+                nums.into_iter()
+                    .map(|opt_v| {
+                        opt_v.and_then(|v| {
+                            if !v.is_finite() {
+                                return None;
+                            }
+                            if text_format_type == Some("time") {
+                                Some(format_time(v as i64, 86_400_000))
+                            } else {
+                                Some(format_with_spec(v, text_format))
+                            }
+                        })
+                    })
+                    .collect()
+            })
+        }),
+    };
+
+    let anchor = match ctx.mark_style.align.as_deref() {
+        Some("left") => TextAnchor::Start,
+        Some("right") => TextAnchor::End,
+        _ => TextAnchor::Middle,
+    };
+    let dx = ctx.mark_style.dx.unwrap_or(0.0);
+    let dy = ctx.mark_style.dy.unwrap_or(0.0);
+    let font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size);
+    let angle = ctx.mark_style.angle.unwrap_or(0.0);
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..n_x {
+        let px = if let Some(xs) = &xs_f {
+            match xs[i] {
+                Some(v) if v.is_finite() => match ctx.scales.x.to_pixel_f64(v) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            }
+        } else if let Some(xs) = &xs_s {
+            match xs[i].as_deref() {
+                Some(s) => match ctx.scales.x.to_pixel_str(s) {
+                    Some(p) => p, None => continue,
+                },
+                None => continue,
+            }
+        } else { continue };
+
+        let py = if let Some(ys) = &ys_f {
+            match ys[i] {
+                Some(v) if v.is_finite() => match ctx.scales.y.to_pixel_f64(v) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            }
+        } else if let Some(ys) = &ys_s {
+            match ys[i].as_deref() {
+                Some(s) => match ctx.scales.y.to_pixel_str(s) {
+                    Some(p) => p, None => continue,
+                },
+                None => continue,
+            }
+        } else { continue };
+
+        let raw_label: String = if let Some(t) = &texts {
+            match &t[i] {
+                Some(s) => s.clone(),
+                None => continue,
+            }
+        } else {
+            match &ys_f {
+                Some(ys) => match ys[i] {
+                    Some(v) if v.is_finite() => format_numeric(v),
+                    _ => continue,
+                },
+                None => continue,
+            }
+        };
+
+        // S7: truncate label to `limit` characters (including the ellipsis).
+        let label = if let Some(limit) = ctx.mark_style.limit {
+            if limit > 0 && raw_label.chars().count() > limit {
+                let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
+                format!("{truncated}\u{2026}") // …
+            } else {
+                raw_label
+            }
+        } else {
+            raw_label
+        };
+
+        nodes.push(SceneNode::Text {
+            x: px + dx,
+            y: py + dy,
+            content: label,
+            style: to_scene_text_style(
+                ctx.theme.font_color,
+                font_size,
+                anchor,
+                angle,
+                &ctx.theme.font_family,
+                ctx.mark_style.font_weight.as_deref(),
+                ctx.mark_style.baseline.as_deref(),
+                ctx.mark_style.opacity,
+            ),
+        });
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Text,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

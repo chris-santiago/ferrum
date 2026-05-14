@@ -99,6 +99,167 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let spec = ctx.spec;
+    let panel = ctx.panel.plot_area;
+    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
+    let stroke_style = to_scene_stroke(
+        stroke_color,
+        ctx.mark_style.stroke_width,
+        1.0,
+        ctx.mark_style.stroke_dash.as_deref(),
+        None,
+        None,
+    );
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Rule,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let xf_opt = x_field(ctx, spec);
+    let yf_opt = y_field(ctx, spec);
+    let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
+    let x2f_opt = spec.encoding.x2.as_ref().map(|e| e.field.as_str());
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    // Ranged rule: ordinal x + quantitative y + y2 → vertical segment per row.
+    if let (Some(xf), Some(yf), Some(y2f)) = (xf_opt, yf_opt, y2f_opt) {
+        if let Ok(xs) = col_as_str(ctx.batch, xf) {
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
+            for i in 0..xs.len() {
+                let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let px = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+                let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+                let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+                let px = px + x_offsets[i];
+                nodes.push(SceneNode::Line {
+                    x1: px,
+                    y1: py + y_offsets[i],
+                    x2: px,
+                    y2: py2 + y_offsets[i],
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
+            }
+            return MarkBuildResult {
+                kind: MarkBatchKind::Rule,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
+        }
+    }
+
+    // Ranged rule: ordinal y + quantitative x + x2 → horizontal segment per row.
+    if let (Some(yf), Some(xf), Some(x2f)) = (yf_opt, xf_opt, x2f_opt) {
+        if let Ok(ys) = col_as_str(ctx.batch, yf) {
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
+            for i in 0..ys.len() {
+                let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let py = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+                let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+                let py = py + y_offsets[i];
+                nodes.push(SceneNode::Line {
+                    x1: px + x_offsets[i],
+                    y1: py,
+                    x2: px2 + x_offsets[i],
+                    y2: py,
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
+            }
+            return MarkBuildResult {
+                kind: MarkBatchKind::Rule,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
+        }
+    }
+
+    // Horizontal span: y only (no x), or y + x inherited from chart-level encoding.
+    if let Some(yf) = yf_opt {
+        if let Ok(ys) = col_as_f64(ctx.batch, yf) {
+            if y2f_opt.is_none() {
+                for (i, yopt) in ys.iter().enumerate() {
+                    let yv = match yopt {
+                        Some(v) if v.is_finite() => *v,
+                        _ => continue,
+                    };
+                    let py = match ctx.scales.y.to_pixel_f64(yv) {
+                        Some(p) => p, None => continue,
+                    };
+                    let py = py + y_offsets[i];
+                    nodes.push(SceneNode::Line {
+                        x1: panel.x,
+                        y1: py,
+                        x2: panel.x + panel.w,
+                        y2: py,
+                        style: stroke_style.clone(),
+                    });
+                    indices.push(i);
+                }
+                return MarkBuildResult {
+                    kind: MarkBatchKind::Rule,
+                    nodes,
+                    data_indices: Some(indices),
+                    tooltips,
+                    hrefs,
+                    descriptions,                };
+            }
+        }
+    }
+
+    // Vertical span: x only (no y).
+    if let (Some(xf), None) = (xf_opt, yf_opt) {
+        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+        for (i, xopt) in xs.iter().enumerate() {
+            let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
+            let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+            let px = px + x_offsets[i];
+            nodes.push(SceneNode::Line {
+                x1: px,
+                y1: panel.y,
+                x2: px,
+                y2: panel.y + panel.h,
+                style: stroke_style.clone(),
+            });
+            indices.push(i);
+        }
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rule,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

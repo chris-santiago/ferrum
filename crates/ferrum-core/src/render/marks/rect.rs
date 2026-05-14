@@ -246,6 +246,346 @@ fn count_distinct(values: &[Option<String>]) -> usize {
     seen.len()
 }
 
+// ── Scene-graph build path (11a) ────────────────────────────────────
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    let both_ranges = ctx.spec.encoding.x2.is_some() && ctx.spec.encoding.y2.is_some();
+    let both_quant = matches!(
+        (&ctx.scales.x, &ctx.scales.y),
+        (
+            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_),
+            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_),
+        )
+    );
+    if both_ranges && both_quant {
+        build_quantitative_range(ctx)
+    } else if ctx.spec.encoding.y2.is_some() {
+        build_ordinal_range(ctx)
+    } else {
+        build_heatmap(ctx)
+    }
+}
+
+fn empty_result() -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::MarkBatchKind;
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    }
+}
+
+fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let spec = ctx.spec;
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
+        Some(f) => f, None => return empty_result(),
+    };
+    let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
+        Some(f) => f, None => return empty_result(),
+    };
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
+    let n = xs.len();
+    if x2s.len() != n || ys.len() != n || y2s.len() != n { return empty_result(); }
+
+    let cfield = color_field(ctx, spec);
+    let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..n {
+        let x_lo = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let x_hi = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let y_lo = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let y_hi = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let px_lo = match ctx.scales.x.to_pixel_f64(x_lo) { Some(p) => p, None => continue };
+        let px_hi = match ctx.scales.x.to_pixel_f64(x_hi) { Some(p) => p, None => continue };
+        let py_lo = match ctx.scales.y.to_pixel_f64(y_lo) { Some(p) => p, None => continue };
+        let py_hi = match ctx.scales.y.to_pixel_f64(y_hi) { Some(p) => p, None => continue };
+        let px_left = px_lo.min(px_hi) + x_offsets[i];
+        let py_top = py_lo.min(py_hi) + y_offsets[i];
+        let w = (px_hi - px_lo).abs().max(0.5);
+        let h = (py_hi - py_lo).abs().max(0.5);
+
+        let fill = match (&ctx.scales.color, &color_numeric, &color_strings) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
+                match values[i] {
+                    Some(v) if v.is_finite() => {
+                        scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill)
+                    }
+                    _ => ctx.mark_style.fill,
+                }
+            }
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
+                match values[i].as_deref() {
+                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    None => ctx.mark_style.fill,
+                }
+            }
+            _ => ctx.mark_style.fill,
+        };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        nodes.push(SceneNode::Rect {
+            x: px_left,
+            y: py_top,
+            w,
+            h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
+fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let spec = ctx.spec;
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
+        Some(f) => f, None => return empty_result(),
+    };
+
+    let n_categories = match &ctx.scales.x {
+        ScaleKind::Ordinal(_) => {
+            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+            count_distinct(&xs_probe).max(1)
+        }
+        _ => return empty_result(),
+    };
+    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
+    if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
+
+    let panel = ctx.panel.plot_area;
+    let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
+
+    let cfield = color_field(ctx, spec);
+    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..xs.len() {
+        let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+        let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+        let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+        let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+        let cx = cx + x_offsets[i];
+        let rect_top = py.min(py2) + y_offsets[i];
+        let rect_h = (py - py2).abs().max(1.0);
+
+        let fill = match (&ctx.scales.color, &color_strings) {
+            (Some(scale @ ColorScale::Categorical { .. }), Some(values)) => {
+                match values[i].as_deref() {
+                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    None => ctx.mark_style.fill,
+                }
+            }
+            _ => ctx.mark_style.fill,
+        };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        nodes.push(SceneNode::Rect {
+            x: cx - box_w / 2.0,
+            y: rect_top,
+            w: box_w,
+            h: rect_h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
+fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke, to_scene_text_style};
+    use crate::render::format::format_numeric;
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let spec = ctx.spec;
+    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
+        (Some(a), Some(b)) => (a, b), _ => return empty_result(),
+    };
+    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    if xs.len() != ys.len() { return empty_result(); }
+
+    let panel = ctx.panel.plot_area;
+    let n_x = match &ctx.scales.x { ScaleKind::Ordinal(_) => count_distinct(&xs).max(1), _ => return empty_result() };
+    let n_y = match &ctx.scales.y { ScaleKind::Ordinal(_) => count_distinct(&ys).max(1), _ => return empty_result() };
+    let cell_w = panel.w / n_x as f64;
+    let cell_h = panel.h / n_y as f64;
+
+    let cfield = color_field(ctx, spec);
+    let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    // Optional text annotation channel for heatmap cells.
+    let text_enc = spec.encoding.text.as_ref();
+    let text_field = text_enc.map(|e| e.field.as_str());
+    let text_values: Option<Vec<Option<String>>> = text_field.and_then(|f| {
+        col_as_str(ctx.batch, f).ok().or_else(|| {
+            col_as_f64(ctx.batch, f).ok().map(|nums| {
+                nums.into_iter()
+                    .map(|v| v.map(|n| format_numeric(n)))
+                    .collect()
+            })
+        })
+    });
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..xs.len() {
+        let xs_v = match &xs[i] { Some(s) => s.as_str(), None => continue };
+        let ys_v = match &ys[i] { Some(s) => s.as_str(), None => continue };
+        let cx = match ctx.scales.x.to_pixel_str(xs_v) { Some(p) => p, None => continue };
+        let cy = match ctx.scales.y.to_pixel_str(ys_v) { Some(p) => p, None => continue };
+        let cx = cx + x_offsets[i];
+        let cy = cy + y_offsets[i];
+
+        let fill = match (&ctx.scales.color, &color_numeric, &color_strings) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
+                match values[i] {
+                    Some(v) if v.is_finite() => {
+                        scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill)
+                    }
+                    _ => ctx.mark_style.fill,
+                }
+            }
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
+                match values[i].as_deref() {
+                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    None => ctx.mark_style.fill,
+                }
+            }
+            _ => ctx.mark_style.fill,
+        };
+        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        nodes.push(SceneNode::Rect {
+            x: cx - cell_w / 2.0,
+            y: cy - cell_h / 2.0,
+            w: cell_w,
+            h: cell_h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
+
+        // Emit text annotation at cell center when text encoding is present.
+        if let Some(ref texts) = text_values {
+            if let Some(Some(content)) = texts.get(i) {
+                if !content.is_empty() {
+                    let text_color = ctx.theme.font_color;
+                    let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
+                    nodes.push(SceneNode::Text {
+                        x: cx,
+                        y: cy,
+                        content: content.clone(),
+                        style: to_scene_text_style(
+                            text_color,
+                            font_size,
+                            crate::layout::TextAnchor::Middle,
+                            0.0,
+                            &ctx.theme.font_family,
+                            None,
+                            Some("central"),
+                            1.0,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

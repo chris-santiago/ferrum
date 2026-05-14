@@ -1,7 +1,9 @@
 //! Internal: draw a per-panel strip-title band (background rect + centered text).
 
 use crate::layout::{Rect, StripTitleLayout, ThemeInputs};
+use crate::render::draw::{to_scene_fill_stroke, to_scene_text_style};
 use crate::render::svg::{FillStroke, SvgBuffer, TextStyle};
+use ferrum_scene::SceneNode;
 
 pub fn draw(
     strip: &StripTitleLayout,
@@ -32,6 +34,51 @@ pub fn draw(
         font_weight: None,
         dominant_baseline: None,
     });
+}
+
+// ── Scene-graph path ────────────────────────────────────────────────
+
+pub fn build_strip_title(
+    strip: &StripTitleLayout,
+    panel_rect: &Rect,
+    theme: &ThemeInputs,
+) -> Vec<SceneNode> {
+    let band_h = (panel_rect.y - (strip.anchor.1 - strip.font_size - theme.strip_padding))
+        .abs()
+        .max(strip.font_size + 2.0 * theme.strip_padding);
+    let band = Rect {
+        x: panel_rect.x,
+        y: panel_rect.y - band_h,
+        w: panel_rect.w,
+        h: band_h,
+    };
+
+    let bg = SceneNode::Rect {
+        x: band.x,
+        y: band.y,
+        w: band.w,
+        h: band.h,
+        style: to_scene_fill_stroke(Some(theme.strip_background_color), None, 0.0, 1.0, None),
+        corner_radius: 0.0,
+    };
+
+    let txt = SceneNode::Text {
+        x: strip.anchor.0,
+        y: strip.anchor.1,
+        content: strip.text.clone(),
+        style: to_scene_text_style(
+            theme.font_color,
+            strip.font_size,
+            strip.align,
+            0.0,
+            &theme.font_family,
+            None,
+            None,
+            1.0,
+        ),
+    };
+
+    vec![bg, txt]
 }
 
 #[cfg(test)]

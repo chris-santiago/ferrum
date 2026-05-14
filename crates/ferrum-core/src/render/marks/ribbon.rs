@@ -180,6 +180,162 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{
+        to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+    };
+    use ferrum_scene::{MarkBatchKind, PathCmd};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Ribbon,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let spec = ctx.spec;
+    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return empty(),
+    };
+    let y2f = match spec.encoding.y2.as_ref() {
+        Some(e) => e.field.as_str(),
+        None => return empty(),
+    };
+
+    let ys = match col_as_f64(ctx.batch, yf) {
+        Ok(v) => v,
+        Err(_) => return empty(),
+    };
+    let y2s = match col_as_f64(ctx.batch, y2f) {
+        Ok(v) => v,
+        Err(_) => return empty(),
+    };
+    let n = ys.len().min(y2s.len());
+    let (x_pixels, x_is_ordinal) = match resolve_x_pixels(ctx, xf, n) {
+        Some(v) => v,
+        None => return empty(),
+    };
+    let n = n.min(x_pixels.len());
+
+    let cf = color_field(ctx, spec);
+    let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
+    let groups: Vec<(Option<String>, Vec<usize>)> = match (color_values.as_ref(), &ctx.scales.color) {
+        (Some(values), Some(_)) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in values.iter().take(n).enumerate() {
+                let key = v.clone();
+                let pos = groups.iter().position(|(k, _)| k == &key);
+                match pos {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            groups
+        }
+        _ => vec![(None, (0..n).collect())],
+    };
+
+    // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut data_indices = Vec::new();
+
+    for (key, rows) in groups {
+        let mut indices: Vec<usize> = rows
+            .into_iter()
+            .filter(|&i| {
+                let xp_ok = x_pixels.get(i).and_then(|v| *v).map(|p| p.is_finite()).unwrap_or(false);
+                let yv_ok = ys.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                let y2v_ok = y2s.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                xp_ok && yv_ok && y2v_ok
+            })
+            .collect();
+        if !x_is_ordinal {
+            indices.sort_by(|&a, &b| {
+                let xa = x_pixels[a].unwrap_or(f64::NAN);
+                let xb = x_pixels[b].unwrap_or(f64::NAN);
+                xa.partial_cmp(&xb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        if indices.len() < 2 {
+            continue;
+        }
+        let pixels: Vec<(f64, f64, f64)> = indices
+            .iter()
+            .filter_map(|&i| {
+                let cx = x_pixels.get(i).and_then(|v| *v)?;
+                let yv = ys[i]?;
+                let y2v = y2s[i]?;
+                let cy = ctx.scales.y.to_pixel_f64(yv)?;
+                let cy2 = ctx.scales.y.to_pixel_f64(y2v)?;
+                let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+                let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+                Some((cx + xo, cy + yo, cy2 + yo))
+            })
+            .collect();
+        if pixels.len() < 2 {
+            continue;
+        }
+
+        // Build closed path commands: top edge x ascending, bottom edge x descending, Close.
+        let mut cmds = Vec::with_capacity(pixels.len() * 2 + 2);
+        let (x0, y0, _) = pixels[0];
+        cmds.push(PathCmd::MoveTo { x: x0, y: y0 });
+        for &(x, y, _) in &pixels[1..] {
+            cmds.push(PathCmd::LineTo { x, y });
+        }
+        for &(x, _, y2) in pixels.iter().rev() {
+            cmds.push(PathCmd::LineTo { x, y: y2 });
+        }
+        cmds.push(PathCmd::Close);
+
+        // Color resolution — mirrors draw().
+        let (fill, stroke) = if has_color_groups {
+            let solid = key
+                .as_deref()
+                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
+                .unwrap_or(ctx.mark_style.fill);
+            let fill = crate::render::color::categorical::with_opacity(solid, ctx.mark_style.opacity);
+            (Some(fill), ctx.mark_style.stroke)
+        } else {
+            let fill = crate::render::color::categorical::with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
+            (Some(fill), ctx.mark_style.stroke)
+        };
+        let style = to_scene_fill_stroke(
+            fill,
+            stroke,
+            ctx.mark_style.stroke_width,
+            1.0,
+            None,
+        );
+        nodes.push(ferrum_scene::SceneNode::Path {
+            commands: cmds,
+            style,
+            closed: true,
+        });
+
+        // Track which rows contributed.
+        data_indices.extend(indices.iter().copied());
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Ribbon,
+        nodes,
+        data_indices: Some(data_indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

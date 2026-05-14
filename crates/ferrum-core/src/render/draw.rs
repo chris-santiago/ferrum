@@ -6,6 +6,11 @@ use crate::layout::{PanelLayout, ThemeInputs};
 use crate::spec::mark::Mark;
 use crate::spec::mark_style::MarkKwargsSpec;
 
+use ferrum_scene::{
+    MarkBatchKind, SceneNode as FsSceneNode, TooltipContent as FsTooltipContent,
+    TooltipField as FsTooltipField,
+};
+
 use super::color::{from_hex_str, with_opacity, Color};
 use super::scale_resolve::ResolvedScales;
 use super::svg::SvgBuffer;
@@ -314,6 +319,134 @@ pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
     macro_rules! arm {
         ($($V:ident => $m:ident,)*) => {
             match mark { $( Mark::$V => super::marks::$m::draw(ctx, out), )* }
+        };
+    }
+    for_each_mark!(arm)
+}
+
+// ── Scene-graph path (11a) ──────────────────────────────────────────
+
+pub struct MarkBuildResult {
+    pub kind: MarkBatchKind,
+    pub nodes: Vec<FsSceneNode>,
+    pub data_indices: Option<Vec<usize>>,
+    pub tooltips: Option<Vec<FsTooltipContent>>,
+    pub hrefs: Option<Vec<Option<String>>>,
+    pub descriptions: Option<Vec<Option<String>>>,
+}
+
+impl MetadataColumns {
+    pub fn build_metadata(
+        &self,
+        ctx: &DrawCtx,
+    ) -> (Option<Vec<FsTooltipContent>>, Option<Vec<Option<String>>>, Option<Vec<Option<String>>>) {
+        let tooltip_field_name = ctx.spec.encoding.tooltip
+            .as_ref()
+            .map(|e| e.field.as_str())
+            .unwrap_or("value");
+        let tooltips = self.tooltip.as_ref().map(|col| {
+            col.iter()
+                .map(|opt| FsTooltipContent {
+                    fields: vec![FsTooltipField {
+                        name: tooltip_field_name.to_string(),
+                        value: opt.clone().unwrap_or_default(),
+                    }],
+                })
+                .collect()
+        });
+        let hrefs = self.href.as_ref().map(|col| col.clone());
+        let descriptions = self.description.as_ref().map(|col| col.clone());
+        (tooltips, hrefs, descriptions)
+    }
+}
+
+pub fn to_scene_color(c: Color) -> ferrum_scene::Color {
+    ferrum_scene::Color { r: c.red, g: c.green, b: c.blue, a: c.alpha }
+}
+
+pub fn to_scene_fill_stroke(
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_width: f64,
+    opacity: f64,
+    stroke_dash: Option<&[f64]>,
+) -> ferrum_scene::FillStroke {
+    ferrum_scene::FillStroke {
+        fill: fill.map(to_scene_color),
+        stroke: stroke.map(to_scene_color),
+        stroke_width,
+        opacity,
+        stroke_dash: stroke_dash.map(|d| d.to_vec()),
+    }
+}
+
+pub fn to_scene_stroke(
+    color: Color,
+    width: f64,
+    opacity: f64,
+    dash: Option<&[f64]>,
+    cap: Option<&str>,
+    join: Option<&str>,
+) -> ferrum_scene::StrokeStyle {
+    ferrum_scene::StrokeStyle {
+        color: to_scene_color(color),
+        width,
+        opacity,
+        dash: dash.map(|d| d.to_vec()),
+        stroke_cap: cap.and_then(|s| match s {
+            "round" => Some(ferrum_scene::StrokeCap::Round),
+            "square" => Some(ferrum_scene::StrokeCap::Square),
+            _ => Some(ferrum_scene::StrokeCap::Butt),
+        }),
+        stroke_join: join.and_then(|s| match s {
+            "round" => Some(ferrum_scene::StrokeJoin::Round),
+            "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
+            _ => Some(ferrum_scene::StrokeJoin::Miter),
+        }),
+    }
+}
+
+pub fn to_scene_text_style(
+    color: Color,
+    font_size: f64,
+    anchor: crate::layout::TextAnchor,
+    angle: f64,
+    font_family: &str,
+    font_weight: Option<&str>,
+    dominant_baseline: Option<&str>,
+    opacity: f64,
+) -> ferrum_scene::TextStyle {
+    ferrum_scene::TextStyle {
+        font_size,
+        font_weight: match font_weight {
+            Some("bold") => ferrum_scene::FontWeight::Bold,
+            Some(w) if w != "normal" => ferrum_scene::FontWeight::Custom(w.to_string()),
+            _ => ferrum_scene::FontWeight::Normal,
+        },
+        anchor: match anchor {
+            crate::layout::TextAnchor::Start => ferrum_scene::TextAnchor::Start,
+            crate::layout::TextAnchor::Middle => ferrum_scene::TextAnchor::Middle,
+            crate::layout::TextAnchor::End => ferrum_scene::TextAnchor::End,
+        },
+        baseline: match dominant_baseline {
+            Some("hanging") | Some("text-before-edge") => ferrum_scene::TextBaseline::Top,
+            Some("central") | Some("middle") => ferrum_scene::TextBaseline::Middle,
+            Some("ideographic") | Some("text-after-edge") => ferrum_scene::TextBaseline::Bottom,
+            Some(other) => ferrum_scene::TextBaseline::Custom(other.to_string()),
+            None => ferrum_scene::TextBaseline::Alphabetic,
+        },
+        angle,
+        color: to_scene_color(color),
+        opacity,
+        font_family: font_family.to_string(),
+    }
+}
+
+pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> MarkBuildResult {
+    use crate::spec::mark::for_each_mark;
+    macro_rules! arm {
+        ($($V:ident => $m:ident,)*) => {
+            match mark { $( Mark::$V => super::marks::$m::build(ctx), )* }
         };
     }
     for_each_mark!(arm)

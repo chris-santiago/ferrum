@@ -228,6 +228,219 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+/// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
+/// given interpolation method. Mirrors `build_line_path` but emits structured
+/// commands instead of a `d` string.
+fn build_line_cmds(points: &[(f64, f64)], interpolate: Option<&str>) -> Vec<ferrum_scene::PathCmd> {
+    use ferrum_scene::PathCmd;
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let method = interpolate.unwrap_or("linear");
+    let mut cmds = Vec::with_capacity(points.len() * 2);
+    cmds.push(PathCmd::MoveTo { x: points[0].0, y: points[0].1 });
+    for i in 1..points.len() {
+        let (px, py) = points[i - 1];
+        let (cx, cy) = points[i];
+        match method {
+            "step" => {
+                let mid_x = (px + cx) / 2.0;
+                cmds.push(PathCmd::HLineTo { x: mid_x });
+                cmds.push(PathCmd::VLineTo { y: cy });
+                cmds.push(PathCmd::HLineTo { x: cx });
+            }
+            "step-before" => {
+                cmds.push(PathCmd::VLineTo { y: cy });
+                cmds.push(PathCmd::HLineTo { x: cx });
+            }
+            "step-after" => {
+                cmds.push(PathCmd::HLineTo { x: cx });
+                cmds.push(PathCmd::VLineTo { y: cy });
+            }
+            _ => {
+                cmds.push(PathCmd::LineTo { x: cx, y: cy });
+            }
+        }
+    }
+    cmds
+}
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{
+        to_scene_fill_stroke, to_scene_stroke, MarkBuildResult, MetadataColumns,
+    };
+    use ferrum_scene::MarkBatchKind;
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Line,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let spec = ctx.spec;
+    let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return empty(),
+    };
+
+    let n_rows = ctx.batch.num_rows();
+    let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
+        ScaleKind::Ordinal(_) => {
+            let xs_str = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            xs_str.iter()
+                .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+                .collect()
+        }
+        _ => {
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            xs.iter()
+                .map(|opt| opt
+                    .filter(|v| v.is_finite())
+                    .and_then(|v| ctx.scales.x.to_pixel_f64(v)))
+                .collect()
+        }
+    };
+    let ys_pix: Vec<Option<f64>> = match &ctx.scales.y {
+        ScaleKind::Ordinal(_) => {
+            let ys_str = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            ys_str.iter()
+                .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
+                .collect()
+        }
+        _ => {
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            ys.iter()
+                .map(|opt| opt
+                    .filter(|v| v.is_finite())
+                    .and_then(|v| ctx.scales.y.to_pixel_f64(v)))
+                .collect()
+        }
+    };
+    if xs_pix.len() != n_rows || ys_pix.len() != n_rows {
+        return empty();
+    }
+
+    let cf = color_field(ctx, spec);
+    let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
+    let detail_values = ctx.mark_style.detail.as_deref()
+        .and_then(|f| col_as_str(ctx.batch, f).ok());
+
+    let groups: Vec<(Option<String>, Vec<usize>)> = match (
+        color_values.as_ref(),
+        detail_values.as_ref(),
+        &ctx.scales.color,
+    ) {
+        (Some(cv), None, Some(_)) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in cv.iter().enumerate() {
+                let key = v.clone();
+                match groups.iter().position(|(k, _)| k == &key) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            groups
+        }
+        (None, Some(dv), _) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in dv.iter().enumerate() {
+                let key = v.clone();
+                match groups.iter().position(|(k, _)| k == &key) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            groups.into_iter().map(|(_, rows)| (None, rows)).collect()
+        }
+        (Some(cv), Some(dv), _) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for i in 0..n_rows {
+                let composite = (cv[i].clone(), dv[i].clone());
+                match groups.iter().position(|(_, rows)| {
+                    rows.first().map(|&r| (cv[r].clone(), dv[r].clone()) == composite)
+                        .unwrap_or(false)
+                }) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((cv[i].clone(), vec![i])),
+                }
+            }
+            groups
+        }
+        _ => vec![(None, (0..n_rows).collect())],
+    };
+
+    let interpolate = ctx.mark_style.interpolate.as_deref();
+    let use_path = interpolate.is_some() && interpolate != Some("linear");
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut data_indices = Vec::new();
+
+    for (key, rows) in groups {
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut row_indices: Vec<usize> = Vec::new();
+        for i in rows {
+            let (cx, cy) = match (xs_pix[i], ys_pix[i]) {
+                (Some(a), Some(b)) => (a, b),
+                _ => continue,
+            };
+            points.push((cx, cy));
+            row_indices.push(i);
+        }
+        if points.len() < 2 { continue; }
+
+        let stroke_color = match (key.as_deref(), &ctx.scales.color) {
+            (Some(v), Some(scale)) =>
+                scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+            _ => ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
+        };
+        let stroke_color = with_opacity(stroke_color, ctx.mark_style.opacity);
+
+        if use_path {
+            let cmds = build_line_cmds(&points, interpolate);
+            let style = to_scene_fill_stroke(
+                None,
+                Some(stroke_color),
+                ctx.mark_style.stroke_width,
+                1.0,
+                ctx.mark_style.stroke_dash.as_deref(),
+            );
+            nodes.push(ferrum_scene::SceneNode::Path {
+                commands: cmds,
+                style,
+                closed: false,
+            });
+        } else {
+            let stroke_style = to_scene_stroke(
+                stroke_color,
+                ctx.mark_style.stroke_width,
+                1.0,
+                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.stroke_cap.as_deref(),
+                ctx.mark_style.stroke_join.as_deref(),
+            );
+            nodes.push(ferrum_scene::SceneNode::Polyline {
+                points: points.clone(),
+                style: stroke_style,
+            });
+        }
+        data_indices.extend(row_indices);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Line,
+        nodes,
+        data_indices: Some(data_indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

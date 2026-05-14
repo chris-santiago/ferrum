@@ -42,6 +42,79 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Segment,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
+    let spec = ctx.spec;
+    let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return empty(); };
+    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else { return empty(); };
+    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else { return empty(); };
+
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
+
+    let stroke_style = to_scene_stroke(
+        ctx.mark_style.fill,
+        ctx.mark_style.stroke_width,
+        ctx.mark_style.opacity,
+        ctx.mark_style.stroke_dash.as_deref(),
+        None,
+        None,
+    );
+
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    let n = xs.len().min(ys.len()).min(x2s.len()).min(y2s.len());
+    for i in 0..n {
+        let (xv, yv, x2v, y2v) = match (xs[i], ys[i], x2s[i], y2s[i]) {
+            (Some(a), Some(b), Some(c), Some(d))
+                if a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite() =>
+                (a, b, c, d),
+            _ => continue,
+        };
+        let p1x = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+        let p1y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+        let p2x = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+        let p2y = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+        let xo = x_offsets.get(i).copied().unwrap_or(0.0);
+        let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+        nodes.push(SceneNode::Line {
+            x1: p1x + xo,
+            y1: p1y + yo,
+            x2: p2x + xo,
+            y2: p2y + yo,
+            style: stroke_style.clone(),
+        });
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Segment,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

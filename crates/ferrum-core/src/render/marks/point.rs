@@ -251,6 +251,320 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     }
 }
 
+// ── Scene-graph build path (11a) ───────────────────────────────────
+
+/// Emit one shape glyph as `SceneNode` variants. Returns a `Vec` because
+/// `ShapeKind::Cross` produces two `Line` nodes while all other shapes
+/// produce exactly one node.
+fn emit_shape_nodes(
+    kind: ShapeKind,
+    cx: f64,
+    cy: f64,
+    r: f64,
+    fill: Option<crate::render::color::Color>,
+    stroke: Option<crate::render::color::Color>,
+    stroke_width: f64,
+    opacity: f64,
+) -> Vec<ferrum_scene::SceneNode> {
+    use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
+    use ferrum_scene::{PathCmd, SceneNode};
+
+    match kind {
+        ShapeKind::Circle => {
+            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            vec![SceneNode::Circle { cx, cy, r, style }]
+        }
+        ShapeKind::Square => {
+            let s = r * 1.6;
+            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            vec![SceneNode::Rect {
+                x: cx - s / 2.0,
+                y: cy - s / 2.0,
+                w: s,
+                h: s,
+                style,
+                corner_radius: 0.0,
+            }]
+        }
+        ShapeKind::Cross => {
+            let stroke_color =
+                fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
+            let arm = r * 0.5;
+            let sw = r * 0.4;
+            let s1 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let s2 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            vec![
+                SceneNode::Line {
+                    x1: cx - arm,
+                    y1: cy,
+                    x2: cx + arm,
+                    y2: cy,
+                    style: s1,
+                },
+                SceneNode::Line {
+                    x1: cx,
+                    y1: cy - arm,
+                    x2: cx,
+                    y2: cy + arm,
+                    style: s2,
+                },
+            ]
+        }
+        ShapeKind::Diamond => {
+            let d = r * 1.4;
+            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            vec![SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: cx, y: cy - d },
+                    PathCmd::LineTo { x: cx + d, y: cy },
+                    PathCmd::LineTo { x: cx, y: cy + d },
+                    PathCmd::LineTo { x: cx - d, y: cy },
+                    PathCmd::Close,
+                ],
+                style,
+                closed: true,
+            }]
+        }
+        ShapeKind::TriangleUp => {
+            let h = r * 1.4;
+            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            vec![SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: cx, y: cy - h },
+                    PathCmd::LineTo { x: cx + h * 0.866, y: cy + h * 0.5 },
+                    PathCmd::LineTo { x: cx - h * 0.866, y: cy + h * 0.5 },
+                    PathCmd::Close,
+                ],
+                style,
+                closed: true,
+            }]
+        }
+        ShapeKind::TriangleDown => {
+            let h = r * 1.4;
+            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            vec![SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: cx, y: cy + h },
+                    PathCmd::LineTo { x: cx + h * 0.866, y: cy - h * 0.5 },
+                    PathCmd::LineTo { x: cx - h * 0.866, y: cy - h * 0.5 },
+                    PathCmd::Close,
+                ],
+                style,
+                closed: true,
+            }]
+        }
+    }
+}
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::MarkBatchKind;
+
+    let spec = ctx.spec;
+    let xf = match x_field(ctx, spec) {
+        Some(f) => f,
+        None => return MarkBuildResult {
+            kind: MarkBatchKind::Point,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+        },
+    };
+    let yf = match y_field(ctx, spec) {
+        Some(f) => f,
+        None => return MarkBuildResult {
+            kind: MarkBatchKind::Point,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+        },
+    };
+
+    let xs_f64 = col_as_f64(ctx.batch, xf).ok();
+    let xs_str = col_as_str(ctx.batch, xf).ok();
+    let ys_f64 = col_as_f64(ctx.batch, yf).ok();
+    let ys_str = col_as_str(ctx.batch, yf).ok();
+    let n = xs_f64
+        .as_ref().map(|v| v.len())
+        .or_else(|| xs_str.as_ref().map(|v| v.len()))
+        .unwrap_or(0);
+    let n_y = ys_f64
+        .as_ref().map(|v| v.len())
+        .or_else(|| ys_str.as_ref().map(|v| v.len()))
+        .unwrap_or(0);
+    if n == 0 || n != n_y {
+        return MarkBuildResult {
+            kind: MarkBatchKind::Point,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+        };
+    }
+
+    // Color encoding.
+    let cfield = color_field(ctx, spec);
+    let color_values_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_values_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+
+    // Per-row size / shape / opacity vectors.
+    let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let shape_values: Option<Vec<Option<String>>> = spec.encoding.shape
+        .as_ref()
+        .and_then(|e| col_as_str(ctx.batch, &e.field).ok());
+
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let default_radius = (ctx.mark_style.point_size / std::f64::consts::PI).sqrt();
+
+    // Per-row pixel offsets from position adjustment.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    // Metadata: build tooltips and hrefs as parallel vecs.
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..n {
+        // Resolve x-pixel.
+        let cx = match &ctx.scales.x {
+            ScaleKind::Ordinal(_) => match &xs_str {
+                Some(v) => match &v[i] {
+                    Some(s) => match ctx.scales.x.to_pixel_str(s.as_str()) {
+                        Some(p) => p, None => continue,
+                    },
+                    None => continue,
+                },
+                None => continue,
+            },
+            _ => match xs_f64.as_ref().and_then(|v| v[i]) {
+                Some(a) if a.is_finite() => match ctx.scales.x.to_pixel_f64(a) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            },
+        };
+        // Resolve y-pixel.
+        let cy = match &ctx.scales.y {
+            ScaleKind::Ordinal(_) => match &ys_str {
+                Some(v) => match &v[i] {
+                    Some(s) => match ctx.scales.y.to_pixel_str(s.as_str()) {
+                        Some(p) => p, None => continue,
+                    },
+                    None => continue,
+                },
+                None => continue,
+            },
+            _ => match ys_f64.as_ref().and_then(|v| v[i]) {
+                Some(a) if a.is_finite() => match ctx.scales.y.to_pixel_f64(a) {
+                    Some(p) => p, None => continue,
+                },
+                _ => continue,
+            },
+        };
+        let cx = cx + x_offsets[i];
+        let cy = cy + y_offsets[i];
+
+        // Resolve color.
+        let fill_base = match (&ctx.scales.color, &color_values_f64, &color_values_str) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
+                match values[i] {
+                    Some(v) if v.is_finite() => scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill),
+                    _ => ctx.mark_style.fill,
+                }
+            }
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
+                match values[i].as_deref() {
+                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                    None => ctx.mark_style.fill,
+                }
+            }
+            _ => ctx.mark_style.fill,
+        };
+
+        // Resolve per-row opacity.
+        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+
+        let fill = with_opacity(fill_base, row_opacity);
+
+        // filled=false → hollow points.
+        let (effective_fill, effective_stroke, effective_sw) =
+            if ctx.mark_style.filled == Some(false) {
+                let sw = if ctx.mark_style.stroke_width > 0.0 {
+                    ctx.mark_style.stroke_width
+                } else {
+                    1.5
+                };
+                (None, Some(fill_base), sw)
+            } else {
+                (Some(fill), ctx.mark_style.stroke, ctx.mark_style.stroke_width)
+            };
+
+        // Resolve per-row radius from size encoding.
+        let radius = if let (Some(values), Some(scale)) = (&size_values, &ctx.scales.size) {
+            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(area) => (area / std::f64::consts::PI).sqrt(),
+                None => default_radius,
+            }
+        } else {
+            default_radius
+        };
+
+        // Resolve per-row shape kind.
+        let shape_kind = if let (Some(values), Some(scale)) = (&shape_values, &ctx.scales.shape) {
+            match values[i].as_deref() {
+                Some(v) => scale.lookup(v).unwrap_or(ShapeKind::Circle),
+                None => ShapeKind::Circle,
+            }
+        } else if let Some(ref shape_name) = ctx.mark_style.shape {
+            shape_from_str(shape_name)
+        } else {
+            ShapeKind::Circle
+        };
+
+        let shape_nodes = emit_shape_nodes(
+            shape_kind, cx, cy, radius,
+            effective_fill, effective_stroke, effective_sw, row_opacity,
+        );
+        nodes.extend(shape_nodes);
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Point,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
