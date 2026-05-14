@@ -1,6 +1,6 @@
 # Gallery
 
-A visual tour of Ferrum's chart surface. Every image below was rendered by Ferrum's Rust engine — no matplotlib, no browser, no external renderer. Each card includes the key API call so you can reproduce it with your own data.
+A visual tour of Ferrum's chart surface. Every image below was rendered by Ferrum's Rust engine — no matplotlib, no browser, no external renderer. Each card includes the API call so you can reproduce it with your own data. Where both exist, *helper* shows the one-line shortcut and *grammar* shows the underlying mark + encode call — both produce the same chart.
 
 ## Primitive marks
 
@@ -86,7 +86,9 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 
     ![mark_histogram](img/mark_histogram.png)
 
-    `fm.Chart(df).mark_histogram(groupby="group").encode(x="value", y="count", color="group")`
+    *helper:* `fm.displot(df, x="value", hue="group", kind="hist")`
+
+    *grammar:* `fm.Chart(df).mark_histogram(groupby="group").encode(x="value", color="group")`
 
 -   **Density (KDE)**
 
@@ -94,7 +96,9 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 
     ![mark_density](img/mark_density.png)
 
-    `fm.Chart(df).mark_density(groupby="group").encode(x="value", color="group")`
+    *helper:* `fm.displot(df, x="value", hue="group", kind="kde")`
+
+    *grammar:* `fm.Chart(df).mark_density(groupby="group").encode(x="value", color="group")`
 
 -   **Smooth (linear)**
 
@@ -102,7 +106,9 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 
     ![mark_smooth_lm](img/mark_smooth_lm.png)
 
-    `fm.Chart(df).mark_smooth(method="lm").encode(x="x", y="y")`
+    *helper:* `fm.lmplot(df, x="x", y="y")`
+
+    *grammar:* `fm.Chart(df).mark_smooth(method="lm").encode(x="x", y="y")`
 
 -   **Smooth (LOESS + CI)**
 
@@ -110,7 +116,9 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 
     ![mark_smooth_ci](img/mark_smooth_ci.png)
 
-    `fm.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y")`
+    *helper:* `fm.lmplot(df, x="x", y="y", method="loess")`
+
+    *grammar:* `fm.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y")`
 
 -   **Contour**
 
@@ -158,7 +166,9 @@ Summarize distributions across categories.
 
     ![mark_boxplot](img/mark_boxplot.png)
 
-    `fm.Chart(df).mark_boxplot().encode(x="group", y="value")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="box")`
+
+    *grammar:* `fm.Chart(df).mark_boxplot().encode(x="group", y="value")`
 
 -   **Boxen (letter-value)**
 
@@ -166,7 +176,9 @@ Summarize distributions across categories.
 
     ![mark_boxen](img/mark_boxen.png)
 
-    `fm.Chart(df).mark_boxen().encode(x="group", y="value")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="boxen")`
+
+    *grammar:* `fm.Chart(df).mark_boxen().encode(x="group", y="value")`
 
 -   **Violin**
 
@@ -174,7 +186,9 @@ Summarize distributions across categories.
 
     ![mark_violin](img/mark_violin.png)
 
-    `fm.Chart(df).mark_violin().encode(x="group", y="value")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="violin")`
+
+    *grammar:* `fm.Chart(df).mark_violin().encode(x="group", y="value")`
 
 -   **Swarm**
 
@@ -182,7 +196,9 @@ Summarize distributions across categories.
 
     ![mark_swarm](img/mark_swarm.png)
 
-    `fm.Chart(df).mark_swarm().encode(x="group", y="value")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="swarm")`
+
+    *grammar:* `fm.Chart(df).mark_swarm().encode(x="group", y="value")`
 
 </div>
 
@@ -294,7 +310,9 @@ One-line entry points for common chart patterns.
 
     ![displot_hist](img/displot_hist.png)
 
-    `fm.displot(df, x="value", hue="group", kind="hist")`
+    *helper:* `fm.displot(df, x="value", hue="group", kind="hist")`
+
+    *grammar:* `fm.Chart(df).mark_histogram(groupby="group").encode(x="value", color="group")`
 
 -   **displot (KDE)**
 
@@ -302,7 +320,9 @@ One-line entry points for common chart patterns.
 
     ![displot_kde](img/displot_kde.png)
 
-    `fm.displot(df, x="value", hue="group", kind="kde")`
+    *helper:* `fm.displot(df, x="value", hue="group", kind="kde")`
+
+    *grammar:* `fm.Chart(df).mark_density(groupby="group").encode(x="value", color="group")`
 
 -   **displot (ECDF)**
 
@@ -310,7 +330,7 @@ One-line entry points for common chart patterns.
 
     ![displot_ecdf](img/displot_ecdf.png)
 
-    `fm.displot(df, x="value", kind="ecdf")`
+    *helper:* `fm.displot(df, x="value", kind="ecdf")`
 
 -   **catplot (box)**
 
@@ -318,7 +338,9 @@ One-line entry points for common chart patterns.
 
     ![catplot_box](img/catplot_box.png)
 
-    `fm.catplot(df, x="group", y="value", kind="box")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="box")`
+
+    *grammar:* `fm.Chart(df).mark_boxplot().encode(x="group", y="value")`
 
 -   **catplot (violin)**
 
@@ -326,7 +348,9 @@ One-line entry points for common chart patterns.
 
     ![catplot_violin](img/catplot_violin.png)
 
-    `fm.catplot(df, x="group", y="value", kind="violin")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="violin")`
+
+    *grammar:* `fm.Chart(df).mark_violin().encode(x="group", y="value")`
 
 -   **catplot (strip)**
 
@@ -334,7 +358,9 @@ One-line entry points for common chart patterns.
 
     ![catplot_strip](img/catplot_strip.png)
 
-    `fm.catplot(df, x="group", y="value", kind="strip")`
+    *helper:* `fm.catplot(df, x="group", y="value", kind="strip")`
+
+    *grammar:* `fm.Chart(df).mark_point().encode(x="group", y="value")`
 
 -   **lmplot**
 
@@ -342,7 +368,9 @@ One-line entry points for common chart patterns.
 
     ![lmplot](img/lmplot.png)
 
-    `fm.lmplot(df, x="x", y="y", hue="group")`
+    *helper:* `fm.lmplot(df, x="x", y="y", hue="group")`
+
+    *grammar:* `fm.Chart(df).mark_point().encode(...) + fm.Chart(df).mark_smooth(method="lm")`
 
 -   **residplot**
 
@@ -350,7 +378,9 @@ One-line entry points for common chart patterns.
 
     ![residplot](img/residplot.png)
 
-    `fm.residplot(df, x="x", y="y")`
+    *helper:* `fm.residplot(df, x="x", y="y")`
+
+    *grammar:* `fm.Chart(df).mark_smooth(method="lm", inject_residuals=True).encode(x="x", y="residual")`
 
 -   **pairplot**
 
@@ -358,7 +388,9 @@ One-line entry points for common chart patterns.
 
     ![pairplot](img/pairplot.png)
 
-    `fm.pairplot(df, vars=[...], hue="species")`
+    *helper:* `fm.pairplot(df, vars=[...], hue="species")`
+
+    *grammar:* `fm.RepeatChart(template, row=[...], column=[...])`
 
 -   **jointplot**
 
@@ -366,7 +398,9 @@ One-line entry points for common chart patterns.
 
     ![jointplot](img/jointplot.png)
 
-    `fm.jointplot(df, x="sepal_length", y="sepal_width")`
+    *helper:* `fm.jointplot(df, x="sepal_length", y="sepal_width")`
+
+    *grammar:* `fm.JointChart(center, top=marginal)`
 
 -   **heatmap**
 
@@ -374,7 +408,9 @@ One-line entry points for common chart patterns.
 
     ![heatmap](img/heatmap.png)
 
-    `fm.heatmap(df_corr, center=0, annot=True)`
+    *helper:* `fm.heatmap(df_corr, center=0, annot=True)`
+
+    *grammar:* `fm.Chart(df).mark_rect().encode(x="col", y="row", color="value")`
 
 -   **clustermap**
 
@@ -382,7 +418,9 @@ One-line entry points for common chart patterns.
 
     ![clustermap](img/clustermap.png)
 
-    `fm.clustermap(df_cluster)`
+    *helper:* `fm.clustermap(df_cluster)`
+
+    *grammar:* `fm.ClusterMapChart(heatmap, row_dendrogram, col_dendrogram)`
 
 </div>
 
