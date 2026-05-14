@@ -10,7 +10,7 @@ Ferrum's position is that model outputs are data, and the natural way to plot th
 
 ## What this principle gets you
 
-Treating diagnostics as data has direct, practical consequences for what you can do with them. The diagnostic plots return `Chart` objects (or compound views like `JointChart` / `RepeatChart` / `ClusterMapChart`) — they are not foreign artifacts that stop being composable the moment they appear.
+Treating diagnostics as data has direct, practical consequences for what you can do with them. The diagnostic plots return [`Chart`][ferrum.Chart] objects (or compound views like [`JointChart`][ferrum.JointChart] / [`RepeatChart`][ferrum.RepeatChart] / [`ClusterMapChart`][ferrum.ClusterMapChart]) — they are not foreign artifacts that stop being composable the moment they appear.
 
 That means a ROC curve participates in the rest of the grammar:
 
@@ -26,11 +26,11 @@ These compositions are not special-cased. They fall out of the chart model becau
 
 Ferrum exposes the model-output side of the library through three coordinated layers:
 
-**`ModelSource`** is the data interface. It wraps a fitted model and a held-out dataset and exposes the derived tables that diagnostics build on: predicted probabilities, predicted classes, residuals, ROC curve points, PR curve points, calibration bins, confusion-matrix counts, learning-curve samples, validation-curve samples, SHAP values, partial dependence grids, and related outputs. The point of `ModelSource` is that you compute those derived tables once, then the various diagnostic plots reuse the same data.
+**[`ModelSource`][ferrum.ModelSource]** is the data interface. It wraps a fitted model and a held-out dataset and exposes the derived tables that diagnostics build on: predicted probabilities, predicted classes, residuals, ROC curve points, PR curve points, calibration bins, confusion-matrix counts, learning-curve samples, validation-curve samples, SHAP values, partial dependence grids, and related outputs. The point of `ModelSource` is that you compute those derived tables once, then the various diagnostic plots reuse the same data.
 
-**Figure-level diagnostic helpers** are the convenience layer: `roc_chart`, `pr_chart`, `calibration_chart`, `confusion_matrix_chart`, `residuals_chart`, `shap_chart`, `learning_curve_chart`, `validation_curve_chart`, `feature_importances_chart`, `pdp_chart`, and similar functions. They take a fitted model + data (or a `ModelSource`) and return a `Chart`. This is the layer you reach for when you want a diagnostic in one line.
+**Figure-level diagnostic helpers** are the convenience layer: [`roc_chart`][ferrum.roc_chart], [`pr_chart`][ferrum.pr_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], `residuals_chart`, `shap_chart`, `learning_curve_chart`, `validation_curve_chart`, `feature_importances_chart`, `pdp_chart`, and similar functions. They take a fitted model + data (or a `ModelSource`) and return a `Chart`. This is the layer you reach for when you want a diagnostic in one line.
 
-**sklearn-protocol visualizers** — `ROCVisualizer`, `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, `ResidualsVisualizer`, `SHAPVisualizer`, `LearningCurveVisualizer`, and others — provide an object-oriented interface that mirrors yellowbrick's pattern. Each visualizer has a `.fit()` / `.score()` / `.show()` flow and ultimately returns a `Chart`. These are useful when you want lifecycle control or when the visualizer needs to manage CV-fold state.
+**sklearn-protocol visualizers** — [`ROCVisualizer`][ferrum.ROCVisualizer], `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, `ResidualsVisualizer`, `SHAPVisualizer`, `LearningCurveVisualizer`, and others — provide an object-oriented interface that mirrors yellowbrick's pattern. Each visualizer has a `.fit()` / `.score()` / `.show()` flow and ultimately returns a `Chart`. These are useful when you want lifecycle control or when the visualizer needs to manage CV-fold state.
 
 All three layers produce the same kind of chart object. You can mix them freely: take a `roc_chart()` helper result and `hconcat` it with a `ROCVisualizer().show()` result.
 

@@ -27,7 +27,7 @@ assert chart.show_svg().startswith("<svg")
 
 ![Basic scatter](img/marks-encodings_01.png)
 
-The three pieces — data, mark, encoding — compose freely. You can change the mark without touching the encoding (`mark_line()` instead of `mark_point()`), change the encoding without touching the mark, or compose multiple marks against the same encoding (see [Composition](composition.md)).
+The three pieces — data, mark, encoding — compose freely. You can change the mark without touching the encoding ([`mark_line()`][ferrum.Chart.mark_line] instead of [`mark_point()`][ferrum.Chart.mark_point]), change the encoding without touching the mark, or compose multiple marks against the same encoding (see [Composition](composition.md)).
 
 ## Encoding channels
 
@@ -128,7 +128,7 @@ assert chart.show_svg().startswith("<svg")
 
 ## Mark families
 
-Ferrum ships 28+ mark methods on `Chart`. They group into five families by what they're for.
+Ferrum ships 28+ mark methods on [`Chart`][ferrum.Chart]. They group into five families by what they're for.
 
 ### Primitive marks
 
@@ -262,9 +262,9 @@ Both fall back to explicit raster output regardless of the renderer in use. See 
 
 ### Model-diagnostic marks
 
-Phase 10 introduced a family of model-evaluation marks that work with `ModelSource` to produce ROC curves, calibration plots, residuals, SHAP summaries, and similar diagnostics — see the [Model diagnostics](model-diagnostics.md) page. These marks live alongside the rest because, structurally, a ROC curve is a chart. The full list (selected): `mark_residuals`, `mark_prediction_error`, `mark_roc`, `mark_pr`, `mark_calibration`, `mark_gain`, `mark_lift`, `mark_confusion`, `mark_importance`, `mark_shap_beeswarm`, `mark_shap_bar`, `mark_pdp`, `mark_learning_curve`.
+Phase 10 introduced a family of model-evaluation marks that work with [`ModelSource`][ferrum.ModelSource] to produce ROC curves, calibration plots, residuals, SHAP summaries, and similar diagnostics — see the [Model diagnostics](model-diagnostics.md) page. These marks live alongside the rest because, structurally, a ROC curve is a chart. The full list (selected): `mark_residuals`, `mark_prediction_error`, `mark_roc`, `mark_pr`, `mark_calibration`, `mark_gain`, `mark_lift`, `mark_confusion`, `mark_importance`, `mark_shap_beeswarm`, `mark_shap_bar`, `mark_pdp`, `mark_learning_curve`.
 
-For most diagnostic use cases you should reach for the figure-level helpers (`roc_chart`, `calibration_chart`, etc.) covered in [Figure-level helpers](figure-helpers.md) rather than calling the marks directly. The marks exist for cases where you want to drop into the grammar and compose custom diagnostic views.
+For most diagnostic use cases you should reach for the figure-level helpers ([`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], etc.) covered in [Figure-level helpers](figure-helpers.md) rather than calling the marks directly. The marks exist for cases where you want to drop into the grammar and compose custom diagnostic views.
 
 ## Picking a mark
 

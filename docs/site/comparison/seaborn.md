@@ -8,20 +8,20 @@ The differences are structural: Ferrum returns chart objects you compose with gr
 
 | seaborn | Ferrum | Notes |
 |---|---|---|
-| `sns.displot(df, x=, kind=)` | `fm.displot(df, x=, kind=)` | Same signature. `kind` ∈ `"hist"`, `"kde"`, `"ecdf"`. |
-| `sns.catplot(df, x=, y=, kind=)` | `fm.catplot(df, x=, y=, kind=)` | Same `kind` values: `"strip"`, `"box"`, `"violin"`, `"swarm"`, `"bar"`, `"point"`, `"boxen"`, `"count"`. |
-| `sns.lmplot(df, x=, y=)` | `fm.lmplot(df, x=, y=)` | `method=` replaces `order=` for polynomial fits. |
-| `sns.residplot(df, x=, y=)` | `fm.residplot(df, x=, y=)` | Same interface. |
-| `sns.pairplot(df)` | `fm.pairplot(df)` | `vars=`, `hue=`, `corner=`, `diag_kind=` all supported. |
-| `sns.jointplot(df, x=, y=)` | `fm.jointplot(df, x=, y=)` | `kind=`, `marginal_kind=` match seaborn. |
-| `sns.heatmap(data)` | `fm.heatmap(data)` | `annot=`, `cmap=` supported. |
-| `sns.clustermap(data)` | `fm.clustermap(data)` | `method=`, `metric=`, `z_score=` supported. |
+| `sns.displot(df, x=, kind=)` | [`fm.displot(df, x=, kind=)`][ferrum.displot] | Same signature. `kind` ∈ `"hist"`, `"kde"`, `"ecdf"`. |
+| `sns.catplot(df, x=, y=, kind=)` | [`fm.catplot(df, x=, y=, kind=)`][ferrum.catplot] | Same `kind` values: `"strip"`, `"box"`, `"violin"`, `"swarm"`, `"bar"`, `"point"`, `"boxen"`, `"count"`. |
+| `sns.lmplot(df, x=, y=)` | [`fm.lmplot(df, x=, y=)`][ferrum.lmplot] | `method=` replaces `order=` for polynomial fits. |
+| `sns.residplot(df, x=, y=)` | [`fm.residplot(df, x=, y=)`][ferrum.residplot] | Same interface. |
+| `sns.pairplot(df)` | [`fm.pairplot(df)`][ferrum.pairplot] | `vars=`, `hue=`, `corner=`, `diag_kind=` all supported. |
+| `sns.jointplot(df, x=, y=)` | [`fm.jointplot(df, x=, y=)`][ferrum.jointplot] | `kind=`, `marginal_kind=` match seaborn. |
+| `sns.heatmap(data)` | [`fm.heatmap(data)`][ferrum.heatmap] | `annot=`, `cmap=` supported. |
+| `sns.clustermap(data)` | [`fm.clustermap(data)`][ferrum.clustermap] | `method=`, `metric=`, `z_score=` supported. |
 
 ## Key differences
 
 ### No matplotlib dependency
 
-Ferrum renders SVG directly from Rust. There is no `plt.show()`, no figure/axes management, and no implicit display state. You get a `Chart` object back and decide what to do with it.
+Ferrum renders SVG directly from Rust. There is no `plt.show()`, no figure/axes management, and no implicit display state. You get a [`Chart`][ferrum.Chart] object back and decide what to do with it.
 
 <!--pytest.mark.skip-->
 ```python

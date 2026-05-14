@@ -1,12 +1,12 @@
 # Themes
 
-A theme is a bundle of style decisions — background, typography, mark color, grid, axes, palettes, padding — that applies uniformly across a chart. Themes are values, not state: you construct a `Theme` and pass it where you want it. Nothing mutates global module state, and no chart is "secretly" themed by an import side-effect.
+A theme is a bundle of style decisions — background, typography, mark color, grid, axes, palettes, padding — that applies uniformly across a chart. Themes are values, not state: you construct a [`Theme`][ferrum.Theme] and pass it where you want it. Nothing mutates global module state, and no chart is "secretly" themed by an import side-effect.
 
 Three layers of theme control let you reach for the right scope: per-chart, process-default, and scoped via a context manager. Per-chart always wins.
 
 ## Built-in themes
 
-Ferrum ships twelve built-in themes accessible as attributes of `ferrum.themes`. Three are original identities designed for Ferrum; the rest are established editorial and publication styles.
+Ferrum ships twelve built-in themes accessible as attributes of [`ferrum.themes`][]. Three are original identities designed for Ferrum; the rest are established editorial and publication styles.
 
 ### Ferrum originals
 
@@ -55,7 +55,7 @@ Switching themes is one method call away; the rest of the chart spec is untouche
 
 ## Theme as a value
 
-`Theme` is immutable. Once constructed, it cannot be mutated. Methods like `.update()` return a new `Theme` rather than modifying the original:
+`Theme` is immutable. Once constructed, it cannot be mutated. Methods like [`.update()`][ferrum.Theme.update] return a new `Theme` rather than modifying the original:
 
 ```python
 import ferrum as fm
@@ -203,7 +203,7 @@ Four named diverging ramps, selectable via `diverging_scheme`:
 
 ## Process-default themes
 
-When you want the same theme to apply to every chart in a notebook or script, set it once with `set_default_theme()`:
+When you want the same theme to apply to every chart in a notebook or script, set it once with [`set_default_theme()`][ferrum.set_default_theme]:
 
 ```python
 import ferrum as fm
@@ -236,7 +236,7 @@ This is the single documented exception to Ferrum's "no global mutable state" ru
 
 ## Scoped themes via `with`
 
-For code where the theme should change for one block and revert afterward, `theme_context()` is a context manager:
+For code where the theme should change for one block and revert afterward, [`theme_context()`][ferrum.theme_context] is a context manager:
 
 ```python
 import ferrum as fm

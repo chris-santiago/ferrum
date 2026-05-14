@@ -6,22 +6,22 @@ Yellowbrick pioneered the idea of "visual diagnostics" — sklearn-protocol obje
 
 | yellowbrick | Ferrum visualizer | Ferrum helper |
 |---|---|---|
-| `ROCAUC(model)` | `fm.ROCVisualizer(model)` | `fm.roc_chart(model, X, y)` |
-| `PrecisionRecallCurve(model)` | `fm.PRVisualizer(model)` | `fm.pr_chart(model, X, y)` |
-| `ConfusionMatrix(model)` | `fm.ConfusionMatrixVisualizer(model)` | `fm.confusion_matrix_chart(model, X, y)` |
-| `ClassificationReport(model)` | `fm.ClassificationReportVisualizer(model)` | — |
-| `ClassPredictionError(model)` | `fm.ClassPredictionErrorVisualizer(model)` | `fm.class_prediction_error_chart(model, X, y)` |
-| `DiscriminationThreshold(model)` | `fm.DiscriminationThresholdVisualizer(model)` | `fm.discrimination_threshold_chart(model, X, y)` |
-| `ResidualsPlot(model)` | `fm.ResidualsVisualizer(model)` | `fm.residuals_chart(model, X, y)` |
-| `PredictionError(model)` | `fm.PredictionErrorVisualizer(model)` | `fm.prediction_error_chart(model, X, y)` |
-| `CooksDistance(model)` | `fm.CooksDistanceVisualizer(model)` | `fm.cooks_distance_chart(model, X, y)` |
-| `FeatureImportances(model)` | `fm.FeatureImportancesVisualizer(model)` | `fm.importance_chart(model, X, y)` |
-| `LearningCurve(model)` | `fm.LearningCurveVisualizer(model)` | `fm.learning_curve_chart(model, X, y)` |
-| `ValidationCurve(model)` | `fm.ValidationCurveVisualizer(model)` | `fm.validation_curve_chart(model, X, y)` |
-| `CVScores(model)` | `fm.CVScoresVisualizer(model)` | `fm.cv_scores_chart(model, X, y)` |
-| `SilhouetteVisualizer(model)` | `fm.SilhouetteVisualizer(model)` | `fm.silhouette_chart(model, X)` |
-| `KElbowVisualizer(model)` | `fm.ElbowVisualizer(model)` | — |
-| `InterclusterDistance(model)` | `fm.InterclusterDistanceVisualizer(model)` | `fm.intercluster_distance_chart(model, X)` |
+| `ROCAUC(model)` | [`fm.ROCVisualizer(model)`][ferrum.ROCVisualizer] | [`fm.roc_chart(model, X, y)`][ferrum.roc_chart] |
+| `PrecisionRecallCurve(model)` | [`fm.PRVisualizer(model)`][ferrum.PRVisualizer] | [`fm.pr_chart(model, X, y)`][ferrum.pr_chart] |
+| `ConfusionMatrix(model)` | [`fm.ConfusionMatrixVisualizer(model)`][ferrum.ConfusionMatrixVisualizer] | [`fm.confusion_matrix_chart(model, X, y)`][ferrum.confusion_matrix_chart] |
+| `ClassificationReport(model)` | [`fm.ClassificationReportVisualizer(model)`][ferrum.ClassificationReportVisualizer] | — |
+| `ClassPredictionError(model)` | [`fm.ClassPredictionErrorVisualizer(model)`][ferrum.ClassPredictionErrorVisualizer] | [`fm.class_prediction_error_chart(model, X, y)`][ferrum.class_prediction_error_chart] |
+| `DiscriminationThreshold(model)` | [`fm.DiscriminationThresholdVisualizer(model)`][ferrum.DiscriminationThresholdVisualizer] | [`fm.discrimination_threshold_chart(model, X, y)`][ferrum.discrimination_threshold_chart] |
+| `ResidualsPlot(model)` | [`fm.ResidualsVisualizer(model)`][ferrum.ResidualsVisualizer] | [`fm.residuals_chart(model, X, y)`][ferrum.residuals_chart] |
+| `PredictionError(model)` | [`fm.PredictionErrorVisualizer(model)`][ferrum.PredictionErrorVisualizer] | `fm.prediction_error_chart(model, X, y)` |
+| `CooksDistance(model)` | [`fm.CooksDistanceVisualizer(model)`][ferrum.CooksDistanceVisualizer] | `fm.cooks_distance_chart(model, X, y)` |
+| `FeatureImportances(model)` | [`fm.FeatureImportancesVisualizer(model)`][ferrum.FeatureImportancesVisualizer] | [`fm.importance_chart(model, X, y)`][ferrum.importance_chart] |
+| `LearningCurve(model)` | [`fm.LearningCurveVisualizer(model)`][ferrum.LearningCurveVisualizer] | [`fm.learning_curve_chart(model, X, y)`][ferrum.learning_curve_chart] |
+| `ValidationCurve(model)` | [`fm.ValidationCurveVisualizer(model)`][ferrum.ValidationCurveVisualizer] | [`fm.validation_curve_chart(model, X, y)`][ferrum.validation_curve_chart] |
+| `CVScores(model)` | [`fm.CVScoresVisualizer(model)`][ferrum.CVScoresVisualizer] | [`fm.cv_scores_chart(model, X, y)`][ferrum.cv_scores_chart] |
+| `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | `fm.silhouette_chart(model, X)` |
+| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model)`][ferrum.ElbowVisualizer] | — |
+| `InterclusterDistance(model)` | [`fm.InterclusterDistanceVisualizer(model)`][ferrum.InterclusterDistanceVisualizer] | [`fm.intercluster_distance_chart(model, X)`][ferrum.intercluster_distance_chart] |
 
 ## The lifecycle pattern
 
@@ -44,7 +44,7 @@ chart = viz.show()  # returns a Chart
 chart.save("roc.svg")
 ```
 
-The difference is what `.show()` returns: yellowbrick renders to a matplotlib axes and calls `plt.show()`. Ferrum returns a `Chart` that you can theme, compose, and save.
+The difference is what `.show()` returns: yellowbrick renders to a matplotlib axes and calls `plt.show()`. Ferrum returns a [`Chart`][ferrum.Chart] that you can theme, compose, and save.
 
 ## Key differences
 
@@ -71,7 +71,7 @@ Every yellowbrick visualizer also has a one-line helper in Ferrum (`roc_chart`, 
 
 ### ModelSource for efficiency
 
-When computing multiple diagnostics on the same model, build a `ModelSource` once and pass it to each helper — predicted probabilities and derived tables are computed once and shared:
+When computing multiple diagnostics on the same model, build a [`ModelSource`][ferrum.ModelSource] once and pass it to each helper — predicted probabilities and derived tables are computed once and shared:
 
 <!--pytest.mark.skip-->
 ```python

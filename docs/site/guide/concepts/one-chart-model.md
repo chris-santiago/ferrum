@@ -25,9 +25,9 @@ That list is the full conceptual surface. There is no second universe of "ML dia
 
 Ferrum is grammar-first, but not grammar-only.
 
-Figure-level helpers such as `displot`, `lmplot`, `catplot`, and the model-diagnostic chart helpers exist because speed matters and because seaborn-style ergonomics are genuinely useful. But they are sugar over the chart system rather than a parallel API with different rules.
+Figure-level helpers such as [`displot`][ferrum.displot], [`lmplot`][ferrum.lmplot], [`catplot`][ferrum.catplot], and the model-diagnostic chart helpers exist because speed matters and because seaborn-style ergonomics are genuinely useful. But they are sugar over the chart system rather than a parallel API with different rules.
 
-That distinction is structural, not stylistic. When you call `displot`, the helper builds a `Chart` and returns it. The result is themeable, composable, savable, and faceted in exactly the same way as a chart you wrote from primitives. There is no helper-object trap and no point at which switching from the helper to the grammar requires rewriting your plot.
+That distinction is structural, not stylistic. When you call `displot`, the helper builds a [`Chart`][ferrum.Chart] and returns it. The result is themeable, composable, savable, and faceted in exactly the same way as a chart you wrote from primitives. There is no helper-object trap and no point at which switching from the helper to the grammar requires rewriting your plot.
 
 This principle prevents feature silos. A convenience plot should not lock you into an object that behaves differently from the rest of the library, and a chart created through a helper should remain themeable, composable, and extensible in the same way as one written from first principles.
 

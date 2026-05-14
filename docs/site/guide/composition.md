@@ -62,7 +62,7 @@ Use concatenation (next section) when the charts should *not* share axes.
 
 Concatenation places independent charts next to each other, with each retaining its own scales, axes, and legend. There is no shared x/y; only the visual layout connects them.
 
-The `|` operator produces an `HConcatChart`; `&` produces a `VConcatChart`:
+The `|` operator produces an [`HConcatChart`][ferrum.HConcatChart]; `&` produces a [`VConcatChart`][ferrum.VConcatChart]:
 
 ```python
 import ferrum as fm
@@ -134,7 +134,7 @@ The explicit form is useful when you want to control spacing or pass more than t
 
 ### Top-level convenience functions
 
-`fm.hconcat()` and `fm.vconcat()` are shorthand for building concat layouts from variadic arguments:
+[`fm.hconcat()`][ferrum.hconcat] and [`fm.vconcat()`][ferrum.vconcat] are shorthand for building concat layouts from variadic arguments:
 
 ```python
 import ferrum as fm
@@ -158,7 +158,7 @@ These are equivalent to `HConcatChart([a, b, c])` / `VConcatChart([a, b, c])` bu
 
 ## Joint distribution with marginals
 
-`JointChart` lays out a central chart with optional marginal plots on the top and right. It's the same shape as seaborn's `jointplot` — a scatter with marginal histograms is the canonical example.
+[`JointChart`][ferrum.JointChart] lays out a central chart with optional marginal plots on the top and right. It's the same shape as seaborn's `jointplot` — a scatter with marginal histograms is the canonical example.
 
 ```python
 import ferrum as fm
@@ -187,7 +187,7 @@ If you want a one-line entry point that handles both marginals and the orientati
 
 ## Repeating a template across fields
 
-`RepeatChart` takes a template chart and replicates it across a grid of fields. Each cell in the grid is the template with one or both encoding channels replaced by the per-cell field name.
+[`RepeatChart`][ferrum.RepeatChart] takes a template chart and replicates it across a grid of fields. Each cell in the grid is the template with one or both encoding channels replaced by the per-cell field name.
 
 The template uses `Repeat.column`, `Repeat.row`, or `Repeat.layer` sentinels (from `ferrum.Repeat`) to mark which encoding channel receives the substitution:
 
@@ -228,7 +228,7 @@ For a small-multiples layout where the data is *partitioned* across cells (one p
 
 ## Clustered heatmap with dendrograms
 
-`ClusterMapChart` is a specialized composition: a heatmap with row and column dendrograms attached, computed from a hierarchical clustering of the data. The output is a 2 × 2 grid — heatmap (bottom-right), column dendrogram (top-right), row dendrogram (bottom-left, rotated), empty (top-left).
+[`ClusterMapChart`][ferrum.ClusterMapChart] is a specialized composition: a heatmap with row and column dendrograms attached, computed from a hierarchical clustering of the data. The output is a 2 × 2 grid — heatmap (bottom-right), column dendrogram (top-right), row dendrogram (bottom-left, rotated), empty (top-left).
 
 For most use cases, the figure-level helper [`clustermap`](figure-helpers.md) in `ferrum.plots` is the right entry point. Direct `ClusterMapChart` construction is for when you want fine control over the linkage method, the dendrogram styling, or the heatmap encoding details.
 

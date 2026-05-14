@@ -25,7 +25,7 @@ assert chart.show_svg().startswith("<svg")
 
 ![Iris scatter plot](img/first-plot_01.png)
 
-That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a `Chart` object — call `.show_svg()` to render it, `.save("chart.svg")` to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
+That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a [`Chart`][ferrum.Chart] object — call [`.show_svg()`][ferrum.Chart.show_svg] to render it, [`.save()`][ferrum.Chart.save] to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
 
 ## Add a trend line
 

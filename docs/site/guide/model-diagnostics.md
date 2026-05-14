@@ -6,9 +6,9 @@ The diagnostic surface consists of three coordinated layers. You can mix and mat
 
 | Layer | What it is | When to reach for it |
 |---|---|---|
-| **Figure-level helpers** | `roc_chart`, `calibration_chart`, `confusion_matrix_chart`, `shap_chart`, etc. | One-line entry points. Takes a fitted model + test data, returns a `Chart`. |
-| **`ModelSource`** | The data interface | When you want to compute derived diagnostic data once and reuse it across multiple charts. |
-| **sklearn-protocol visualizers** | `ROCVisualizer`, `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, etc. | When you want lifecycle control (`.fit()` / `.score()` / `.show()`) or are following a yellowbrick-style pattern. |
+| **Figure-level helpers** | [`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], `shap_chart`, etc. | One-line entry points. Takes a fitted model + test data, returns a [`Chart`][ferrum.Chart]. |
+| **[`ModelSource`][ferrum.ModelSource]** | The data interface | When you want to compute derived diagnostic data once and reuse it across multiple charts. |
+| **sklearn-protocol visualizers** | [`ROCVisualizer`][ferrum.ROCVisualizer], `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, etc. | When you want lifecycle control (`.fit()` / `.score()` / `.show()`) or are following a yellowbrick-style pattern. |
 
 The design rationale is on the [Model outputs are data](concepts/model-outputs-as-data.md) Concepts page; this page is the practical reference.
 
@@ -221,7 +221,7 @@ A few sharp edges worth knowing:
 - **`calibration_chart` rendering**: at the time of writing, `calibration_chart` builds the right `Chart` value but has a layering wiring gap that prevents `.show_svg()` from succeeding in the standard configuration. The chart object is well-formed; rendering will work once Phase 8a layer-data resolution is wired through for this helper. Other diagnostics on the same `ModelSource` are unaffected.
 - **SHAP, UMAP, and shap-style helpers**: require their respective packages installed (`shap`, `umap-learn`). They lazy-import on first call; install the optional `ferrum[shap]` / `ferrum[umap]` extras to pull them in.
 - **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average.
-- **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a `ComparedModelSource` data source) for side-by-side comparison. See the API reference for the per-helper signatures.
+- **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a [`ComparedModelSource`][ferrum.ComparedModelSource] data source) for side-by-side comparison. See the API reference for the per-helper signatures.
 
 ## Where to go next
 

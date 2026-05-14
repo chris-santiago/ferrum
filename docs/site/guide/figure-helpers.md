@@ -1,8 +1,8 @@
 # Figure-level helpers
 
-Figure-level helpers are one-line entry points for common chart patterns. They are convenience over the grammar, not parallel objects: each helper builds a `Chart` (or a compound view like `JointChart` / `RepeatChart` / `ClusterMapChart`) and returns it. The result is themeable, composable, savable, and renderable in exactly the same way as a chart you wrote from primitives.
+Figure-level helpers are one-line entry points for common chart patterns. They are convenience over the grammar, not parallel objects: each helper builds a [`Chart`][ferrum.Chart] (or a compound view like [`JointChart`][ferrum.JointChart] / [`RepeatChart`][ferrum.RepeatChart] / [`ClusterMapChart`][ferrum.ClusterMapChart]) and returns it. The result is themeable, composable, savable, and renderable in exactly the same way as a chart you wrote from primitives.
 
-This page covers the eight helpers in `ferrum.plots`. Each is also available at the top level (`fm.displot` ≡ `fm.plots.displot`).
+This page covers the eight helpers in [`ferrum.plots`][]. Each is also available at the top level ([`fm.displot`][ferrum.displot] ≡ `fm.plots.displot`).
 
 ## When to use a helper
 
@@ -24,14 +24,14 @@ The two paths converge: a helper's output and a grammar-authored chart are the s
 
 | Helper | What it produces | Family |
 |---|---|---|
-| `displot` | Univariate distribution | Distribution |
-| `catplot` | Categorical comparison | Categorical |
-| `lmplot` | Regression scatter with fit overlay | Regression |
-| `residplot` | Residuals from a regression fit | Regression |
-| `pairplot` | Pairwise scatter grid | Matrix |
-| `heatmap` | 2-D heatmap of a wide table | Matrix |
-| `clustermap` | Clustered heatmap with dendrograms | Matrix |
-| `jointplot` | Bivariate plot with marginal distributions | Joint |
+| [`displot`][ferrum.displot] | Univariate distribution | Distribution |
+| [`catplot`][ferrum.catplot] | Categorical comparison | Categorical |
+| [`lmplot`][ferrum.lmplot] | Regression scatter with fit overlay | Regression |
+| [`residplot`][ferrum.residplot] | Residuals from a regression fit | Regression |
+| [`pairplot`][ferrum.pairplot] | Pairwise scatter grid | Matrix |
+| [`heatmap`][ferrum.heatmap] | 2-D heatmap of a wide table | Matrix |
+| [`clustermap`][ferrum.clustermap] | Clustered heatmap with dendrograms | Matrix |
+| [`jointplot`][ferrum.jointplot] | Bivariate plot with marginal distributions | Joint |
 
 ## Distribution: `displot`
 

@@ -92,6 +92,8 @@ accent = "light-blue"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
+[project.plugins.autorefs]
+
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
 inventories = ["https://docs.python.org/3/objects.inv"]
@@ -106,6 +108,7 @@ members_order = "source"
 separate_signature = true
 show_signature_annotations = true
 docstring_section_style = "table"
+filters = ["!^_"]
 
 [project.markdown_extensions.abbr]
 [project.markdown_extensions.admonition]

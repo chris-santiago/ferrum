@@ -6,23 +6,23 @@ scikit-plot (`skplt`) provides one-function plotting for sklearn model evaluatio
 
 | scikit-plot | Ferrum | Notes |
 |---|---|---|
-| `skplt.metrics.plot_roc(y_test, y_probas)` | `fm.roc_chart(model, X_test, y_test)` | Ferrum takes the model directly; computes probabilities internally. |
-| `skplt.metrics.plot_precision_recall(y_test, y_probas)` | `fm.pr_chart(model, X_test, y_test)` | Same. |
-| `skplt.metrics.plot_confusion_matrix(y_test, y_pred)` | `fm.confusion_matrix_chart(model, X_test, y_test)` | `normalize=` supported. |
-| `skplt.metrics.plot_calibration_curve(y_test, probas_list)` | `fm.calibration_chart(model, X_test, y_test)` | Single model or `ComparedModelSource` for multi-model. |
-| `skplt.metrics.plot_cumulative_gain(y_test, y_probas)` | `fm.gain_chart(model, X_test, y_test)` | — |
-| `skplt.metrics.plot_lift_curve(y_test, y_probas)` | `fm.lift_chart(model, X_test, y_test)` | — |
-| `skplt.estimators.plot_feature_importances(model)` | `fm.importance_chart(model, X_test, y_test)` | Handles `feature_importances_`, permutation, and coefficients. |
-| `skplt.estimators.plot_learning_curve(model, X, y)` | `fm.learning_curve_chart(model, X, y)` | — |
+| `skplt.metrics.plot_roc(y_test, y_probas)` | [`fm.roc_chart(model, X_test, y_test)`][ferrum.roc_chart] | Ferrum takes the model directly; computes probabilities internally. |
+| `skplt.metrics.plot_precision_recall(y_test, y_probas)` | [`fm.pr_chart(model, X_test, y_test)`][ferrum.pr_chart] | Same. |
+| `skplt.metrics.plot_confusion_matrix(y_test, y_pred)` | [`fm.confusion_matrix_chart(model, X_test, y_test)`][ferrum.confusion_matrix_chart] | `normalize=` supported. |
+| `skplt.metrics.plot_calibration_curve(y_test, probas_list)` | [`fm.calibration_chart(model, X_test, y_test)`][ferrum.calibration_chart] | Single model or [`ComparedModelSource`][ferrum.ComparedModelSource] for multi-model. |
+| `skplt.metrics.plot_cumulative_gain(y_test, y_probas)` | [`fm.gain_chart(model, X_test, y_test)`][ferrum.gain_chart] | — |
+| `skplt.metrics.plot_lift_curve(y_test, y_probas)` | [`fm.lift_chart(model, X_test, y_test)`][ferrum.lift_chart] | — |
+| `skplt.estimators.plot_feature_importances(model)` | [`fm.importance_chart(model, X_test, y_test)`][ferrum.importance_chart] | Handles `feature_importances_`, permutation, and coefficients. |
+| `skplt.estimators.plot_learning_curve(model, X, y)` | [`fm.learning_curve_chart(model, X, y)`][ferrum.learning_curve_chart] | — |
 | `skplt.cluster.plot_silhouette(X, labels)` | `fm.silhouette_chart(model, X)` | Takes the fitted clusterer directly. |
-| `skplt.cluster.plot_elbow_curve(model, X)` | `fm.ElbowVisualizer(model)` | Visualizer-style (`.fit()` / `.show()`). |
-| `skplt.decomposition.plot_pca_component_variance(pca)` | `fm.pca_scree_chart(model, X)` | — |
+| `skplt.cluster.plot_elbow_curve(model, X)` | [`fm.ElbowVisualizer(model)`][ferrum.ElbowVisualizer] | Visualizer-style (`.fit()` / `.show()`). |
+| `skplt.decomposition.plot_pca_component_variance(pca)` | [`fm.pca_scree_chart(model, X)`][ferrum.pca_scree_chart] | — |
 
 ## Key differences
 
 ### Model-in, chart-out
 
-scikit-plot typically requires you to pre-compute predictions (`y_pred`) or probabilities (`y_probas`) and pass arrays. Ferrum takes the fitted model directly and computes everything internally via `ModelSource`:
+scikit-plot typically requires you to pre-compute predictions (`y_pred`) or probabilities (`y_probas`) and pass arrays. Ferrum takes the fitted model directly and computes everything internally via [`ModelSource`][ferrum.ModelSource]:
 
 <!--pytest.mark.skip-->
 ```python
@@ -38,7 +38,7 @@ chart.save("roc.svg")
 
 ### No matplotlib
 
-scikit-plot renders to matplotlib and requires `plt.show()` or `plt.savefig()`. Ferrum returns a `Chart` — same object you get from `fm.Chart(data).mark_point().encode(...)`.
+scikit-plot renders to matplotlib and requires `plt.show()` or `plt.savefig()`. Ferrum returns a [`Chart`][ferrum.Chart] — same object you get from `fm.Chart(data).mark_point().encode(...)`.
 
 ### Charts compose
 
