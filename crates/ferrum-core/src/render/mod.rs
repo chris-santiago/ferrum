@@ -57,6 +57,8 @@ pub enum RenderError {
     /// The unioned numeric/temporal extent for an axis or color channel
     /// produced no finite values (all rows null/NaN or empty after filter).
     EmptyDomain { channel: String, field: String },
+    SceneConstruction(String),
+    HtmlBundleAssembly(String),
 }
 
 impl std::fmt::Display for RenderError {
@@ -88,6 +90,10 @@ impl std::fmt::Display for RenderError {
             },
             Self::EmptyDomain { channel, field } =>
                 write!(f, "{channel}: no usable values found for field '{field}'"),
+            Self::SceneConstruction(msg) =>
+                write!(f, "scene construction failed: {msg}"),
+            Self::HtmlBundleAssembly(msg) =>
+                write!(f, "HTML bundle assembly failed: {msg}"),
         }
     }
 }

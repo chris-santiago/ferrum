@@ -192,6 +192,16 @@ dist/
 **/.claude/worktrees
 TODO.md
 
+# WASM build artifacts (wasm-pack output).
+# The hand-authored JS/CSS are tracked; generated files are not.
+src/ferrum/_wasm/ferrum_wasm.js
+src/ferrum/_wasm/ferrum_wasm_bg.wasm
+src/ferrum/_wasm/ferrum_wasm.d.ts
+src/ferrum/_wasm/ferrum_wasm_bg.wasm.d.ts
+src/ferrum/_wasm/package.json
+src/ferrum/_wasm/.gitignore
+crates/ferrum-wasm/pkg/
+
 # Gallery audit generated artifacts (panel images, verdicts, REPORT.md).
 # Inputs (skill, panel scripts, rubric, judge_prompt, RESUME) stay tracked.
 .claude/skills/gallery-audit/output/

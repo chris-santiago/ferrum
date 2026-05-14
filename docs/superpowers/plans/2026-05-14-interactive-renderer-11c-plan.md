@@ -123,7 +123,16 @@ Wire the full interaction system onto the SceneGraph IR (11a) and WASM renderer 
 - anywidget renders in Jupyter, selection state round-trips Python↔JS
 - No changes to existing golden SVGs
 
-## 7. Open questions
+## 7. Deferred gaps from 11b to address in 11c
+
+| Item | Notes |
+|---|---|
+| Python `InteractiveRenderError` / `WasmNotAvailableError` (spec §8.2) | Raised by `.interactive()` — implement alongside `InteractiveChart` |
+| `Raw` node rendering | Legend colorbar gradients skip with console.warn. Consider typed gradient representation or DOM SVG overlay |
+
+`SceneError`, `RenderError` extensions, stroke dash rendering, image texture upload, and `embed_wasm=False` sidecar copy were closed in the 11b gap review (2026-05-14).
+
+## 8. Open questions
 
 - Does `anywidget>=0.9` introduce conflicts with existing notebook deps? Check before adding to `pyproject.toml`.
 - `FieldValue` shape in `ferrum-scene` was specified but not implemented in 11a — verify the existing `SelectionSpec` and `ConditionalEncoding` structs are compatible with the new `FieldValue` type before wiring.

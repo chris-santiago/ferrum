@@ -30,6 +30,11 @@ manifest-path = "crates/ferrum-core/Cargo.toml"
 python-source = "src"
 features = ["extension-module"]
 strip = true
+include = [
+    { path = "src/ferrum/_wasm/*.wasm", format = "sdist" },
+    { path = "src/ferrum/_wasm/*.js", format = "sdist" },
+    { path = "src/ferrum/_wasm/*.css", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]

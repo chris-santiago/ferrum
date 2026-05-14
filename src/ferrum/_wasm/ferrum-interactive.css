@@ -1,0 +1,41 @@
+.ferrum-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ferrum-text {
+  position: absolute;
+  white-space: nowrap;
+  pointer-events: none;
+  line-height: 1;
+  user-select: none;
+}
+
+.ferrum-tooltip {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: sans-serif;
+  pointer-events: none;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+}
+
+.ferrum-tooltip table {
+  border-collapse: collapse;
+}
+
+.ferrum-tooltip td {
+  padding: 1px 6px;
+}
+
+.ferrum-tooltip td:first-child {
+  font-weight: bold;
+  text-align: right;
+}

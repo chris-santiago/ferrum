@@ -1,6 +1,8 @@
+pub mod error;
 pub mod types;
 pub mod selection;
 
+pub use error::*;
 pub use types::*;
 pub use selection::*;
 

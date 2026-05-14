@@ -4598,7 +4598,7 @@ class Chart:
         spec, data, viewport, theme_dict = self._render_inputs()
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
-    def save(self, path, *, format=None, **render_kwargs) -> None:
+    def save(self, path, *, format=None, embed_wasm=True, **render_kwargs) -> None:
         """Save the chart to a file on disk.
 
         Delegates to ``ferrum.display.save_chart``.  The file format is
@@ -4608,16 +4608,14 @@ class Chart:
         ----------
         path : str or pathlib.Path
             Destination file path.  Extension determines the default format:
-            ``.svg`` → SVG, ``.png`` → PNG.
-        format : {"svg", "png"} or None, optional
+            ``.svg`` → SVG, ``.png`` → PNG, ``.html`` → HTML, ``.json`` → JSON.
+        format : {"svg", "png", "html", "json"} or None, optional
             Explicit format override.  ``None`` (default) infers from ``path``.
+        embed_wasm : bool
+            For ``"html"`` format only.  When True (default), the WASM binary
+            is base64-inlined for single-file distribution.
         **render_kwargs
-            Additional keyword arguments forwarded to the underlying renderer
-            (e.g. ``width``, ``height`` viewport overrides).
-
-        Returns
-        -------
-        None
+            Additional keyword arguments forwarded to the underlying renderer.
 
         Examples
         --------
@@ -4628,7 +4626,7 @@ class Chart:
         """
         from ferrum.display import save_chart
 
-        save_chart(self, path, format=format, **render_kwargs)
+        save_chart(self, path, format=format, embed_wasm=embed_wasm, **render_kwargs)
 
     def show(self) -> None:
         """Display the chart inline or in a browser.

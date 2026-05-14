@@ -109,3 +109,29 @@ are additive — no spec fields were removed or renamed.
 | 8 | `PathCmd` field style | positional tuples: `MoveTo(f64, f64)` | named fields: `MoveTo { x: f64, y: f64 }` | serde `#[serde(tag = "op")]` requires struct variants, not tuple variants. |
 | 9 | `StrokeStyle` | `color`, `width`, `opacity`, `dash` | + `stroke_cap: Option<StrokeCap>`, `stroke_join: Option<StrokeJoin>` | Needed on `Polyline` nodes so the SVG walker can detect and emit the `<g>` wrapper. (Plan §"Type gaps" identified this pre-implementation.) |
 | 10 | `TextStyle` | no `font_family` | + `font_family: String` | Every SVG `<text>` needs a `font-family` attribute. (Plan §"Type gaps" identified this pre-implementation.) |
+
+## 7. Implementation decisions (recorded 2026-05-14)
+
+| Decision | Spec assumed | Implementation chose | Reason |
+|---|---|---|---|
+| wgpu version | 24.x | 29.0.3 | 24.x does not exist; 29.x is current stable. API differs significantly: `InstanceDescriptor` uses factory methods (no `Default`), `request_adapter` returns `Result` (not `Option`), `get_current_texture` returns `CurrentSurfaceTexture` enum, `PipelineLayoutDescriptor` uses `immediate_size` (not `push_constant_ranges`), `RenderPassColorAttachment` has `depth_slice`, `RenderPipelineDescriptor` uses `multiview_mask` (not `multiview`), `bind_group_layouts` takes `Option<&BindGroupLayout>` per slot. |
+| Constructor pattern | `WasmRenderer::new()` async constructor | `WasmRenderer::create()` static async factory | wasm-bindgen deprecates async constructors (produces invalid TS). Static factory avoids the warning and is idiomatic for fallible async init. |
+| Workspace compilation | `ferrum-wasm` compiles under `cargo test` | `default-members` excludes `ferrum-wasm` | `ferrum-wasm` targets `wasm32-unknown-unknown` only. Native compilation fails on `HtmlCanvasElement`, `SurfaceTarget::Canvas`, etc. `default-members = ["ferrum-core", "ferrum-scene"]` keeps `cargo test` working without `--exclude`. |
+| lyon SVG arcs | `builder.arc_to()` on standard `PathBuilder` | `LyonPath::builder().with_svg()` → `SvgPathBuilder` trait | lyon 1.x standard `PathBuilder` has no `arc_to`; `SvgPathBuilder` (via `.with_svg()`) provides SVG-compatible arc, `move_to`, and auto-close semantics. Also eliminates manual sub-path lifecycle tracking. |
+| WASM output directory | `crates/ferrum-wasm/pkg/` (wasm-pack default) | `--out-dir ../../src/ferrum/_wasm/` | Places build artifacts directly in the Python package directory so `_html.py` can find them at `Path(__file__).parent / "_wasm"`. The `pkg/` default is gitignored separately. |
+| Debug WASM size | ~2-4 MB (spec estimate) | 12 MB (debug), ~2-4 MB expected for release | Debug build includes full debug info. Release build (`--release`) will match the spec estimate. HTML with inline base64 is ~17 MB in debug — acceptable for dev, release will be ~3-5 MB. |
+
+## 8. Intentional gaps deferred to later sub-phases
+
+These items are specified in the Phase 11 spec but intentionally out of scope for 11b (static rendering foundation). Each is assigned to the correct sub-phase.
+
+| # | Gap | Spec section | Deferred to | Notes |
+|---|---|---|---|---|
+| 1 | `Raw` node rendering (colorbar gradients) | §3.4 divergence #4 | 11c/11d | Raw SVG content (legend colorbar `<defs>`) skipped with console.warn. Needs a typed gradient representation or DOM SVG overlay. Design decision per plan §4 constraints. |
+| 2 | `InteractionState` on `WasmRenderer` | §5.4, §6 | 11c | Selection state machine, hit testing, conditional encoding resolution. |
+| 3 | Event capture (mouse, wheel, click) | §5.3 | 11c | Selection, zoom/pan, href click-through. |
+| 4 | Tooltip rendering | §5.3, §6.6 | 11c | DOM hover tooltip from `TooltipContent`. |
+| 5 | `anywidget` dependency + `InteractiveChart` | §10.3, §11.2 | 11c | `anywidget` not added to `pyproject.toml`; `InteractiveChart` class not created. Both belong to 11c. |
+| 6 | Python `InteractiveRenderError` / `WasmNotAvailableError` | §8.2 | 11c | Raised by `.interactive()`, which is 11c scope. |
+
+**Closed during gap review (2026-05-14):** Image texture upload (now decodes PNG → RGBA → GPU texture), stroke dash rendering (manual dash-to-segments before lyon tessellation), `SceneError` in ferrum-scene, `RenderError` extensions in ferrum-core, `embed_wasm=False` sidecar file copy.

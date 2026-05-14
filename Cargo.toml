@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferrum-core", "crates/ferrum-scene"]
+members = ["crates/ferrum-core", "crates/ferrum-scene", "crates/ferrum-wasm"]
+default-members = ["crates/ferrum-core", "crates/ferrum-scene"]
 
 [workspace.package]
 version = "0.1.0"
@@ -68,6 +69,18 @@ faer = "0.24"
 # TODO: remove faer-compat when manifolds-rs supports faer >=0.24.
 manifolds-rs = { version = "0.2", default-features = false }
 faer-compat = { package = "faer", version = "0.23.2" }
+# Phase 11b (WASM renderer) — GPU rendering in the browser.
+wgpu              = { version = "29", default-features = false, features = ["webgl", "wgsl"] }
+wasm-bindgen      = { version = "0.2" }
+wasm-bindgen-futures = { version = "0.4" }
+web-sys           = { version = "0.3", features = [
+    "HtmlCanvasElement", "Window", "Document", "Element",
+    "console", "CssStyleDeclaration",
+] }
+js-sys            = { version = "0.3" }
+lyon              = { version = "1" }
+bytemuck          = { version = "1", features = ["derive"] }
+console_error_panic_hook = { version = "0.1" }
 
 [profile.release]
 lto = "thin"
