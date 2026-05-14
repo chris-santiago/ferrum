@@ -105,7 +105,19 @@ Deliver all four coordinate systems (CoordCartesian, CoordFixed, CoordPolar, Coo
 - Zero `NotImplementedError` for coords; zero `deferred_mark_error` for arc/label/geoshape/image
 - `ChartSpec(..., coord='flip')` still works (string back-compat)
 
-## 7. Open questions
+## 7. Deferred gaps from 11c to address in 11d
+
+| Item | Notes |
+|---|---|
+| `requestAnimationFrame` transition loop (§6.8) | Rust lerp/ease implemented. JS animation loop + GPU buffer re-upload per frame needed. |
+| Enter/exit fade for unmatched keys (§6.8) | Key diffing identifies matched pairs. Unmatched old/new keys need opacity-fade transitions. |
+| `interaction_config` traitlet (§11.2) | `InteractiveChart` syncs scene_json and selection_state but not interaction_config. |
+| Recomputation flow on zoom (§6.8 anywidget) | Python-side callable re-evaluation over new domain, partial SceneGraph rebuild. |
+| `Raw` node rendering (§3.4 divergence #4) | Legend colorbar gradients skip with console.warn. Needs typed gradient or DOM SVG overlay. |
+| `CoordFixed` uniform scale constraint on zoom (§6.5) | `zoom_pan.rs` supports arbitrary zoom; CoordFixed panels should constrain sx=sy. |
+| `Chart.conditional()` convenience method (§10.4) | Primary `.when().otherwise()` path works. `.conditional()` is sugar. |
+
+## 8. Open questions
 
 - Does `MarkBatchKind` in ferrum-scene need an `Arc` and/or `Label` variant, or should they reuse `Polygon`/`Text`? Check existing variants before deciding.
 - EqualEarth and NaturalEarth inverse projections require Newton-Raphson iteration — what convergence tolerance and max iterations?

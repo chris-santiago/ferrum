@@ -1,11 +1,13 @@
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
-    BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, SceneGraph, SceneNode,
+    BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, PanelTickLevels, SceneGraph,
+    SceneNode, TickLevel,
 };
 
 use crate::layout::{LayoutResult, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
+use super::arrow_cast::col_as_str;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
 use super::marks;
@@ -29,6 +31,7 @@ pub fn build_scene(
     build_title(layout, spec, theme, &mut title_nodes);
 
     let mut panels: Vec<Panel> = Vec::new();
+    let mut tick_levels: Vec<PanelTickLevels> = Vec::new();
 
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
@@ -117,6 +120,8 @@ pub fn build_scene(
         )?;
         warnings.extend(scale_warnings);
 
+        tick_levels.push(build_tick_levels(&scales, panel_idx));
+
         // Mark batches
         let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -159,6 +164,7 @@ pub fn build_scene(
             };
 
             let result = draw::dispatch_mark_build(&layer.mark, &ctx);
+            let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
             mark_batches.push(MarkBatch {
                 kind: result.kind,
                 nodes: result.nodes,
@@ -166,7 +172,7 @@ pub fn build_scene(
                 tooltips: result.tooltips,
                 hrefs: result.hrefs,
                 descriptions: result.descriptions,
-                keys: None,
+                keys,
                 blend: BlendMode::Normal,
                 stroke_cap: mark_style.stroke_cap.as_deref().and_then(|s| match s {
                     "round" => Some(ferrum_scene::StrokeCap::Round),
@@ -211,6 +217,14 @@ pub fn build_scene(
     // Legend
     build_legend_decorations(layout, spec, prep, theme, &mut legend_nodes)?;
 
+    let interaction = InteractionConfig {
+        zoom_enabled: !spec.selections.is_empty(),
+        pan_enabled: !spec.selections.is_empty(),
+        conditionals: spec.conditionals.clone(),
+        linked_panels: Vec::new(),
+        tick_levels,
+    };
+
     Ok(SceneGraph {
         width: layout.viewport.w,
         height: layout.viewport.h,
@@ -219,8 +233,8 @@ pub fn build_scene(
         panels,
         legend: legend_nodes,
         decorations: Vec::new(),
-        selections: Vec::new(),
-        interaction: InteractionConfig::default(),
+        selections: spec.selections.clone(),
+        interaction,
     })
 }
 
@@ -299,4 +313,56 @@ fn build_legend_decorations(
     };
     out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
     Ok(())
+}
+
+fn extract_keys(
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    data_indices: Option<&[usize]>,
+) -> Option<Vec<String>> {
+    let key_enc = encoding.key.as_ref()?;
+    let col = col_as_str(batch, &key_enc.field).ok()?;
+    let indices = data_indices?;
+    Some(
+        indices
+            .iter()
+            .map(|&i| col.get(i).and_then(|v| v.clone()).unwrap_or_default())
+            .collect(),
+    )
+}
+
+pub fn build_tick_levels(
+    scales: &scale_resolve::ResolvedScales,
+    panel_idx: usize,
+) -> PanelTickLevels {
+    const ZOOM_BREAKPOINTS: &[(f64, f64, usize)] = &[
+        (0.0, 0.5, 4),
+        (0.5, 2.0, 8),
+        (2.0, 4.0, 16),
+        (4.0, 1e9, 32),
+    ];
+
+    let x_levels: Vec<TickLevel> = ZOOM_BREAKPOINTS
+        .iter()
+        .map(|&(min_z, max_z, count)| TickLevel {
+            min_zoom: min_z,
+            max_zoom: max_z,
+            ticks: scales.x.tick_data(count),
+        })
+        .collect();
+
+    let y_levels: Vec<TickLevel> = ZOOM_BREAKPOINTS
+        .iter()
+        .map(|&(min_z, max_z, count)| TickLevel {
+            min_zoom: min_z,
+            max_zoom: max_z,
+            ticks: scales.y.tick_data(count),
+        })
+        .collect();
+
+    PanelTickLevels {
+        panel_id: panel_idx,
+        x_levels,
+        y_levels,
+    }
 }

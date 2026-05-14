@@ -1090,6 +1090,7 @@ dependencies = [
  "js-sys",
  "lyon",
  "png",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "wasm-bindgen",

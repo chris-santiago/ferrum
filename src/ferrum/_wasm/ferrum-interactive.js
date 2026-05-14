@@ -93,6 +93,62 @@ export async function renderChart(container, sceneJson, options = {}) {
   const textElements = JSON.parse(textJson);
   placeTextOverlay(overlay, textElements);
 
+  // Tooltip element
+  const tooltip = document.createElement("div");
+  tooltip.className = "ferrum-tooltip";
+  tooltip.style.position = "absolute";
+  tooltip.style.pointerEvents = "none";
+  tooltip.style.opacity = "0";
+  tooltip.style.transition = "opacity 0.1s ease";
+  container.appendChild(tooltip);
+
+  // Tooltip + href event handling
+  canvas.style.pointerEvents = "auto";
+  const marks = scene.panels ? scene.panels.flatMap(p => p.marks || []) : [];
+
+  canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const hit = findTooltipHit(marks, x, y);
+    if (hit) {
+      tooltip.replaceChildren();
+      const table = document.createElement("table");
+      for (const field of hit.fields) {
+        const row = document.createElement("tr");
+        const name = document.createElement("td");
+        name.textContent = field.name;
+        name.style.fontWeight = "bold";
+        name.style.paddingRight = "6px";
+        const val = document.createElement("td");
+        val.textContent = field.value;
+        row.appendChild(name);
+        row.appendChild(val);
+        table.appendChild(row);
+      }
+      tooltip.appendChild(table);
+      tooltip.style.left = (x + 12) + "px";
+      tooltip.style.top = (y - 12) + "px";
+      tooltip.style.opacity = "1";
+    } else {
+      tooltip.style.opacity = "0";
+    }
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    tooltip.style.opacity = "0";
+  });
+
+  canvas.addEventListener("click", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const href = findHrefHit(marks, x, y);
+    if (href) {
+      window.open(href, "_blank", "noopener,noreferrer");
+    }
+  });
+
   const observer = new ResizeObserver(() => {
     const rect = container.getBoundingClientRect();
     const w = Math.max(1, Math.floor(rect.width));
@@ -103,7 +159,7 @@ export async function renderChart(container, sceneJson, options = {}) {
   });
   observer.observe(container);
 
-  return { renderer, canvas, overlay };
+  return { renderer, canvas, overlay, tooltip };
 }
 
 /**
@@ -125,6 +181,52 @@ export function render({ model, el }) {
       renderChart(container, updated);
     }
   });
+}
+
+function findTooltipHit(marks, x, y) {
+  for (let bi = marks.length - 1; bi >= 0; bi--) {
+    const batch = marks[bi];
+    if (!batch.tooltips) continue;
+    const nodes = batch.nodes || [];
+    for (let ni = nodes.length - 1; ni >= 0; ni--) {
+      if (nodeContains(nodes[ni], x, y)) {
+        const tip = batch.tooltips[ni];
+        if (tip) return tip;
+      }
+    }
+  }
+  return null;
+}
+
+function findHrefHit(marks, x, y) {
+  for (let bi = marks.length - 1; bi >= 0; bi--) {
+    const batch = marks[bi];
+    if (!batch.hrefs) continue;
+    const nodes = batch.nodes || [];
+    for (let ni = nodes.length - 1; ni >= 0; ni--) {
+      if (nodeContains(nodes[ni], x, y)) {
+        const href = batch.hrefs[ni];
+        if (href) return href;
+      }
+    }
+  }
+  return null;
+}
+
+function nodeContains(node, x, y) {
+  if (!node || !node.type) return false;
+  switch (node.type) {
+    case "circle": {
+      const dx = x - node.cx;
+      const dy = y - node.cy;
+      return dx * dx + dy * dy <= node.r * node.r;
+    }
+    case "rect":
+      return x >= node.x && x <= node.x + node.w &&
+             y >= node.y && y <= node.y + node.h;
+    default:
+      return false;
+  }
 }
 
 export default { renderChart, render };

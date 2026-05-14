@@ -80,6 +80,10 @@ _DOC_ALLOWLIST: set[str] = {
     "pca_scree_chart", "cluster_diagnostics",
     "intercluster_distance_chart", "decision_boundary_chart",
     "rank_chart", "rank1d_chart", "rank2d_chart", "parallel_coordinates_chart",
+    # Phase 11c — selection API
+    "Selection", "SelectionMark", "ConditionalSpec",
+    "selection_point", "selection_interval", "selection_single", "selection_multi",
+    "value",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

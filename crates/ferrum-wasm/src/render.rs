@@ -37,7 +37,7 @@ impl GpuBuffers {
         pipelines: &RenderPipelines,
         scene: &SceneData,
     ) -> Self {
-        let viewport = [scene.width, scene.height];
+        let viewport: [f32; 4] = [scene.width, scene.height, 0.0, 0.0];
         let uniform_buffer =
             gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("uniforms"),

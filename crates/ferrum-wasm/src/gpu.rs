@@ -7,6 +7,17 @@ use wgpu::{
 
 use crate::error::WasmRenderError;
 
+#[derive(Debug)]
+struct WebDisplay;
+
+impl raw_window_handle::HasDisplayHandle for WebDisplay {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::web())
+    }
+}
+
 pub struct GpuContext {
     pub device: Device,
     pub queue: Queue,
@@ -16,9 +27,11 @@ pub struct GpuContext {
 }
 
 pub async fn init_gpu(canvas: HtmlCanvasElement) -> Result<GpuContext, WasmRenderError> {
-    let mut desc = InstanceDescriptor::new_without_display_handle();
-    desc.backends = Backends::BROWSER_WEBGPU | Backends::GL;
-    let instance = Instance::new(desc);
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::BROWSER_WEBGPU | Backends::GL,
+        display: Some(Box::new(WebDisplay)),
+        ..InstanceDescriptor::new_without_display_handle()
+    });
 
     let surface_target = wgpu::SurfaceTarget::Canvas(canvas.clone());
     let surface = instance

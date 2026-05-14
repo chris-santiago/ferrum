@@ -417,6 +417,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("bin_start", DataType::Float64, false),
@@ -453,6 +454,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -485,6 +487,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("v", DataType::Float64, false),
@@ -519,6 +522,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x0", DataType::Float64, false),
@@ -555,6 +559,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),

@@ -77,3 +77,63 @@ def test_repr_html_returns_div_wrapped_svg(chart):
     s = chart._repr_html_()
     assert s is not None
     assert s.startswith("<div>")
+
+
+# ── Phase 11c: WASM renderer regression tests ──────────────────────
+
+
+def test_save_html_contains_wasm_init_and_canvas(chart, tmp_path):
+    """HTML output must contain WASM init, canvas creation, and tooltip wiring."""
+    out = tmp_path / "out.html"
+    chart.save(out)
+    text = out.read_text()
+    assert "__wbg_init" in text, "missing WASM init call"
+    assert "createElement('canvas')" in text, "missing canvas creation"
+    assert "ferrum-tooltip" in text, "missing tooltip CSS class"
+    assert "hitTest" in text, "missing JS hit-test function"
+
+
+def test_scene_json_has_no_null_floats(chart, tmp_path):
+    """SceneGraph JSON must not contain null where f64 is expected (e.g. max_zoom)."""
+    import json
+
+    out = tmp_path / "scene.json"
+    chart.save(out, format="json")
+    text = out.read_text()
+    scene = json.loads(text)
+    for ptl in scene.get("interaction", {}).get("tick_levels", []):
+        for level in ptl.get("x_levels", []) + ptl.get("y_levels", []):
+            assert level["min_zoom"] is not None, "min_zoom is null"
+            assert level["max_zoom"] is not None, "max_zoom is null"
+            assert isinstance(level["max_zoom"], (int, float)), (
+                f"max_zoom is {type(level['max_zoom'])}, expected number"
+            )
+
+
+def test_scene_json_round_trips_through_serde(chart, tmp_path):
+    """SceneGraph JSON must deserialize without errors (catches alignment/type mismatches)."""
+    import json
+
+    out = tmp_path / "scene.json"
+    chart.save(out, format="json")
+    scene = json.loads(out.read_text())
+    assert isinstance(scene["panels"], list)
+    assert len(scene["panels"]) > 0
+    assert "marks" in scene["panels"][0]
+    for batch in scene["panels"][0]["marks"]:
+        for node in batch["nodes"]:
+            assert "type" in node, "SceneNode missing 'type' discriminator"
+
+
+def test_save_html_base64_wasm_decodable(chart, tmp_path):
+    """The base64-inlined WASM must be decodable (catches encoding corruption)."""
+    import base64
+    import re
+
+    out = tmp_path / "out.html"
+    chart.save(out)
+    text = out.read_text()
+    m = re.search(r"const wasmB64 = '([A-Za-z0-9+/=]+)'", text)
+    assert m, "base64 WASM blob not found in HTML"
+    decoded = base64.b64decode(m.group(1))
+    assert decoded[:4] == b"\x00asm", "decoded bytes are not a valid WASM module"

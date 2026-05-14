@@ -89,6 +89,17 @@ pub enum EncodingValue {
     Field { name: String },
 }
 
+// ── 3.8b FieldValue ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FieldValue {
+    String { value: String },
+    Number { value: f64 },
+    Bool { value: bool },
+    Null,
+}
+
 // ── 3.9 InteractionConfig ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

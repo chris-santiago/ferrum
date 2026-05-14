@@ -126,6 +126,83 @@ impl ScaleKind {
         let r = dispatch_all!(self, range_pair);
         (r[0], r[1])
     }
+
+    pub fn tick_data(&self, count_hint: usize) -> Vec<ferrum_scene::Tick> {
+        match self {
+            Self::Ordinal(_) => Vec::new(),
+            Self::Linear(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Self::Time(s) => {
+                let ticks = s.ticks_internal(count_hint);
+                let spacing = if ticks.len() >= 2 {
+                    (ticks[1] - ticks[0]) as i64
+                } else {
+                    86_400_000
+                };
+                ticks
+                    .into_iter()
+                    .filter_map(|v| {
+                        let px = s.scale_internal(v);
+                        if px.is_finite() {
+                            Some(ferrum_scene::Tick {
+                                value: v,
+                                label: super::format::format_time(v as i64, spacing),
+                                pixel: px,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Self::Log(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Self::Symlog(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1004,6 +1081,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1089,6 +1167,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1143,6 +1222,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1167,6 +1247,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1191,6 +1272,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1276,6 +1358,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1331,6 +1414,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1386,6 +1470,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1427,6 +1512,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

@@ -19,3 +19,4 @@ lyon = { workspace = true }
 bytemuck = { workspace = true }
 console_error_panic_hook = { workspace = true }
 png = { workspace = true }
+raw-window-handle = "0.6"

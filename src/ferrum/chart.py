@@ -394,6 +394,8 @@ class Chart:
         "_axis_x",
         "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
         "_composite_kind",
+        "_selections",
+        "_conditionals",
     )
 
     def __init__(
@@ -431,6 +433,8 @@ class Chart:
         self._axis_x: Optional[bool] = None
         self._axis_y: Optional[bool] = None
         self._composite_kind: Optional[str] = None
+        self._selections: list = []
+        self._conditionals: list = []
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -452,6 +456,8 @@ class Chart:
         new._axis_x = self._axis_x
         new._axis_y = self._axis_y
         new._composite_kind = self._composite_kind
+        new._selections = list(self._selections)
+        new._conditionals = list(self._conditionals)
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -4482,6 +4488,16 @@ class Chart:
         # crates/ferrum-core/src/spec/chart.rs has no `description` field yet.
         # When added, wire it here as `kw["description"] = resolved._description`
         # so the renderer can emit a `<desc>` element inside the root `<svg>`.
+        if resolved._selections:
+            import json as _json
+            kw["selections"] = _json.dumps(
+                [s.to_spec_dict() for s in resolved._selections]
+            )
+        if resolved._conditionals:
+            import json as _json
+            kw["conditionals"] = _json.dumps(
+                [c.to_spec_dict() for c in resolved._conditionals]
+            )
         return ChartSpec(**kw)
 
     def _build_spec(self):
@@ -4696,8 +4712,9 @@ class Chart:
         >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_selection()
         """
-        del selections  # ignored under SVG/PNG; placeholder for Phase 11 wiring
-        return self._clone()
+        new = self._clone()
+        new._selections.extend(selections)
+        return new
 
     def interactive(self) -> "Chart":
         """Mark this chart as interactive.
@@ -4719,7 +4736,8 @@ class Chart:
         >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").interactive()
         """
-        return self._clone()
+        from ferrum._interactive import InteractiveChart
+        return InteractiveChart(self)
 
     def __repr__(self) -> str:
         """Return a concise string representation of the chart.

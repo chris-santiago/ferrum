@@ -468,6 +468,10 @@ pub struct Encoding {
     // Phase 10 gallery-defaults: description field emits SVG <desc> for accessibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<EncodingSpec>,
+    // Phase 11c: key channel for animated transitions — identifies marks
+    // across data updates so the WASM renderer can lerp between old/new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -533,6 +537,7 @@ impl Encoding {
         inherit(&mut self.tooltip, &parent.tooltip);
         inherit(&mut self.href, &parent.href);
         inherit(&mut self.description, &parent.description);
+        inherit(&mut self.key, &parent.key);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -551,7 +556,7 @@ impl Encoding {
                 $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
             };
         }
-        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description);
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description, key);
     }
 }
 
@@ -897,6 +902,7 @@ mod tests {
             tooltip: Some(EncodingSpec { field: "btt".into(), ..Default::default() }),
             href: Some(EncodingSpec { field: "bh".into(), ..Default::default() }),
             description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
+            key: Some(EncodingSpec { field: "bk".into(), ..Default::default() }),
         };
         // Overlay only tooltip, href, description (the three that were missed
         // by the old inline merge).

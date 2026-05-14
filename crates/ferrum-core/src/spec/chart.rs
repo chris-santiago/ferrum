@@ -79,6 +79,10 @@ pub struct ChartSpec {
     /// Y-axis variant of `axis_x`. Same semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selections: Vec<ferrum_scene::SelectionSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditionals: Vec<ferrum_scene::ConditionalEncoding>,
 }
 
 #[pymethods]
@@ -99,6 +103,9 @@ impl ChartSpec {
         title = None,                                         // Themes-T2.5: chart-level title
         axis_x = None,                                        // spec-level axis suppression
         axis_y = None,
+        key = None,                                               // Phase 11c (transition key)
+        selections = None,                                        // Phase 11c (JSON)
+        conditionals = None,                                      // Phase 11c (JSON)
     ))]
     fn new(
         mark: &str,
@@ -124,6 +131,9 @@ impl ChartSpec {
         title: Option<&Bound<'_, PyAny>>,
         axis_x: Option<bool>,
         axis_y: Option<bool>,
+        key: Option<&Bound<'_, PyAny>>,
+        selections: Option<&str>,
+        conditionals: Option<&str>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -140,6 +150,7 @@ impl ChartSpec {
         let tooltip = tooltip.map(coerce_encoding).transpose()?;
         let href = href.map(coerce_encoding).transpose()?;
         let description = description.map(coerce_encoding).transpose()?;
+        let key = key.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -196,10 +207,21 @@ impl ChartSpec {
             }
         };
 
+        let selections = match selections {
+            None => Vec::new(),
+            Some(s) => serde_json::from_str(s)
+                .map_err(|e| PyValueError::new_err(format!("selections: {e}")))?,
+        };
+        let conditionals = match conditionals {
+            None => Vec::new(),
+            Some(s) => serde_json::from_str(s)
+                .map_err(|e| PyValueError::new_err(format!("conditionals: {e}")))?,
+        };
+
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description, key },
             transforms,
             facet,
             layers,
@@ -209,6 +231,8 @@ impl ChartSpec {
             title,
             axis_x,
             axis_y,
+            selections,
+            conditionals,
         })
     }
 
@@ -472,6 +496,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -560,6 +585,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -590,6 +616,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -620,6 +647,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");

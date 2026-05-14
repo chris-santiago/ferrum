@@ -63,6 +63,7 @@ Wire the full interaction system onto the SceneGraph IR (11a) and WASM renderer 
 - [ ] Add `selections: Vec<SelectionSpec>` and `conditionals: Vec<ConditionalEncoding>` to ChartSpec
 - [ ] Add `key: Option<EncodingSpec>` to Encoding struct
 - [ ] Wire selections/conditionals into SceneGraph in `scene_build.rs`; populate `InteractionConfig`
+- [ ] Populate `InteractionConfig.tick_levels`: for each panel, call scale tick generation at count_hints 4/8/16/32, package into `PanelTickLevels` with zoom breakpoints (0–0.5, 0.5–2.0, 2.0–4.0, 4.0–∞). Ordinal scales return empty tick levels.
 - [ ] Wire Key channel → `MarkBatch.keys` in scene_build.rs
 - [ ] Verify: `cargo test`, existing goldens unchanged
 
@@ -78,6 +79,7 @@ Wire the full interaction system onto the SceneGraph IR (11a) and WASM renderer 
 - [ ] Verify: Rust unit tests for conditional resolution logic
 
 ### Task 11c3: Zoom/pan + tick level selection
+- [ ] Add `glam` as a direct dependency in `crates/ferrum-wasm/Cargo.toml` (transitive via wgpu, but needed for explicit `Affine2` usage)
 - [ ] Implement `zoom_pan.rs` per spec §6.5: per-panel `Affine2` transform, wheel → zoom, drag → pan
 - [ ] Clamp zoom to `InteractionConfig.zoom_range`
 - [ ] Tick level selection: swap pre-computed tick labels based on zoom factor per spec §6.5
@@ -123,19 +125,46 @@ Wire the full interaction system onto the SceneGraph IR (11a) and WASM renderer 
 - anywidget renders in Jupyter, selection state round-trips Python↔JS
 - No changes to existing golden SVGs
 
-## 7. Deferred gaps from 11b to address in 11c
+## 7. Deferred gaps from 11b — closed in 11c
 
-| Item | Notes |
+| Item | Status |
 |---|---|
-| Python `InteractiveRenderError` / `WasmNotAvailableError` (spec §8.2) | Raised by `.interactive()` — implement alongside `InteractiveChart` |
-| `Raw` node rendering | Legend colorbar gradients skip with console.warn. Consider typed gradient representation or DOM SVG overlay |
+| Python `InteractiveRenderError` / `WasmNotAvailableError` (spec §8.2) | **Closed** — added to `_interactive.py` |
+| `Raw` node rendering | Still deferred — legend colorbar gradients skip with console.warn. Needs typed gradient representation or DOM SVG overlay (11d/11e). |
 
-`SceneError`, `RenderError` extensions, stroke dash rendering, image texture upload, and `embed_wasm=False` sidecar copy were closed in the 11b gap review (2026-05-14).
+## 8. Implementation decisions (recorded 2026-05-14)
 
-## 8. Open questions
+| Decision | Spec assumed | Implementation chose | Reason |
+|---|---|---|---|
+| `glam` for Affine2 | `glam::Affine2` (transitive dep of wgpu) | Custom `Affine2` struct in `zoom_pan.rs` | glam is not in wgpu 29's dep tree. A 4-field struct with 5 methods is simpler than adding a dependency. |
+| anywidget dependency | Hard dependency `anywidget>=0.9` | Optional import (try/except ImportError) | Avoids breaking existing installs. `InteractiveChart._try_init_widget()` gracefully degrades when anywidget is absent. Will add to pyproject.toml when notebook integration is end-to-end tested. |
+| Selection state location | `FieldValue` in selection state flows Python↔JS | `FieldValue` in `ferrum-scene` (serializable), runtime `SelectionState` in `ferrum-wasm` | Keeps the serializable type shared across crates; runtime state stays WASM-only. |
+| Key channel wiring | Per-mark-builder key extraction | scene_build.rs post-dispatch extraction using `data_indices` | Avoids touching all 12+ mark builder files. Key column is read from the batch and aligned with `data_indices` at the scene_build level. |
+| Tick level computation | `tick_values(count_hint)` on `ScaleKind` | `tick_data(count_hint)` returns `Vec<Tick>` directly | Returns value+label+pixel in one call, avoiding triple dispatch through tick generation, formatting, and pixel mapping. |
+| wgpu display handle | `Instance::default()` or `new_without_display_handle()` | `WebDisplay` struct implementing `HasDisplayHandle` → `DisplayHandle::web()`, passed via `InstanceDescriptor.display` | wgpu 29 requires a display handle for `create_surface()` on GLES/WebGL2 backend. `new_without_display_handle()` leaves `display: None`, which causes `MissingDisplayHandle` error. |
+| Uniform buffer alignment | `vec2<f32>` viewport (8 bytes) | `vec2<f32>` + `vec2<f32>` padding (16 bytes) | WebGL2 requires uniform buffer bindings to be 16-byte aligned (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED` not supported). All 4 WGSL shaders and the Rust buffer creation padded. |
+| Tick level max_zoom | `f64::INFINITY` for unbounded upper range | `1e9` (large finite value) | `f64::INFINITY` serializes to JSON `null`, which fails `serde_json` deserialization as `f64` on the WASM side. |
+| Base64 WASM decode | `Uint8Array.from(atob(...), c => c.charCodeAt(0))` | `for` loop over `atob()` result | `Uint8Array.from` with a mapper can fail on large strings (3.4MB WASM → 4.6MB base64) due to call stack limits in some engines. |
 
-- Does `anywidget>=0.9` introduce conflicts with existing notebook deps? Check before adding to `pyproject.toml`.
-- `FieldValue` shape in `ferrum-scene` was specified but not implemented in 11a — verify the existing `SelectionSpec` and `ConditionalEncoding` structs are compatible with the new `FieldValue` type before wiring.
+## 9. Intentional gaps deferred to 11d/11e
+
+| # | Gap | Spec section | Deferred to | Notes |
+|---|---|---|---|---|
+| 1 | `requestAnimationFrame` transition loop | §6.8 | 11d | Rust-side `lerp_circles`/`lerp_rects`/`ease_in_out_cubic` are implemented. JS-side animation loop and GPU buffer re-upload on each frame require integration with the WasmRenderer event loop. |
+| 2 | Enter/exit fade for unmatched keys | §6.8 | 11d | Key diffing identifies matched pairs. Unmatched old keys (exit) and unmatched new keys (enter) need opacity-fade transitions added to the animation loop. |
+| 3 | `interaction_config` traitlet | §11.2 | 11d | `InteractiveChart` syncs `scene_json` and `selection_state` but not `interaction_config`. Needed for Python-side zoom range updates and linked panel configuration. |
+| 4 | Recomputation flow (function re-evaluation on zoom) | §6.8 anywidget protocol | 11d | Complex: requires Python-side callable re-evaluation over a new domain, partial SceneGraph rebuild, and incremental panel update. |
+| 5 | `Raw` node rendering (colorbar gradients) | §3.4 divergence #4 | 11d/11e | Raw SVG content skipped with console.warn. Needs typed gradient representation or DOM SVG overlay. |
+| 6 | `CoordFixed` uniform scale constraint on zoom | §6.5 | 11d | `zoom_pan.rs` supports arbitrary zoom. CoordFixed panels should constrain sx=sy. One-line addition when CoordFixed detection is wired. |
+| 7 | `Chart.conditional()` convenience method | §10.4 | 11d | Primary path works: `sel.when(Color("x")).otherwise(value("#ccc"))` passed to `.encode(color=...)`. The `.conditional()` method is sugar. |
+| 8 | Headless browser / anywidget integration tests | §12.3 | 11e | Requires browser automation and Jupyter kernel setup. |
+
+**Closed during gap review (2026-05-14):** `InteractiveRenderError`/`WasmNotAvailableError` (added to `_interactive.py`), `nearest=true` hit testing (added `hit_test_nearest` to `hit_test.rs`). **Closed during browser testing (2026-05-14):** `WebDisplayHandle` for wgpu surface creation, uniform buffer 16-byte alignment (all 4 shaders + Rust buffer), `f64::INFINITY` → `1e9` in tick levels, base64 WASM decode for large binaries, inline HTML tooltip/href wiring, JS `nodeContains` field name (`type` not `op`). 4 regression tests added to `test_show_save.py`.
+
+## 10. Open questions (resolved)
+
+- `anywidget>=0.9` — not added to `pyproject.toml` yet; anywidget is imported optionally. Will add as a hard dep when end-to-end notebook integration is validated (11d).
+- `FieldValue` compatibility — confirmed compatible. `FieldValue` added to `ferrum-scene/src/selection.rs` as a tagged enum with 4 variants; existing `SelectionSpec` and `ConditionalEncoding` structs are unchanged.
 
 ### Intentional divergences from spec §3 (required for byte-identical golden SVGs)
 

@@ -1,11 +1,16 @@
 #![deny(clippy::unwrap_used)]
 
+pub mod conditional;
 pub mod error;
 pub mod gpu;
+pub mod hit_test;
 pub mod pipelines;
 pub mod render;
 pub mod scene_load;
+pub mod selection_state;
 pub mod tessellate;
+pub mod transition;
+pub mod zoom_pan;
 
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
