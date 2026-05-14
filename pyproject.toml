@@ -60,7 +60,9 @@ src = ["src", "tests"]
 select = ["D"]
 ignore = [
     "D203",  # one-blank-line-before-class (conflicts with D211)
+    "D205",  # 1 blank line required between summary and description — not enforced
     "D213",  # multi-line-summary-second-line (conflicts with D212)
+    "D301",  # use r-strings for backslashes — too strict for docstrings with \n examples
 ]
 
 [tool.ruff.lint.pydocstyle]

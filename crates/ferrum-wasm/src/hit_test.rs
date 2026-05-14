@@ -17,7 +17,7 @@ pub fn hit_test(
             continue;
         }
         for (bi, batch) in panel.marks.iter().enumerate().rev() {
-            if let Some(ni) = hit_test_batch(batch, x, y) {
+            if let Some(ni) = hit_test_batch(batch, panel, x, y) {
                 let data_idx = batch
                     .data_indices
                     .as_ref()
@@ -91,12 +91,16 @@ fn nearest_in_batch(batch: &MarkBatch, x: f64, y: f64) -> Option<(usize, f64)> {
     best
 }
 
-fn hit_test_batch(batch: &MarkBatch, x: f64, y: f64) -> Option<usize> {
+fn hit_test_batch(batch: &MarkBatch, panel: &ferrum_scene::Panel, x: f64, y: f64) -> Option<usize> {
     match batch.kind {
         MarkBatchKind::Point => hit_test_circles(&batch.nodes, x, y),
         MarkBatchKind::Bar | MarkBatchKind::Rect => hit_test_rects(&batch.nodes, x, y),
         MarkBatchKind::Line | MarkBatchKind::Area => hit_test_lines(&batch.nodes, x, y),
         MarkBatchKind::Rule => hit_test_lines(&batch.nodes, x, y),
+        // Geoshape polygons: use existing polygon point-in-polygon test.
+        MarkBatchKind::Polygon => hit_test_lines(&batch.nodes, x, y),
+        // Arc wedges (polar pie/donut): polar coordinate hit-test.
+        MarkBatchKind::Arc => hit_test_polar_arcs(&batch.nodes, panel, x, y),
         _ => None,
     }
 }
@@ -162,6 +166,66 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
                 return Some(i);
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// Hit-test polar arc wedge nodes by converting pixel coords to (θ, r) and checking
+/// each wedge's angular range (extracted from the first MoveTo/ArcTo commands).
+fn hit_test_polar_arcs(
+    nodes: &[SceneNode],
+    panel: &ferrum_scene::Panel,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    use std::f64::consts::TAU;
+    use ferrum_scene::CoordKind;
+
+    let (inner_r, outer_r) = match &panel.coord {
+        CoordKind::Polar { inner_radius, outer_radius, .. } => (*inner_radius, *outer_radius),
+        _ => return None,
+    };
+    let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
+    let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
+    let r = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+    if r < inner_r || r > outer_r {
+        return None;
+    }
+    let mut theta = (x - cx).atan2(-(y - cy)); // clockwise from top, [-π, π]
+    if theta < 0.0 { theta += TAU; }
+
+    for (i, node) in nodes.iter().enumerate().rev() {
+        let SceneNode::Path { commands, .. } = node else { continue };
+        // Extract start angle from first MoveTo, end angle from first ArcTo.
+        let mut start_theta: Option<f64> = None;
+        let mut end_theta: Option<f64> = None;
+        for cmd in commands {
+            match cmd {
+                ferrum_scene::PathCmd::MoveTo { x: mx, y: my } if start_theta.is_none() => {
+                    let mut t = (*mx - cx).atan2(-(*my - cy));
+                    if t < 0.0 { t += TAU; }
+                    start_theta = Some(t);
+                }
+                ferrum_scene::PathCmd::ArcTo { x: ax, y: ay, .. } if end_theta.is_none() => {
+                    let mut t = (*ax - cx).atan2(-(*ay - cy));
+                    if t < 0.0 { t += TAU; }
+                    end_theta = Some(t);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let (Some(t0), Some(t1)) = (start_theta, end_theta) {
+            let inside = if t1 >= t0 {
+                theta >= t0 && theta <= t1
+            } else {
+                // Wedge wraps around 0 (e.g. last slice covers 330°–360°+0°–30°)
+                theta >= t0 || theta <= t1
+            };
+            if inside {
+                return Some(i);
+            }
         }
     }
     None

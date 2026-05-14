@@ -47,13 +47,23 @@ impl ZoomPanState {
         }
     }
 
-    pub fn on_wheel(&mut self, panel_id: usize, delta: f64, cursor_x: f64, cursor_y: f64) {
+    pub fn on_wheel(
+        &mut self,
+        panel_id: usize,
+        delta: f64,
+        cursor_x: f64,
+        cursor_y: f64,
+        coord_fixed: bool,
+    ) {
         let Some(t) = self.transforms.get_mut(panel_id) else {
             return;
         };
         let factor = 1.0 + delta * 0.001;
         let new_sx = (t.sx * factor).clamp(self.zoom_range.0, self.zoom_range.1);
-        let new_sy = (t.sy * factor).clamp(self.zoom_range.0, self.zoom_range.1);
+        // CoordFixed panels use uniform (square-pixel) scaling: sy always equals sx.
+        let new_sy = if coord_fixed { new_sx } else {
+            (t.sy * factor).clamp(self.zoom_range.0, self.zoom_range.1)
+        };
 
         t.tx = cursor_x - new_sx * ((cursor_x - t.tx) / t.sx);
         t.ty = cursor_y - new_sy * ((cursor_y - t.ty) / t.sy);
@@ -113,7 +123,7 @@ mod tests {
     fn zoom_increases_scale() {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
-        state.on_wheel(0, 500.0, 100.0, 100.0);
+        state.on_wheel(0, 500.0, 100.0, 100.0, false);
         assert!(state.transforms[0].sx > 1.0);
     }
 
@@ -130,7 +140,7 @@ mod tests {
     fn double_click_resets() {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
-        state.on_wheel(0, 1000.0, 50.0, 50.0);
+        state.on_wheel(0, 1000.0, 50.0, 50.0, false);
         state.reset(0);
         assert!((state.transforms[0].sx - 1.0).abs() < 1e-10);
         assert!((state.transforms[0].tx).abs() < 1e-10);
@@ -155,7 +165,7 @@ mod tests {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
         for _ in 0..100 {
-            state.on_wheel(0, 5000.0, 0.0, 0.0);
+            state.on_wheel(0, 5000.0, 0.0, 0.0, false);
         }
         assert!(state.transforms[0].sx <= 50.0);
     }
@@ -166,5 +176,17 @@ mod tests {
         assert_eq!(tick_level_for_zoom(1.0), 1);
         assert_eq!(tick_level_for_zoom(3.0), 2);
         assert_eq!(tick_level_for_zoom(10.0), 3);
+    }
+
+    #[test]
+    fn coord_fixed_enforces_uniform_scale() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        // Initial sx/sy are different: simulate a non-square zoom then fix it.
+        state.transforms[0].sx = 1.5;
+        state.transforms[0].sy = 2.0;
+        state.on_wheel(0, 100.0, 50.0, 50.0, true);
+        let t = &state.transforms[0];
+        assert!((t.sx - t.sy).abs() < 1e-10, "sx={} sy={} must be equal for CoordFixed", t.sx, t.sy);
     }
 }

@@ -11,7 +11,7 @@ use ferrum_scene::GeoProjection;
 #[inline(always)]
 fn to_rad(deg: f64) -> f64 { deg * PI / 180.0 }
 
-// Used only by cfg(test) inverse functions; gated to suppress dead-code warning.
+// Only needed by #[cfg(test)] inverse functions; suppress dead-code lint.
 #[cfg(test)]
 #[inline(always)]
 fn to_deg(r: f64) -> f64 { r * 180.0 / PI }
@@ -31,9 +31,9 @@ pub fn forward(proj: GeoProjection, lon: f64, lat: f64) -> (f64, f64) {
 
 /// Inverse projection: normalized (x, y) → (lon°, lat°).
 ///
-/// Gated to `#[cfg(test)]` — no production caller yet (needed for
-/// interactive hit-testing in Phase 11e).  Kept here so round-trip tests
-/// stay in the same file as the forward functions.
+/// Kept under `#[cfg(test)]` until a non-test caller lands (geo hit-testing in Phase 11e
+/// will move this into a shared crate accessible from ferrum-wasm). Round-trip tests
+/// live in the same file.
 #[cfg(test)]
 pub fn inverse(proj: GeoProjection, x: f64, y: f64) -> (f64, f64) {
     match proj {
@@ -53,6 +53,7 @@ fn mercator_fwd(lon: f64, lat: f64) -> (f64, f64) {
     (to_rad(lon), (FRAC_PI_4 + to_rad(lat_c) / 2.0).tan().ln())
 }
 
+
 #[cfg(test)]
 fn mercator_inv(x: f64, y: f64) -> (f64, f64) {
     (to_deg(x), to_deg(2.0 * y.exp().atan() - (PI / 2.0)))
@@ -61,6 +62,7 @@ fn mercator_inv(x: f64, y: f64) -> (f64, f64) {
 // ── Equirectangular ───────────────────────────────────────────────────────
 
 fn equirect_fwd(lon: f64, lat: f64) -> (f64, f64) { (to_rad(lon), to_rad(lat)) }
+
 #[cfg(test)]
 fn equirect_inv(x: f64, y: f64) -> (f64, f64) { (to_deg(x), to_deg(y)) }
 
@@ -84,6 +86,7 @@ fn equal_earth_fwd(lon: f64, lat: f64) -> (f64, f64) {
     let t2 = theta * theta;
     (lam * ee_x_factor(t2), EE_M * theta)
 }
+
 
 #[cfg(test)]
 fn equal_earth_inv(x: f64, y: f64) -> (f64, f64) {
@@ -119,6 +122,7 @@ fn natural_earth_fwd(lon: f64, lat: f64) -> (f64, f64) {
     (lam * ne_poly(&NE_A, phi), phi * ne_poly(&NE_B, phi))
 }
 
+
 #[cfg(test)]
 fn natural_earth_inv(x: f64, y: f64) -> (f64, f64) {
     let mut phi = y;
@@ -143,6 +147,7 @@ fn orthographic_fwd(lon: f64, lat: f64) -> (f64, f64) {
     if cos_phi * lam.cos() < 0.0 { return (f64::NAN, f64::NAN); }
     (cos_phi * lam.sin(), phi.sin())
 }
+
 
 #[cfg(test)]
 fn orthographic_inv(x: f64, y: f64) -> (f64, f64) {
@@ -180,6 +185,7 @@ fn albers_usa_fwd(lon: f64, lat: f64) -> (f64, f64) {
     albers_conic_fwd(lon, lat, 29.5, 45.5, 38.0, -96.0)
 }
 
+
 #[cfg(test)]
 fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
     // Approximate inverse using main continental conic.
@@ -193,6 +199,7 @@ fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
     let lam = x.atan2(dy) / n + lam0;
     (to_deg(lam), to_deg(phi))
 }
+
 
 #[cfg(test)]
 mod tests {

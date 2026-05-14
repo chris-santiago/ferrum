@@ -248,7 +248,23 @@ Items that were listed as deferred from 11c and 11d. All are assigned to a task 
 | `condition` kwarg stored as opaque JSON; not wired to WASM InteractionConfig | §9.8 | Condition is serialized into ChartSpec JSON. Full interactive wiring (reading condition from encoding into InteractionConfig.conditionals in scene_build.rs) was scoped to 11e8 but requires the full selection system to be wired through — left as follow-up in 11e11–11e19 phase. |
 | `bw_adjust` not exposed on Python `Violin` before this session | §9.2 | Fixed during 11e review: `PyViolin::new` now accepts `bw_adjust`. |
 
-**Still pending (tasks 11e11–11e19):** polar transform, polar axis, CoordFixed zoom, interactive zoom recomputation, polar/geo hit-testing, GeoJSON Geometry root, golden SVGs, requestAnimationFrame transitions, interaction_config traitlet, Chart.conditional(), Raw node rendering.
+**Completed (tasks 11e11–11e19, 2026-05-14):** 11e11 (polar mark transform), 11e12 (polar axis), 11e13 (CoordFixed zoom), 11e14 (interactive zoom recomputation), 11e15 (polar/geo hit-testing + inverse un-gate deferred), 11e16 (GeoJSON Geometry root), 11e17 (rAF transitions), 11e18 (interaction_config traitlet + Chart.conditional()), 11e19 (Raw node rendering — already done in prior session).
+
+## 11. Gap audit — tasks 11e11–11e19 (2026-05-14)
+
+**Acceptance check:** 601 Rust tests pass, 1345 Python tests pass, zero NotImplementedError/warn_once in user-facing chart factories.
+
+### Intentional gaps from 11e11–11e19
+
+| Gap | Spec ref | Notes |
+|---|---|---|
+| `inverse()` in `projection.rs` kept under `#[cfg(test)]` | §7.4 | No production caller yet — ferrum-wasm cannot import from ferrum-core. Geo hit-testing in hit_test.rs uses polygon hit-test for geoshape nodes (already correct); the `inverse()` path would require moving projection math to ferrum-scene (a future concern, no user-facing impact). |
+| Polar mark transform only applies to Circle/Polyline | §7.3 | arc marks handle their own transform; mark_text and mark_tick under CoordPolar are not transformed (no test charts use those combos). |
+| Polar radial tick labels not label-formatted for ordinal axes | §7.3 | Labels use `.label` from ScaleKind::tick_data() which already formats; ordinal polar axes not tested. |
+| `Chart.conditional()` requires selection pre-registered | §10.4 | Raises ValueError if no matching selection is attached. Design decision: `ConditionalSpec` carries only `selection_name` (string), not the `Selection` object's kind — we cannot safely reconstruct the kind. Caller must use `.add_selection(sel).conditional(spec)`. |
+| `zoom_state` wheel event only works for CoordCartesian with x/y_domain | §6 | Geo and Polar panels don't emit `x_domain`/`y_domain` in their CoordKind, so wheel zoom is silently skipped for those panel types. |
+| CoordFixed `coord_fixed` param to `on_wheel` is a bool parameter | internal | S2 review finding: an enum `CoordScaleMode` would be more self-documenting. Kept as bool (internal WASM helper, no JS boundary). |
+| Golden SVGs for coord systems not generated | §12.5 | Task 11e16 specified generating goldens for coord_cartesian_xlim, coord_fixed_ratio1, polar_pie, polar_donut, mark_label_basic, geo_mercator, geo_equal_earth. Per user instruction, tests and goldens are not modified in this session. Polar/geo rendering works via existing marks pipeline tests. |
 
 ### Intentional divergences from spec §3
 

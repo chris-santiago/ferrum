@@ -4818,6 +4818,51 @@ class Chart:
         from ferrum._interactive import InteractiveChart
         return InteractiveChart(self)
 
+    def conditional(self, spec: Any) -> "Chart":
+        """Apply a conditional encoding to this chart.
+
+        Convenience sugar: ``chart.conditional(sel.when(Color("x")).otherwise(value("#ccc")))``
+        is equivalent to::
+
+            chart.add_selection(sel).encode(color=sel.when(Color("x")).otherwise(value("#ccc")))
+
+        Parameters
+        ----------
+        spec : ConditionalSpec
+            A ``ConditionalSpec`` produced by ``sel.when(...).otherwise(...)``.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the conditional recorded.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> from ferrum.selection import selection_point, value
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "z": ["a", "b"]})
+        >>> sel = selection_point(fields=["z"])
+        >>> chart = (
+        ...     fm.Chart(df)
+        ...     .mark_point()
+        ...     .encode(x="x", y="y")
+        ...     .conditional(sel.when(fm.Color("z")).otherwise(value("#ccc")))
+        ... )
+        """
+        new = self._clone()
+        new._conditionals.append(spec)
+        if hasattr(spec, "selection_name"):
+            # Ensure the selection is also registered so scene_build can wire it.
+            existing = {s.name: s for s in new._selections if hasattr(s, "name")}
+            if spec.selection_name not in existing:
+                raise ValueError(
+                    f"Chart.conditional(): no selection named {spec.selection_name!r} "
+                    f"is attached to this chart. Call .add_selection(sel) first, or use "
+                    f"chart.add_selection(sel).encode(...) with the conditional encoding."
+                )
+        return new
+
     def __repr__(self) -> str:
         """Return a concise string representation of the chart.
 

@@ -10,11 +10,14 @@ is installed; otherwise it falls back to returning a clone (SVG path).
 
 from __future__ import annotations
 
+import logging
 import pathlib
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
+
+_log = logging.getLogger(__name__)
 
 _WASM_DIR = pathlib.Path(__file__).parent / "_wasm"
 
@@ -128,16 +131,61 @@ def _build_anywidget_esm() -> str:
         "    if(h&&h.batch.hrefs&&h.batch.hrefs[h.idx])\n"
         "      window.open(h.batch.hrefs[h.idx],'_blank','noopener,noreferrer');\n"
         "  });\n"
+        "  return {canvas,renderer,scene};\n"
         "}\n"
         "\n"
         "export async function render({model,el}){\n"
         "  const container=document.createElement('div');\n"
         "  el.appendChild(container);\n"
+        "  let _state=null;\n"
+        "  let _prevJson=null;\n"
+        "  async function _reload(s){\n"
+        "    const prev=_prevJson;\n"
+        "    _prevJson=s;\n"
+        "    _state=await _render(container,s);\n"
+        "    if(_state&&prev){\n"
+        "      // Animate transition from previous scene\n"
+        "      try{\n"
+        "        _state.renderer.startTransition(prev,s);\n"
+        "        const dur=300;\n"
+        "        const t0=performance.now();\n"
+        "        function _step(){\n"
+        "          const t=Math.min((performance.now()-t0)/dur,1.0);\n"
+        "          _state.renderer.tickTransition(t).catch(()=>{});\n"
+        "          if(t<1.0)requestAnimationFrame(_step);\n"
+        "        }\n"
+        "        requestAnimationFrame(_step);\n"
+        "      }catch(e){/* transition not supported — fall back to static render */}\n"
+        "    }\n"
+        "    if(_state){\n"
+        "      _state.canvas.addEventListener('wheel',e=>{\n"
+        "        e.preventDefault();\n"
+        "        if(!_state)return;\n"
+        "        const sc=_state.scene;\n"
+        "        const p=sc.panels&&sc.panels[0];\n"
+        "        if(!p)return;\n"
+        "        const factor=1-e.deltaY*0.001;\n"
+        "        const xs=p.coord&&p.coord.x_domain;\n"
+        "        const ys=p.coord&&p.coord.y_domain;\n"
+        "        if(!xs||!ys)return;\n"
+        "        const xSpan=(xs[1]-xs[0]);\n"
+        "        const ySpan=(ys[1]-ys[0]);\n"
+        "        const xc=xs[0]+xSpan/2, yc=ys[0]+ySpan/2;\n"
+        "        const nxSpan=xSpan/factor, nySpan=ySpan/factor;\n"
+        "        const zs=JSON.stringify({'0':{\n"
+        "          x_domain:[xc-nxSpan/2,xc+nxSpan/2],\n"
+        "          y_domain:[yc-nySpan/2,yc+nySpan/2]\n"
+        "        }});\n"
+        "        model.set('zoom_state',zs);\n"
+        "        model.save_changes();\n"
+        "      },{passive:false});\n"
+        "    }\n"
+        "  }\n"
         "  const s=model.get('scene_json');\n"
-        "  if(s) await _render(container,s);\n"
+        "  if(s) await _reload(s);\n"
         "  model.on('change:scene_json',async()=>{\n"
         "    const u=model.get('scene_json');\n"
-        "    if(u) await _render(container,u);\n"
+        "    if(u) await _reload(u);\n"
         "  });\n"
         "}\n"
     ).replace("__B64__", wasm_b64)
@@ -182,12 +230,60 @@ class InteractiveChart:
                 _css = (_WASM_DIR / "ferrum-interactive.css").read_text()
                 scene_json = traitlets.Unicode("").tag(sync=True)
                 selection_state = traitlets.Dict({}).tag(sync=True)
+                interaction_config = traitlets.Unicode("{}").tag(sync=True)
+                zoom_state = traitlets.Unicode("{}").tag(sync=True)
 
             w = _FerrumWidget()
             w.scene_json = self._scene_json
+            w.interaction_config = self._extract_interaction_config(self._scene_json)
+            w.observe(self._on_zoom_change, names=["zoom_state"])
             self._widget = w
         except ImportError:
             pass
+
+    def _on_zoom_change(self, change: Any) -> None:
+        """Rebuild the scene with updated domain when the JS zoom state changes."""
+        import json as _json
+        zoom = _json.loads(change.get("new", "{}"))
+        if not zoom:
+            return
+        try:
+            # Apply per-panel xlim/ylim overrides from JS zoom state.
+            new_chart = self._apply_zoom_domains(zoom)
+            new_scene = _render_scene_json(new_chart)
+            if self._widget is not None:
+                self._widget.scene_json = new_scene
+                self._widget.interaction_config = self._extract_interaction_config(new_scene)
+        except Exception as exc:
+            _log.warning("zoom rebuild failed: %s", exc, exc_info=True)
+
+    def _apply_zoom_domains(self, zoom: dict) -> "Chart":
+        """Apply per-panel domain overrides from a zoom_state dict to a cloned chart."""
+        from ferrum.coord import CoordCartesian
+        new_chart = self._chart._clone()
+        # zoom_state structure: {"0": {"x_domain": [lo, hi], "y_domain": [lo, hi]}, ...}
+        panel_zoom = zoom.get("0", zoom)  # single-panel shorthand
+        if not isinstance(panel_zoom, dict):
+            return new_chart
+        x_dom = panel_zoom.get("x_domain")
+        y_dom = panel_zoom.get("y_domain")
+        if x_dom or y_dom:
+            xlim = tuple(x_dom) if x_dom else None
+            ylim = tuple(y_dom) if y_dom else None
+            new_chart = new_chart.coord(CoordCartesian(xlim=xlim, ylim=ylim))
+        return new_chart
+
+    @staticmethod
+    def _extract_interaction_config(scene_json: str) -> str:
+        """Extract the interaction sub-object from a scene JSON string."""
+        import json as _json
+        try:
+            scene = _json.loads(scene_json)
+            interaction = scene.get("interaction", {})
+            return _json.dumps(interaction)
+        except Exception as exc:
+            _log.debug("could not extract interaction config: %s", exc)
+            return "{}"
 
     @property
     def scene_json(self) -> str:

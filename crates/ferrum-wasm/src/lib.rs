@@ -20,12 +20,19 @@ use crate::gpu::GpuContext;
 use crate::pipelines::RenderPipelines;
 use crate::render::GpuBuffers;
 use crate::scene_load::SceneData;
+use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 
 #[wasm_bindgen]
 pub struct WasmRenderer {
     gpu: GpuContext,
     pipelines: RenderPipelines,
     loaded: Option<LoadedScene>,
+    transition: Option<ActiveTransition>,
+}
+
+struct ActiveTransition {
+    old_data: SceneData,
+    new_data: SceneData,
 }
 
 struct LoadedScene {
@@ -44,6 +51,7 @@ impl WasmRenderer {
             gpu,
             pipelines,
             loaded: None,
+            transition: None,
         })
     }
 
@@ -77,6 +85,61 @@ impl WasmRenderer {
                 loaded.data.background,
             )
             .map_err(JsValue::from)?;
+        }
+        Ok(())
+    }
+
+    /// Begin a GPU-interpolated transition between two scene JSON strings.
+    ///
+    /// Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+    /// to drive the animation.  ``start_transition`` does not start the loop —
+    /// the JavaScript caller owns the timing.
+    #[wasm_bindgen(js_name = "startTransition")]
+    pub fn start_transition(
+        &mut self,
+        old_scene_json: &str,
+        new_scene_json: &str,
+    ) -> Result<(), JsValue> {
+        let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
+            .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
+        let new_scene: ferrum_scene::SceneGraph = serde_json::from_str(new_scene_json)
+            .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
+        let old_data = scene_load::load_scene(&old_scene);
+        let new_data = scene_load::load_scene(&new_scene);
+        self.transition = Some(ActiveTransition { old_data, new_data });
+        Ok(())
+    }
+
+    /// Advance the transition to fractional progress ``t`` ∈ [0, 1].
+    ///
+    /// Applies eased interpolation and re-renders the GPU frame.
+    /// When ``t >= 1.0`` the transition state is cleared and the new scene
+    /// is committed as the loaded scene.
+    #[wasm_bindgen(js_name = "tickTransition")]
+    pub fn tick_transition(&mut self, t: f32) -> Result<(), JsValue> {
+        let t_eased = ease_in_out_cubic(t.clamp(0.0, 1.0));
+        if let Some(ref tr) = self.transition {
+            let lerped_circles = lerp_circles(&tr.old_data.circle_instances, &tr.new_data.circle_instances, t_eased);
+            let lerped_rects = lerp_rects(&tr.old_data.rect_instances, &tr.new_data.rect_instances, t_eased);
+            let lerped_data = SceneData {
+                circle_instances: lerped_circles,
+                rect_instances: lerped_rects,
+                mesh_buffers: tr.new_data.mesh_buffers.clone(),
+                text_elements: tr.new_data.text_elements.clone(),
+                image_quads: tr.new_data.image_quads.clone(),
+                background: tr.new_data.background,
+                width: tr.new_data.width,
+                height: tr.new_data.height,
+            };
+            let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
+            render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
+                .map_err(JsValue::from)?;
+            if t >= 1.0 {
+                let final_data = tr.new_data.clone();
+                self.transition = None;
+                let final_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &final_data);
+                self.loaded = Some(LoadedScene { data: final_data, buffers: final_buffers });
+            }
         }
         Ok(())
     }

@@ -26,6 +26,7 @@ pub struct RectInstance {
     pub opacity: f32,
 }
 
+#[derive(Clone)]
 pub struct SceneData {
     pub circle_instances: Vec<CircleInstance>,
     pub rect_instances: Vec<RectInstance>,
@@ -37,6 +38,7 @@ pub struct SceneData {
     pub height: f32,
 }
 
+#[derive(Clone)]
 pub struct TextElementData {
     pub x: f64,
     pub y: f64,
@@ -44,6 +46,7 @@ pub struct TextElementData {
     pub style: TextStyle,
 }
 
+#[derive(Clone)]
 pub struct ImageQuad {
     pub x: f32,
     pub y: f32,

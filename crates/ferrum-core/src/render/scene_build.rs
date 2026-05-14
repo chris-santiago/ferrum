@@ -133,6 +133,14 @@ pub fn build_scene(
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
 
+        // Polar axis: circular boundary + radial tick marks (replaces Cartesian axes)
+        if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+            let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
+            let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
+            let outer_r = (panel.plot_area.w.min(panel.plot_area.h)) / 2.0;
+            axes_nodes.extend(build_polar_axes(cx, cy, outer_r, &scales, theme));
+        }
+
         // Mark batches
         let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -174,7 +182,17 @@ pub fn build_scene(
                 mark_style: &mark_style,
             };
 
-            let result = draw::dispatch_mark_build(&layer.mark, &ctx);
+            let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
+
+            // For CoordPolar, transform Circle/Polyline nodes from Cartesian pixel
+            // space to polar pixel space (arc marks handle their own transform).
+            if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
+                && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
+            {
+                let pa = &panel.plot_area;
+                apply_polar_node_transform(&mut result.nodes, pa.x, pa.y, pa.w, pa.h);
+            }
+
             let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
             mark_batches.push(MarkBatch {
                 kind: result.kind,
@@ -398,4 +416,109 @@ pub fn build_tick_levels(
         x_levels,
         y_levels,
     }
+}
+
+/// Transform Circle and Polyline SceneNodes from Cartesian pixel coordinates
+/// to polar pixel coordinates. Used for mark_point and mark_line under CoordPolar.
+///
+/// Cartesian interpretation: cx → θ (0..2π mapped across plot width),
+/// cy → r (plot height mapped to outer_radius, y-inverted because SVG y grows down).
+fn apply_polar_node_transform(
+    nodes: &mut [SceneNode],
+    plot_x: f64, plot_y: f64, plot_w: f64, plot_h: f64,
+) {
+    use std::f64::consts::TAU;
+    let center_x = plot_x + plot_w / 2.0;
+    let center_y = plot_y + plot_h / 2.0;
+    let outer_r = plot_w.min(plot_h) / 2.0;
+    for node in nodes.iter_mut() {
+        match node {
+            SceneNode::Circle { ref mut cx, ref mut cy, .. } => {
+                let theta = (*cx - plot_x) / plot_w * TAU;
+                let r = (plot_y + plot_h - *cy) / plot_h * outer_r;
+                *cx = center_x + r * theta.sin();
+                *cy = center_y - r * theta.cos();
+            }
+            SceneNode::Polyline { ref mut points, .. } => {
+                for pt in points.iter_mut() {
+                    let theta = (pt.0 - plot_x) / plot_w * TAU;
+                    let r = (plot_y + plot_h - pt.1) / plot_h * outer_r;
+                    pt.0 = center_x + r * theta.sin();
+                    pt.1 = center_y - r * theta.cos();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build polar axis nodes: a circular outer boundary and radial tick marks with labels.
+fn build_polar_axes(
+    cx: f64,
+    cy: f64,
+    outer_r: f64,
+    scales: &scale_resolve::ResolvedScales,
+    theme: &ThemeInputs,
+) -> Vec<SceneNode> {
+    use std::f64::consts::TAU;
+    use ferrum_scene::PathCmd;
+
+    let axis_color = draw::to_scene_color(theme.axis_line_color);
+    let stroke = ferrum_scene::StrokeStyle {
+        color: axis_color,
+        width: theme.axis_line_width,
+        dash: None,
+        opacity: 1.0,
+        stroke_cap: None,
+        stroke_join: None,
+    };
+
+    let mut nodes: Vec<SceneNode> = Vec::new();
+
+    // Circular outer boundary (two 180° arcs to form a full circle).
+    if outer_r > 0.0 {
+        nodes.push(SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: cx - outer_r, y: cy },
+                PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx + outer_r, y: cy },
+                PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx - outer_r, y: cy },
+            ],
+            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None },
+            closed: true,
+        });
+    }
+
+    // Radial tick marks and labels at each x-axis tick position.
+    let (px_lo, px_hi) = scales.x.pixel_range();
+    let px_span = px_hi - px_lo;
+    if px_span.abs() > 0.0 {
+        let ticks = scales.x.tick_data(8);
+        let tick_len = 5.0_f64;
+        let label_pad = 10.0_f64;
+        for tick in &ticks {
+            let theta = (tick.pixel - px_lo) / px_span * TAU;
+            // Radial line from center to outer_r + tick_len
+            let x1 = cx + outer_r * theta.sin();
+            let y1 = cy - outer_r * theta.cos();
+            let x2 = cx + (outer_r + tick_len) * theta.sin();
+            let y2 = cy - (outer_r + tick_len) * theta.cos();
+            nodes.push(SceneNode::Line { x1, y1, x2, y2, style: stroke.clone() });
+
+            // Label outside the tick
+            let lx = cx + (outer_r + label_pad) * theta.sin();
+            let ly = cy - (outer_r + label_pad) * theta.cos();
+            nodes.push(SceneNode::Text {
+                x: lx,
+                y: ly,
+                content: tick.label.clone(),
+                style: draw::to_scene_text_style(
+                    theme.label_color, theme.label_font_size,
+                    crate::layout::TextAnchor::Middle, 0.0,
+                    &theme.font_family, None, None, 1.0,
+                ),
+            });
+        }
+    }
+
+    nodes
 }

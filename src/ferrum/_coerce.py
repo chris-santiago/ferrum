@@ -81,6 +81,10 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         # GeoJSON FeatureCollection detection: split properties→columns, geometry→column.
         if _is_geojson_feature_collection(data):
             return _geojson_to_arrow(data)
+        # Bare Geometry or GeometryCollection: wrap in a synthetic FeatureCollection.
+        if _is_geojson_geometry_root(data):
+            wrapped = _wrap_geometry_as_feature_collection(data)
+            return _geojson_to_arrow(wrapped)
         return pa.Table.from_pydict(data)
     if isinstance(data, list):
         if not data:
@@ -137,6 +141,25 @@ def _is_geojson_feature_collection(data: dict) -> bool:
         data.get("type") == "FeatureCollection"
         and isinstance(data.get("features"), list)
     )
+
+
+_GEOJSON_GEOMETRY_TYPES = frozenset({
+    "Point", "MultiPoint", "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon", "GeometryCollection",
+})
+
+
+def _is_geojson_geometry_root(data: dict) -> bool:
+    """Return True if *data* is a bare GeoJSON Geometry or GeometryCollection."""
+    return data.get("type") in _GEOJSON_GEOMETRY_TYPES
+
+
+def _wrap_geometry_as_feature_collection(geom: dict) -> dict:
+    """Wrap a bare GeoJSON Geometry into a synthetic single-feature FeatureCollection."""
+    return {
+        "type": "FeatureCollection",
+        "features": [{"type": "Feature", "geometry": geom, "properties": {}}],
+    }
 
 
 def _geojson_to_arrow(data: dict) -> "pyarrow.Table":
