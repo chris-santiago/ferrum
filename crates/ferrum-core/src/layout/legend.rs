@@ -111,7 +111,7 @@ const SYMBOL_WIDTH: f64 = 12.0;
 const SYMBOL_LABEL_GAP: f64 = 4.0;
 const LEGEND_OUTER_PAD: f64 = 8.0;
 const LEGEND_ENTRY_ROW_PAD: f64 = 4.0;
-const LEGEND_TITLE_GAP: f64 = 4.0;
+const LEGEND_TITLE_GAP: f64 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LegendSize {
@@ -204,16 +204,33 @@ pub fn layout_legend(
         entries, orient, label_font_size, title, title_font_size, metrics,
     );
 
+    // Add a small gap between the plot area and the legend strip so data
+    // points near the axis edge don't visually merge with legend text.
+    const LEGEND_PLOT_GAP: f64 = 8.0;
+
     let (legend_rect, plot_inner) = match orient {
         LegendOrient::Right => {
             let w = size.width.min(inner.w * 0.5);
-            let (strip, rest) = inner.split_right(w);
-            (strip, rest)
+            let (strip_with_gap, rest) = inner.split_right(w + LEGEND_PLOT_GAP);
+            // Inset the legend rect by the gap on its left side.
+            let legend_rect = crate::layout::Rect {
+                x: strip_with_gap.x + LEGEND_PLOT_GAP,
+                y: strip_with_gap.y,
+                w: strip_with_gap.w - LEGEND_PLOT_GAP,
+                h: strip_with_gap.h,
+            };
+            (legend_rect, rest)
         }
         LegendOrient::Left => {
             let w = size.width.min(inner.w * 0.5);
-            let (strip, rest) = inner.split_left(w);
-            (strip, rest)
+            let (strip_with_gap, rest) = inner.split_left(w + LEGEND_PLOT_GAP);
+            let legend_rect = crate::layout::Rect {
+                x: strip_with_gap.x,
+                y: strip_with_gap.y,
+                w: strip_with_gap.w - LEGEND_PLOT_GAP,
+                h: strip_with_gap.h,
+            };
+            (legend_rect, rest)
         }
         LegendOrient::Top => {
             let h = size.height.min(inner.h * 0.5);
@@ -552,7 +569,8 @@ mod tests {
         let legend = legend.expect("legend should be Some");
         assert_eq!(legend.orient, LegendOrient::Right);
         assert_eq!(legend.direction, LegendDirection::Vertical);
-        assert!((legend.rect.x - (plot_inner.x + plot_inner.w)).abs() < 1e-6);
+        // Legend rect starts LEGEND_PLOT_GAP pixels to the right of the plot area.
+        assert!((legend.rect.x - (plot_inner.x + plot_inner.w) - 8.0).abs() < 1e-6);
         assert!(plot_inner.w < inner.w);
         assert_eq!(plot_inner.h, inner.h);
     }
@@ -565,7 +583,8 @@ mod tests {
         let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0);
         let legend = legend.unwrap();
         assert_eq!(legend.rect.x, inner.x);
-        assert!((plot_inner.x - (inner.x + legend.rect.w)).abs() < 1e-6);
+        // plot area starts LEGEND_PLOT_GAP to the right of the legend rect end.
+        assert!((plot_inner.x - (inner.x + legend.rect.w) - 8.0).abs() < 1e-6);
     }
 
     #[test]
