@@ -422,8 +422,8 @@ def desugar_raster(
     resolution : int or "screen", default "screen"
         Pixel grid resolution.  ``"screen"`` infers from chart dimensions.
     blend : {"alpha", "additive"}, default "alpha"
-        Pixel-level blending mode.  ``"additive"`` emits a ``warn_once``
-        and falls back to ``"alpha"`` (deferred to Phase 11).
+        Pixel-level blending mode.  ``"additive"`` renders with
+        ``mix-blend-mode:screen`` in the SVG output.
     min_count : int or None, default None
         Pixel cells with fewer than ``min_count`` points render as
         transparent.
@@ -650,8 +650,8 @@ def desugar_swarm(
     side : {"both", "left", "right"}, default "both"
         Which side(s) of the category axis to spread points onto.
     dodge : str or None, default None
-        Reserved for future use.  Emits a ``warn_once`` and renders as a
-        single-group swarm (no-op today).
+        Column name to sub-group by within each category band.  Each
+        dodge group is offset side-by-side so groups do not overlap.
 
     Returns
     -------
