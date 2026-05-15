@@ -836,7 +836,7 @@ def _class_balance_chart_from_dataframe(
         .rename({"len": "count"})
         .sort("y")
     )
-    chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count")
+    chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count", color="y")
     chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:
         chart = chart.theme(theme)
