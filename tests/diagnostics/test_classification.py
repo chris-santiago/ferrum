@@ -455,3 +455,27 @@ def test_class_balance_visualizer_xy_signature():
     X = df.select(["f0", "f1", "f2", "f3"])
     viz = ferrum.ClassBalanceVisualizer().fit(X, df["y"])
     assert "<svg" in viz.show().show_svg()
+
+
+# ---------------------------------------------------------------------------
+# Public figure-function smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_classification_report_chart_returns_chart():
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    chart = ferrum.classification_report_chart(model, X, df["y"])
+    assert "<svg" in chart.show_svg()
+
+
+def test_class_balance_chart_returns_chart():
+    df = load_dataset("multiclass_classification")
+    chart = ferrum.class_balance_chart(df["y"])
+    assert "<svg" in chart.show_svg()
+
+
+def test_class_balance_chart_accepts_list():
+    chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
+    assert "<svg" in chart.show_svg()

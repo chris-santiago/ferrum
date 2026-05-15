@@ -2,7 +2,7 @@
 
 Public API
 ----------
-lmplot, residplot, residuals_chart.
+lmplot, residplot, residuals_chart, prediction_error_chart, cooks_distance_chart.
 
 Each public function wraps ``_resolve_source`` (shared across all figure
 functions) and dispatches to a co-located ``_*_from_source`` builder that
@@ -1056,6 +1056,158 @@ def residuals_chart(
         panels=panel_list,
         annotate_metrics=annotate_metrics,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
+
+
+def prediction_error_chart(
+    model_or_source: Any = None,
+    X: Any = None,
+    y: Any = None,
+    *,
+    y_true: Any = None,
+    y_pred: Any = None,
+    identity_line: bool = True,
+    ci: float | None = None,
+    reference_band: bool = False,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Actual-vs-predicted scatter for a regression estimator.
+
+    Plots ``y_true`` on the y axis against ``y_pred`` on the x axis with
+    an optional identity line (``y = x`` diagonal) and an optional
+    residual-based confidence ribbon.
+
+    Parameters
+    ----------
+    model_or_source : estimator or ModelSource
+        A fitted sklearn-compatible regression estimator, an explicit
+        ``ferrum.ModelSource``, or ``None`` when pre-computed arrays are
+        supplied via ``y_true`` / ``y_pred``.
+    X : array-like, optional
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    y : array-like, optional
+        Target vector. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    y_true : array-like, optional
+        Pre-computed true labels. Use with ``y_pred`` to bypass model
+        inference entirely.
+    y_pred : array-like, optional
+        Pre-computed predictions. Use with ``y_true`` to bypass model
+        inference entirely.
+    identity_line : bool, default True
+        Overlay the dashed ``y = x`` diagonal.
+    ci : float or None, default None
+        Confidence level in ``(0, 1)``. When set, overlays a ribbon
+        spanning the central ``ci`` fraction of residuals around the
+        identity line. Raises ``ValueError`` if not in ``(0, 1)``.
+    reference_band : bool, default False
+        When ``True`` (and ``ci`` is ``None``), overlays a ±1 RMSE
+        ribbon around the identity line.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Actual-vs-predicted scatter with optional identity line and
+        confidence ribbon.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.prediction_error_chart(model, X_test, y_test, identity_line=True)
+    """
+    source = _resolve_source(
+        model_or_source, X, y,
+        y_true=y_true, y_pred=y_pred,
+        random_state=random_state,
+    )
+    return _prediction_error_chart_from_source(
+        source,
+        identity_line=identity_line,
+        ci=ci,
+        reference_band=reference_band,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
+
+
+def cooks_distance_chart(
+    model_or_source: Any = None,
+    X: Any = None,
+    y: Any = None,
+    *,
+    threshold: float | str | None = None,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Cook's distance / residuals-vs-leverage diagnostic for a linear estimator.
+
+    Renders the residuals-vs-leverage panel with optional Cook's-distance
+    outlier highlighting. Useful for identifying influential observations
+    in a linear regression fit.
+
+    Parameters
+    ----------
+    model_or_source : estimator or ModelSource
+        A fitted sklearn-compatible regression estimator that exposes
+        ``coef_`` (required for leverage-aware Cook's distance), or an
+        explicit ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    y : array-like, optional
+        Target vector. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    threshold : float, "auto", or None, default None
+        Cook's-distance threshold for outlier highlighting. A float is
+        used as an absolute cutoff; ``"auto"`` applies the ``4 / n``
+        rule (Hair et al.); ``None`` disables highlighting.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Residuals-vs-leverage panel with optional Cook's-distance
+        outlier overlay.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
+    """
+    source = _resolve_source(
+        model_or_source, X, y,
+        random_state=random_state,
+    )
+    return _residuals_chart_from_source(
+        source,
+        kind="studentized",
+        cook_threshold=threshold,
+        panels=["residuals_vs_leverage"],
         mark=mark,
         encode=encode,
         properties=properties,

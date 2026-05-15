@@ -308,3 +308,48 @@ def test_has_score_true_on_prediction_error_visualizer():
 def test_has_score_false_on_unsupervised_visualizer():
     """CooksDistanceVisualizer has no score(); sentinel must be False."""
     assert ferrum.CooksDistanceVisualizer.has_score is False
+
+
+# ---------------------------------------------------------------------------
+# Public figure-function smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_prediction_error_chart_returns_chart():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.prediction_error_chart(model, X, df["y"])
+    assert "<svg" in chart.show_svg()
+
+
+def test_prediction_error_chart_with_ci():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.prediction_error_chart(model, X, df["y"], ci=0.90)
+    assert "<svg" in chart.show_svg()
+
+
+def test_prediction_error_chart_with_reference_band():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.prediction_error_chart(model, X, df["y"], reference_band=True)
+    assert "<svg" in chart.show_svg()
+
+
+def test_cooks_distance_chart_returns_chart():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.cooks_distance_chart(model, X, df["y"])
+    assert "<svg" in chart.show_svg()
+
+
+def test_cooks_distance_chart_with_auto_threshold():
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.cooks_distance_chart(model, X, df["y"], threshold="auto")
+    assert "<svg" in chart.show_svg()

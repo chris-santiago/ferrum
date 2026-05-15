@@ -448,3 +448,38 @@ def test_visualizer_show_before_fit_raises():
     viz = ferrum.SilhouetteVisualizer(model)
     with pytest.raises(RuntimeError, match="must be fit"):
         viz.show()
+
+
+# ---------------------------------------------------------------------------
+# Public figure-function smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_silhouette_chart_figure_function():
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
+    chart = ferrum.silhouette_chart(model, df)
+    assert "<svg" in chart.show_svg()
+
+
+def test_manifold_chart_figure_function():
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
+    chart = ferrum.manifold_chart(model, df, method="pca")
+    assert "<svg" in chart.show_svg()
+
+
+def test_elbow_chart_figure_function():
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    chart = ferrum.elbow_chart(KMeans, df, ks=range(2, 6), random_state=0)
+    assert "<svg" in chart.show_svg()
+
+
+def test_elbow_chart_silhouette_metric():
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    chart = ferrum.elbow_chart(KMeans, df, ks=range(2, 5), metric="silhouette", random_state=0)
+    assert "<svg" in chart.show_svg()

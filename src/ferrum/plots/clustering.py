@@ -2,7 +2,8 @@
 
 Public API
 ----------
-pca_scree_chart, cluster_diagnostics, intercluster_distance_chart.
+pca_scree_chart, cluster_diagnostics, intercluster_distance_chart,
+silhouette_chart, manifold_chart, elbow_chart.
 
 Each public function wraps ``_resolve_source`` (shared across all figure
 functions) and dispatches to a co-located ``_*_from_source`` builder that
@@ -663,3 +664,177 @@ def intercluster_distance_chart(
         layers=layers,
         theme=theme,
     )
+
+
+def silhouette_chart(
+    model_or_source: Any,
+    X: Any = None,
+    *,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Rousseeuw silhouette plot for a fitted clusterer.
+
+    Computes per-sample silhouette coefficients and renders a horizontal
+    bar chart sorted by cluster, one bar per sample, colored by cluster
+    label.
+
+    Parameters
+    ----------
+    model_or_source : fitted clusterer or ModelSource
+        A fitted sklearn-compatible clustering estimator that exposes
+        ``labels_``, or an explicit ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Horizontal silhouette bar chart with per-cluster color encoding.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> fm.silhouette_chart(KMeans(n_clusters=3, random_state=0).fit(X), X)
+    """
+    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    return _silhouette_chart_from_source(
+        source,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
+
+
+def manifold_chart(
+    model_or_source: Any,
+    X: Any = None,
+    *,
+    method: str = "umap",
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Low-dimensional manifold-embedding scatter (UMAP / t-SNE / PCA).
+
+    Projects the input data to two dimensions via the selected embedding
+    algorithm and renders a point chart with axes ``dim_0`` / ``dim_1``
+    colored by cluster label.
+
+    Parameters
+    ----------
+    model_or_source : fitted clusterer or ModelSource
+        A fitted clustering estimator whose ``labels_`` attribute colors
+        the points, or an explicit ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    method : str, default "umap"
+        Embedding algorithm. Typical values are ``"umap"``, ``"tsne"``,
+        and ``"pca"``.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource`` for stochastic embeddings.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        2-D scatter plot of the embedded data, colored by cluster label.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> fm.manifold_chart(KMeans(n_clusters=4, random_state=0).fit(X), X, method="tsne")
+    """
+    import ferrum
+
+    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    emb = source.embeddings(method=method)
+    chart = (
+        ferrum.Chart(emb)
+        .mark_point()
+        .encode(x="dim_0", y="dim_1", color="label")
+    )
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
+
+
+def elbow_chart(
+    model_class: Any,
+    X: Any,
+    *,
+    ks: Any,
+    metric: str = "distortion",
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Elbow / score sweep over a range of k for a clustering algorithm.
+
+    Fits one model per k value and plots the selected score metric against
+    k. Useful for identifying the optimal number of clusters visually.
+
+    Parameters
+    ----------
+    model_class : type
+        Uninstantiated clustering class (e.g. ``sklearn.cluster.KMeans``).
+        Must accept ``n_clusters``, ``random_state``, and ``n_init`` keyword
+        arguments.
+    X : array-like
+        Feature matrix used to fit each per-k model.
+    ks : sequence of int
+        The candidate k values to sweep (e.g. ``range(2, 11)``).
+    metric : {"distortion", "silhouette", "calinski_harabasz"}, default "distortion"
+        Score to optimize. ``"distortion"`` is minimized; ``"silhouette"``
+        and ``"calinski_harabasz"`` are maximized.
+    random_state : int or None, default None
+        Seed passed to every per-k model instantiation.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Score-vs-k line chart with the optimal k annotated.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.cluster import KMeans
+    >>> fm.elbow_chart(KMeans, X_train, ks=range(2, 9))
+    """
+    from ferrum._diagnostics.visualizers.clustering import ElbowVisualizer
+
+    viz = ElbowVisualizer(
+        model_class,
+        ks=ks,
+        metric=metric,
+        random_state=random_state,
+        theme=theme,
+    ).fit(X)
+
+    chart = viz._chart
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+    return chart
