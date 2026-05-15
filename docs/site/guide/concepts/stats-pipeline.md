@@ -4,7 +4,8 @@ In most Python visualization workflows, statistical computation lives outside th
 
 The plot is the easy step. The pre-processing dominates the code.
 
-Ferrum reverses that arrangement. Statistical transforms are first-class operations inside the chart specification, executed by the engine before rendering. You declare intent — *bin this field*, *smooth this series*, *show a 95% confidence band* — and the engine computes the result in Rust as part of the build.
+!!! tip "Declare intent, not procedure"
+    Ferrum reverses that arrangement. Statistical transforms are first-class operations inside the chart specification, executed by the engine before rendering. You declare intent — *bin this field*, *smooth this series*, *show a 95% confidence band* — and the engine computes the result in Rust as part of the build.
 
 ## Why this is a structural choice
 
