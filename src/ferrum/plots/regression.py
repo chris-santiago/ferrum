@@ -534,17 +534,21 @@ def lmplot(
     # When truncate=True (default) x_range stays None → clips to observed data.
     x_range = None
     if not truncate:
-        # Compute the data-column extent here so lmplot does not need a
+        # Compute the axis-domain extent here so lmplot does not need a
         # provisional scale pass. The Rust Smooth/Robust transform will
         # evaluate the fit line over [x_min, x_max] of the full dataset
         # regardless of which rows each facet panel sees.
+        # seaborn behaviour: extend to the axis limits, which are the data
+        # range padded by 5% on each side (matching the typical auto-scale margin).
         try:
-            import polars as pl
             _df = data.collect() if hasattr(data, "collect") else data
             x_col_name = x.field if hasattr(x, "field") else str(x)
             if hasattr(_df, "to_arrow"):
                 _x_series = _df[x_col_name]
-                x_range = [float(_x_series.min()), float(_x_series.max())]
+                _x_min = float(_x_series.min())
+                _x_max = float(_x_series.max())
+                _margin = (_x_max - _x_min) * 0.05
+                x_range = [_x_min - _margin, _x_max + _margin]
         except (AttributeError, KeyError):
             x_range = None
 
@@ -583,13 +587,19 @@ def lmplot(
                     x_bins=x_bins,
                     x_estimator=x_estimator,
                     groupby=hue_col,
+                    **({"x_range": x_range} if x_range is not None else {}),
                 )
                 .encode(x=x, y=y, color=hue)
             )
         else:
             fit = (
                 Chart(data)
-                .mark_smooth(method="loess", ci=ci_frac, groupby=hue_col)
+                .mark_smooth(
+                    method="loess",
+                    ci=ci_frac,
+                    groupby=hue_col,
+                    **({"x_range": x_range} if x_range is not None else {}),
+                )
                 .encode(x=x, y=y, color=hue)
             )
     elif method == "lm":
@@ -602,11 +612,20 @@ def lmplot(
                 x_bins=x_bins,
                 x_estimator=x_estimator,
                 show_metrics=metrics_applied,
+                **({"x_range": x_range} if x_range is not None else {}),
             )
             .encode(x=x, y=y)
         )
     elif method == "loess":
-        fit = Chart(data).mark_smooth(method="loess", ci=ci_frac).encode(x=x, y=y)
+        fit = (
+            Chart(data)
+            .mark_smooth(
+                method="loess",
+                ci=ci_frac,
+                **({"x_range": x_range} if x_range is not None else {}),
+            )
+            .encode(x=x, y=y)
+        )
     elif method == "logistic":
         fit = (
             Chart(data)
