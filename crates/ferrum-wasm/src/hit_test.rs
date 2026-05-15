@@ -11,13 +11,19 @@ pub fn hit_test(
     panels: &[ferrum_scene::Panel],
     x: f64,
     y: f64,
+    zoom: &crate::zoom_pan::ZoomPanState,
 ) -> Option<HitResult> {
-    for panel in panels.iter().rev() {
-        if !rect_contains(&panel.plot_area, x, y) {
+    for (panel_pos, panel) in panels.iter().enumerate().rev() {
+        // Map the click from visual (post-zoom) pixel space back to scene pixel space.
+        let (px, py) = zoom.transforms
+            .get(panel_pos)
+            .map(|t| t.inverse_apply(x, y))
+            .unwrap_or((x, y));
+        if !rect_contains(&panel.plot_area, px, py) {
             continue;
         }
         for (bi, batch) in panel.marks.iter().enumerate().rev() {
-            if let Some(ni) = hit_test_batch(batch, panel, x, y) {
+            if let Some(ni) = hit_test_batch(batch, panel, px, py) {
                 let data_idx = batch
                     .data_indices
                     .as_ref()
@@ -38,14 +44,20 @@ pub fn hit_test_nearest(
     panels: &[ferrum_scene::Panel],
     x: f64,
     y: f64,
+    zoom: &crate::zoom_pan::ZoomPanState,
 ) -> Option<HitResult> {
     let mut best: Option<(f64, HitResult)> = None;
-    for panel in panels.iter() {
-        if !rect_contains(&panel.plot_area, x, y) {
+    for (panel_pos, panel) in panels.iter().enumerate() {
+        // Map the click from visual (post-zoom) pixel space back to scene pixel space.
+        let (px, py) = zoom.transforms
+            .get(panel_pos)
+            .map(|t| t.inverse_apply(x, y))
+            .unwrap_or((x, y));
+        if !rect_contains(&panel.plot_area, px, py) {
             continue;
         }
         for (bi, batch) in panel.marks.iter().enumerate() {
-            if let Some((ni, dist)) = nearest_in_batch(batch, x, y) {
+            if let Some((ni, dist)) = nearest_in_batch(batch, px, py) {
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {
                     let data_idx = batch

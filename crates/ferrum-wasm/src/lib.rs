@@ -204,6 +204,7 @@ impl WasmRenderer {
             &self.selections,
             x as f64,
             y as f64,
+            &self.zoom,
         );
 
         // Apply conditional encodings to produce dimmed/highlighted instance colors.

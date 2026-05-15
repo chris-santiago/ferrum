@@ -54,8 +54,9 @@ impl InteractionState {
         specs: &[SelectionSpec],
         x: f64,
         y: f64,
+        zoom: &crate::zoom_pan::ZoomPanState,
     ) {
-        let hit = hit_test::hit_test(panels, x, y);
+        let hit = hit_test::hit_test(panels, x, y, zoom);
 
         for spec in specs {
             match spec {
@@ -131,8 +132,9 @@ impl InteractionState {
         panels: &[ferrum_scene::Panel],
         x: f64,
         y: f64,
+        zoom: &crate::zoom_pan::ZoomPanState,
     ) -> Option<&HitResult> {
-        self.hover = hit_test::hit_test(panels, x, y);
+        self.hover = hit_test::hit_test(panels, x, y, zoom);
         self.hover.as_ref()
     }
 
@@ -354,7 +356,8 @@ mod tests {
             SelectionState::Point { indices: vec![0, 1], field_values: Vec::new() },
         );
         // Click on empty panels (no marks) — simulates a background click.
-        state.handle_click(&[], &specs, 50.0, 50.0);
+        let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
+        state.handle_click(&[], &specs, 50.0, 50.0, &zoom);
         assert!(
             matches!(state.selections.get("sel1"), Some(SelectionState::Empty)),
             "background click must deselect to Empty"
@@ -365,7 +368,8 @@ mod tests {
     fn background_click_with_no_prior_selection_stays_empty() {
         let specs = vec![point_spec("s")];
         let mut state = InteractionState::new(&specs);
-        state.handle_click(&[], &specs, 0.0, 0.0);
+        let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
+        state.handle_click(&[], &specs, 0.0, 0.0, &zoom);
         assert!(matches!(state.selections.get("s"), Some(SelectionState::Empty)));
     }
 
