@@ -467,6 +467,23 @@ class Chart:
         new = self._clone()
         new._pending_stat_mark = None
 
+        # swarm: Rust swarm transform requires the value column to be Float64.
+        # Cast it here where we have both encoding (value field name) and data.
+        if kind == "swarm":
+            try:
+                import polars as pl
+                orient = kwargs.get("orient", "vertical")
+                value_field = y_field if orient != "horizontal" else x_field
+                if (value_field and new._data is not None
+                        and isinstance(new._data, pl.DataFrame)
+                        and value_field in new._data.columns
+                        and new._data[value_field].dtype != pl.Float64):
+                    new._data = new._data.with_columns(
+                        pl.col(value_field).cast(pl.Float64)
+                    )
+            except Exception:
+                pass
+
         # Build a scatter layer from the prior mark if present.
         _prior_layer = None
         if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
@@ -1799,6 +1816,21 @@ class Chart:
                 tbl = to_arrow_table(data_source)
                 if x_field_name in tbl.column_names:
                     parent_x_data = tbl[x_field_name]
+            except Exception:
+                pass
+        elif x_enc is None and data_source is not None and domain is None:
+            # Encoding not set yet (mark_function called before .encode()).
+            # Infer domain from the first numeric column in the chart's data.
+            try:
+                import pyarrow as pa
+                from ferrum._coerce import to_arrow_table
+
+                tbl = to_arrow_table(data_source)
+                for _col_name in tbl.column_names:
+                    _col = tbl[_col_name]
+                    if pa.types.is_floating(_col.type) or pa.types.is_integer(_col.type):
+                        parent_x_data = _col
+                        break
             except Exception:
                 pass
 
@@ -4603,8 +4635,11 @@ class Chart:
 
     def _render_inputs(self) -> tuple:
         # Shared render plumbing for show_svg / show_png: spec, data, viewport, theme.
+        # Use the resolved chart's _data (not self._data) so that any dtype casts
+        # applied in _resolve_pending (e.g. swarm value column → Float64) take effect.
+        resolved = self._resolve_pending()
         spec = self.to_spec()
-        data = to_arrow_table(self._data)
+        data = to_arrow_table(resolved._data)
         viewport = (self._width or 600.0, self._height or 400.0)
         theme_dict = self._theme.to_theme_inputs_dict() if self._theme else {}
         return spec, data, viewport, theme_dict
