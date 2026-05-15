@@ -30,6 +30,16 @@ Split by domain and run three agents in parallel. Each reads every file in scope
 - Parameters that immediately `raise ValueError` for any non-default value (signature promises, implementation refuses)
 - `if False:` or hardcoded-`False` branch guards on feature paths
 
+### Verification required before reporting — do not skip this step
+
+Comments saying `"Reserved for future use"`, `"no-op today"`, `"deferred"`, or `"accepted but not yet wired"` are **candidates**, not confirmed gaps. Before reporting any such comment as a finding, verify the actual code path:
+
+1. **Python kwargs:** does the kwarg appear in `to_mark_kwargs_dict()`? Does a matching field exist in `MarkKwargsSpec`? Does the Rust renderer read that field and produce a visual effect?
+2. **Python channels:** is the channel in `_SILENT_CHANNELS`, or does it have a rendering path in the SVG/WASM renderer?
+3. **Rust comments:** does the function/field/arm still match the "no-op" description, or has the implementation been added since the comment was written?
+
+If the implementation exists and is wired end-to-end, classify the finding as `STALE_COMMENT` (comment no longer matches code), not `SILENT_DROP`. Stale comments are low-severity cleanup, not bugs. Reporting an implemented kwarg as a gap wastes remediation effort and creates false urgency.
+
 ## Rust Patterns
 
 **Obvious:** `todo!()`, `unimplemented!()`, `// TODO`, `// FIXME`.
@@ -62,10 +72,13 @@ Each agent returns structured findings:
 ```
 FILE: <path>
 LINE: <number>
-TYPE: [TODO | FIXME | STUB | todo!() | SILENT_DROP | DEAD_PARAM | SKIP | SPEC_GAP | other]
+TYPE: [TODO | FIXME | STUB | todo!() | SILENT_DROP | DEAD_PARAM | SKIP | SPEC_GAP | STALE_COMMENT | other]
 COMMENT/CODE: <exact text>
-WHAT'S MISSING: <one sentence>
+WHAT'S MISSING: <one sentence — or for STALE_COMMENT: "Comment says X but code already does Y">
+VERIFIED: <yes — traced code path | no — comment only>
 ```
+
+`STALE_COMMENT` is for comments/docstrings that describe absent behavior but the implementation is already present. Do not promote a `STALE_COMMENT` to a higher-severity type without code-path verification.
 
 ## Synthesis
 
