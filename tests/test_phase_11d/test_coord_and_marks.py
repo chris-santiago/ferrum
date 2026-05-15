@@ -129,6 +129,39 @@ def test_mark_label_spec_round_trip(label_df):
     assert j["mark"] == "label"
 
 
+def test_mark_label_dense_no_crash():
+    """Dense, tightly-clustered labels must render without error.
+
+    The collision-avoidance algorithm must not raise or produce invalid SVG
+    even when no perfect non-overlapping placement exists.  Each label text
+    value must appear exactly once in the SVG output.
+    """
+    labels = list("abcdefghi")
+    df = pl.DataFrame({
+        "x": pl.Series([1.0, 1.05, 1.1, 1.15, 2.0, 2.05, 2.1, 2.15, 3.0]),
+        "y": pl.Series([1.0, 1.05, 1.1, 1.15, 2.0, 2.05, 2.1, 2.15, 3.0]),
+        "label": labels,
+    })
+    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").show_svg()
+    assert "<svg" in svg
+    # Each single-character label must appear in the SVG as label text content.
+    for lbl in labels:
+        assert f">{lbl}<" in svg, f"label '{lbl}' missing from SVG"
+
+
+def test_mark_label_manual_override_bypasses_avoidance(label_df):
+    """When both dx and dy are provided, all labels use those fixed offsets.
+
+    The SVG must contain every label text value and render without error.
+    """
+    svg = fm.Chart(label_df).mark_label(dx=5.0, dy=-15.0).encode(
+        x="x", y="y", text="label"
+    ).show_svg()
+    assert "<svg" in svg
+    for lbl in ("first", "second", "third"):
+        assert f">{lbl}<" in svg, f"label '{lbl}' missing from SVG"
+
+
 # ── CoordGeo + mark_geoshape ───────────────────────────────────────────────
 
 MINIMAL_GEOJSON = {
@@ -179,13 +212,62 @@ def test_mark_geoshape_spec_round_trip():
     assert j["coord"]["projection"] == "mercator"
 
 
-# ── mark_image coord-awareness ────────────────────────────────────────────
+# ── mark_label collision avoidance ────────────────────────────────────────
 
-def test_mark_image_callable_without_error():
-    """mark_image must be callable (no longer raises NotImplementedError)."""
-    df = pl.DataFrame({"x": [1.0], "y": [1.0], "url": ["data:image/png;base64,iVBORw0KGgo="]})
-    chart = fm.Chart(df).mark_image()
-    assert chart is not None
+def test_mark_label_collision_avoidance_produces_spread_positions():
+    """Dense labels must not all share the same y-offset.
+
+    Naive placement (fixed dy=-8) would give every label the same y. With
+    collision avoidance, at least some labels must be placed at a different
+    y position (above, below, or diagonally repositioned).
+    """
+    import re
+    labels = list("abcdefgh")
+    df = pl.DataFrame({
+        "x": pl.Series([1.0] * 8),  # all same x — maximally dense
+        "y": pl.Series([2.0] * 8),  # all same y — maximally dense
+        "label": labels,
+    })
+    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").show_svg()
+    # Extract y coordinates of <text> elements — match only numeric y="NNN.NNN" values
+    y_vals = [float(m) for m in re.findall(r'<text[^>]+\by="(-?[\d.]+)"', svg)]
+    # With 8 labels at the same point, collision avoidance must place them
+    # at more than one distinct y position (naive would have only 1 unique y).
+    unique_y = set(round(v, 1) for v in y_vals)
+    assert len(unique_y) > 1, (
+        f"All labels landed at the same y — collision avoidance may not be working. "
+        f"y positions: {sorted(unique_y)}"
+    )
+
+
+# ── mark_image URL tiles ───────────────────────────────────────────────────
+
+# Minimal valid 1×1 red PNG encoded as base64.
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADklEQVQI12P4z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+def test_mark_image_url_tiles_render_image_elements():
+    """mark_image with url encoding must emit <image> elements in the SVG."""
+    df = pl.DataFrame({
+        "x": [1.0, 3.0, 5.0],
+        "y": [2.0, 4.0, 2.0],
+        "url": [f"data:image/png;base64,{_TINY_PNG_B64}"] * 3,
+    })
+    svg = fm.Chart(df).mark_image().encode(x="x:Q", y="y:Q", url="url").show_svg()
+    assert "<svg" in svg
+    assert "<image" in svg, "Expected <image> elements in SVG for mark_image URL tiles"
+
+
+def test_mark_raster_still_works_after_image_rewrite():
+    """mark_raster must continue rendering <image> elements (regression for image.rs rewrite)."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({"x": rng.uniform(0, 10, 300).tolist(), "y": rng.uniform(0, 10, 300).tolist()})
+    svg = fm.Chart(df).mark_raster().encode(x="x:Q", y="y:Q").show_svg()
+    assert "<svg" in svg
+    assert "<image" in svg, "mark_raster must still produce an <image> element after image.rs rewrite"
 
 
 # ── String back-compat ─────────────────────────────────────────────────────
