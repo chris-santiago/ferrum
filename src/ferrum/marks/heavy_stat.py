@@ -577,7 +577,7 @@ def desugar_hex(
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
-    mk: dict = {"detail": "hex_id"}
+    mk: dict = {"detail": "hex_id", "opacity": 1.0}
     if cmap is not None:
         mk["cmap"] = cmap
     layers = [
