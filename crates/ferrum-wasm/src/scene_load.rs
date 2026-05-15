@@ -475,6 +475,7 @@ mod tests {
             stroke_width: 2.0,
             opacity: 1.0,
             stroke_opacity: 0.5,
+            fill_opacity: 1.0,
             stroke_dash: Some(vec![6.0, 3.0]), // index 1 = dashed
             angle: 45.0,
         };
@@ -514,6 +515,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         let data = load_scene(&scene);
@@ -538,6 +540,7 @@ mod tests {
             stroke_width: 1.0,
             opacity: 0.9,
             stroke_opacity: 0.75,
+            fill_opacity: 1.0,
             stroke_dash: Some(vec![2.0, 3.0]), // index 2 = dotted
             angle: 30.0,
         };
@@ -579,6 +582,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         let data = load_scene(&scene);
@@ -627,6 +631,7 @@ mod tests {
             stroke_width: 0.0,
             opacity: 1.0,
             stroke_opacity: 1.0, // default
+            fill_opacity: 1.0,   // default
             stroke_dash: None,   // solid → 0.0
             angle: 0.0,          // default
         };
@@ -666,6 +671,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         let data = load_scene(&scene);
@@ -673,5 +679,217 @@ mod tests {
         assert!((ci.stroke_opacity - 1.0).abs() < 1e-6, "default stroke_opacity is 1.0");
         assert!((ci.stroke_dash - 0.0).abs() < 1e-6, "default stroke_dash is 0.0 (solid)");
         assert!((ci.angle - 0.0).abs() < 1e-6, "default angle is 0.0");
+    }
+
+    // ── Polygon tessellation regression tests ─────────────────────────
+    //
+    // These test the exact code path that the WASM interactive renderer
+    // uses for hexbin and geoshape marks: SceneNode::Polygon → lyon
+    // tessellation → mesh vertex/index buffers. If tessellation produces
+    // zero vertices, the GPU renders nothing (the "empty hex" bug).
+
+    fn make_scene_with_polygons(nodes: Vec<SceneNode>) -> SceneGraph {
+        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Polygon,
+                    nodes,
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    fn hex_polygon(cx: f64, cy: f64, r: f64) -> SceneNode {
+        let ring: Vec<[f64; 2]> = (0..6)
+            .map(|i| {
+                let angle = std::f64::consts::FRAC_PI_3 * i as f64;
+                [cx + r * angle.cos(), cy + r * angle.sin()]
+            })
+            .collect();
+        SceneNode::Polygon {
+            rings: vec![ring],
+            style: FillStroke {
+                fill: Some(Color { r: 100, g: 150, b: 200, a: 255 }),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn polygon_tessellation_produces_nonzero_mesh() {
+        let scene = make_scene_with_polygons(vec![
+            hex_polygon(200.0, 200.0, 20.0),
+        ]);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "polygon tessellation must produce vertices"
+        );
+        assert!(
+            !data.mesh_buffers.indices.is_empty(),
+            "polygon tessellation must produce indices"
+        );
+        assert!(
+            data.mesh_buffers.indices.len() >= 3,
+            "polygon must tessellate to at least one triangle"
+        );
+    }
+
+    #[test]
+    fn multiple_hex_polygons_all_tessellate() {
+        let nodes: Vec<SceneNode> = (0..20)
+            .map(|i| {
+                let row = i / 5;
+                let col = i % 5;
+                let cx = 100.0 + col as f64 * 40.0;
+                let cy = 100.0 + row as f64 * 40.0;
+                hex_polygon(cx, cy, 15.0)
+            })
+            .collect();
+        let scene = make_scene_with_polygons(nodes);
+        let data = load_scene(&scene);
+        // 20 hexagons × 4 triangles each (fan tessellation of a 6-gon) = 80
+        // triangles minimum. Each triangle = 3 indices.
+        assert!(
+            data.mesh_buffers.indices.len() >= 20 * 3 * 3,
+            "20 hex polygons must produce ≥180 indices; got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    #[test]
+    fn polygon_with_hole_tessellates() {
+        let exterior = vec![
+            [100.0, 100.0], [300.0, 100.0], [300.0, 300.0], [100.0, 300.0],
+        ];
+        let hole = vec![
+            [150.0, 150.0], [250.0, 150.0], [250.0, 250.0], [150.0, 250.0],
+        ];
+        let node = SceneNode::Polygon {
+            rings: vec![exterior, hole],
+            style: FillStroke {
+                fill: Some(Color { r: 50, g: 100, b: 150, a: 255 }),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+        };
+        let scene = make_scene_with_polygons(vec![node]);
+        let data = load_scene(&scene);
+        assert!(
+            data.mesh_buffers.vertices.len() >= 8,
+            "polygon with hole must tessellate to ≥8 vertices; got {}",
+            data.mesh_buffers.vertices.len()
+        );
+    }
+
+    #[test]
+    fn polygon_no_fill_produces_no_fill_triangles() {
+        let node = SceneNode::Polygon {
+            rings: vec![vec![
+                [100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0],
+            ]],
+            style: FillStroke {
+                fill: None,
+                stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+                stroke_width: 2.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+        };
+        let scene = make_scene_with_polygons(vec![node]);
+        let data = load_scene(&scene);
+        // Stroke-only polygon still produces mesh vertices (stroke tessellation),
+        // but we mainly want to ensure it doesn't panic.
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "stroke-only polygon must still produce stroke mesh vertices"
+        );
+    }
+
+    #[test]
+    fn polygon_vertices_are_finite() {
+        let nodes: Vec<SceneNode> = (0..5)
+            .map(|i| hex_polygon(100.0 + i as f64 * 60.0, 200.0, 20.0))
+            .collect();
+        let scene = make_scene_with_polygons(nodes);
+        let data = load_scene(&scene);
+        for (i, v) in data.mesh_buffers.vertices.iter().enumerate() {
+            assert!(
+                v.position[0].is_finite() && v.position[1].is_finite(),
+                "mesh vertex {i} has non-finite position: {:?}",
+                v.position
+            );
+            for c in &v.color {
+                assert!(c.is_finite(), "mesh vertex {i} has non-finite color component");
+            }
+        }
+    }
+
+    #[test]
+    fn degenerate_polygon_does_not_panic() {
+        // 2-point "polygon" — should be skipped gracefully, not panic.
+        let node = SceneNode::Polygon {
+            rings: vec![vec![[100.0, 100.0], [200.0, 200.0]]],
+            style: FillStroke {
+                fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+        };
+        let scene = make_scene_with_polygons(vec![node]);
+        let data = load_scene(&scene);
+        // Degenerate polygon with <3 points should be skipped.
+        assert!(
+            data.mesh_buffers.vertices.is_empty(),
+            "degenerate 2-point polygon should produce zero mesh vertices"
+        );
     }
 }

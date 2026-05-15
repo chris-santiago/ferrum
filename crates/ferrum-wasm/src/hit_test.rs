@@ -355,6 +355,7 @@ mod bug_hunt_tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
         }
@@ -391,6 +392,7 @@ mod bug_hunt_tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
             corner_radius: 0.0,
@@ -416,6 +418,7 @@ mod bug_hunt_tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
             corner_radius: 0.0,
@@ -486,6 +489,7 @@ mod bug_hunt_tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
             corner_radius: 0.0,
@@ -505,6 +509,7 @@ mod bug_hunt_tests {
             opacity: 1.0,
             stroke_dash: None,
             stroke_opacity: 1.0,
+            fill_opacity: 1.0,
             angle: 0.0,
         };
         vec![Panel {
@@ -639,6 +644,7 @@ mod bug_hunt_tests {
             opacity: 1.0,
             stroke_dash: None,
             stroke_opacity: 1.0,
+            fill_opacity: 1.0,
             angle: 0.0,
         }
     }
@@ -796,6 +802,7 @@ mod bug_hunt_tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
             closed: true,
@@ -964,6 +971,7 @@ mod tests {
             opacity: 1.0,
             stroke_dash: None,
             stroke_opacity: 1.0,
+            fill_opacity: 1.0,
             angle: 0.0,
         }
     }
@@ -1097,6 +1105,7 @@ mod tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
         }];
@@ -1118,6 +1127,7 @@ mod tests {
                 opacity: 1.0,
                 stroke_dash: None,
                 stroke_opacity: 1.0,
+                fill_opacity: 1.0,
                 angle: 0.0,
             },
             corner_radius: 0.0,

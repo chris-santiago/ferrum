@@ -961,3 +961,55 @@ class TestChartDataNoneSVGRendering:
         chart = fm.Chart(data=None).mark_point().encode(x="x", y="y")
         with pytest.raises(Exception):
             chart.show_svg()
+
+
+# ---------------------------------------------------------------------------
+# G1: chart-level description → <desc> in root SVG
+# ---------------------------------------------------------------------------
+
+
+class TestChartDescription:
+    """Tests for properties(description=...) emitting <desc> in the root SVG."""
+
+    def _base_chart(self, df: pl.DataFrame | None = None) -> "fm.Chart":
+        if df is None:
+            df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        return fm.Chart(df).mark_point().encode(x="x", y="y")
+
+    def test_description_emitted_as_desc_element(self):
+        """properties(description=...) emits <desc>...</desc> inside the root <svg>."""
+        svg = self._base_chart().properties(description="Test description").show_svg()
+        assert "<desc>Test description</desc>" in svg, (
+            f"Expected '<desc>Test description</desc>' in SVG; got:\n{svg[:500]}"
+        )
+
+    def test_description_appears_near_start_of_svg(self):
+        """<desc> is a direct child of <svg>, before any mark geometry."""
+        svg = self._base_chart().properties(description="Accessibility text").show_svg()
+        svg_open = svg.index("<svg ")
+        desc_pos = svg.index("<desc>")
+        first_circle = svg.find("<circle")
+        assert desc_pos > svg_open, "<desc> must come after <svg> opening tag"
+        assert first_circle == -1 or desc_pos < first_circle, (
+            "<desc> should appear before mark geometry"
+        )
+
+    def test_description_xml_escaped(self):
+        """Special XML characters in description are escaped correctly."""
+        svg = self._base_chart().properties(description="A & B <test>").show_svg()
+        # XML-escaped form
+        assert "A &amp; B &lt;test&gt;" in svg, (
+            f"Expected XML-escaped description in SVG; got:\n{svg[:500]}"
+        )
+        # Raw angle-brackets must not appear inside <desc>
+        assert "<desc>A & B <test></desc>" not in svg
+
+    def test_no_description_emits_no_root_desc(self):
+        """A chart without .properties(description=) emits no <desc> at root level."""
+        svg = self._base_chart().show_svg()
+        # There must be no chart-level <desc>; per-mark descriptions are inside <g> wrappers,
+        # not at the root level immediately after <svg>.
+        # The simplest check: no <desc> element at all.
+        assert "<desc>" not in svg, (
+            f"Expected no <desc> in SVG when description is not set; got:\n{svg[:500]}"
+        )

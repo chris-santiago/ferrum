@@ -224,6 +224,9 @@ mod tests {
             stroke_width: 1.5,
             opacity: 1.0,
             stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
         };
         assert!(style.fill.is_none(), "hollow point must have no fill");
         assert!(style.stroke.is_some(), "hollow point must have stroke color");
@@ -241,6 +244,9 @@ mod tests {
                 stroke_width: 0.0,
                 opacity: op,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
             };
             assert!(style.opacity >= 0.0 && style.opacity <= 1.0,
                 "opacity must be in [0,1], got {}", style.opacity);

@@ -20,6 +20,9 @@ mod tests {
             stroke_width: 0.0,
             opacity: 1.0,
             stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
         }
     }
 
@@ -57,6 +60,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: Default::default(),
+            chart_description: None,
         };
         let json = serde_json::to_string(&scene).expect("serialize");
         let back: SceneGraph = serde_json::from_str(&json).expect("deserialize");
@@ -77,6 +81,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: Default::default(),
+            chart_description: None,
         };
         let json = serde_json::to_string(&scene).expect("serialize");
         let back: SceneGraph = serde_json::from_str(&json).expect("deserialize");
@@ -259,6 +264,9 @@ mod tests {
             stroke_width: 1.5,
             opacity: 0.7,
             stroke_dash: Some(vec![4.0, 2.0]),
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
         };
         let json = serde_json::to_string(&fs).expect("serialize");
         let back: FillStroke = serde_json::from_str(&json).expect("deserialize");

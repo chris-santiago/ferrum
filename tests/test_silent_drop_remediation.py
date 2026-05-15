@@ -881,3 +881,121 @@ class TestAngleSVG:
         # rows 1 and 2 have angle=45, 90 → rotates should appear
         assert "rotate(45" in svg, "Expected rotate(45 ...) for row 1"
         assert "rotate(90" in svg, "Expected rotate(90 ...) for row 2"
+
+
+class TestFillOpacitySVG:
+    """fill_opacity is a renderer-honored channel that emits SVG fill-opacity attributes.
+
+    It is distinct from opacity, which bakes transparency into the fill RGBA alpha.
+    """
+
+    def test_fill_opacity_not_in_silent_channels(self):
+        """fill_opacity must not be in _SILENT_CHANNELS after promotion."""
+        from ferrum.chart import _SILENT_CHANNELS
+        assert "fill_opacity" not in _SILENT_CHANNELS, (
+            "fill_opacity should have been removed from _SILENT_CHANNELS"
+        )
+
+    def test_fill_opacity_in_renderer_honored_channels(self):
+        """fill_opacity must be in _RENDERER_HONORED_CHANNELS."""
+        from ferrum.chart import _RENDERER_HONORED_CHANNELS
+        assert "fill_opacity" in _RENDERER_HONORED_CHANNELS, (
+            "fill_opacity must be in _RENDERER_HONORED_CHANNELS"
+        )
+
+    def test_scatter_fill_opacity_emits_attribute(self):
+        """encode(fill_opacity='fo') → SVG circles carry fill-opacity attributes."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [0.3, 0.6, 0.9],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        assert "fill-opacity" in svg, (
+            "Expected fill-opacity attribute in SVG; got:\n" + svg[:2000]
+        )
+
+    def test_scatter_fill_opacity_values_vary_per_row(self):
+        """Distinct fill_opacity column values → multiple fill-opacity values in SVG."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [0.3, 0.6, 0.9],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        vals = re.findall(r'fill-opacity="([^"]+)"', svg)
+        float_vals = [float(v) for v in vals]
+        per_row_vals = [v for v in float_vals if v < 1.0]
+        assert len(per_row_vals) >= 3, (
+            f"Expected at least 3 distinct fill-opacity values; got {per_row_vals}"
+        )
+
+    def test_fill_opacity_1_does_not_emit_attribute(self):
+        """fill_opacity=1.0 (default) → no fill-opacity attribute emitted."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [1.0, 1.0, 1.0],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "fill-opacity" not in svg, (
+            "fill-opacity=1.0 should not emit attribute; got:\n" + svg[:2000]
+        )
+
+    def test_fill_opacity_and_opacity_coexist(self):
+        """fill_opacity and opacity can both be encoded simultaneously.
+
+        opacity bakes into RGBA alpha on the fill color.
+        fill_opacity emits a separate fill-opacity SVG attribute.
+        Both can appear on the same element without conflict.
+        """
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [0.5, 0.5, 0.5],
+            "op": [0.8, 0.8, 0.8],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo", opacity="op")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        # fill-opacity attribute appears (from fill_opacity channel)
+        assert "fill-opacity" in svg, (
+            "Expected fill-opacity attribute from fill_opacity channel; got:\n" + svg[:2000]
+        )
+
+    def test_bar_fill_opacity_emits_attribute(self):
+        """encode(fill_opacity='fo') on bar marks → fill-opacity on rect elements."""
+        df = pl.DataFrame({
+            "cat": ["a", "b", "c"],
+            "val": [1.0, 2.0, 3.0],
+            "fo": [0.4, 0.7, 0.9],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_bar()
+            .encode(x="cat", y="val", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "fill-opacity" in svg, (
+            "Expected fill-opacity attribute on bar rects; got:\n" + svg[:2000]
+        )

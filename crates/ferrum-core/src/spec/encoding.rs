@@ -954,6 +954,7 @@ mod tests {
             stroke_opacity: None,
             stroke_dash: None,
             angle: None,
+            fill_opacity: None,
         };
         // Overlay only tooltip, href, description (the three that were missed
         // by the old inline merge).

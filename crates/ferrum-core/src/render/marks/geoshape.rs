@@ -234,6 +234,7 @@ mod tests {
             axis_y: None,
             selections: Vec::new(),
             conditionals: Vec::new(),
+            chart_description: None,
         }
     }
 
