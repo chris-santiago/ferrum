@@ -105,6 +105,7 @@ class InteractiveChart:
         self._scene_json = _render_scene_json(chart)
         self._selection_callbacks: list[Callable] = []
         self._widget: Any = None
+        self._output_widget: Any = None  # ipywidgets.Output, created lazily by on_selection_change
         self._try_init_widget()
 
     def _try_init_widget(self) -> None:
@@ -178,9 +179,33 @@ class InteractiveChart:
         return {}
 
     def on_selection_change(self, callback: Callable) -> None:
-        """Register a Python callback for selection state changes."""
+        """Register a Python callback for selection state changes.
+
+        Output from the callback is routed to an ``ipywidgets.Output`` widget
+        displayed below the chart (when ipywidgets is available), ensuring
+        that ``print()`` calls inside the callback appear in the notebook cell
+        rather than the kernel log.  The output area clears on each new
+        selection so it always shows the latest state.
+        """
         self._selection_callbacks.append(callback)
-        if self._widget is not None:
+        if self._widget is None:
+            return
+
+        try:
+            import ipywidgets as _ipy
+
+            if self._output_widget is None:
+                self._output_widget = _ipy.Output()
+            out = self._output_widget
+
+            def _wrapped(change: Any) -> None:
+                with out:
+                    out.clear_output(wait=True)
+                    callback(change["new"])
+
+            self._widget.observe(_wrapped, names=["selection_state"])
+        except ImportError:
+            # ipywidgets absent — observe fires but print() goes to kernel log
             self._widget.observe(
                 lambda change: callback(change["new"]),
                 names=["selection_state"],
@@ -193,9 +218,16 @@ class InteractiveChart:
         save_chart(self._chart, path, format="html", **kwargs)
 
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
-        if self._widget is not None:
-            return self._widget._repr_mimebundle_(**kwargs)
-        return None
+        if self._widget is None:
+            return None
+        if self._output_widget is not None:
+            try:
+                import ipywidgets as _ipy
+                box = _ipy.VBox([self._widget, self._output_widget])
+                return box._repr_mimebundle_(**kwargs)
+            except ImportError:
+                pass
+        return self._widget._repr_mimebundle_(**kwargs)
 
     def __repr__(self) -> str:
         return f"InteractiveChart(selections={len(self._chart._selections)})"
