@@ -97,7 +97,22 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Bug-hunter agent | `.claude/agents/bug-hunter.md` |
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
+| **Code archaeology report** | **`docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
+| Code archaeology skill | `.claude/skills/code-archaeology/` |
 | Automations index | `.claude/README.md` |
+
+---
+
+## Known open gaps (code archaeology)
+
+**Read `docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
+
+- **Channels:** `Description`/`Key` encoding (TODO G1 chart-level done, but `Key` is interactive-only), `Href` encoding already works
+- **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
+- **Missing spec implementations:** `ferrum.color`, `ferrum.config`, `Axis(...)` full value class, auto-raster policy, `RenderConfig`, `ferrum.Grid`, `WindowTransform`, full palette library, `mark_text` multiline `<tspan>`, `SceneNode::Raw` WASM, `share_x`/`share_y` grid enforcement, axis `format=` on X/Y, `compare=` routing for 3 diagnostic charts, Phase 12
+- **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
+
+When fixing a bug or adding a feature that overlaps with an open item, update the archaeology doc's status column and check off the corresponding action-list entry.
 
 ---
 
