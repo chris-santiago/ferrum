@@ -291,12 +291,8 @@ pub fn layout_legend(
             let n_cols = columns.unwrap_or(1).max(1) as usize;
 
             // Column width: divide available width evenly across N columns.
+            // Label overflow within a column is acceptable — text truncation is render-side.
             let col_w = if n_cols > 1 { avail_w / n_cols as f64 } else { avail_w };
-            let max_label_w = entries
-                .iter()
-                .map(|e| metrics.measure_width(&e.label, label_font_size))
-                .fold(0.0_f64, f64::max);
-            let _ = max_label_w; // layout uses col_w; label may overflow but text truncation is render-side
 
             let max_rows = if row_pitch > 0.0 {
                 ((avail_h + LEGEND_ENTRY_ROW_PAD) / row_pitch).floor() as usize

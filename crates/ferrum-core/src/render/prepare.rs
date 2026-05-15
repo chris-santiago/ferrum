@@ -174,10 +174,6 @@ pub struct PreparedInputs {
     pub legend_title_override: Option<String>,
     /// D13: legend title font size override from `encoding.color.legend.titleFontSize`.
     pub legend_title_font_size_override: Option<f64>,
-    /// D13: legend format override from `encoding.color.legend.format`.
-    /// When `Some`, colorbar tick labels are reformatted with this Python-style
-    /// format spec (e.g. `".0%"` → multiply by 100, zero decimal places, `%` suffix).
-    pub legend_format_override: Option<String>,
     /// D13: legend columns override from `encoding.color.legend.columns`.
     /// When `Some`, categorical legend entries are arranged in N columns instead of
     /// the default single vertical column.
@@ -582,10 +578,6 @@ pub fn prepare_render_inputs(
             extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
         })
         .and_then(|v| v.as_f64());
-    let legend_format_override = color_legend_extra
-        .and_then(|extra| extra.get("format"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
     let legend_columns_override = color_legend_extra
         .and_then(|extra| extra.get("columns"))
         .and_then(|v| v.as_u64())
@@ -605,7 +597,6 @@ pub fn prepare_render_inputs(
         legend_orient_override,
         legend_title_override,
         legend_title_font_size_override,
-        legend_format_override,
         legend_columns_override,
     })
 }

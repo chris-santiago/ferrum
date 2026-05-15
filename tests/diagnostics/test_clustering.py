@@ -180,6 +180,27 @@ def test_embeddings_pca():
     assert emb.height == df.height
 
 
+def test_embeddings_label_column_is_utf8():
+    """Regression: label column must be Utf8 so nominal color encoding works."""
+    df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(load_fixture("pca_4comp"), df, random_state=0)
+    emb = source.embeddings(method="pca", n_components=2)
+    assert emb["label"].dtype == pl.Utf8
+
+
+def test_embeddings_uses_model_labels_when_y_absent():
+    """Regression: when y is not provided, embeddings() must use model.labels_
+    from a fitted clusterer instead of all-zeros."""
+    model = load_fixture("kmeans_3cluster")
+    df = load_dataset("clustering")
+    source = ferrum.ModelSource(model, df, random_state=0)
+    emb = source.embeddings(method="pca", n_components=2)
+    distinct_labels = set(emb["label"].to_list())
+    assert len(distinct_labels) >= 2, (
+        f"Expected ≥2 distinct labels from KMeans; got {distinct_labels}"
+    )
+
+
 def test_embeddings_rejects_bad_method():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(load_fixture("pca_4comp"), df)
@@ -469,6 +490,18 @@ def test_manifold_chart_figure_function():
     model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
     chart = ferrum.manifold_chart(model, df, method="pca")
     assert "<svg" in chart.show_svg()
+
+
+def test_manifold_chart_colors_by_cluster():
+    """Regression: manifold_chart must color points by cluster label, not all
+    the same color. The SVG should contain ≥3 distinct fill colors for k=3."""
+    import re
+    from sklearn.cluster import KMeans
+    df = load_dataset("clustering")
+    model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
+    svg = ferrum.manifold_chart(model, df, method="pca").show_svg()
+    fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
+    assert len(fills) >= 3, f"Expected ≥3 distinct fill colors for 3 clusters; got {fills}"
 
 
 def test_elbow_chart_figure_function():

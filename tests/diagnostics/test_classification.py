@@ -479,3 +479,12 @@ def test_class_balance_chart_returns_chart():
 def test_class_balance_chart_accepts_list():
     chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
     assert "<svg" in chart.show_svg()
+
+
+def test_class_balance_chart_bars_colored_by_class():
+    """Regression: bars must use distinct colors per class, not a single fill."""
+    import re
+    chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
+    svg = chart.show_svg()
+    fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
+    assert len(fills) >= 3, f"Expected ≥3 distinct fill colors for 3 classes; got {fills}"
