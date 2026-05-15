@@ -363,6 +363,57 @@ class TestFormatType:
         )
         assert "<svg" in svg
 
+    def test_format_dot2f_produces_two_decimal_places(self):
+        """format='.2f' → x tick labels show exactly 2 decimal places (e.g. '1.00')."""
+        svg = (
+            fm.Chart(_numeric_df())
+            .mark_point()
+            .encode(x=fm.X("x", format=".2f"), y="y")
+            .show_svg()
+        )
+        labels = _extract_text_labels(svg)
+        two_decimal = [l for l in labels if re.fullmatch(r"\d+\.\d{2}", l)]
+        assert two_decimal, (
+            f"Expected labels with exactly 2 decimal places (e.g. '1.00'); got: {labels}"
+        )
+
+    def test_format_percent_produces_percent_labels(self):
+        """format='.1%' → x tick labels include '%' suffix (e.g. '10.0%')."""
+        df = pl.DataFrame({"x": [0.1, 0.2, 0.3, 0.4, 0.5], "y": [1, 2, 3, 4, 5]})
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x=fm.X("x", format=".1%"), y="y")
+            .show_svg()
+        )
+        labels = _extract_text_labels(svg)
+        pct_labels = [l for l in labels if "%" in l]
+        assert pct_labels, (
+            f"Expected percent-formatted tick labels with format='.1%'; got: {labels}"
+        )
+        # Spot-check: 0.1 → '10.0%'
+        assert "10.0%" in pct_labels, (
+            f"Expected '10.0%' in labels; got: {pct_labels}"
+        )
+
+    def test_format_comma_produces_thousands_separator(self):
+        """format=',' → x tick labels have thousands commas (e.g. '1,000')."""
+        df = pl.DataFrame({"x": [1000.0, 2000.0, 3000.0], "y": [1, 2, 3]})
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x=fm.X("x", format=","), y="y")
+            .show_svg()
+        )
+        labels = _extract_text_labels(svg)
+        comma_labels = [l for l in labels if "," in l and l.replace(",", "").isdigit()]
+        assert comma_labels, (
+            f"Expected thousands-separated tick labels with format=','; got: {labels}"
+        )
+        assert "1,000" in comma_labels, (
+            f"Expected '1,000' in labels; got: {comma_labels}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Task 5: impute= transform

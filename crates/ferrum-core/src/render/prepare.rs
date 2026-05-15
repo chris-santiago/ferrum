@@ -870,54 +870,279 @@ fn apply_impute(
     }
 }
 
+// ── D3-subset format spec parser ─────────────────────────────────────────────
+
+/// Parsed representation of a D3-subset numeric format specifier.
+///
+/// Supported grammar: `[,][.precision][type]`
+///
+/// where `type` is one of: `f`, `e`, `g`, `%`, `d`, `s` (SI), or absent.
+/// The `,` flag requests thousands-separator grouping.
+#[derive(Debug, PartialEq)]
+struct ParsedFmt {
+    thousands: bool,
+    precision: Option<usize>,
+    /// Format type char, or `'\0'` for "auto/default".
+    fmt_type: char,
+}
+
+/// Parse a D3-subset format string into a `ParsedFmt`.
+fn parse_d3_fmt(fmt: &str) -> ParsedFmt {
+    let mut s = fmt;
+    let thousands = if s.starts_with(',') {
+        s = &s[1..];
+        true
+    } else {
+        false
+    };
+    let (precision, s) = if s.starts_with('.') {
+        let rest = &s[1..];
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let prec: Option<usize> = if end > 0 { rest[..end].parse().ok() } else { None };
+        (prec, &rest[end..])
+    } else {
+        (None, s)
+    };
+    let fmt_type = s.chars().next().unwrap_or('\0');
+    ParsedFmt { thousands, precision, fmt_type }
+}
+
+/// Apply thousands-separator grouping to an unsigned integer digit string.
+fn apply_thousands_sep(s: &str) -> String {
+    if s.len() <= 3 {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let rem = s.len() % 3;
+    for (i, ch) in s.chars().enumerate() {
+        if i != 0 && (i % 3 == rem || (rem == 0 && i % 3 == 0)) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Format a float with thousands grouping and fixed decimal precision.
+fn format_grouped(v: f64, precision: usize) -> String {
+    let is_neg = v < 0.0;
+    let abs = v.abs();
+    let int_part = abs.trunc() as u64;
+    let frac = abs.fract();
+    let int_str = apply_thousands_sep(&int_part.to_string());
+    let sign = if is_neg { "-" } else { "" };
+    if precision == 0 {
+        format!("{sign}{int_str}")
+    } else {
+        let frac_str = format!("{:.prec$}", frac, prec = precision);
+        let digits = &frac_str[2..]; // skip "0."
+        format!("{sign}{int_str}.{digits}")
+    }
+}
+
+/// Format an f64 using SI prefix notation (k, M, G, m, μ, n).
+fn format_si(v: f64, precision: usize) -> String {
+    const PREFIXES: &[(f64, &str)] = &[
+        (1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k"),
+        (1.0, ""), (1e-3, "m"), (1e-6, "μ"), (1e-9, "n"),
+    ];
+    let abs = v.abs();
+    for &(threshold, prefix) in PREFIXES {
+        if abs >= threshold || threshold == 1e-9 {
+            let scaled = v / threshold;
+            return format!("{:.prec$}{prefix}", scaled, prec = precision);
+        }
+    }
+    format!("{v:.prec$}", prec = precision)
+}
+
+/// Apply a `ParsedFmt` spec to a single f64 value.
+fn apply_fmt_to_value(v: f64, spec: &ParsedFmt) -> String {
+    use crate::render::format::format_numeric;
+    match spec.fmt_type {
+        'f' => {
+            let prec = spec.precision.unwrap_or(2);
+            if spec.thousands { format_grouped(v, prec) } else { format!("{v:.*}", prec) }
+        }
+        'e' => {
+            let prec = spec.precision.unwrap_or(2);
+            format!("{v:.*e}", prec)
+        }
+        '%' => {
+            let prec = spec.precision.unwrap_or(1);
+            let pct = v * 100.0;
+            format!("{pct:.*}%", prec)
+        }
+        'd' => {
+            let i = v.round() as i64;
+            if spec.thousands {
+                let s = i.unsigned_abs().to_string();
+                let g = apply_thousands_sep(&s);
+                if i < 0 { format!("-{g}") } else { g }
+            } else {
+                format!("{i}")
+            }
+        }
+        's' => {
+            let prec = spec.precision.unwrap_or(2);
+            format_si(v, prec)
+        }
+        'g' => format_numeric(v),
+        // No type but `,` flag — thousands grouping with auto precision.
+        '\0' if spec.thousands => {
+            if v.fract() == 0.0 {
+                let i = v as i64;
+                let s = i.unsigned_abs().to_string();
+                let g = apply_thousands_sep(&s);
+                if i < 0 { format!("-{g}") } else { g }
+            } else {
+                let prec = spec.precision.unwrap_or(2);
+                format_grouped(v, prec)
+            }
+        }
+        _ => format_numeric(v),
+    }
+}
+
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.
 ///
-/// The scale's `tick_labels()` method returns pre-formatted strings. When the
-/// encoding carries an explicit `format` string (e.g. `.2f`), we re-parse each
-/// label back to a float and re-format it per the spec. When `format_type` is
-/// `"time"`, we treat the label as an epoch-ms integer and use `format_time`.
-/// Labels that fail to parse are left unchanged (ordinal labels, already-formatted
-/// time strings, etc.).
+/// The scale's `tick_labels()` method returns pre-formatted strings (via
+/// `format_numeric`). When the encoding carries an explicit `format` string
+/// (e.g. `.2f`, `.1%`, `,`), we re-parse each label back to f64 and re-format it
+/// using a D3-subset parser. When `format_type` is `"time"`, we treat the label as
+/// an epoch-ms integer. Labels that fail to parse are left unchanged (ordinal
+/// labels, already-formatted time strings, etc.).
 fn apply_tick_format(
     labels: Vec<String>,
     format: Option<&str>,
     format_type: Option<&str>,
 ) -> Vec<String> {
-    use crate::render::format::{format_numeric, format_time};
+    use crate::render::format::format_time;
     let Some(fmt) = format else { return labels };
+    let spec = parse_d3_fmt(fmt);
     labels
         .into_iter()
         .map(|raw| {
             if format_type == Some("time") {
-                // Try to parse as i64 epoch-ms.
                 if let Ok(epoch_ms) = raw.parse::<i64>() {
                     return format_time(epoch_ms, 86_400_000);
                 }
-                // Also try f64 (tick_labels may produce "1.7e12" style).
                 if let Ok(f) = raw.parse::<f64>() {
                     return format_time(f as i64, 86_400_000);
                 }
                 raw
             } else {
-                // Re-parse to f64 and apply the numeric format spec.
                 if let Ok(v) = raw.parse::<f64>() {
-                    let trimmed = fmt.strip_prefix('.').unwrap_or(fmt);
-                    let (digits_part, fmt_char) = match trimmed.chars().last() {
-                        Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
-                        _ => return format_numeric(v),
-                    };
-                    let n: usize = digits_part.parse().unwrap_or(2);
-                    match fmt_char {
-                        'f' => format!("{v:.*}", n),
-                        'e' => format!("{v:.*e}", n),
-                        'g' | _ => format_numeric(v),
-                    }
+                    apply_fmt_to_value(v, &spec)
                 } else {
                     raw // ordinal — pass through
                 }
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tick_format_tests {
+    use super::*;
+
+    fn fmt_labels(labels: &[&str], format: &str) -> Vec<String> {
+        apply_tick_format(
+            labels.iter().map(|s| s.to_string()).collect(),
+            Some(format),
+            None,
+        )
+    }
+
+    #[test]
+    fn parse_dotf() {
+        assert_eq!(
+            parse_d3_fmt(".2f"),
+            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 'f' }
+        );
+    }
+    #[test]
+    fn parse_pct() {
+        assert_eq!(
+            parse_d3_fmt(".1%"),
+            ParsedFmt { thousands: false, precision: Some(1), fmt_type: '%' }
+        );
+    }
+    #[test]
+    fn parse_comma_dotf() {
+        assert_eq!(
+            parse_d3_fmt(",.0f"),
+            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f' }
+        );
+    }
+    #[test]
+    fn parse_comma_only() {
+        assert_eq!(
+            parse_d3_fmt(","),
+            ParsedFmt { thousands: true, precision: None, fmt_type: '\0' }
+        );
+    }
+    #[test]
+    fn parse_d() {
+        assert_eq!(
+            parse_d3_fmt("d"),
+            ParsedFmt { thousands: false, precision: None, fmt_type: 'd' }
+        );
+    }
+    #[test]
+    fn parse_si() {
+        assert_eq!(
+            parse_d3_fmt(".2s"),
+            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 's' }
+        );
+    }
+    #[test]
+    fn dotf_two_decimals() {
+        assert_eq!(fmt_labels(&["2", "2.5", "3"], ".2f"), vec!["2.00", "2.50", "3.00"]);
+    }
+    #[test]
+    fn dot1f_one_decimal() {
+        assert_eq!(fmt_labels(&["1", "1.5", "2"], ".1f"), vec!["1.0", "1.5", "2.0"]);
+    }
+    #[test]
+    fn percent_format() {
+        assert_eq!(fmt_labels(&["0.1", "0.123", "0.5"], ".1%"), vec!["10.0%", "12.3%", "50.0%"]);
+    }
+    #[test]
+    fn comma_thousands_integer() {
+        assert_eq!(
+            fmt_labels(&["1000", "10000", "1234567"], ","),
+            vec!["1,000", "10,000", "1,234,567"]
+        );
+    }
+    #[test]
+    fn comma_dotf_thousands_decimal() {
+        assert_eq!(fmt_labels(&["1000", "2000", "3000"], ",.0f"), vec!["1,000", "2,000", "3,000"]);
+    }
+    #[test]
+    fn d_integer_format() {
+        assert_eq!(fmt_labels(&["42", "1000", "3.7"], "d"), vec!["42", "1000", "4"]);
+    }
+    #[test]
+    fn si_kilo() {
+        assert_eq!(fmt_labels(&["1200", "1500"], ".2s"), vec!["1.20k", "1.50k"]);
+    }
+    #[test]
+    fn ordinal_passthrough() {
+        assert_eq!(fmt_labels(&["setosa", "versicolor"], ".2f"), vec!["setosa", "versicolor"]);
+    }
+    #[test]
+    fn no_format_passthrough() {
+        let labels = vec!["1".to_string(), "2".to_string()];
+        let out = apply_tick_format(labels.clone(), None, None);
+        assert_eq!(out, labels);
+    }
+    #[test]
+    fn apply_thousands_sep_small() {
+        assert_eq!(apply_thousands_sep("123"), "123");
+        assert_eq!(apply_thousands_sep("1234"), "1,234");
+        assert_eq!(apply_thousands_sep("1234567"), "1,234,567");
+    }
 }
 
 /// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
