@@ -87,19 +87,31 @@ pub fn tessellate_polyline(
 }
 
 pub fn tessellate_polygon(
-    points: &[[f64; 2]],
+    rings: &[Vec<[f64; 2]>],
     style: &FillStroke,
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) {
-    if points.len() < 3 {
-        return;
-    }
+    // Skip if no rings or the exterior ring has fewer than 3 points.
+    let exterior = match rings.first() {
+        Some(r) if r.len() >= 3 => r,
+        _ => return,
+    };
     let mut builder = LyonPath::builder();
-    builder.begin(point(points[0][0] as f32, points[0][1] as f32));
-    for p in &points[1..] {
+    // Exterior ring.
+    builder.begin(point(exterior[0][0] as f32, exterior[0][1] as f32));
+    for p in &exterior[1..] {
         builder.line_to(point(p[0] as f32, p[1] as f32));
     }
     builder.close();
+    // Interior rings (holes).
+    for hole in &rings[1..] {
+        if hole.len() < 3 { continue; }
+        builder.begin(point(hole[0][0] as f32, hole[0][1] as f32));
+        for p in &hole[1..] {
+            builder.line_to(point(p[0] as f32, p[1] as f32));
+        }
+        builder.close();
+    }
     let path = builder.build();
 
     if let Some(fill) = &style.fill {

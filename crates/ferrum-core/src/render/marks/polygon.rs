@@ -199,9 +199,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
-        let points: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
+        let exterior: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
         nodes.push(SceneNode::Polygon {
-            points,
+            rings: vec![exterior],
             style: to_scene_fill_stroke(
                 Some(fill),
                 ctx.mark_style.stroke,
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 1, "expected 1 polygon");
         // Polygon must have at least 3 points.
         let has_points = result.nodes.iter().any(|n| {
-            if let ferrum_scene::SceneNode::Polygon { points, .. } = n { points.len() >= 3 } else { false }
+            if let ferrum_scene::SceneNode::Polygon { rings, .. } = n { rings.first().map_or(false, |r| r.len() >= 3) } else { false }
         });
         assert!(has_points, "polygon must have at least 3 points");
     }

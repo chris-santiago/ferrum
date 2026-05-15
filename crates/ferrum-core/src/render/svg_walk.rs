@@ -203,9 +203,12 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
         SceneNode::Polyline { points, style } => {
             svg.polyline(points, &to_svg_stroke(style));
         }
-        SceneNode::Polygon { points, style } => {
-            let ring: Vec<(f64, f64)> = points.iter().map(|p| (p[0], p[1])).collect();
-            svg.polygon(&[ring], &to_svg_fill_stroke(style));
+        SceneNode::Polygon { rings, style } => {
+            let svg_rings: Vec<Vec<(f64, f64)>> = rings
+                .iter()
+                .map(|r| r.iter().map(|p| (p[0], p[1])).collect())
+                .collect();
+            svg.polygon(&svg_rings, &to_svg_fill_stroke(style));
         }
         SceneNode::Group { attrs, children } => {
             if attrs.is_empty() {

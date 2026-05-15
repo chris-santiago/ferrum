@@ -155,8 +155,8 @@ fn collect_nodes(
                 if s.stroke_join.is_none() { s.stroke_join = batch_join; }
                 tessellate::tessellate_polyline(points, &s, mesh);
             }
-            SceneNode::Polygon { points, style } => {
-                tessellate::tessellate_polygon(points, style, mesh);
+            SceneNode::Polygon { rings, style } => {
+                tessellate::tessellate_polygon(rings, style, mesh);
             }
             SceneNode::Text { x, y, content, style } => {
                 texts.push(TextElementData {

@@ -181,8 +181,9 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
                     }
                 }
             }
-            SceneNode::Polygon { points, style }
-                if style.fill.is_some() && point_in_polygon(x, y, points) =>
+            SceneNode::Polygon { rings, style }
+                if style.fill.is_some()
+                    && rings.first().map_or(false, |r| point_in_polygon(x, y, r)) =>
             {
                 return Some(i);
             }

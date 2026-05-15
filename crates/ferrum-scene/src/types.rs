@@ -118,7 +118,10 @@ pub enum SceneNode {
         data: ImageData,
     },
     Polygon {
-        points: Vec<[f64; 2]>,
+        /// Rings of the polygon: first ring is the exterior, subsequent rings
+        /// are interior holes. Rendered with `fill-rule="evenodd"` so holes
+        /// cut through the fill automatically.
+        rings: Vec<Vec<[f64; 2]>>,
         style: FillStroke,
     },
     Polyline {
