@@ -848,6 +848,111 @@ def residplot(
     return chart
 
 
+def regplot(
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    hue: Any = None,
+    method: str = "lm",
+    ci: Any = 95,
+    order: int = 1,
+    scatter: bool = True,
+    scatter_kws: Any = None,
+    line_kws: Any = None,
+    truncate: bool = True,
+    x_jitter: Any = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+    **encode_kwargs: Any,
+) -> Chart:
+    """Axes-level regression scatter plot.
+
+    The axes-level equivalent of ``lmplot`` — identical API except
+    ``col=`` and ``row=`` are excluded because ``regplot`` does not
+    facet.  Every parameter is forwarded to ``lmplot`` unchanged.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str
+        Column name for the horizontal (predictor) axis (required).
+    y : str
+        Column name for the vertical (response) axis (required).
+    hue : str or encoding, optional
+        Column name to map to color; fit lines are drawn per hue level.
+    method : {"lm", "logistic", "glm", "loess", "robust"}, default "lm"
+        Fitting method forwarded to ``lmplot``.
+    ci : int or None, default 95
+        Confidence interval level (0--100) shown as a band around the fit
+        line.  Pass ``None`` to suppress.
+    order : int, default 1
+        Polynomial degree forwarded to ``mark_smooth`` when
+        ``method="lm"``.
+    scatter : bool, default True
+        Include a scatter layer (``mark_point``).
+    scatter_kws : dict, optional
+        Extra keyword arguments forwarded to the scatter ``mark_point`` call.
+    line_kws : dict, optional
+        Extra keyword arguments forwarded to the regression-line mark call.
+    truncate : bool, default True
+        When ``True``, the fit line spans only the observed data range.
+    x_jitter : float or None, optional
+        When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
+        scatter layer.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Layered chart (scatter + fit) or fit-only when ``scatter=False``.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is not one of the supported values.
+    ValueError
+        If ``truncate=False`` (extending the fit line beyond the data range
+        is not yet supported).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.regplot(df, x="total_bill", y="tip")
+
+    Robust regression:
+
+    >>> fm.regplot(df, x="size", y="tip", method="robust")
+    """
+    return lmplot(
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        method=method,
+        ci=ci,
+        order=order,
+        scatter=scatter,
+        scatter_kws=scatter_kws,
+        line_kws=line_kws,
+        truncate=truncate,
+        x_jitter=x_jitter,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        **encode_kwargs,
+    )
+
+
 def residuals_chart(
     model_or_source: Any = None,
     X: Any = None,

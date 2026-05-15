@@ -18,6 +18,7 @@ from ferrum.plots.regression import (
     residuals_chart,
     lmplot,
     residplot,
+    regplot,
 )
 from ferrum.plots.explanation import (
     importance_chart,
@@ -48,6 +49,7 @@ from ferrum.plots.ranking import (
 from ferrum.plots.distribution import (
     displot,
     catplot,
+    relplot,
 )
 from ferrum.plots.matrix import (
     pairplot,
@@ -68,6 +70,7 @@ __all__ = [
     "residuals_chart",
     "lmplot",
     "residplot",
+    "regplot",
     "importance_chart",
     "shap_chart",
     "shap_beeswarm_chart",
@@ -88,6 +91,7 @@ __all__ = [
     "decision_boundary_chart",
     "displot",
     "catplot",
+    "relplot",
     "pairplot",
     "heatmap",
     "clustermap",

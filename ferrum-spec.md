@@ -1063,6 +1063,18 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                ci=95, n_boot=1000, seed=None, theme=None)
 ```
 
+#### Relational
+
+```
+ferrum.relplot(data, *, x, y, hue=None, size=None, style=None,
+               col=None, row=None,
+               kind="scatter",        # "scatter" | "line"
+               height=None, aspect=None, theme=None)
+```
+
+`size` maps to the `Size` channel (point area or line width). `style`
+maps to `Shape` for `kind="scatter"` or `StrokeDash` for `kind="line"`.
+
 #### Regression
 
 ```
@@ -1072,9 +1084,17 @@ ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
               truncate=False, x_bins=None, x_estimator=None, x_jitter=None,
               logx=False, theme=None)
 
+ferrum.regplot(data, *, x, y, hue=None,
+               method="lm",          # same as lmplot
+               ci=95, order=1, scatter=True, scatter_kws=None, line_kws=None,
+               truncate=True, x_jitter=None, theme=None)
+
 ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
                  dropna=True, label=None, color=None, theme=None)
 ```
+
+`regplot` is the axes-level equivalent of `lmplot` — identical API minus
+`col=` and `row=` (no faceting). All parameters are forwarded to `lmplot`.
 
 #### Matrix / Pairwise
 

@@ -16,7 +16,7 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 2 — top-level Chart class
     "Chart",
     # Task 3 — figure-level functions
-    "displot", "catplot", "lmplot", "residplot",
+    "displot", "catplot", "relplot", "lmplot", "residplot", "regplot",
     "pairplot", "heatmap", "clustermap", "jointplot",
     "plots",
     # Task 4 — encoding channels (31)

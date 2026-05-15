@@ -2,11 +2,12 @@
 
 Public API
 ----------
-displot, catplot.
+displot, catplot, relplot.
 
 ``displot`` dispatches to histogram, KDE, ECDF, or rug marks.
 ``catplot`` dispatches to strip, swarm, box, violin, boxen, point, bar,
 or count marks.
+``relplot`` dispatches to scatter or line marks with optional faceting.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ _DISPLOT_VALID_KINDS = {"hist", "kde", "ecdf", "rug"}
 _DISPLOT_VALID_MULTIPLE = {"layer", "stack", "fill", "dodge"}
 
 _CATPLOT_VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
+_RELPLOT_VALID_KINDS = {"scatter", "line"}
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +557,139 @@ def catplot(
             chart = chart.facet(col=col)
         else:
             chart = chart.facet(row=row)
+
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+
+    if theme is not None:
+        chart = chart.theme(theme)
+
+    return chart
+
+
+# ---------------------------------------------------------------------------
+# relplot
+# ---------------------------------------------------------------------------
+
+def relplot(
+    data: Any,
+    *,
+    x: Any,
+    y: Any,
+    hue: Any = None,
+    size: Any = None,
+    style: Any = None,
+    col: Any = None,
+    row: Any = None,
+    kind: str = "scatter",
+    height: float | None = None,
+    aspect: float | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+    **encode_kwargs: Any,
+) -> Chart:
+    """Relational figure-level function for scatter and line plots.
+
+    Dispatches to the appropriate mark based on ``kind``:
+
+    * ``"scatter"`` -- ``mark_point()``.  ``style`` maps to ``Shape``.
+    * ``"line"``    -- ``mark_line()``.  ``style`` maps to ``StrokeDash``.
+
+    Parameters
+    ----------
+    data : DataFrame-like
+        Input data accepted by ``Chart(data)``.
+    x : str or encoding
+        Column name for the horizontal axis (required).
+    y : str or encoding
+        Column name for the vertical axis (required).
+    hue : str or encoding, optional
+        Column name to map to color (one group per level).
+    size : str or encoding, optional
+        Column name to map to the ``Size`` channel (point area or line width).
+    style : str or encoding, optional
+        Column name to map to ``Shape`` (scatter) or ``StrokeDash`` (line).
+    col : str, optional
+        Column name for faceting across columns.
+    row : str, optional
+        Column name for faceting across rows.
+    kind : {"scatter", "line"}, default "scatter"
+        Which relational mark to draw.
+    height : float or None, optional
+        Height of the chart in pixels.  Width is derived from ``aspect``.
+    aspect : float or None, optional
+        Aspect ratio (width = height * aspect).  Requires ``height``.
+    theme : Theme, optional
+        Visual theme applied via ``Chart.theme()``.
+    **encode_kwargs
+        Additional keyword arguments forwarded to ``Chart.encode()``.
+
+    Returns
+    -------
+    Chart
+        Configured chart (possibly faceted or sized).
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` is not one of ``"scatter"`` or ``"line"``.
+
+    Examples
+    --------
+    Scatter with hue grouping and column faceting:
+
+    >>> import ferrum as fm
+    >>> fm.relplot(df, x="total_bill", y="tip", hue="sex", col="time")
+
+    Line plot with per-level dash styling:
+
+    >>> fm.relplot(df, x="timepoint", y="signal", hue="region",
+    ...            style="region", kind="line")
+    """
+    if kind not in _RELPLOT_VALID_KINDS:
+        raise ValueError(
+            f"relplot: kind must be one of {sorted(_RELPLOT_VALID_KINDS)}; got {kind!r}"
+        )
+
+    chart = Chart(data)
+
+    enc: dict = {}
+    if x is not None:
+        enc["x"] = x
+    if y is not None:
+        enc["y"] = y
+    if hue is not None:
+        enc["color"] = hue
+    if size is not None:
+        enc["size"] = size
+    if style is not None:
+        if kind == "scatter":
+            enc["shape"] = style
+        else:
+            enc["stroke_dash"] = style
+    enc.update(encode_kwargs)
+
+    if kind == "scatter":
+        chart = chart.mark_point()
+    else:
+        chart = chart.mark_line()
+
+    chart = chart.encode(**enc)
+
+    if col is not None or row is not None:
+        if col is not None and row is not None:
+            chart = chart.facet(row=row, col=col)
+        elif col is not None:
+            chart = chart.facet(col=col)
+        else:
+            chart = chart.facet(row=row)
+
+    if height is not None or aspect is not None:
+        h = height if height is not None else 300.0
+        w = h * aspect if aspect is not None else h
+        chart = chart.properties(width=w, height=h)
 
     chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
 
