@@ -8,24 +8,24 @@ Ferrum runs on Python 3.10 or newer. The Rust core ships as a pre-built extensio
 
     <!--pytest.mark.skip-->
     ```bash
-    pip install ferrum-viz
+    pip install ferrum-viz[all]
     ```
 
 === "uv"
 
     <!--pytest.mark.skip-->
     ```bash
-    uv add ferrum-viz
+    uv add ferrum-viz[all]
     ```
 
 === "poetry"
 
     <!--pytest.mark.skip-->
     ```bash
-    poetry add ferrum-viz
+    poetry add ferrum-viz[all]
     ```
 
-That installs Ferrum and its four runtime dependencies (`polars`, `pyarrow`, `narwhals`, `numpy`). Nothing else is required to render charts.
+This installs Ferrum with all optional dependencies — model diagnostics, SHAP explanations, and interactive Jupyter rendering. For a leaner install (e.g. containers or CI), drop `[all]`: `pip install ferrum-viz`.
 
 !!! info "Pre-1.0 release status"
     Ferrum is currently pre-1.0 (the live version is shown in the page footer). The public surface is stabilizing toward the 1.0 commitment described in [Why Ferrum](why-ferrum.md), but APIs may shift between minor versions until 1.0 is cut. Pin a specific version in production code.
