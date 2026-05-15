@@ -118,9 +118,14 @@ def desugar_boxplot(
         return d
 
     layers = [
-        _Layer(name="whisker", mark="rule", encoding=enc("lower_whisker", "upper_whisker", title=val), data_source="box"),
-        _Layer(name="lower_cap", mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
-        _Layer(name="upper_cap", mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3}, data_source="box"),
+        _Layer(
+            name="whisker", mark="rule",
+            encoding=enc("lower_whisker", "upper_whisker", title=val),
+            mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
+            data_source="box",
+        ),
+        _Layer(name="lower_cap", mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3, "stroke": "theme:label"}, data_source="box"),
+        _Layer(name="upper_cap", mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3, "stroke": "theme:label"}, data_source="box"),
         _Layer(
             name="box", mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"band_size": band}, data_source="box"
         ),
@@ -128,7 +133,7 @@ def desugar_boxplot(
             name="median",
             mark="tick",
             encoding=enc("median"),
-            mark_kwargs={"band_size": band, "stroke": "#222222", "stroke_width": 2},
+            mark_kwargs={"band_size": band, "stroke": "theme:label", "stroke_width": 2},
             data_source="box",
         ),
     ]
@@ -210,6 +215,7 @@ def desugar_errorbar(
             name="rule",
             mark="rule",
             encoding={"x": x_field, "y": "lower", "y2": "upper"},
+            mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="err",
         ),
     ]
@@ -220,14 +226,14 @@ def desugar_errorbar(
                     name="lower_cap",
                     mark="tick",
                     encoding={"x": x_field, "y": "lower"},
-                    mark_kwargs={"band_size": 0.3},
+                    mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_cap",
                     mark="tick",
                     encoding={"x": x_field, "y": "upper"},
-                    mark_kwargs={"band_size": 0.3},
+                    mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
             ]
@@ -484,6 +490,7 @@ def desugar_boxen(
             name="median",
             mark="rule",
             encoding=({"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}),
+            mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="lv_depth_1",
         )
     )

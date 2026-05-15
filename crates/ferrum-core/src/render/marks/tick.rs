@@ -26,8 +26,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
     let stroke_style = to_scene_stroke(
-        ctx.mark_style.fill,
+        stroke_color,
         ctx.mark_style.stroke_width.max(1.0),
         ctx.mark_style.opacity,
         None,
@@ -245,5 +246,52 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 3);
+    }
+
+    #[test]
+    fn tick_uses_stroke_color_when_mark_style_stroke_is_set() {
+        // Composite structural ticks (boxplot caps, median, errorbar caps) pass
+        // stroke: "theme:label" via mark_kwargs. After resolve_mark_style,
+        // mark_style.stroke = Some(label_color). tick.rs must use that stroke
+        // color, not fall back to mark_style.fill (which is mark_color = blue).
+        use arrow::array::StringArray;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+        };
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("cat", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a"])),
+            Arc::new(Float64Array::from(vec![5.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+
+        // Stroke = #aabbcc (distinctive; different from mark_color and fill)
+        let overrides = MarkKwargsSpec { stroke: Some("#aabbcc".into()), ..Default::default() };
+        let mark_style = crate::render::draw::resolve_mark_style(Some(&overrides), &theme, &Mark::Tick);
+        // Confirm fill is NOT #aabbcc (it's still mark_color blue)
+        assert_ne!(mark_style.fill.red, 0xAA, "fill should not be the stroke color");
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let line = result.nodes.iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.clone()) } else { None }
+        }).expect("expected at least one Line node");
+        assert_eq!(line.color.r, 0xAA, "tick stroke must use mark_style.stroke, not mark_style.fill");
+        assert_eq!(line.color.g, 0xBB, "tick stroke must use mark_style.stroke, not mark_style.fill");
+        assert_eq!(line.color.b, 0xCC, "tick stroke must use mark_style.stroke, not mark_style.fill");
     }
 }

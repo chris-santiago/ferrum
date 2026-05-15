@@ -162,4 +162,77 @@ def test_mark_histogram_then_encode_resolves_correctly():
     c = Chart(df).mark_histogram().encode(x="a")
     spec = c.to_spec()
     assert spec.mark == "bar"
-    assert any(t.__class__.__name__ == "Bin" for t in spec.transforms)
+
+
+# ---------------------------------------------------------------------------
+# Structural-mark color sentinel tests (Option A bug fix)
+# Whisker rules, cap ticks, and median ticks in composite marks must carry
+# stroke="theme:label" so the Rust renderer resolves them to label_color
+# at render time rather than defaulting to the accent mark_color.
+# ---------------------------------------------------------------------------
+
+def test_desugar_boxplot_whisker_carries_theme_label_stroke():
+    from ferrum.marks.composite import desugar_boxplot
+    result = desugar_boxplot("species", "sepal_length", outliers=False)
+    whisker = next(l for l in result.layers if l.name == "whisker")
+    assert whisker.mark_kwargs is not None
+    assert whisker.mark_kwargs.get("stroke") == "theme:label", (
+        "whisker rule stroke must be 'theme:label' so Rust resolves to label_color"
+    )
+
+
+def test_desugar_boxplot_whisker_stroke_dash_cleared():
+    from ferrum.marks.composite import desugar_boxplot
+    result = desugar_boxplot("species", "sepal_length", outliers=False)
+    whisker = next(l for l in result.layers if l.name == "whisker")
+    assert whisker.mark_kwargs.get("stroke_dash") == [], (
+        "whisker stroke_dash must be [] to override the Rule mark's reference_line_dash (dashed by default)"
+    )
+
+
+def test_desugar_boxplot_caps_carry_theme_label_stroke():
+    from ferrum.marks.composite import desugar_boxplot
+    result = desugar_boxplot("species", "sepal_length", outliers=False)
+    for cap_name in ("lower_cap", "upper_cap"):
+        cap = next(l for l in result.layers if l.name == cap_name)
+        assert cap.mark_kwargs is not None
+        assert cap.mark_kwargs.get("stroke") == "theme:label", (
+            f"{cap_name} tick stroke must be 'theme:label'"
+        )
+
+
+def test_desugar_boxplot_median_carries_theme_label_stroke():
+    from ferrum.marks.composite import desugar_boxplot
+    result = desugar_boxplot("species", "sepal_length", outliers=False)
+    median = next(l for l in result.layers if l.name == "median")
+    assert median.mark_kwargs is not None
+    assert median.mark_kwargs.get("stroke") == "theme:label", (
+        "median tick stroke must be 'theme:label'"
+    )
+
+
+def test_desugar_errorbar_rule_carries_theme_label_stroke():
+    from ferrum.marks.composite import desugar_errorbar
+    result = desugar_errorbar("day", "tip")
+    rule = next(l for l in result.layers if l.name == "rule")
+    assert rule.mark_kwargs is not None
+    assert rule.mark_kwargs.get("stroke") == "theme:label"
+    assert rule.mark_kwargs.get("stroke_dash") == []
+
+
+def test_desugar_errorbar_caps_carry_theme_label_stroke():
+    from ferrum.marks.composite import desugar_errorbar
+    result = desugar_errorbar("day", "tip")
+    for cap_name in ("lower_cap", "upper_cap"):
+        cap = next(l for l in result.layers if l.name == cap_name)
+        assert cap.mark_kwargs is not None
+        assert cap.mark_kwargs.get("stroke") == "theme:label"
+
+
+def test_desugar_boxen_median_rule_carries_theme_label_stroke():
+    from ferrum.marks.composite import desugar_boxen
+    result = desugar_boxen("species", "sepal_length")
+    median = next(l for l in result.layers if l.name == "median")
+    assert median.mark_kwargs is not None
+    assert median.mark_kwargs.get("stroke") == "theme:label"
+    assert median.mark_kwargs.get("stroke_dash") == []

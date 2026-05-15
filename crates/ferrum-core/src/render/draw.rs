@@ -173,16 +173,23 @@ pub fn resolve_mark_style(
     if let Some(opacity) = o.opacity { style.opacity = opacity; }
     if let Some(cr) = o.corner_radius { style.corner_radius = cr; }
     if let Some(sw) = o.stroke_width { style.stroke_width = sw; }
-    if let Some(ref dash) = o.stroke_dash { style.stroke_dash = Some(dash.clone()); }
+    // Empty vec = clear the dash (solid line); non-empty = set explicitly.
+    if let Some(ref dash) = o.stroke_dash {
+        style.stroke_dash = if dash.is_empty() { None } else { Some(dash.clone()) };
+    }
 
     if let Some(ref hex) = o.stroke {
-        if let Ok(c) = from_hex_str(hex) {
+        if hex == "theme:label" {
+            style.stroke = Some(theme.label_color);
+        } else if let Ok(c) = from_hex_str(hex) {
             style.stroke = Some(c);
         }
-        // parse failure: silently skip; warn at Python layer
+        // other parse failure: silently skip; warn at Python layer
     }
     if let Some(ref hex) = o.fill {
-        if let Ok(c) = from_hex_str(hex) {
+        if hex == "theme:label" {
+            style.fill = theme.label_color;
+        } else if let Ok(c) = from_hex_str(hex) {
             style.fill = c;
         }
     }
@@ -518,5 +525,41 @@ mod tests {
         // Mark::Point theme default stroke is None; invalid color does NOT set it
         let baseline = resolve_mark_style(None, &theme, &Mark::Point);
         assert_eq!(style.stroke, baseline.stroke);
+    }
+
+    // --- theme:label sentinel tests ---
+
+    #[test]
+    fn resolve_mark_style_stroke_theme_label_sentinel_uses_label_color() {
+        let mut theme = ThemeInputs::default();
+        theme.label_color = palette::Srgba::new(0x11, 0x22, 0x33, 0xFF);
+        let overrides = MarkKwargsSpec { stroke: Some("theme:label".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
+        let stroke = style.stroke.expect("stroke must be set by sentinel");
+        assert_eq!(stroke.red,   0x11, "sentinel stroke.red must be label_color.red");
+        assert_eq!(stroke.green, 0x22, "sentinel stroke.green must be label_color.green");
+        assert_eq!(stroke.blue,  0x33, "sentinel stroke.blue must be label_color.blue");
+    }
+
+    #[test]
+    fn resolve_mark_style_fill_theme_label_sentinel_uses_label_color() {
+        let mut theme = ThemeInputs::default();
+        theme.label_color = palette::Srgba::new(0x44, 0x55, 0x66, 0xFF);
+        let overrides = MarkKwargsSpec { fill: Some("theme:label".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick);
+        assert_eq!(style.fill.red,   0x44, "sentinel fill.red must be label_color.red");
+        assert_eq!(style.fill.green, 0x55, "sentinel fill.green must be label_color.green");
+        assert_eq!(style.fill.blue,  0x66, "sentinel fill.blue must be label_color.blue");
+    }
+
+    #[test]
+    fn resolve_mark_style_empty_stroke_dash_clears_reference_line_dash() {
+        // Rule mark picks up reference_line_dash from theme by default.
+        // Passing stroke_dash: [] should clear it (solid line for composite structural rules).
+        let theme = ThemeInputs::default(); // reference_line_dash = Some([4.0, 4.0])
+        assert!(theme.reference_line_dash.is_some(), "test requires non-None reference_line_dash");
+        let overrides = MarkKwargsSpec { stroke_dash: Some(vec![]), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
+        assert!(style.stroke_dash.is_none(), "empty stroke_dash override must clear the dash");
     }
 }

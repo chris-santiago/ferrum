@@ -88,6 +88,50 @@ def test_render_svg_render_config_kwargs_accepted():
     assert "#000000" in svg
 
 
+def test_boxplot_structural_marks_use_label_color_not_mark_color():
+    """Boxplot whisker rules, cap ticks, and median tick must render in
+    theme.label_color (#6b7280 in default Paper Ink theme), not the accent
+    mark_color (#2563eb), when a color encoding is present."""
+    df = pl.DataFrame({
+        "cat": ["a"] * 10 + ["b"] * 10,
+        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+                3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    })
+    chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val", color="cat:N")
+    svg = chart.show_svg()
+    # Default Paper Ink label_color must appear as stroke on structural lines
+    label_color = "#6b7280"
+    assert label_color in svg, (
+        f"label_color {label_color!r} must appear in SVG as stroke for structural marks; "
+        "whisker/cap/median were rendering in mark_color (blue) instead"
+    )
+    # The label_color assertion above proves at least one structural line uses the neutral color.
+
+
+def test_boxplot_whisker_is_solid_not_dashed():
+    """Boxplot whisker rules must render as solid lines, not dashed.
+    Rule marks default to reference_line_dash (dashed); composite.py must
+    clear it via stroke_dash=[] so whiskers render solid."""
+    df = pl.DataFrame({
+        "cat": ["a"] * 8 + ["b"] * 8,
+        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0,
+                3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0],
+    })
+    chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val")
+    svg = chart.show_svg()
+    # Dashed lines use stroke-dasharray; solid lines must not have it for whiskers.
+    # If reference_line_dash is not cleared, SVG will contain stroke-dasharray attributes.
+    # This test verifies whiskers are solid.
+    # A line element with stroke-dasharray would look like:
+    #   stroke-dasharray="4 4" (or similar)
+    # Since a boxplot has only structural lines and no reference lines,
+    # a stroke-dasharray should NOT be present.
+    assert "stroke-dasharray" not in svg, (
+        "boxplot SVG must not contain stroke-dasharray; whiskers must be solid, "
+        "not dashed (reference_line_dash should be cleared via stroke_dash=[])"
+    )
+
+
 def test_render_svg_faceted_emits_three_strip_titles():
     # The plan's hardcoded JSON likely doesn't match Phase 6's serde format.
     # Try the JSON in the plan first; if it fails, use the actual serialized
