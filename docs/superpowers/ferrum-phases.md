@@ -1,6 +1,6 @@
 # Ferrum — Implementation Phases (Meta-Roadmap)
 
-**Last updated:** 2026-05-11
+**Last updated:** 2026-05-14
 **Concept spec:** `ferrum-spec.md` (at repo root — philosophy, API surface, design constraints)
 **This document:** implementation order, phase dependencies, done criteria, and session-orientation guide
 
@@ -68,8 +68,8 @@ An arrow `→` means "must be done before." Phases with no arrow have no predece
 | **8b** | Composite + heavy statistical marks | `mark_boxplot/errorbar/errorband/ribbon`, `mark_contour/violin/qq/raster/swarm/hex/function` + 10 new Phase 5 transforms (Outliers, ErrorExtent, BoxStats, Violin, Kde2D, Contour, QQ, Raster, Hex, Swarm) + new SVG primitives (image, polygon, beeswarm) | 8a | [`2026-05-10-composite-stat-marks-design.md`](specs/2026-05-10-composite-stat-marks-design.md) | **done** |
 | **9** | Convenience / figure-level API | 8 Group A figure functions (`displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`, `clustermap`, `jointplot`); 8 new transforms (Unpivot, Linkage, Reorder, Bin2D, Logistic, Glm, Robust, LetterValue); 4 position adjustments (Identity, Dodge, Jitter, Stack); 2 new marks (segment, boxen); 3 new compound views (JointChart, RepeatChart, ClusterMapChart). Group B (model-diagnostic figure-level) deferred to Phase 10. | 8 | [`2026-05-10-convenience-api-design.md`](specs/2026-05-10-convenience-api-design.md) | **done** |
 | **10** | Model diagnostics layer | `ModelSource` (sklearn-protocol adapter, 22 derived-data methods, plus `ComparedModelSource` for multi-model overlay), 26 model-diagnostic marks, 21 Group B figure functions, 25 sklearn-protocol Visualizers. One new Rust function (`kendall_tau_b`, Knight's O(n log n)). | 8 | [`2026-05-10-model-diagnostics-design.md`](specs/2026-05-10-model-diagnostics-design.md) | **done** |
-| **11** | Interactive renderer (WASM) | `ferrum-wasm` crate + `ferrum._wasm` module; `.interactive()` switches render target; selections, zoom, pan, linked views declared in chart spec | 8 | *(not yet written)* | pending |
-| **12** | Extension points | Public APIs for custom marks, custom stat transforms, custom themes, renderer plugins; stable enough to document and not break | 8 | *(not yet written)* | pending |
+| **11** | Interactive renderer (WASM) | `ferrum-wasm` crate + `ferrum._wasm` module; `.interactive()` switches render target; selections, zoom, pan, linked views declared in chart spec | 8 | [`2026-05-13-interactive-renderer-design.md`](specs/2026-05-13-interactive-renderer-design.md) | **done** |
+| **12** | Extension points | Public APIs for custom marks, custom stat transforms, renderer plugins; stable enough to document and not break. Custom themes already complete (Phase 8a — plain dataclass, no registration). | 8 | *(not yet written)* | pending |
 
 ---
 
@@ -149,13 +149,14 @@ A phase is `done` when all of the following are true:
 - [x] Sklearn is not imported unless the user's model is from sklearn
 
 ### Phase 11 — Interactive renderer
-- [ ] `chart.interactive()` produces an HTML bundle with a WASM renderer
-- [ ] Selections, zoom, and pan declared in the chart spec work in a browser
-- [ ] `ferrum-wasm` crate added to workspace; wheel build still works for the Python package
+- [x] `chart.interactive()` produces an HTML bundle with a WASM renderer
+- [x] Selections, zoom, and pan declared in the chart spec work in a browser
+- [x] `ferrum-wasm` crate added to workspace; wheel build still works for the Python package
 
 ### Phase 12 — Extension points
-- [ ] Custom mark, stat transform, theme, and renderer plugin protocols are documented
-- [ ] At least one of each is implemented as an example in `examples/`
+- [ ] Custom mark, stat transform, and renderer plugin protocols are documented (`register_mark`, `register_stat`, `register_renderer` / `RendererProtocol`)
+- [x] Custom theme protocol is complete — `Theme` is a plain dataclass value; pass to `.theme()` or `set_default_theme()`. No registration needed. (landed Phase 8a)
+- [ ] At least one of each (custom mark, stat transform, renderer plugin) implemented as an example in `examples/`
 - [ ] Adding a custom mark does not require modifying `ferrum-core`
 
 ---
