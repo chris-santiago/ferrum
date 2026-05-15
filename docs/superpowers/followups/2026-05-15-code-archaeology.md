@@ -80,7 +80,8 @@ These are accepted end-to-end (Python API → serialized to Rust `EncodingSpec`)
 | `Layer(data=...)` via `Chart.layer()` | `src/ferrum/chart.py:3904` | Raises; only `+` operator supports layers with independent data |
 | `mark_hex(stroke=..., stroke_width=...)` | `src/ferrum/marks/heavy_stat.py:538` | Non-default values raise `ValueError` |
 | `mark_function(clip=False)` | `src/ferrum/marks/heavy_stat.py:769` | Accepted but documented as no-op |
-| `mark_raster(blend="additive")` | `src/ferrum/marks/heavy_stat.py:426` | Accepted, `warn_once` emitted, falls back to alpha |
+
+> **2026-05-15 update:** `mark_raster(blend="additive")` was removed from this table — docstring cleanup confirmed it is fully implemented (renders with `mix-blend-mode:screen` in SVG via `svg_walk.rs`). The original archaeology finding was a stale-comment false positive. Similarly, `mark_swarm(dodge=...)` is fully wired through `apply_dodged()` in `transform/swarm.rs`.
 
 ### `VisualBase.score()` not overridden in 14 visualizer subclasses
 

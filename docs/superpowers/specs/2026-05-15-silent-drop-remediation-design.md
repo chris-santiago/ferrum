@@ -32,7 +32,7 @@ Complete the deferred API surface for: (a) five `EncodingSpec` fields (`sort`, `
 ## 3. Non-goals
 
 - `impute=` on encodings — data imputation requires a new Rust transform and is deferred.
-- `mark_raster(blend="additive")` — requires GPU shader changes; separate effort.
+- `mark_raster(blend="additive")` **SVG** — already implemented via `mix-blend-mode:screen` in `svg_walk.rs`; no action needed. The non-goal is the **WASM GPU pixel-blending path** specifically, which requires additive compositing in the fragment shader and is a separate effort.
 - Full `Axis(...)` Python value class — only dict-passthrough of the named axis properties listed in §6 is in scope.
 - Legend kwarg passthrough beyond `disabled` — separate effort.
 - SVG rendering of `stroke_dash`/`stroke_opacity`/`stroke_width`/`angle` channels — only WASM.
