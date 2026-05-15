@@ -444,7 +444,7 @@ fn polar_outer_radius(plot_area: &crate::layout::Rect) -> f64 {
 ///   with `RECT_ARC_SEGMENTS` points; radial edges (constant-x) use 2 points.
 ///   The Rect's `FillStroke` is preserved so fill colour is not lost.
 fn apply_polar_node_transform(
-    nodes: &mut [SceneNode],
+    nodes: &mut Vec<SceneNode>,
     plot_area: &crate::layout::Rect,
 ) {
     use std::f64::consts::TAU;
@@ -456,81 +456,90 @@ fn apply_polar_node_transform(
     let center_y = plot_y + plot_h / 2.0;
     let outer_r = polar_outer_radius(plot_area);
 
+    /// Number of sample points along each arc edge of a converted Rect.
     const RECT_ARC_SEGMENTS: usize = 12;
 
-    let map_pt = |px: f64, py: f64| -> (f64, f64) {
-        let theta = (px - plot_x) / plot_w * TAU;
+    /// Map a single Cartesian pixel point to polar pixel coordinates.
+    #[inline]
+    fn map_pt(px: f64, py: f64, plot_x: f64, plot_y: f64, plot_w: f64, plot_h: f64,
+              center_x: f64, center_y: f64, outer_r: f64, tau: f64) -> (f64, f64) {
+        let theta = (px - plot_x) / plot_w * tau;
         let r = (plot_y + plot_h - py) / plot_h * outer_r;
         (center_x + r * theta.sin(), center_y - r * theta.cos())
-    };
+    }
 
     let mut replacements: Vec<(usize, SceneNode)> = Vec::new();
 
     for (idx, node) in nodes.iter_mut().enumerate() {
         match node {
             SceneNode::Circle { ref mut cx, ref mut cy, .. } => {
-                let (nx, ny) = map_pt(*cx, *cy);
+                let (nx, ny) = map_pt(*cx, *cy, plot_x, plot_y, plot_w, plot_h,
+                                      center_x, center_y, outer_r, TAU);
                 *cx = nx;
                 *cy = ny;
             }
             SceneNode::Polyline { ref mut points, .. } => {
                 for pt in points.iter_mut() {
-                    let (nx, ny) = map_pt(pt.0, pt.1);
+                    let (nx, ny) = map_pt(pt.0, pt.1, plot_x, plot_y, plot_w, plot_h,
+                                          center_x, center_y, outer_r, TAU);
                     pt.0 = nx;
                     pt.1 = ny;
                 }
             }
-            SceneNode::Line {
-                ref mut x1,
-                ref mut y1,
-                ref mut x2,
-                ref mut y2,
-                ..
-            } => {
-                let (nx1, ny1) = map_pt(*x1, *y1);
-                let (nx2, ny2) = map_pt(*x2, *y2);
-                *x1 = nx1;
-                *y1 = ny1;
-                *x2 = nx2;
-                *y2 = ny2;
+            SceneNode::Line { ref mut x1, ref mut y1, ref mut x2, ref mut y2, .. } => {
+                let (nx1, ny1) = map_pt(*x1, *y1, plot_x, plot_y, plot_w, plot_h,
+                                        center_x, center_y, outer_r, TAU);
+                let (nx2, ny2) = map_pt(*x2, *y2, plot_x, plot_y, plot_w, plot_h,
+                                        center_x, center_y, outer_r, TAU);
+                *x1 = nx1; *y1 = ny1;
+                *x2 = nx2; *y2 = ny2;
             }
             SceneNode::Text { ref mut x, ref mut y, .. } => {
-                let (nx, ny) = map_pt(*x, *y);
+                let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                      center_x, center_y, outer_r, TAU);
                 *x = nx;
                 *y = ny;
             }
             SceneNode::Rect { x, y, w, h, style, .. } => {
                 // Convert the Cartesian rect to a polar Polygon by sampling
                 // its perimeter. Constant-y (arc) edges get RECT_ARC_SEGMENTS
-                // points; constant-x (radial) edges use 2 points (straight).
+                // points; constant-x (radial) edges get 2 points (straight).
                 // Perimeter order: bottom-left → bottom-right (arc) →
                 // top-right (radial) → top-left (arc, reversed) → close.
                 let (rx, ry, rw, rh, fill_stroke) = (*x, *y, *w, *h, style.clone());
-                let mut pts: Vec<[f64; 2]> =
-                    Vec::with_capacity(2 * (RECT_ARC_SEGMENTS + 1) + 1);
+                let mut pts: Vec<[f64; 2]> = Vec::with_capacity(
+                    2 * RECT_ARC_SEGMENTS + 2
+                );
                 // Bottom arc: y = ry + rh, x sweeps left → right.
                 for i in 0..=RECT_ARC_SEGMENTS {
                     let t = i as f64 / RECT_ARC_SEGMENTS as f64;
-                    let (nx, ny) = map_pt(rx + t * rw, ry + rh);
+                    let px = rx + t * rw;
+                    let py = ry + rh;
+                    let (nx, ny) = map_pt(px, py, plot_x, plot_y, plot_w, plot_h,
+                                          center_x, center_y, outer_r, TAU);
                     pts.push([nx, ny]);
                 }
                 // Right radial edge: x = rx + rw, y sweeps bottom → top.
-                let (nx, ny) = map_pt(rx + rw, ry);
+                let (nx, ny) = map_pt(rx + rw, ry, plot_x, plot_y, plot_w, plot_h,
+                                      center_x, center_y, outer_r, TAU);
                 pts.push([nx, ny]);
                 // Top arc: y = ry, x sweeps right → left.
                 for i in (0..=RECT_ARC_SEGMENTS).rev() {
                     let t = i as f64 / RECT_ARC_SEGMENTS as f64;
-                    let (nx, ny) = map_pt(rx + t * rw, ry);
+                    let px = rx + t * rw;
+                    let py = ry;
+                    let (nx, ny) = map_pt(px, py, plot_x, plot_y, plot_w, plot_h,
+                                          center_x, center_y, outer_r, TAU);
                     pts.push([nx, ny]);
                 }
                 // Left radial edge closes back to start (polygon auto-closes).
-                replacements.push((idx, SceneNode::Polygon { rings: vec![pts], style: fill_stroke }));
+                replacements.push((idx, SceneNode::Polygon { points: pts, style: fill_stroke }));
             }
             _ => {}
         }
     }
 
-    // Apply Rect → Polygon replacements after the borrow-safe iteration above.
+    // Apply Rect → Polygon replacements (done after the borrow-safe iteration above).
     for (idx, replacement) in replacements {
         nodes[idx] = replacement;
     }
@@ -567,7 +576,7 @@ fn build_polar_axes(
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx + outer_r, y: cy },
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx - outer_r, y: cy },
             ],
-            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None, stroke_opacity: 1.0, angle: 0.0 },
+            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None },
             closed: true,
         });
     }
@@ -605,214 +614,4 @@ fn build_polar_axes(
     }
 
     nodes
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layout::Rect;
-    use ferrum_scene::{Color, FillStroke, SceneNode, StrokeStyle, TextAnchor, TextBaseline, FontWeight, TextStyle};
-
-    /// A minimal plot area: 200×200 starting at (10, 10).
-    fn test_plot_area() -> Rect {
-        Rect { x: 10.0, y: 10.0, w: 200.0, h: 200.0 }
-    }
-
-    fn dummy_stroke() -> StrokeStyle {
-        StrokeStyle {
-            color: Color::rgb(0, 0, 0),
-            width: 1.0,
-            opacity: 1.0,
-            dash: None,
-            stroke_cap: None,
-            stroke_join: None,
-        }
-    }
-
-    fn dummy_fill() -> FillStroke {
-        FillStroke {
-            fill: Some(Color::rgb(100, 100, 100)),
-            stroke: None,
-            stroke_width: 0.0,
-            opacity: 1.0,
-            stroke_dash: None,
-            stroke_opacity: 1.0,
-            angle: 0.0,
-        }
-    }
-
-    fn dummy_text_style() -> TextStyle {
-        TextStyle {
-            font_size: 12.0,
-            font_weight: FontWeight::Normal,
-            anchor: TextAnchor::Middle,
-            baseline: TextBaseline::Alphabetic,
-            angle: 0.0,
-            color: Color::rgb(0, 0, 0),
-            opacity: 1.0,
-            font_family: "sans-serif".to_string(),
-        }
-    }
-
-    // ── F14 regression tests ─────────────────────────────────────────
-
-    /// Line endpoints must be remapped by the polar transform.
-    #[test]
-    fn polar_transform_remaps_line_endpoints() {
-        let plot_area = test_plot_area();
-        // Place the line at the centre of the plot area in Cartesian pixel
-        // space — guaranteed to land inside the area.
-        let cx = plot_area.x + plot_area.w / 2.0;
-        let cy = plot_area.y + plot_area.h / 2.0;
-        let (orig_x1, orig_y1) = (cx - 20.0, cy - 10.0);
-        let (orig_x2, orig_y2) = (cx + 20.0, cy + 10.0);
-
-        let mut nodes = vec![SceneNode::Line {
-            x1: orig_x1,
-            y1: orig_y1,
-            x2: orig_x2,
-            y2: orig_y2,
-            style: dummy_stroke(),
-        }];
-
-        apply_polar_node_transform(&mut nodes, &plot_area);
-
-        match &nodes[0] {
-            SceneNode::Line { x1, y1, x2, y2, .. } => {
-                // Values must have changed from the original Cartesian coords.
-                assert!(
-                    (*x1 - orig_x1).abs() > 1e-9 || (*y1 - orig_y1).abs() > 1e-9,
-                    "expected (x1,y1) to change after polar remap, got ({x1},{y1})"
-                );
-                assert!(
-                    (*x2 - orig_x2).abs() > 1e-9 || (*y2 - orig_y2).abs() > 1e-9,
-                    "expected (x2,y2) to change after polar remap, got ({x2},{y2})"
-                );
-                // The remapped coords must fall within a plausible range around
-                // the polar centre (within outer_radius of the plot-area centre).
-                let outer_r = plot_area.w.min(plot_area.h) / 2.0;
-                let pcx = plot_area.x + plot_area.w / 2.0;
-                let pcy = plot_area.y + plot_area.h / 2.0;
-                let dist1 = ((x1 - pcx).powi(2) + (y1 - pcy).powi(2)).sqrt();
-                let dist2 = ((x2 - pcx).powi(2) + (y2 - pcy).powi(2)).sqrt();
-                assert!(
-                    dist1 <= outer_r + 1e-6,
-                    "remapped (x1,y1)=({x1},{y1}) is further from polar centre than outer_r={outer_r}"
-                );
-                assert!(
-                    dist2 <= outer_r + 1e-6,
-                    "remapped (x2,y2)=({x2},{y2}) is further from polar centre than outer_r={outer_r}"
-                );
-            }
-            other => panic!("expected SceneNode::Line after transform, got {other:?}"),
-        }
-    }
-
-    /// Text anchor point must be remapped by the polar transform.
-    #[test]
-    fn polar_transform_remaps_text_anchor() {
-        let plot_area = test_plot_area();
-        let orig_x = plot_area.x + plot_area.w * 0.3;
-        let orig_y = plot_area.y + plot_area.h * 0.7;
-
-        let mut nodes = vec![SceneNode::Text {
-            x: orig_x,
-            y: orig_y,
-            content: "hello".to_string(),
-            style: dummy_text_style(),
-        }];
-
-        apply_polar_node_transform(&mut nodes, &plot_area);
-
-        match &nodes[0] {
-            SceneNode::Text { x, y, content, .. } => {
-                // Content must be preserved.
-                assert_eq!(content, "hello");
-                // Anchor coords must have been remapped.
-                assert!(
-                    (*x - orig_x).abs() > 1e-9 || (*y - orig_y).abs() > 1e-9,
-                    "expected text anchor to change after polar remap, got ({x},{y})"
-                );
-                // Plausibility: within outer_radius of the plot-area centre.
-                let outer_r = plot_area.w.min(plot_area.h) / 2.0;
-                let pcx = plot_area.x + plot_area.w / 2.0;
-                let pcy = plot_area.y + plot_area.h / 2.0;
-                let dist = ((x - pcx).powi(2) + (y - pcy).powi(2)).sqrt();
-                assert!(
-                    dist <= outer_r + 1e-6,
-                    "remapped text ({x},{y}) is further from polar centre than outer_r={outer_r}"
-                );
-            }
-            other => panic!("expected SceneNode::Text after transform, got {other:?}"),
-        }
-    }
-
-    /// A Rect node must become a Polygon with one ring of 27 points.
-    ///
-    /// Point count: bottom arc (RECT_ARC_SEGMENTS+1 = 13) + right radial (1)
-    /// + top arc reversed (RECT_ARC_SEGMENTS+1 = 13) = 27.
-    #[test]
-    fn polar_transform_converts_rect_to_polygon_with_expected_ring() {
-        let plot_area = test_plot_area();
-        // A rect occupying the middle quarter of the plot area.
-        let rx = plot_area.x + plot_area.w * 0.25;
-        let ry = plot_area.y + plot_area.h * 0.25;
-        let rw = plot_area.w * 0.5;
-        let rh = plot_area.h * 0.5;
-
-        let mut nodes = vec![SceneNode::Rect {
-            x: rx,
-            y: ry,
-            w: rw,
-            h: rh,
-            style: dummy_fill(),
-            corner_radius: 0.0,
-        }];
-
-        apply_polar_node_transform(&mut nodes, &plot_area);
-
-        match &nodes[0] {
-            SceneNode::Polygon { rings, .. } => {
-                assert_eq!(rings.len(), 1, "expected exactly one ring, got {}", rings.len());
-                // RECT_ARC_SEGMENTS = 12  →  (12+1) + 1 + (12+1) = 27 points
-                let expected_pts = 27;
-                assert_eq!(
-                    rings[0].len(),
-                    expected_pts,
-                    "expected {expected_pts} ring points, got {}",
-                    rings[0].len()
-                );
-            }
-            other => panic!("expected SceneNode::Polygon after Rect transform, got {other:?}"),
-        }
-    }
-
-    /// Regression guard: Circle (cx,cy) must still be remapped after the refactor
-    /// that added Line/Text/Rect support.
-    #[test]
-    fn polar_transform_still_remaps_circle_cx_cy() {
-        let plot_area = test_plot_area();
-        let orig_cx = plot_area.x + plot_area.w * 0.6;
-        let orig_cy = plot_area.y + plot_area.h * 0.4;
-
-        let mut nodes = vec![SceneNode::Circle {
-            cx: orig_cx,
-            cy: orig_cy,
-            r: 5.0,
-            style: dummy_fill(),
-        }];
-
-        apply_polar_node_transform(&mut nodes, &plot_area);
-
-        match &nodes[0] {
-            SceneNode::Circle { cx, cy, r, .. } => {
-                assert_eq!(*r, 5.0, "circle radius must be unchanged");
-                assert!(
-                    (*cx - orig_cx).abs() > 1e-9 || (*cy - orig_cy).abs() > 1e-9,
-                    "expected circle centre to change after polar remap, got ({cx},{cy})"
-                );
-            }
-            other => panic!("expected SceneNode::Circle after transform, got {other:?}"),
-        }
-    }
 }

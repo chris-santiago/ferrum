@@ -3907,11 +3907,17 @@ class Chart:
         Accepts both public ``Layer`` instances (user-facing API) and
         internal ``_Layer`` instances (used by ferrum internals).
 
+        When a ``Layer(data=df, ...)`` has its own ``data`` attribute, that
+        data is merged with the chart's existing data via diagonal concatenation
+        (same strategy as the ``+`` operator). Each layer's encoding references
+        only its own columns; null-padded rows in the merged batch are invisible
+        to mark renderers that skip null values.
+
         Parameters
         ----------
         *layers : Layer or _Layer
-            Layer objects to append. Public ``Layer`` instances with
-            ``data`` set are not yet supported.
+            Layer objects to append. Public ``Layer`` instances may carry an
+            independent ``data=`` DataFrame.
 
         Returns
         -------
@@ -3929,10 +3935,23 @@ class Chart:
                 converted.append(ly)
             elif isinstance(ly, PublicLayer):
                 if ly.data is not None:
-                    raise ValueError(
-                        "Layer(data=...) is not yet supported by Chart.layer(); "
-                        "use the + operator for layers with independent data"
-                    )
+                    # Merge the layer's data with the chart's data via diagonal
+                    # concatenation (mirrors the __add__ strategy for independent data).
+                    # When the chart has no data yet (data=None), the layer's data
+                    # becomes the chart's data.
+                    import polars as pl
+
+                    layer_df = _to_polars(ly.data)
+                    if new._data is None:
+                        new._data = layer_df
+                    else:
+                        try:
+                            chart_df = _to_polars(new._data)
+                            new._data = pl.concat([chart_df, layer_df], how="diagonal")
+                        except Exception:
+                            # If chart data can't be converted (shouldn't happen),
+                            # use layer data only.
+                            new._data = layer_df
                 converted.append(
                     _Layer(
                         name=ly.name,

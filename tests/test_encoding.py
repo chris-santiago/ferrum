@@ -96,13 +96,14 @@ def test_x_construction_with_full_honored_kwargs():
     assert c._kwargs["type"] == "Q"
 
 
-def test_x_warns_on_deferred_kwargs():
+def test_x_honored_kwargs_no_warning():
+    """axis=, sort=, stack=, impute=, format=, format_type= are all honored — no warning."""
     reset_warnings()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        # `sort` is now honored (D8 wiring), so only `axis` warns.
         X("price", axis={"grid": False}, sort="ascending")
-    assert len(w) == 1
+    # Both axis= and sort= are now honored — neither emits a warning.
+    assert len(w) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -146,9 +146,13 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
             inst.opacity = *o as f32;
         }
         (ChannelName::Size, EncodingValue::Size { value: s }) => {
-            // No orientation context here; apply to both dimensions conservatively.
-            inst.size[0] = *s as f32;
-            inst.size[1] = *s as f32;
+            // Without orientation context (h-bar vs v-bar) we apply the size to
+            // both width and height so the conditional always has a visible effect.
+            // The rendering layer controls which dimension is the data extent; the
+            // other is the band width set by the scale.  Applying to both is the
+            // conservative fallback that matches the circle counterpart's intent
+            // (scale the mark proportionally to the encoded value).
+            inst.size = [*s as f32, *s as f32];
         }
         _ => {}
     }
@@ -168,9 +172,6 @@ mod tests {
             stroke_color: [0.0, 0.0, 0.0, 0.0],
             stroke_width: 0.0,
             opacity: 1.0,
-            stroke_opacity: 1.0,
-            stroke_dash: 0.0,
-            angle: 0.0,
         };
         let red = Color {
             r: 255,
@@ -197,9 +198,6 @@ mod tests {
             stroke_color: [0.0, 0.0, 0.0, 0.0],
             stroke_width: 0.0,
             opacity: 1.0,
-            stroke_opacity: 1.0,
-            stroke_dash: 0.0,
-            angle: 0.0,
         };
         apply_value_to_rect(
             &mut inst,
@@ -207,5 +205,25 @@ mod tests {
             &EncodingValue::Opacity { value: 0.3 },
         );
         assert!((inst.opacity - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn apply_size_to_rect() {
+        let mut inst = RectInstance {
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+            corner_radius: 0.0,
+            fill_color: [0.5, 0.5, 0.5, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 0.0],
+            stroke_width: 0.0,
+            opacity: 1.0,
+        };
+        apply_value_to_rect(
+            &mut inst,
+            &ChannelName::Size,
+            &EncodingValue::Size { value: 20.0 },
+        );
+        assert!((inst.size[0] - 20.0).abs() < 0.01);
+        assert!((inst.size[1] - 20.0).abs() < 0.01);
     }
 }

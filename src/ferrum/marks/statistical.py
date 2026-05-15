@@ -142,7 +142,7 @@ def desugar_density(
     if multiple not in ("layer", "stack", "fill", "dodge"):
         raise ValueError(
             f"mark_density(multiple={multiple!r}) must be one of "
-            "'layer', 'stack', 'fill' (dodge not yet implemented)"
+            "'layer', 'stack', 'fill', 'dodge'"
         )
 
     if orientation not in ("vertical", "horizontal"):
@@ -272,10 +272,10 @@ def desugar_histogram(
             "mark_histogram(right=True) is not supported; "
             "bins are always left-closed, right-open [lo, hi)"
         )
-    if multiple != "layer":
+    if multiple not in ("layer", "stack", "fill", "dodge"):
         raise ValueError(
             f"mark_histogram(multiple={multiple!r}) is not supported; "
-            "only 'layer' overlap is available"
+            "expected one of 'layer', 'stack', 'fill', 'dodge'"
         )
     if orientation not in ("vertical", "horizontal"):
         raise ValueError(
@@ -295,7 +295,21 @@ def desugar_histogram(
         encoding_remap = {"y": "bin_start", "y2": "bin_end", "x": count_column}
     else:
         encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": count_column}
-    return MarkDesugarResult(mark="bar", transforms=transforms, remap=encoding_remap)
+
+    # multiple= → position adjustment on the count/density axis.
+    position = None
+    if multiple == "stack":
+        from ferrum.position import Stack
+        position = Stack(offset="zero")
+    elif multiple == "fill":
+        from ferrum.position import Stack
+        position = Stack(offset="normalize")
+    elif multiple == "dodge":
+        from ferrum.position import Dodge
+        position = Dodge()
+
+    return MarkDesugarResult(mark="bar", transforms=transforms, remap=encoding_remap,
+                             position=position)
 
 
 def desugar_smooth(

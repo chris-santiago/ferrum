@@ -158,8 +158,8 @@ class TestTitleSpec:
 # ---------------------------------------------------------------------------
 
 class TestEncodingAxis:
-    def test_axis_labels_false_accepted_without_crash(self):
-        """axis kwarg is accepted and stored; it emits a one-time UserWarning."""
+    def test_axis_labels_false_accepted_and_honored(self):
+        """axis= kwarg is accepted and honored — no UserWarning emitted."""
         from ferrum._warn import reset_warnings
         reset_warnings()
         with warnings.catch_warnings(record=True) as caught:
@@ -171,10 +171,10 @@ class TestEncodingAxis:
                 .show_svg()
             )
         assert "<svg" in svg
-        # A UserWarning about axis not being honored should be emitted.
-        messages = [str(w.message) for w in caught]
-        assert any("axis" in m.lower() for m in messages), (
-            f"Expected a 'axis' warning; got: {messages}"
+        # axis= is now honored — no warning should be emitted.
+        axis_warns = [w for w in caught if "axis" in str(w.message).lower()]
+        assert axis_warns == [], (
+            f"axis= should not warn (it is now honored); got: {[str(w.message) for w in axis_warns]}"
         )
 
 
@@ -199,8 +199,8 @@ class TestEncodingSort:
 # ---------------------------------------------------------------------------
 
 class TestEncodingFormat:
-    def test_format_string_accepted_without_crash(self):
-        """format kwarg is accepted; emits a UserWarning (not yet rendered)."""
+    def test_format_string_accepted_and_honored(self):
+        """format= kwarg is accepted and honored — no UserWarning emitted."""
         from ferrum._warn import reset_warnings
         reset_warnings()
         with warnings.catch_warnings(record=True) as caught:
@@ -212,9 +212,10 @@ class TestEncodingFormat:
                 .show_svg()
             )
         assert "<svg" in svg
-        messages = [str(w.message) for w in caught]
-        assert any("format" in m.lower() for m in messages), (
-            f"Expected a 'format' warning; got: {messages}"
+        # format= is now honored — no warning should be emitted.
+        fmt_warns = [w for w in caught if "format" in str(w.message).lower()]
+        assert fmt_warns == [], (
+            f"format= should not warn (it is now honored); got: {[str(w.message) for w in fmt_warns]}"
         )
 
 

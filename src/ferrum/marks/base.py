@@ -51,6 +51,7 @@ _VALID_MARK_KWARGS = frozenset(
         "right",  # histogram
         "multiple",  # density/histogram
         "blend",     # layer blend mode ("normal", "additive")
+        "leader_line",  # label: draw thin leader line from data point to label
     ]
 )
 

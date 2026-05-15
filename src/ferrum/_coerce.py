@@ -57,7 +57,11 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
     import pyarrow as pa
 
     if data is None:
-        raise ValueError("Chart(data=None) requires per-layer data — not yet supported in Phase 8a")
+        raise ValueError(
+            "Chart(data=None) requires per-layer data. "
+            "Construct layers with individual data= arguments and pass them via Chart.layer(), "
+            "or use the + operator to combine independent-data charts."
+        )
 
     # Fast path: polars (zero-copy via Arrow C Data Interface)
     try:

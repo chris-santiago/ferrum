@@ -5,7 +5,21 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_RENDERED_HONORED = frozenset(["type", "bin", "aggregate", "scale", "title", "sort"])
+_RENDERED_HONORED = frozenset([
+    "type", "bin", "aggregate", "scale", "title",
+    # Sort — honored by scale_resolve.rs ordinal domain builder.
+    "sort",
+    # Axis dict — honored by prepare.rs AxisInput construction.
+    "axis",
+    # Stack — honored by position.rs Stack strategy selection.
+    "stack",
+    # Impute dict — honored by prepare.rs apply_impute.
+    "impute",
+    # Format string and type — honored by prepare.rs apply_tick_format.
+    "format", "format_type",
+    # Legend dict — honored by prepare.rs legend_orient_override / title.
+    "legend",
+])
 
 
 class X(ChannelBase):
@@ -85,6 +99,19 @@ class Y(ChannelBase):
     _channel_name = "y"
     _renders_in_phase_8a = True
     _honored_kwargs = _RENDERED_HONORED
+
+    _VALID_STACK = frozenset(("zero", "normalize", "center", "false", "null", "none"))
+
+    def _validate(self) -> None:
+        super()._validate()
+        stack = self._kwargs.get("stack")
+        if stack is not None and isinstance(stack, str):
+            if stack.lower() not in self._VALID_STACK:
+                raise ValueError(
+                    f"Y(stack={stack!r}): must be one of "
+                    "'zero', 'normalize', 'center', or None; "
+                    f"got {stack!r}"
+                )
 
 
 class X2(ChannelBase):

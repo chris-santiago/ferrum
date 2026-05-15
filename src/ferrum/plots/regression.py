@@ -527,14 +527,26 @@ def lmplot(
     metrics_applied = show_metrics and method == "lm" and hue is None
 
     # truncate: True = clip to data range (current Smooth default).
-    # False = extend beyond data range — requires Rust-side x_range
-    # support (SmoothSpec.x_range, tracked in design spec WI-7).
+    # False = extend fit line to the full x-axis domain boundary via
+    # SmoothSpec/RobustSpec.x_range (spec §4 WI-7 — now wired end-to-end).
+    # The x_range is resolved from the chart's x column min/max at Python
+    # desugar time; the Rust transform uses it as the evaluation domain.
+    # When truncate=True (default) x_range stays None → clips to observed data.
+    x_range = None
     if not truncate:
-        raise ValueError(
-            "lmplot: truncate=False is not yet supported; the fit line always "
-            "clips to the observed data range. Set truncate=True or omit the "
-            "parameter. Rust-side x_range support is tracked in design spec WI-7."
-        )
+        # Compute the data-column extent here so lmplot does not need a
+        # provisional scale pass. The Rust Smooth/Robust transform will
+        # evaluate the fit line over [x_min, x_max] of the full dataset
+        # regardless of which rows each facet panel sees.
+        try:
+            import polars as pl
+            _df = data.collect() if hasattr(data, "collect") else data
+            x_col_name = x.field if hasattr(x, "field") else str(x)
+            if hasattr(_df, "to_arrow"):
+                _x_series = _df[x_col_name]
+                x_range = [float(_x_series.min()), float(_x_series.max())]
+        except Exception:
+            x_range = None  # fall back to truncated fit if data resolution fails
 
     # Shared encoding.
     enc: dict = {"x": x, "y": y}

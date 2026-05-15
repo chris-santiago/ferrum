@@ -170,9 +170,12 @@ class ChannelBase:
                 continue
             if (v := self._kwargs.get(k)) is not None:
                 out[k] = v
-        # PyO3 EncodingSpec.__new__ expects snake_case param name `format_type`
-        # even though the user-facing kwarg and JSON serde key is "formatType".
+        # PyO3 EncodingSpec.__new__ expects snake_case param name `format_type`.
+        # Accept both "formatType" (camelCase, Vega-Lite compat) and "format_type"
+        # (snake_case, Python idiomatic) as aliases.
         if (v := self._kwargs.get("formatType")) is not None:
+            out["format_type"] = v
+        elif (v := self._kwargs.get("format_type")) is not None:
             out["format_type"] = v
         # condition: serialize ConditionalSpec or raw dict as opaque JSON for Rust.
         if (cond := self._kwargs.get("condition")) is not None:
