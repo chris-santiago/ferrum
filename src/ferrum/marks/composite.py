@@ -1,16 +1,14 @@
 """Composite-mark desugar helpers (Phase 8b).
 
-Each desugar_<name> returns a 5-tuple:
-    ("__layered__", transforms: list, _ignored: None, _ignored: None, layers: list)
-
-Where `layers` is a list of ``ferrum._layer._Layer`` instances.
+Each desugar_<name> returns a ``MarkDesugarResult`` with ``layers`` set to a
+list of ``ferrum._layer._Layer`` instances (layered mode).
 """
 
 from __future__ import annotations
 from typing import Any, Optional
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
-from ferrum._layer import _Layer
+from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.encoding import X, Y
 
@@ -137,7 +135,7 @@ def desugar_boxplot(
     if outliers:
         layers.append(_Layer(name="outlier", mark="point", encoding=enc(val), mark_kwargs={"filled": False}, data_source="outliers"))
 
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("boxplot", frozenset({
@@ -234,7 +232,7 @@ def desugar_errorbar(
                 ),
             ]
         )
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("errorbar", frozenset({
@@ -318,7 +316,7 @@ def desugar_errorband(
                 _Layer(name="upper_border", mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
             ]
         )
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("errorband", frozenset({
@@ -404,7 +402,7 @@ def desugar_ribbon(
             mark_kwargs={"opacity": opacity, "stroke": "none"},
         ),
     ]
-    return ("__layered__", [], None, None, layers)
+    return MarkDesugarResult(layers=layers)
 
 
 register_layer_names("ribbon", frozenset({
@@ -501,7 +499,7 @@ def desugar_boxen(
         )
     )
 
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("boxen", frozenset({

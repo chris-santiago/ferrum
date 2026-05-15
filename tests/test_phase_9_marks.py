@@ -5,10 +5,6 @@ import ferrum as fe
 
 
 class TestMarkSegment:
-    def test_segment_no_longer_in_deferred(self):
-        from ferrum.marks import PHASE_9_PLUS_MARKS
-        assert "segment" not in PHASE_9_PLUS_MARKS
-
     def test_mark_segment_accepts_x2_y2(self):
         df = pl.DataFrame({
             "x": [0.0, 1.0], "y": [0.0, 1.0],

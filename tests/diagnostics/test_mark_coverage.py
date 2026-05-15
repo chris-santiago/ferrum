@@ -1,9 +1,8 @@
 """Phase 10 mark coverage assertion (Task 42).
 
 Locks down the contract that all 26 Phase 10 marks ship as ``Chart``
-methods, none of them appears in the deferred-marks lists in
-``src/ferrum/marks/deferred.py``, and the Phase 9+ deferred list is
-unchanged from its post-9d state.
+methods.  The deferred-marks module was deleted once all marks shipped;
+these tests verify the marks are available on Chart.
 """
 from __future__ import annotations
 
@@ -24,15 +23,6 @@ def test_phase_10_marks_count():
     assert len(PHASE_10_MARKS) == 26
 
 
-def test_phase_10_marks_not_in_deferred():
-    from ferrum.marks.deferred import PHASE_8B_MARKS, PHASE_9_PLUS_MARKS
-
-    overlap = PHASE_10_MARKS & (PHASE_8B_MARKS | PHASE_9_PLUS_MARKS)
-    assert not overlap, (
-        f"Phase 10 marks still appear in a deferred list: {overlap}"
-    )
-
-
 def test_phase_10_marks_available_on_chart():
     # All Phase 10 marks ship as ``Chart.mark_<name>`` methods (not
     # module-level functions). Verify each method exists and is callable.
@@ -45,16 +35,3 @@ def test_phase_10_marks_available_on_chart():
     assert not missing, (
         f"Phase 10 marks not available as Chart methods: {missing}"
     )
-
-
-def test_phase_9_plus_marks_unchanged():
-    # Phase 11d closed all four deferred marks (arc 11d3, label 11d4, geoshape 11d5, image 11d6).
-    from ferrum.marks.deferred import PHASE_9_PLUS_MARKS
-
-    assert PHASE_9_PLUS_MARKS == frozenset()
-
-
-def test_phase_8b_marks_empty():
-    from ferrum.marks.deferred import PHASE_8B_MARKS
-
-    assert PHASE_8B_MARKS == frozenset()

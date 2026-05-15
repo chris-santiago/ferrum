@@ -223,11 +223,10 @@ def _resolve_encoding_value(enc: Any) -> dict:
         if isinstance(v, (int, float)):
             return {"kind": "opacity", "value": float(v)}
         return {"kind": "opacity", "value": 1.0}
-    from ferrum.encoding.appearance import Color, Opacity, Size
-    if isinstance(enc, Color):
+    from ferrum.encoding.base import ChannelBase
+    if isinstance(enc, ChannelBase):
         return {"kind": "field", "name": enc.field}
-    if isinstance(enc, Opacity):
-        return {"kind": "field", "name": enc.field}
-    if isinstance(enc, Size):
-        return {"kind": "field", "name": enc.field}
-    return {"kind": "opacity", "value": 1.0}
+    raise TypeError(
+        f"conditional encoding value must be a channel object (Color, Shape, etc.) "
+        f"or a literal value(...) — got {type(enc).__name__}"
+    )

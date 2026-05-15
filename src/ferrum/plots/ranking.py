@@ -792,7 +792,7 @@ def _decision_boundary_chart_from_source(
             chart = chart.theme(theme)
         return chart
 
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     unified = _build_decision_boundary_unified(source, grid_info)
     # Non-proba: cast class indices to String for categorical color scale.
@@ -803,7 +803,7 @@ def _decision_boundary_chart_from_source(
         )
     chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
     chart = chart.layer(
-        Layer(
+        _Layer(
             mark="point",
             encoding={"x": "scatter_x", "y": "scatter_y", "color": "scatter_z"},
             mark_kwargs={"stroke": "#000000", "stroke_width": 1.0, "size": 80.0},

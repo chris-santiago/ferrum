@@ -22,46 +22,35 @@ def test_to_mark_kwargs_dict_filters_to_style_only():
     assert d == {"size": 100}   # method and bandwidth go to transforms, not style
 
 
-def test_deferred_mark_error_for_9_plus_mark():
-    # Phase 11d closed all Phase 9+ deferred marks (arc, label, geoshape, image).
-    # deferred_mark_error now returns a generic "not implemented" message for unknown marks.
-    from ferrum.marks import deferred_mark_error
-    e = deferred_mark_error("future_mark")
-    assert "not implemented" in str(e)
-
-
-def test_phase_8b_marks_set_is_empty_after_subbatch_f():
-    from ferrum.marks import PHASE_8B_MARKS
-    # Sub-batch E shipped composites (boxplot/errorbar/errorband/ribbon) and
-    # Sub-batch F shipped heavy-stat marks (contour/violin/qq/raster/hex/swarm/function).
-    # All Phase 8b marks are now implemented; the deferred set is empty.
-    assert PHASE_8B_MARKS == frozenset()
-
-
 def test_desugar_density_returns_area_with_kde_transform():
     from ferrum.marks.statistical import desugar_density
     from ferrum import Kde
-    mark, transforms, remap = desugar_density("price")
-    assert mark == "area"
-    assert len(transforms) == 1 and isinstance(transforms[0], Kde)
+    from ferrum._layer import MarkDesugarResult
+    result = desugar_density("price")
+    assert isinstance(result, MarkDesugarResult)
+    assert result.mark == "area"
+    assert len(result.transforms) == 1 and isinstance(result.transforms[0], Kde)
     # Kde produces ("value", "density") columns; both x and y are remapped.
-    assert remap == {"x": "value", "y": "density"}
+    assert result.remap == {"x": "value", "y": "density"}
 
 
 def test_desugar_histogram_returns_bar_with_bin_transform():
     from ferrum.marks.statistical import desugar_histogram
     from ferrum import Bin
-    mark, transforms, remap = desugar_histogram("price", bin_count=20)
-    assert mark == "bar"
-    assert isinstance(transforms[0], Bin)
-    assert remap == {"x": "bin_start", "x2": "bin_end", "y": "count"}
+    from ferrum._layer import MarkDesugarResult
+    result = desugar_histogram("price", bin_count=20)
+    assert isinstance(result, MarkDesugarResult)
+    assert result.mark == "bar"
+    assert isinstance(result.transforms[0], Bin)
+    assert result.remap == {"x": "bin_start", "x2": "bin_end", "y": "count"}
 
 
-def test_desugar_smooth_with_ci_returns_layered_tuple():
-    """Phase 8b: ci= no longer warns; it returns the layered (__layered__,
-    transforms, _, _, layers) 5-tuple emitting a ribbon CI band + line."""
+def test_desugar_smooth_with_ci_returns_layered_result():
+    """Phase 8b: ci= no longer warns; it returns a MarkDesugarResult with
+    layers (ribbon CI band + line)."""
     import warnings
     from ferrum._warn import reset_warnings
+    from ferrum._layer import MarkDesugarResult
     from ferrum.marks.statistical import desugar_smooth
 
     reset_warnings()
@@ -70,11 +59,10 @@ def test_desugar_smooth_with_ci_returns_layered_tuple():
         result = desugar_smooth("x_col", "y_col", ci=0.95)
     # No ci-deferral warning anymore.
     assert not any("Phase 8b" in str(wi.message) and "ci" in str(wi.message).lower() for wi in w)
-    # 5-tuple layered output, ribbon + line layers.
-    assert isinstance(result, tuple) and len(result) == 5
-    assert result[0] == "__layered__"
-    layers = result[4]
-    assert [layer.mark for layer in layers] == ["ribbon", "line"]
+    # Layered output via MarkDesugarResult: ribbon + line layers.
+    assert isinstance(result, MarkDesugarResult)
+    assert result.layers is not None
+    assert [layer.mark for layer in result.layers] == ["ribbon", "line"]
 
 
 # ---------------------------------------------------------------------------

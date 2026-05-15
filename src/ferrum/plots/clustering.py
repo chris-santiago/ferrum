@@ -92,7 +92,7 @@ def _pca_scree_chart_from_source(
 ):
     """PCA scree chart with optional cumulative line + threshold rule."""
     import ferrum
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     df = source.pca_variance(n_components=n_components)
     chart = ferrum.Chart(df).mark_pca_scree(
@@ -102,7 +102,7 @@ def _pca_scree_chart_from_source(
     chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
     if cumulative_line:
         chart = chart.layer(
-            Layer(
+            _Layer(
                 mark="point",
                 encoding={"x": "component", "y": "cumulative_variance_ratio"},
                 mark_kwargs={"size": 40, "filled": True},
@@ -128,7 +128,7 @@ def _pca_scree_chart_from_variance_df(
 ):
     """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path)."""
     import ferrum
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart = ferrum.Chart(df).mark_pca_scree(
         cumulative_line=cumulative_line,
@@ -137,7 +137,7 @@ def _pca_scree_chart_from_variance_df(
     chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
     if cumulative_line:
         chart = chart.layer(
-            Layer(
+            _Layer(
                 mark="point",
                 encoding={"x": "component", "y": "cumulative_variance_ratio"},
                 mark_kwargs={"size": 40, "filled": True},
@@ -231,7 +231,7 @@ def _cluster_diagnostics_chart(
     from ferrum import _core
     from sklearn.cluster import KMeans, AgglomerativeClustering
     from ferrum.encoding import X as XEnc, Y as YEnc
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
     X_np = np.asarray(X, dtype=np.float64)
@@ -290,13 +290,13 @@ def _cluster_diagnostics_chart(
             ),
         )
         elbow_layers = [
-            Layer(
+            _Layer(
                 mark="rule",
                 encoding={"x": "_elbow_k"},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
                 name="elbow_rule",
             ),
-            Layer(
+            _Layer(
                 mark="text",
                 encoding={"x": "_elbow_k", "y": "_elbow_y", "text": "_elbow_text"},
                 mark_kwargs={"dx": 8, "dy": -8, "align": "left"},
@@ -309,7 +309,7 @@ def _cluster_diagnostics_chart(
         .encode(x=XEnc("k", title="k"), y=YEnc("inertia", title="Distortion score"))
         .properties(title=ferrum.Title("Distortion Score Elbow"))
         .layer(
-            Layer(
+            _Layer(
                 mark="point",
                 encoding={"x": "k", "y": "inertia"},
                 mark_kwargs={"size": 40, "filled": True},
@@ -324,7 +324,7 @@ def _cluster_diagnostics_chart(
         .encode(x=XEnc("k", title="k"), y=YEnc("silhouette", title="Silhouette score"))
         .properties(title=ferrum.Title("Silhouette Score"))
         .layer(
-            Layer(
+            _Layer(
                 mark="point",
                 encoding={"x": "k", "y": "silhouette"},
                 mark_kwargs={"size": 40, "filled": True},

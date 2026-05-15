@@ -127,17 +127,17 @@ def _importance_chart_from_source(
     )
 
     if show_values:
-        from ferrum.layer import Layer
+        from ferrum._layer import _Layer
 
         if orient == "horizontal":
-            text_ly = Layer(
+            text_ly = _Layer(
                 mark="text",
                 encoding={"x": "importance", "y": "feature", "text": "_value_text"},
                 mark_kwargs={"align": "left", "dx": 4},
                 name="value_text",
             )
         else:
-            text_ly = Layer(
+            text_ly = _Layer(
                 mark="text",
                 encoding={"x": "feature", "y": "importance", "text": "_value_text"},
                 mark_kwargs={"baseline": "bottom", "dy": -4},
