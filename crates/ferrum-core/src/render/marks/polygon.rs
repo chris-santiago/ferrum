@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use arrow::array::{Array, Float64Array, UInt32Array};
+use arrow::array::{Array, Float64Array, Int64Array, UInt32Array};
 
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
@@ -68,6 +68,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 for i in 0..u.len() {
                     if !u.is_null(i) {
                         g.entry(u.value(i) as i64).or_default().push(i);
+                    }
+                }
+            } else if let Some(i64a) = arr.as_any().downcast_ref::<Int64Array>() {
+                for i in 0..i64a.len() {
+                    if !i64a.is_null(i) {
+                        g.entry(i64a.value(i)).or_default().push(i);
                     }
                 }
             } else if let Some(f) = arr.as_any().downcast_ref::<Float64Array>() {
@@ -401,5 +407,49 @@ mod tests {
             }
         }
         assert_eq!(fills.len(), 3, "expected 3 distinct polygon fills, got {}: {:?}", fills.len(), fills);
+    }
+
+    #[test]
+    fn polygon_int64_detail_groups_correctly() {
+        // Regression: hex_id is Int64 but the grouping code previously only
+        // handled UInt32 and Float64, collapsing all hex vertices into one
+        // degenerate polygon. Verify three Int64 groups → three Polygon nodes.
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use arrow::array::Int64Array;
+
+        let spec = polygon_spec(Some("hex_id"), None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("hex_id", DataType::Int64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![
+                0.0, 1.0, 0.5,    2.0, 3.0, 2.5,    4.0, 5.0, 4.5,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    0.0, 0.0, 1.0,
+            ])),
+            Arc::new(Int64Array::from(vec![
+                100i64, 100, 100,   200, 200, 200,   300, 300, 300,
+            ])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 5.0], vec![0.0, 100.0], false, false,
+            )),
+            y: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0], vec![100.0, 0.0], false, false,
+            )),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let n = result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count();
+        assert_eq!(n, 3, "Int64 hex_id must produce 3 separate polygons, got {n}");
     }
 }
