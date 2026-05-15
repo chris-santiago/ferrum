@@ -150,16 +150,16 @@
 
 ## Prioritized Action List
 
-### Immediate (active correctness bugs)
-1. **B2** — Fix `"type_"` vs `"type"` key mismatch in `_build_layers_list` (`chart.py:4400`)
-2. **F8** — Extend WASM hit-test dispatch table to cover `Tick`, `Text`, `Ribbon`, `Segment`, `Image`
-3. **F17** — Wire remaining transforms into `secondary_outputs` dispatch in `transform/core.rs`
+### Immediate (active correctness bugs) — ✅ all resolved
+1. ~~**B2** — Fix `"type_"` vs `"type"` key mismatch~~ — ✅ `dbc9f41`
+2. ~~**F8** — Extend WASM hit-test dispatch table~~ — ✅ `175664a`
+3. ~~**F17** — Wire remaining transforms into `secondary_outputs`~~ — ✅ not a bug (already correct)
 
-### High (features with dead or broken code paths)
-4. **F3** — Wire leader-line path in `marks/label.rs` to a `mark_style.line` field, or remove the dead branch
-5. **F14** — Extend polar coordinate transform in `scene_build.rs` to cover all scene node types
-6. Unblock Task 37: wire per-cell quantitative coloring for `mark_contour` and `mark_hex`
-7. Fix `mark_violin(inner=None)` scale-resolve integration for small samples
+### High (features with dead or broken code paths) — ✅ all resolved
+4. ~~**F3** — Wire leader-line path in `marks/label.rs`~~ — ✅ `87e8c6b`
+5. ~~**F14** — Extend polar coordinate transform~~ — ✅ `a5d1de0`
+6. Unblock Task 37: wire per-cell quantitative coloring for `mark_contour` and `mark_hex` — deferred (separate scope)
+7. ~~Fix `mark_violin(inner=None)` scale-resolve~~ — ✅ `531f10d`
 
 ### Medium (spec-documented but silently dropped)
 8. ~~Wire the 11 silent-drop mark kwargs through `MarkKwargsSpec`~~ — ✅ resolved (10/11 already wired; 1 boxplot `width=` alias added `82a1496`)
@@ -171,5 +171,5 @@
 ### Low (missing namespaces / Phase 12 scope)
 13. ~~Scaffold `ferrum.data`~~ — dropped (users use sklearn/seaborn). Scaffold `ferrum.color`, `ferrum.config` namespaces
 14. Clean up 105 suppressed Rust dead-code warnings; remove unused `CategoricalPalette`/`Scheme` module
-15. Update stale docstrings (`CoordPolar`, Phase 8a error message, contour `smooth`)
+15. ~~Update stale docstrings (`CoordPolar`, Phase 8a error message, contour `smooth`)~~ — ✅ all 6 fixed `5f5948f` + `f87ba9a`
 16. Write Phase 12 spec doc and begin extension-point implementation
