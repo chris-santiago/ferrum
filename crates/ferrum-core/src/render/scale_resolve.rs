@@ -410,10 +410,12 @@ pub fn resolve_scales_with_outputs(
         ));
     }
 
-    // Tick mark supports single-axis rug mode: only x or only y is encoded.
-    // Synthesize a dummy unit scale for the absent axis so the tick builder
+    // Tick and Rule marks support single-axis mode: only x or only y is encoded.
+    // Tick: x-only = x-rug, y-only = y-rug.
+    // Rule: y-only = horizontal span, x-only = vertical span.
+    // Synthesize a dummy unit scale for the absent axis so the mark builder
     // can access its present scale without scale_resolve erroring.
-    if matches!(spec.mark, crate::spec::mark::Mark::Tick) {
+    if matches!(spec.mark, crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule) {
         let has_x = spec.encoding.x.is_some();
         let has_y = spec.encoding.y.is_some();
         if has_x && !has_y {
