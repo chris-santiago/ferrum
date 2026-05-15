@@ -115,6 +115,21 @@ async function _render(container, sceneJson, model) {
 
   // ── Pan + hover tooltip (combined mousemove) ─────────────────────
   // renderer is declared below (let), captured by closure.
+  //
+  // _zoom mirrors the Rust ZoomPanState affine transform so the JS-side
+  // hit-test can inverse-transform mouse positions to original mark space.
+  // Updated in-place by pan events here, and by wheel/dblclick handlers
+  // in the outer render() scope via the returned _state.zoom reference.
+  const _zoom = { sx: 1, sy: 1, tx: 0, ty: 0 };
+
+  // Inverse-transform a canvas (post-zoom) point to original mark space.
+  function _invZoom(x, y) {
+    return [
+      Math.abs(_zoom.sx) > 1e-10 ? (x - _zoom.tx) / _zoom.sx : x,
+      Math.abs(_zoom.sy) > 1e-10 ? (y - _zoom.ty) / _zoom.sy : y,
+    ];
+  }
+
   let _isDragging = false;
   let _panStart = null;
   canvas.addEventListener('mousedown', e => {
@@ -126,8 +141,9 @@ async function _render(container, sceneJson, model) {
   canvas.addEventListener('mousemove', e => {
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
-    // Tooltip hover (always active).
-    const hh = _hitTest(marks, mx, my);
+    // Tooltip hover: inverse-transform mouse into original mark space before hit-testing.
+    const [hx, hy] = _invZoom(mx, my);
+    const hh = _hitTest(marks, hx, hy);
     if (hh && hh.batch.tooltips && hh.batch.tooltips[hh.idx]) {
       const t = hh.batch.tooltips[hh.idx];
       tip.replaceChildren();
@@ -154,6 +170,8 @@ async function _render(container, sceneJson, model) {
     try {
       const textJson = renderer.onPan(0, dx, dy);
       _placeText(ov, JSON.parse(textJson));
+      _zoom.tx += dx;
+      _zoom.ty += dy;
     } catch (err) { /* GPU not ready */ }
     _panStart = { x: mx, y: my };
   });
@@ -167,8 +185,9 @@ async function _render(container, sceneJson, model) {
     const r = canvas.getBoundingClientRect();
     const cx = e.clientX - r.left, cy = e.clientY - r.top;
 
-    // Href navigation: use JS hit test (doesn't need WASM).
-    const h = _hitTest(marks, cx, cy);
+    // Href navigation: inverse-transform then JS hit test.
+    const [hx, hy] = _invZoom(cx, cy);
+    const h = _hitTest(marks, hx, hy);
     if (h && h.batch.hrefs && h.batch.hrefs[h.idx]) {
       window.open(h.batch.hrefs[h.idx], '_blank', 'noopener,noreferrer');
       return;
@@ -225,7 +244,7 @@ async function _render(container, sceneJson, model) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
 
-  return { canvas, renderer, scene, ov };
+  return { canvas, renderer, scene, ov, zoom: _zoom };
 }
 
 export async function render({ model, el }) {
@@ -266,11 +285,21 @@ export async function render({ model, el }) {
           e.preventDefault();
           if (!_state) return;
           const r = _state.canvas.getBoundingClientRect();
+          const cx = e.clientX - r.left, cy = e.clientY - r.top;
           if (_state.renderer) {
             try {
-              const textJson = _state.renderer.onWheel(
-                0, e.deltaY, e.clientX - r.left, e.clientY - r.top);
+              const textJson = _state.renderer.onWheel(0, e.deltaY, cx, cy);
               _placeText(_state.ov, JSON.parse(textJson));
+              // Mirror Rust ZoomPanState::on_wheel to keep JS zoom transform in sync.
+              const t = _state.zoom;
+              const f = 1.0 + e.deltaY * 0.001;
+              const ZMIN = 0.1, ZMAX = 50.0;
+              const sx = Math.min(ZMAX, Math.max(ZMIN, t.sx * f));
+              const sy = Math.min(ZMAX, Math.max(ZMIN, t.sy * f));
+              t.tx = cx - sx * ((cx - t.tx) / t.sx);
+              t.ty = cy - sy * ((cy - t.ty) / t.sy);
+              t.sx = sx;
+              t.sy = sy;
             } catch (err) { /* GPU not ready */ }
           }
           // Debounced Python round-trip (for mark_function/mark_raster recompute).
@@ -295,6 +324,7 @@ export async function render({ model, el }) {
           try {
             const textJson = _state.renderer.resetZoom(0);
             _placeText(_state.ov, JSON.parse(textJson));
+            Object.assign(_state.zoom, { sx: 1, sy: 1, tx: 0, ty: 0 });
           } catch (err) { /* ignore */ }
         });
       }
