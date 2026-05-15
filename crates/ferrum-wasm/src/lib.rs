@@ -32,13 +32,15 @@ use crate::gpu::GpuContext;
 #[cfg(target_arch = "wasm32")]
 use crate::pipelines::RenderPipelines;
 #[cfg(target_arch = "wasm32")]
-use crate::render::GpuBuffers;
+use crate::render::{GpuBuffers, Uniforms};
 #[cfg(target_arch = "wasm32")]
 use crate::scene_load::SceneData;
 #[cfg(target_arch = "wasm32")]
 use crate::selection_state::InteractionState;
 #[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
+#[cfg(target_arch = "wasm32")]
+use crate::zoom_pan::{ScaleMode, ZoomPanState};
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -49,6 +51,8 @@ pub struct WasmRenderer {
     transition: Option<ActiveTransition>,
     selections: Vec<ferrum_scene::SelectionSpec>,
     interaction_state: InteractionState,
+    zoom: ZoomPanState,
+    interaction: ferrum_scene::InteractionConfig,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -80,6 +84,8 @@ impl WasmRenderer {
             transition: None,
             selections: Vec::new(),
             interaction_state: InteractionState::new(&[]),
+            zoom: ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default()),
+            interaction: ferrum_scene::InteractionConfig::default(),
         })
     }
 
@@ -95,6 +101,8 @@ impl WasmRenderer {
 
         self.selections = scene.selections.clone();
         self.interaction_state = InteractionState::new(&self.selections);
+        self.interaction = scene.interaction.clone();
+        self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
         self.loaded = Some(LoadedScene { data, buffers, scene });
 
         if let Some(ref loaded) = self.loaded {
@@ -229,6 +237,45 @@ impl WasmRenderer {
         Ok(state_json)
     }
 
+    /// Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
+    ///
+    /// Returns updated text-element JSON (tick labels at new positions) so the JS
+    /// overlay can reposition axis labels without a Python round-trip.
+    #[wasm_bindgen(js_name = "onWheel")]
+    pub fn on_wheel(&mut self, panel_id: u32, delta_y: f32, cx: f32, cy: f32) -> Result<String, JsValue> {
+        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let scale_mode = match loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord) {
+            Some(ferrum_scene::CoordKind::Fixed { .. }) => ScaleMode::Uniform,
+            _ => ScaleMode::Independent,
+        };
+        self.zoom.on_wheel(panel_id as usize, delta_y as f64, cx as f64, cy as f64, scale_mode);
+        self.upload_transform_and_render(panel_id as usize)
+    }
+
+    /// Apply a pan delta on the given panel and re-render via GPU affine transform.
+    ///
+    /// Returns updated text-element JSON.
+    #[wasm_bindgen(js_name = "onPan")]
+    pub fn on_pan(&mut self, panel_id: u32, dx: f32, dy: f32) -> Result<String, JsValue> {
+        let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        self.zoom.on_pan(panel_id as usize, dx as f64, dy as f64);
+        self.upload_transform_and_render(panel_id as usize)
+    }
+
+    /// Reset zoom/pan to identity for the given panel and re-render.
+    ///
+    /// Returns text-element JSON with tick labels at their original positions.
+    #[wasm_bindgen(js_name = "resetZoom")]
+    pub fn reset_zoom(&mut self, panel_id: u32) -> Result<String, JsValue> {
+        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        self.zoom.reset(panel_id as usize);
+        let uniforms = Uniforms::identity(loaded.data.width, loaded.data.height);
+        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
+        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
+            .map_err(JsValue::from)?;
+        Ok(build_text_json(&loaded.data))
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.config.width = width.max(1);
         self.gpu.config.height = height.max(1);
@@ -236,6 +283,35 @@ impl WasmRenderer {
             .surface
             .configure(&self.gpu.device, &self.gpu.config);
         let _ = self.render_frame_js();
+    }
+}
+
+/// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
+#[cfg(target_arch = "wasm32")]
+impl WasmRenderer {
+    fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
+        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let transform = self.zoom.transforms.get(panel_id)
+            .copied()
+            .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+        let uniforms = Uniforms {
+            canvas_w: loaded.data.width,
+            canvas_h: loaded.data.height,
+            sx: transform.sx as f32,
+            sy: transform.sy as f32,
+            tx: transform.tx as f32,
+            ty: transform.ty as f32,
+            clip_x: 0.0,
+            clip_y: 0.0,
+            clip_w: loaded.data.width,
+            clip_h: loaded.data.height,
+            _pad: [0.0; 6],
+        };
+        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
+        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
+            .map_err(JsValue::from)?;
+        let text_json = build_zoomed_text_json(&loaded.data.text_elements, &self.interaction, panel_id, &transform);
+        Ok(text_json)
     }
 }
 
@@ -276,4 +352,153 @@ fn build_text_json(data: &SceneData) -> String {
         })
         .collect();
     serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Build text-element JSON for a zoomed panel.
+///
+/// Static text (titles, axis labels) stays at original canvas positions. Axis tick
+/// labels are replaced with those from the active `TickLevel` at their new zoomed
+/// positions. Tick labels are identified by matching (content, x-position) for
+/// x-axis or (content, y-position) for y-axis against the baseline tick level.
+#[cfg(target_arch = "wasm32")]
+fn build_zoomed_text_json(
+    all_text: &[crate::scene_load::TextElementData],
+    interaction: &ferrum_scene::InteractionConfig,
+    panel_id: usize,
+    transform: &crate::zoom_pan::Affine2,
+) -> String {
+    use std::collections::HashSet;
+    use crate::zoom_pan::tick_level_for_zoom;
+
+    let Some(ptl) = interaction.tick_levels.iter().find(|p| p.panel_id == panel_id) else {
+        return build_text_json_from(all_text);
+    };
+
+    // Collect all tick pixel positions (×10 integer key to avoid float hash) for exclusion.
+    let x_tick_px: HashSet<i64> = ptl.x_levels.iter()
+        .flat_map(|lvl| lvl.ticks.iter().map(|t| (t.pixel * 10.0) as i64))
+        .collect();
+    let y_tick_px: HashSet<i64> = ptl.y_levels.iter()
+        .flat_map(|lvl| lvl.ticks.iter().map(|t| (t.pixel * 10.0) as i64))
+        .collect();
+    let x_tick_labels: HashSet<&str> = ptl.x_levels.iter()
+        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
+        .collect();
+    let y_tick_labels: HashSet<&str> = ptl.y_levels.iter()
+        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
+        .collect();
+
+    let is_x_tick = |te: &crate::scene_load::TextElementData| {
+        x_tick_px.contains(&((te.x * 10.0) as i64)) && x_tick_labels.contains(te.content.as_str())
+    };
+    let is_y_tick = |te: &crate::scene_load::TextElementData| {
+        y_tick_px.contains(&((te.y * 10.0) as i64)) && y_tick_labels.contains(te.content.as_str())
+    };
+
+    // Positions of the axis rows/columns (constant during zoom).
+    let x_axis_y: Option<f64> = all_text.iter().find(|te| is_x_tick(te)).map(|te| te.y);
+    let y_axis_x: Option<f64> = all_text.iter().find(|te| is_y_tick(te)).map(|te| te.x);
+
+    // Reference style for tick labels (borrow from any existing tick element).
+    let tick_style = all_text.iter()
+        .find(|te| is_x_tick(te) || is_y_tick(te))
+        .map(|te| te.style.clone());
+
+    // Static text first.
+    let mut elements: Vec<serde_json::Value> = all_text.iter()
+        .filter(|te| !is_x_tick(te) && !is_y_tick(te))
+        .map(text_element_to_json)
+        .collect();
+
+    let level_idx = tick_level_for_zoom(transform.zoom_factor());
+
+    // Zoomed x-axis tick labels.
+    if let (Some(y_pos), Some(level)) = (x_axis_y, ptl.x_levels.get(level_idx)) {
+        for tick in &level.ticks {
+            let new_x = tick.pixel * transform.sx + transform.tx;
+            elements.push(tick_label_json(new_x, y_pos, &tick.label, "center", tick_style.as_ref()));
+        }
+    }
+
+    // Zoomed y-axis tick labels.
+    if let (Some(x_pos), Some(level)) = (y_axis_x, ptl.y_levels.get(level_idx)) {
+        for tick in &level.ticks {
+            let new_y = tick.pixel * transform.sy + transform.ty;
+            elements.push(tick_label_json(x_pos, new_y, &tick.label, "end", tick_style.as_ref()));
+        }
+    }
+
+    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_text_json_from(all_text: &[crate::scene_load::TextElementData]) -> String {
+    let elements: Vec<serde_json::Value> = all_text.iter().map(text_element_to_json).collect();
+    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn text_element_to_json(t: &crate::scene_load::TextElementData) -> serde_json::Value {
+    serde_json::json!({
+        "x": t.x,
+        "y": t.y,
+        "content": t.content,
+        "fontSize": t.style.font_size,
+        "fontWeight": match &t.style.font_weight {
+            ferrum_scene::FontWeight::Normal => "normal".to_string(),
+            ferrum_scene::FontWeight::Bold => "bold".to_string(),
+            ferrum_scene::FontWeight::Custom(s) => s.clone(),
+        },
+        "fontFamily": t.style.font_family,
+        "anchor": match t.style.anchor {
+            ferrum_scene::TextAnchor::Start => "start",
+            ferrum_scene::TextAnchor::Middle => "center",
+            ferrum_scene::TextAnchor::End => "end",
+        },
+        "baseline": match &t.style.baseline {
+            ferrum_scene::TextBaseline::Top => "top".to_string(),
+            ferrum_scene::TextBaseline::Middle => "middle".to_string(),
+            ferrum_scene::TextBaseline::Bottom => "bottom".to_string(),
+            ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
+            ferrum_scene::TextBaseline::Custom(s) => s.clone(),
+        },
+        "angle": t.style.angle,
+        "color": format!("rgba({},{},{},{})",
+            t.style.color.r, t.style.color.g, t.style.color.b,
+            t.style.opacity),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn tick_label_json(
+    x: f64, y: f64, label: &str, anchor: &str,
+    style: Option<&ferrum_scene::TextStyle>,
+) -> serde_json::Value {
+    let (font_size, font_weight, font_family, baseline, color) = match style {
+        Some(s) => (
+            s.font_size,
+            match &s.font_weight {
+                ferrum_scene::FontWeight::Normal => "normal".to_string(),
+                ferrum_scene::FontWeight::Bold => "bold".to_string(),
+                ferrum_scene::FontWeight::Custom(v) => v.clone(),
+            },
+            s.font_family.clone(),
+            match &s.baseline {
+                ferrum_scene::TextBaseline::Top => "top".to_string(),
+                ferrum_scene::TextBaseline::Middle => "middle".to_string(),
+                ferrum_scene::TextBaseline::Bottom => "bottom".to_string(),
+                ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
+                ferrum_scene::TextBaseline::Custom(v) => v.clone(),
+            },
+            format!("rgba({},{},{},{})", s.color.r, s.color.g, s.color.b, s.opacity),
+        ),
+        None => (11.0, "normal".to_string(), "sans-serif".to_string(),
+                 "alphabetic".to_string(), "rgba(51,51,51,1)".to_string()),
+    };
+    serde_json::json!({
+        "x": x, "y": y, "content": label,
+        "fontSize": font_size, "fontWeight": font_weight,
+        "fontFamily": font_family, "anchor": anchor,
+        "baseline": baseline, "angle": 0.0, "color": color,
+    })
 }

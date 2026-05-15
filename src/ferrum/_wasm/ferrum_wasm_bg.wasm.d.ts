@@ -1,0 +1,25 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_wasmrenderer_free: (a: number, b: number) => void;
+export const wasmrenderer_create: (a: any) => any;
+export const wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
+export const wasmrenderer_loadScene: (a: number, b: number, c: number) => [number, number, number, number];
+export const wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const wasmrenderer_renderFrame: (a: number) => [number, number];
+export const wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
+export const wasmrenderer_resize: (a: number, b: number, c: number) => void;
+export const wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
+export const wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
+export const wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen__convert__closures_____invoke__h5ec2816eae335d2e: (a: number, b: number, c: any, d: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_destroy_closure: (a: number, b: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

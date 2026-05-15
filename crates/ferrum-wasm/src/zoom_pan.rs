@@ -102,7 +102,7 @@ impl ZoomPanState {
     }
 }
 
-fn tick_level_for_zoom(zoom: f64) -> usize {
+pub(crate) fn tick_level_for_zoom(zoom: f64) -> usize {
     if zoom < 0.5 {
         0
     } else if zoom < 2.0 {
