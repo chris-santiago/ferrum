@@ -4,9 +4,9 @@ Most Python visualization workflows still fracture across multiple mental models
 
 Ferrum is designed to remove that boundary. The same chart system supports a simple scatter plot, a faceted distribution analysis, a linked interactive view, and a model-diagnostic suite without forcing users into separate object types or unrelated APIs.
 
-## Three things that don't exist in combination anywhere else
+## What makes Ferrum different
 
-There are excellent Python plotting libraries today. Each is best at one thing. Ferrum is built around three claims that no single existing library delivers in combination:
+There are excellent Python plotting libraries today. Each is best at one thing. Ferrum is built around three properties that no single existing library delivers together:
 
 ### 1. One grammar that scales to production data size
 
@@ -26,7 +26,7 @@ Every existing library makes you precompute: call SciPy, build the KDE yourself,
 
 Ferrum declares intent and computes in Rust before rendering. KDE, LOESS, bootstrap CIs, binning, calibration curves, smoothing, and similar transforms are declarative chart operations. The library is statistically literate, not just a renderer.
 
-## Six features worth leading with
+## At a glance
 
 **Grammar of Graphics, without the ceiling.** Declarative, composable, layered — like Altair or plotnine — but no row limits and no API switch when data grows.
 
