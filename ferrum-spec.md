@@ -1469,7 +1469,7 @@ chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
 
 1. Jupyter / IPython → inline SVG (static) or WASM widget (if `.interactive()`)
 2. VS Code notebook → same
-3. Terminal with sixel support → PNG via sixel
+3. ~~Terminal with sixel support → PNG via sixel~~ — **REMOVED (2026-05-15):** sixel is niche, inconsistent across terminal emulators, and ferrum's audience is Jupyter/browser-first. Not worth implementation effort.
 4. Otherwise → write temp HTML and open browser
 
 ---
@@ -1520,7 +1520,7 @@ The threshold column refers to `raster_threshold` (default `500_000`), configura
 | `.show()` — `mark_count < threshold` (def 500k) | SVG inline                         |
 | `.show()` — `mark_count >= threshold`           | tiny-skia PNG                      |
 | `.show()` in headless / no display              | tiny-skia PNG (always)             |
-| `.show()` in terminal with sixel support        | tiny-skia → sixel                  |
+| `.show()` in terminal with sixel support        | ~~tiny-skia → sixel~~ — removed    |
 | `.interactive()`                                | wgpu / WASM                        |
 
 Per-call `RenderConfig` takes precedence over global `ferrum.config` settings for all threshold and backend parameters.

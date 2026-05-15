@@ -111,7 +111,7 @@
 | `ferrum.WindowTransform` | `ferrum-spec.md §3.19` | Absent from source |
 | Full palette library (cyclical schemes, tealblues, brewer extended sequential) | `ferrum-spec.md §3.13` | Rejected at validation time |
 | `mark_text` multiline via `<tspan>` | `docs/superpowers/followups/2026-05-12-mark-text-multiline-tspan.md` | `\n` in text collapses to single space in SVG; `marks/text.rs` does not split on `\n` |
-| Sixel terminal rendering | `ferrum-spec.md §3.16` | Mentioned in environment-detection order but absent from `_html.py` and show path |
+| Sixel terminal rendering | `ferrum-spec.md §3.16` | **Intentionally dropped (2026-05-15)** — niche format, inconsistent across terminal emulators, audience is Jupyter/browser-first |
 | `SceneNode::Raw` support in WASM renderer | `crates/ferrum-wasm/src/scene_load.rs:181` | Silently skipped with `console.warn` only |
 | `share_x` / `share_y` enforcement in grid compositor | `crates/ferrum-core/src/render/grid_compose.rs:4` | Accepted, silently ignored — alignment left to caller |
 | Axis tick-label formatting via `format=` on X/Y | `crates/ferrum-core/src/render/format.rs:1` | `format=` only honored for `mark_text`, not axis ticks |
