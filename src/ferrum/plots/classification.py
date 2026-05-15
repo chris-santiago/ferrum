@@ -4,7 +4,7 @@ Public API
 ----------
 roc_chart, pr_chart, calibration_chart, gain_chart, lift_chart,
 discrimination_threshold_chart, confusion_matrix_chart,
-class_prediction_error_chart.
+class_prediction_error_chart, classification_report_chart, class_balance_chart.
 
 Each public function wraps ``_resolve_source`` (shared across all figure
 functions) and dispatches to a co-located ``_*_from_source`` builder that
@@ -1555,6 +1555,104 @@ def discrimination_threshold_chart(
         threshold_line=threshold_line,
         optimum_label=optimum_label,
         subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
+
+
+def classification_report_chart(
+    model_or_source: Any = None,
+    X: Any = None,
+    y: Any = None,
+    *,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Per-class precision / recall / F1 heatmap for a classifier.
+
+    Renders a rect-plus-text heatmap where rows are class labels, columns
+    are metrics (``precision``, ``recall``, ``f1-score``), and cell color
+    encodes the metric value. Each cell is annotated with its value to two
+    decimal places.
+
+    Parameters
+    ----------
+    model_or_source : estimator or ModelSource
+        A fitted sklearn-compatible classifier that exposes ``predict``,
+        or an explicit ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix. Required when ``model_or_source`` is a raw
+        estimator; ignored when it is already a ``ModelSource``.
+    y : array-like, optional
+        True labels. Required when ``model_or_source`` is a raw estimator;
+        ignored when it is already a ``ModelSource``.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Heatmap with per-class precision / recall / F1-score cells.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.classification_report_chart(clf, X_test, y_test)
+    """
+    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    return _classification_report_chart(
+        source,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
+
+
+def class_balance_chart(
+    y: Any,
+    *,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Bar chart of per-class label counts.
+
+    Computes the count of each unique class label and renders a vertical
+    bar chart. No model is required — operates on the target array alone.
+
+    Parameters
+    ----------
+    y : array-like
+        Target label array (1-D). Accepts polars ``Series``, numpy
+        arrays, and any iterable convertible to a flat list.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
+
+    Returns
+    -------
+    Chart
+        Vertical bar chart with class labels on x and counts on y.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.class_balance_chart(y_train)
+    """
+    return _class_balance_chart_from_dataframe(
+        y,
         mark=mark,
         encode=encode,
         properties=properties,
