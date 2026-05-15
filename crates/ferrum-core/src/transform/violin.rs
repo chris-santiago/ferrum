@@ -193,7 +193,7 @@ pub(crate) fn apply_with_context(
             })
             .collect();
 
-        if vals.len() < 2 {
+        if vals.is_empty() {
             continue;
         }
 
@@ -202,7 +202,22 @@ pub(crate) fn apply_with_context(
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
                 (a.min(v), b.max(v))
             });
-        if !(lo.is_finite() && hi.is_finite()) || lo >= hi {
+        if !(lo.is_finite() && hi.is_finite()) {
+            continue;
+        }
+        // Degenerate group: a single observation or all-equal values produce
+        // lo == hi (zero-width KDE domain). Emit a minimal zero-width polygon
+        // (4 vertices at violin_x=0, violin_y=lo) so the output batch is
+        // non-empty and scale_resolve can find finite values in violin_y. The
+        // polygon mark's `ring.len() < 3` guard will still skip rendering it —
+        // a 1-point violin is correctly invisible — but the column is populated.
+        if lo >= hi {
+            for _ in 0..4 {
+                group_ids.push(gid as u32);
+                keys_out.push(key.clone());
+                violin_x.push(0.0);
+                violin_y.push(lo);
+            }
             continue;
         }
 

@@ -185,9 +185,6 @@ def test_function_wrong_shape_raises():
 
 # ---- Smoke renders (skip if engine doesn't support yet) ----
 
-@pytest.mark.skip(reason="violin polygon render fails: 'no usable values for violin_y' from "
-                         "scale_resolve when transform output is empty for small samples; "
-                         "engine integration bug, not desugar bug. Tracked for Phase 8b follow-up.")
 def test_violin_no_inner_renders(df_xy):
     """Smoke render -- violin polygon only (no inner box/quartile)."""
     svg = fe.Chart(df_xy).mark_violin(inner=None).encode(x="x", y="y").show_svg()
