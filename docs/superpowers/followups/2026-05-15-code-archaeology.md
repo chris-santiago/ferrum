@@ -57,12 +57,12 @@
 | Channel | Status |
 |---|---|
 | `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` | ✅ Promoted to `_RENDERER_HONORED_CHANNELS` — SVG attribute emission wired in `point.rs`, `bar.rs`, `line.rs`, `rule.rs`; WASM GPU instances wired via `FillStroke`. Commits `26f20b3`, `e387017`, `a8d8da8` |
-| `Description` / `Key` (chart-level) | Open — TODO(G1) still present; `Chart.properties(description=)` stores `_description` but never serializes to `ChartSpec`; no `<desc>` emitted in root SVG |
+| `Description` (chart-level) | ✅ Fixed `6e45ddd` — `chart_description: Option<String>` added to `ChartSpec` + `SceneGraph`; `svg_walk.rs` emits `<desc>` as first child of root `<svg>`. Python `Chart.properties(description=)` → `kw["chart_description"]`. TODO(G1) removed. 7 regression tests. |
 | `Theta` / `Radius` | ✅ Docstrings updated — `CoordPolar` shipped Phase 11 (fixed in Stale Documentation section) |
 | `Href` (encoding channel) | ✅ Already working — `_RENDERER_HONORED_CHANNELS` → `EncodingSpec` → `MetadataColumns` → `svg_walk.rs` wraps each mark in `<a href="...">`. Verified: 3 `<a>` tags for 3-row DataFrame |
 | `Description` (encoding channel) | ✅ Already working — same path → `svg_walk.rs` emits `<desc>` per mark. Verified: 3 `<desc>` tags for 3-row DataFrame |
 | `Key` | Intentionally silent — stored for future interactive/animated rendering (`_SILENT_CHANNELS`); not a static SVG gap |
-| `fill_opacity` | Partial — alias to `opacity` works when `opacity` is absent (per-row alpha via `rgba()` fill). When both `fill_opacity` and `opacity` are present, `fill_opacity` is silently dropped. True `fill-opacity` SVG attribute not emitted separately. |
+| `fill_opacity` | ✅ Fixed `1623cee` — promoted from `_SILENT_CHANNELS` to `_RENDERER_HONORED_CHANNELS`; `fill_opacity: Option<EncodingSpec>` added to Rust `Encoding`; per-row reading in `point.rs`/`bar.rs`; `fill-opacity` SVG attribute emitted (omitted when 1.0). Old alias to `opacity` removed. 12 regression tests. WASM GPU instances do not yet carry `fill_opacity` to shaders (S2, non-blocking). |
 
 ### 5 `EncodingSpec` fields deserialized, never read by Rust renderer
 
@@ -162,8 +162,8 @@
 7. Fix `mark_violin(inner=None)` scale-resolve integration for small samples
 
 ### Medium (spec-documented but silently dropped)
-8. Wire the 11 silent-drop mark kwargs through `MarkKwargsSpec`
-9. Implement `Description` → `<desc>` SVG element (TODO(G1) in `chart.py:4670`)
+8. ~~Wire the 11 silent-drop mark kwargs through `MarkKwargsSpec`~~ — ✅ resolved (10/11 already wired; 1 boxplot `width=` alias added `82a1496`)
+9. ~~Implement `Description` → `<desc>` SVG element (TODO(G1))~~ — ✅ fixed `6e45ddd` (chart_description on ChartSpec + SceneGraph)
 10. Implement `mark_text` multiline via `<tspan>` splitting on `\n`
 11. Wire `format=` on X/Y encodings to axis tick-label formatters
 12. Wire `Axis(...)` and `Legend(...)` full kwarg sets into Rust renderer
