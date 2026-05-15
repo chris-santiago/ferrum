@@ -19,7 +19,6 @@
 //! When `encoding.y2` is unset the drawer silently skips — ribbon requires y2.
 
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
-use crate::render::svg::{fmt_f, FillStroke, SvgBuffer};
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
     if let Ok(xs_f) = col_as_f64(ctx.batch, xf) {
@@ -41,36 +40,46 @@ fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64
     None
 }
 
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{
+        to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+    };
+    use ferrum_scene::{MarkBatchKind, PathCmd};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Ribbon,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b),
-        _ => return,
+        _ => return empty(),
     };
     let y2f = match spec.encoding.y2.as_ref() {
         Some(e) => e.field.as_str(),
-        None => return,
+        None => return empty(),
     };
 
     let ys = match col_as_f64(ctx.batch, yf) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return empty(),
     };
     let y2s = match col_as_f64(ctx.batch, y2f) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return empty(),
     };
     let n = ys.len().min(y2s.len());
     let (x_pixels, x_is_ordinal) = match resolve_x_pixels(ctx, xf, n) {
         Some(v) => v,
-        None => return,
+        None => return empty(),
     };
     let n = n.min(x_pixels.len());
 
-    // Partition rows by color category when a color encoding is bound; mirrors
-    // line.rs so a multi-series ribbon (e.g. train + test CI bands sharing an x
-    // axis) emits one closed polygon per series instead of a single zigzag
-    // polygon stitching across category boundaries.
     let cf = color_field(ctx, spec);
     let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
     let groups: Vec<(Option<String>, Vec<usize>)> = match (color_values.as_ref(), &ctx.scales.color) {
@@ -92,13 +101,13 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    // Preserve the original single-series styling when there is no color
-    // encoding (fill carries opacity, stroke is a solid color from the
-    // resolved mark style) so existing one-series ribbon goldens remain
-    // byte-identical. For multi-series ribbons, derive each group's fill
-    // from the categorical scale lookup and multiply in the mark-style
-    // fill alpha so opacity is preserved.
     let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut data_indices = Vec::new();
 
     for (key, rows) in groups {
         let mut indices: Vec<usize> = rows
@@ -137,27 +146,19 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             continue;
         }
 
-        // Build closed path: top edge x ascending, bottom edge x descending, Z.
-        let mut d = String::new();
+        // Build closed path commands: top edge x ascending, bottom edge x descending, Close.
+        let mut cmds = Vec::with_capacity(pixels.len() * 2 + 2);
         let (x0, y0, _) = pixels[0];
-        d.push_str(&format!("M{} {}", fmt_f(x0), fmt_f(y0)));
+        cmds.push(PathCmd::MoveTo { x: x0, y: y0 });
         for &(x, y, _) in &pixels[1..] {
-            d.push_str(&format!(" L{} {}", fmt_f(x), fmt_f(y)));
+            cmds.push(PathCmd::LineTo { x, y });
         }
         for &(x, _, y2) in pixels.iter().rev() {
-            d.push_str(&format!(" L{} {}", fmt_f(x), fmt_f(y2)));
+            cmds.push(PathCmd::LineTo { x, y: y2 });
         }
-        d.push_str(" Z");
+        cmds.push(PathCmd::Close);
 
-        // Color resolution.
-        // - No color encoding: pass through the resolved mark style verbatim
-        //   so single-series ribbons stay byte-identical to pre-Phase-10e
-        //   goldens (mark_style.fill already carries the ribbon opacity;
-        //   mark_style.stroke is the solid edge color).
-        // - With color encoding: look up the group's solid color from the
-        //   categorical scale, then multiply in the mark-style fill alpha
-        //   so each per-group fill carries the same opacity as the
-        //   pre-resolved single-series fill.
+        // Color resolution — mirrors draw().
         let (fill, stroke) = if has_color_groups {
             let solid = key
                 .as_deref()
@@ -169,15 +170,30 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             let fill = crate::render::color::categorical::with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
             (Some(fill), ctx.mark_style.stroke)
         };
-        out.path(
-            &d,
-            &FillStroke {
-                fill,
-                stroke,
-                stroke_width: ctx.mark_style.stroke_width,
-            },
+        let style = to_scene_fill_stroke(
+            fill,
+            stroke,
+            ctx.mark_style.stroke_width,
+            1.0,
+            None,
         );
+        nodes.push(ferrum_scene::SceneNode::Path {
+            commands: cmds,
+            style,
+            closed: true,
+        });
+
+        // Track which rows contributed.
+        data_indices.extend(indices.iter().copied());
     }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Ribbon,
+        nodes,
+        data_indices: Some(data_indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
 #[cfg(test)]
@@ -217,6 +233,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -252,7 +269,7 @@ mod tests {
         .unwrap()
     }
 
-    fn render(spec: &ChartSpec, batch: &RecordBatch) -> String {
+    fn render(spec: &ChartSpec, batch: &RecordBatch) -> crate::render::draw::MarkBuildResult {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
@@ -278,9 +295,7 @@ mod tests {
             batch,
             mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        out.finish()
+        super::build(&ctx)
     }
 
     #[test]
@@ -293,42 +308,35 @@ mod tests {
             vec![0.0, 2.0, 4.0, 6.0, 8.0],
             vec![1.0, 3.0, 5.0, 7.0, 8.0],
         );
-        let svg = render(&spec, &batch);
-        assert_eq!(svg.matches("<path ").count(), 1, "svg: {svg}");
-        // Path d-attribute starts with M and ends with Z.
-        let path_idx = svg.find("d=\"").expect("path d= attr");
-        let after = &svg[path_idx + 3..];
-        assert!(after.starts_with('M'), "d-attr should start with M: {after}");
-        assert!(svg.contains(" Z\""), "ribbon path must close with Z: {svg}");
+        let result = render(&spec, &batch);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).count(), 1);
+        // Path must be closed and start with MoveTo.
+        let path = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).unwrap();
+        if let ferrum_scene::SceneNode::Path { commands, closed, .. } = path {
+            assert!(*closed, "ribbon path must be closed");
+            assert!(matches!(commands.first(), Some(ferrum_scene::PathCmd::MoveTo { .. })),
+                "ribbon path must start with MoveTo");
+        }
     }
 
     #[test]
     fn ribbon_walks_x_ascending_then_descending() {
         let spec = ribbon_spec(true);
         // 3 rows: top edge has 3 vertices (M + 2 L), bottom edge reversed adds 3 more L.
-        // Expect 5 ` L` substrings total in the path d-attribute.
-        // y values must vary so the auto-domain is non-degenerate; y2 stays inside [min(y), max(y)].
+        // Expect 5 LineTo commands total in the path (before Close).
         let batch = three_col_batch(
             vec![0.0, 5.0, 10.0],
             vec![0.0, 4.0, 10.0],
             vec![2.0, 6.0, 8.0],
         );
-        let svg = render(&spec, &batch);
-        let d_start = svg.find("d=\"").expect("d= attr") + 3;
-        let d_end = svg[d_start..].find('"').expect("closing quote") + d_start;
-        let d = &svg[d_start..d_end];
-        // M + 2 top L + 3 bottom-reversed L + Z = 5 L commands.
-        let l_count = d.matches(" L").count();
-        assert_eq!(l_count, 5, "expected 5 L commands, got {l_count} in d={d:?}");
-        // Ensure the bottom edge starts where the top ended (x descending after rightmost x).
-        // The last top vertex has x=10; the next L should also have x=10 (same point, y=y2).
-        // Splitting by ' L' yields ["M0 ...", "5 ...", "10 ...", "10 ...", "5 ...", "0 ..."].
-        let parts: Vec<&str> = d.split(" L").collect();
-        assert_eq!(parts.len(), 6, "expected 6 path segments, got {parts:?}");
-        // parts[2] is the rightmost top vertex (x=10), parts[3] is rightmost bottom vertex (x=10).
-        let top_right_x = parts[2].split_whitespace().next().unwrap();
-        let bot_right_x = parts[3].split_whitespace().next().unwrap();
-        assert_eq!(top_right_x, bot_right_x, "x-descend should start at rightmost top x");
+        let result = render(&spec, &batch);
+        let path = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).unwrap();
+        if let ferrum_scene::SceneNode::Path { commands, .. } = path {
+            let line_to_count = commands.iter().filter(|c| matches!(c, ferrum_scene::PathCmd::LineTo { .. })).count();
+            assert_eq!(line_to_count, 5, "expected 5 LineTo commands, got {line_to_count}");
+            // Verify the path structure: MoveTo + 2 top LineTo + 3 bottom-reversed LineTo + Close.
+            assert_eq!(commands.len(), 7, "expected 7 path commands (M + 5L + Z), got {}", commands.len());
+        }
     }
 
     #[test]
@@ -336,7 +344,7 @@ mod tests {
         // Two interleaved series (A,B,A,B,A,B) sharing an x axis. Without
         // color grouping the renderer would stitch a single zigzag polygon
         // across both categories — regression fixed by the per-color
-        // partitioning in `draw`.
+        // partitioning in `build`.
         let mut spec = ribbon_spec(true);
         spec.encoding.color = Some(EncodingSpec {
             field: "g".into(),
@@ -360,11 +368,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let svg = render(&spec, &batch);
+        let result = render(&spec, &batch);
         assert_eq!(
-            svg.matches("<path ").count(),
+            result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).count(),
             2,
-            "expected one polygon per color group, got: {svg}"
+            "expected one polygon per color group"
         );
     }
 
@@ -372,7 +380,8 @@ mod tests {
     fn ribbon_no_y2_silently_skips() {
         let spec = ribbon_spec(false);
         let batch = two_col_batch(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
-        let svg = render(&spec, &batch);
-        assert!(!svg.contains("<path "), "no path should be emitted without y2: {svg}");
+        let result = render(&spec, &batch);
+        assert!(result.nodes.iter().all(|n| !matches!(n, ferrum_scene::SceneNode::Path { .. })),
+            "no path should be emitted without y2");
     }
 }

@@ -64,6 +64,13 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         import polars as pl
 
         if isinstance(data, pl.DataFrame):
+            # polars.Date (date32) is not handled by the Rust CDI transport;
+            # cast to Datetime[ms] so Arrow produces timestamp[ms] instead.
+            date_cols = [c for c in data.columns if data[c].dtype == pl.Date]
+            if date_cols:
+                data = data.with_columns(
+                    [pl.col(c).cast(pl.Datetime("ms")) for c in date_cols]
+                )
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
             return data.collect().to_arrow()
@@ -78,6 +85,13 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
 
     # Direct conversions: dict, list, numpy
     if isinstance(data, dict):
+        # GeoJSON FeatureCollection detection: split properties→columns, geometry→column.
+        if _is_geojson_feature_collection(data):
+            return _geojson_to_arrow(data)
+        # Bare Geometry or GeometryCollection: wrap in a synthetic FeatureCollection.
+        if _is_geojson_geometry_root(data):
+            wrapped = _wrap_geometry_as_feature_collection(data)
+            return _geojson_to_arrow(wrapped)
         return pa.Table.from_pydict(data)
     if isinstance(data, list):
         if not data:
@@ -124,3 +138,67 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
             f"Supported: polars, pyarrow, pandas, modin, cuDF, dask, ibis, dict, list, numpy 2D. "
             f"Underlying error: {e}"
         ) from e
+
+
+# ── GeoJSON FeatureCollection support ────────────────────────────────────────
+
+def _is_geojson_feature_collection(data: dict) -> bool:
+    """Return True if *data* looks like a GeoJSON FeatureCollection."""
+    return (
+        data.get("type") == "FeatureCollection"
+        and isinstance(data.get("features"), list)
+    )
+
+
+_GEOJSON_GEOMETRY_TYPES = frozenset({
+    "Point", "MultiPoint", "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon", "GeometryCollection",
+})
+
+
+def _is_geojson_geometry_root(data: dict) -> bool:
+    """Return True if *data* is a bare GeoJSON Geometry or GeometryCollection."""
+    t = data.get("type")
+    return isinstance(t, str) and t in _GEOJSON_GEOMETRY_TYPES
+
+
+def _wrap_geometry_as_feature_collection(geom: dict) -> dict:
+    """Wrap a bare GeoJSON Geometry into a synthetic single-feature FeatureCollection."""
+    return {
+        "type": "FeatureCollection",
+        "features": [{"type": "Feature", "geometry": geom, "properties": {}}],
+    }
+
+
+def _geojson_to_arrow(data: dict) -> "pyarrow.Table":
+    """Convert a GeoJSON FeatureCollection to a ``pyarrow.Table``.
+
+    Feature properties become regular columns.  Each feature's geometry is
+    serialized to a JSON string and stored in a ``__geometry__`` column so
+    that ``mark_geoshape`` can read and project it without a sidecar field
+    on ``ChartSpec``.
+    """
+    import json
+    import pyarrow as pa
+
+    features = data.get("features", [])
+    if not features:
+        return pa.table({"__geometry__": pa.array([], type=pa.string())})
+
+    # Collect property columns and geometry strings.
+    rows: list[dict] = []
+    geom_strings: list[str] = []
+    for feat in features:
+        props = dict(feat.get("properties") or {})
+        geom = feat.get("geometry")
+        geom_strings.append(json.dumps(geom) if geom is not None else "null")
+        rows.append(props)
+
+    geom_col = pa.array(geom_strings, type=pa.string())
+    if rows and all(not r for r in rows):
+        # All features have empty properties — build a schema-less table with
+        # the correct row count so the geometry column can be appended.
+        tbl = pa.table({"__geometry__": geom_col})
+        return tbl
+    tbl = pa.Table.from_pylist(rows)
+    return tbl.append_column("__geometry__", geom_col)

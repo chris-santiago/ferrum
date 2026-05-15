@@ -124,7 +124,7 @@ impl ContinuousScheme {
 }
 
 fn sample_gradient(stops: &[(f64, Color)], t: f64) -> Color {
-    if stops.is_empty() {
+    if stops.is_empty() || !t.is_finite() {
         return from_rgba(0, 0, 0, 255);
     }
     if t <= stops[0].0 { return stops[0].1; }

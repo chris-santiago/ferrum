@@ -19,12 +19,23 @@ use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 use crate::render::color::{ContinuousScheme, NamedContinuous};
 use crate::render::draw::DrawCtx;
 use crate::render::rasterize::encode_png;
-use crate::render::svg::SvgBuffer;
 
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Image);
+
+    // mark_image is inherently Cartesian — return empty for Polar/Geo coords.
+    match &ctx.spec.coord {
+        Some(crate::spec::coord::CoordKind::Polar { .. }) |
+        Some(crate::spec::coord::CoordKind::Geo { .. }) => return empty(),
+        _ => {}
+    }
+
     let batch = ctx.batch;
     if batch.num_rows() != 1 {
-        return; // image expects single-row Raster output
+        return empty();
     }
 
     let x_min = match batch
@@ -32,55 +43,54 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let x_max = match batch
         .column_by_name("x_max")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let y_min = match batch
         .column_by_name("y_min")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let y_max = match batch
         .column_by_name("y_max")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let width = match batch
         .column_by_name("width")
         .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let height = match batch
         .column_by_name("height")
         .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
     let pixel_bytes = match batch
         .column_by_name("pixel_data")
         .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
     {
         Some(a) => a.value(0),
-        None => return,
+        None => return empty(),
     };
 
     let n_cells = (width as usize) * (height as usize);
     if pixel_bytes.len() != n_cells * 8 {
-        // Expect normalized f64 (8 bytes/cell). Skip silently on malformed input.
-        return;
+        return empty();
     }
 
     // Resolve colormap: mark_style.cmap → theme.sequential_scheme → Viridis.
@@ -96,8 +106,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let scheme = ContinuousScheme::Named(named);
 
     // Decode f64 values and map through colormap to produce RGBA8 pixels.
-    // NaN sentinel (emitted by the Raster transform for empty / masked cells)
-    // becomes fully transparent so the plot background shows through.
     let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
     for chunk in pixel_bytes.chunks_exact(8) {
         let v = f64::from_le_bytes(chunk.try_into().unwrap());
@@ -114,28 +122,42 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
     let png_bytes = encode_png(width, height, &rgba);
 
-    // Map data extent to pixel space via scales. SVG y axis is inverted vs data y,
-    // so the top edge of the image corresponds to data y_max.
+    // Map data extent to pixel space via scales.
     let svg_x = match ctx.scales.x.to_pixel_f64(x_min) {
         Some(p) => p,
-        None => return,
+        None => return empty(),
     };
     let svg_x_far = match ctx.scales.x.to_pixel_f64(x_max) {
         Some(p) => p,
-        None => return,
+        None => return empty(),
     };
     let svg_y_top = match ctx.scales.y.to_pixel_f64(y_max) {
         Some(p) => p,
-        None => return,
+        None => return empty(),
     };
     let svg_y_bot = match ctx.scales.y.to_pixel_f64(y_min) {
         Some(p) => p,
-        None => return,
+        None => return empty(),
     };
     let svg_w = (svg_x_far - svg_x).abs();
     let svg_h = (svg_y_bot - svg_y_top).abs();
 
-    out.image(svg_x, svg_y_top, svg_w, svg_h, &png_bytes);
+    MarkBuildResult {
+        kind: MarkBatchKind::Image,
+        nodes: vec![SceneNode::Image {
+            x: svg_x,
+            y: svg_y_top,
+            w: svg_w,
+            h: svg_h,
+            data: ImageData::Inline {
+                bytes: png_bytes,
+                mime: ImageMime::Png,
+            },
+        }],
+        data_indices: Some(vec![0]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,    }
 }
 
 #[cfg(test)]
@@ -189,6 +211,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -250,17 +273,16 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert!(
-            s.contains(r#"<image "#),
-            "expected an <image> element, got: {s}"
-        );
-        assert!(
-            s.contains("href=\"data:image/png;base64,"),
-            "expected a base64 PNG data URL href, got: {s}"
-        );
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(), 1,
+            "expected an Image node");
+        // Verify PNG data is present.
+        let has_png = result.nodes.iter().any(|n| {
+            if let ferrum_scene::SceneNode::Image { data, .. } = n {
+                matches!(data, ferrum_scene::ImageData::Inline { mime: ferrum_scene::ImageMime::Png, .. })
+            } else { false }
+        });
+        assert!(has_png, "expected inline PNG image data");
     }
 
     #[test]
@@ -283,11 +305,9 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert!(s.contains("<image "), "expected <image> element: {s}");
-        assert_eq!(s.matches("<image ").count(), 1, "expected exactly one <image> element");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(), 1,
+            "expected exactly one Image node");
     }
 
     #[test]
@@ -306,17 +326,16 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        // SvgBuffer.image emits attributes in order: x, y, width, height, href.
+        let result = super::build(&ctx);
         // With scales mapping data [0,10] -> pixel [0,100], the image should span
-        // x=0, width=100, height=100. The SVG y-axis is inverted (data y_max → svg
-        // top), but for a domain spanning the full pixel range either edge yields
-        // y=0 in pixel space.
-        assert!(
-            s.contains(r#"<image x="0" y="0" width="100" height="100" "#),
-            "expected image positioned at (0,0) with 100x100 size, got: {s}"
-        );
+        // x=0, w=100, h=100.
+        let img = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Image { .. }));
+        assert!(img.is_some(), "expected Image node");
+        if let Some(ferrum_scene::SceneNode::Image { x, y, w, h, .. }) = img {
+            assert!((*x - 0.0).abs() < 1.0, "expected x near 0, got {x}");
+            assert!((*y - 0.0).abs() < 1.0, "expected y near 0, got {y}");
+            assert!((*w - 100.0).abs() < 1.0, "expected w near 100, got {w}");
+            assert!((*h - 100.0).abs() < 1.0, "expected h near 100, got {h}");
+        }
     }
 }

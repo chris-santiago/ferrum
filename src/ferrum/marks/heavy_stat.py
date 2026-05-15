@@ -1,9 +1,7 @@
 """Heavy-stat-mark desugar helpers (Phase 8b Sub-batch F).
 
-Each desugar_<name> returns the unified 4-tuple
-    (mark, transforms, encoding_remap, synthetic_data)
-or 5-tuple for layered:
-    ("__layered__", transforms, None, None, layers)
+Each desugar_<name> returns a ``MarkDesugarResult`` — either in layered mode
+(``layers`` set) or single-mark mode (``mark``/``transforms``/``remap``).
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ from ferrum import (
     Swarm,
     Violin,
 )
-from ferrum._layer import _Layer
+from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 
 
@@ -137,7 +135,7 @@ def desugar_contour(
                 data_source="contour",
             )
         ]
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("contour", frozenset({
@@ -230,14 +228,11 @@ def desugar_violin(
         data_source="violin",
     )
     if inner is None:
-        return ("__layered__", transforms, None, None, [violin_layer])
+        return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
     if inner == "point":
-        return (
-            "__layered__",
-            transforms,
-            None,
-            None,
-            [violin_layer, _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field})],
+        return MarkDesugarResult(
+            transforms=transforms,
+            layers=[violin_layer, _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field})],
         )
     if inner == "quartile":
         transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
@@ -253,14 +248,17 @@ def desugar_violin(
                     data_source="quart",
                 )
             )
-        return ("__layered__", transforms, None, None, layers)
+        return MarkDesugarResult(transforms=transforms, layers=layers)
     # inner == "box"
     from ferrum.marks.composite import desugar_boxplot
 
-    _, box_t, _, _, box_layers = desugar_boxplot(
+    box_result = desugar_boxplot(
         x_field, y_field, extent=1.5, outliers=False, size=0.1
     )
-    return ("__layered__", [*transforms, *box_t], None, None, [violin_layer, *box_layers])
+    return MarkDesugarResult(
+        transforms=[*transforms, *box_result.transforms],
+        layers=[violin_layer, *box_result.layers],
+    )
 
 
 register_layer_names("violin", frozenset({
@@ -367,7 +365,7 @@ def desugar_qq(
                 data_source="qq_line",
             )
         )
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("qq", frozenset({
@@ -453,14 +451,6 @@ def desugar_raster(
         raise ValueError("mark_raster() requires .encode(x=..., y=...)")
     if aggregate in ("mean", "sum") and field is None:
         raise ValueError(f"mark_raster aggregate={aggregate!r} requires field=...")
-    if blend == "additive":
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_raster",
-            "blend_additive",
-            "mark_raster blend='additive' deferred to Phase 11; using alpha blending",
-        )
 
     # Default to log-scale for count/density aggregates to improve contrast
     # when most cells are empty and a few have high counts.
@@ -487,9 +477,10 @@ def desugar_raster(
             encoding={"x": x_field, "y": y_field},
             mark_kwargs=mk if mk else None,
             data_source="raster",
+            blend="additive" if blend == "additive" else None,
         )
     ]
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("raster", frozenset({
@@ -576,17 +567,13 @@ def desugar_hex(
         raise ValueError(f"mark_hex(stroke={stroke!r}) is not supported")
     if stroke_width != 0:
         raise ValueError(f"mark_hex(stroke_width={stroke_width!r}) is not supported")
-    if aggregate in ("mean", "sum") and field is None:
-        raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
-    if aggregate not in ("count", "mean", "sum"):
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_hex",
-            "aggregate_unsupported",
-            f"mark_hex aggregate={aggregate!r} deferred; falling back to 'count'",
+    _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
+    if aggregate not in _VALID_AGGREGATES:
+        raise ValueError(
+            f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}"
         )
-        aggregate = "count"
+    if aggregate != "count" and field is None:
+        raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
@@ -602,7 +589,7 @@ def desugar_hex(
             data_source="hex",
         )
     ]
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("hex", frozenset({
@@ -684,27 +671,20 @@ def desugar_swarm(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
-    if dodge is not None:
-        from ferrum._warn import warn_once
-
-        warn_once(
-            "mark_swarm",
-            "dodge",
-            "mark_swarm dodge= is not yet supported; rendering single-group swarm",
-        )
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
-    transforms = [
-        Swarm(
-            category=cat,
-            value=val,
-            point_size=float(size),
-            spacing=spacing,
-            side=side,
-            orient=orient,
-            name="swarm",
-        )
-    ]
+    swarm_kwargs: dict = dict(
+        category=cat,
+        value=val,
+        point_size=float(size),
+        spacing=spacing,
+        side=side,
+        orient=orient,
+        name="swarm",
+    )
+    if dodge is not None:
+        swarm_kwargs["dodge"] = str(dodge)
+    transforms = [Swarm(**swarm_kwargs)]
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
@@ -734,7 +714,7 @@ def desugar_swarm(
                 data_source="swarm",
             )
         ]
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("swarm", frozenset({
@@ -834,4 +814,4 @@ def desugar_function(
         )
 
     synthetic = pa.Table.from_pydict({"x": xs, "y": ys})
-    return ("line", [], {"x": "x", "y": "y"}, synthetic)
+    return MarkDesugarResult(mark="line", remap={"x": "x", "y": "y"}, data=synthetic)

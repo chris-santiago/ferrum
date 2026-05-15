@@ -5,19 +5,33 @@
 //!     feature-importance error bars).
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
-use crate::render::svg::{Stroke, SvgBuffer};
 
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
-    // Schwabish SB3 (2026-05-11): honor an explicit `stroke=...` kwarg
-    // (e.g. ``mark_rule(stroke="#8a8a8a")``) so reference rules can pick a
-    // neutral color distinct from the theme's mark_color. Falls back to
-    // the resolved fill (Phase 7 default) when no override is given.
-    let style = Stroke {
-        stroke: ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
-        stroke_width: ctx.mark_style.stroke_width,
-        stroke_dash: ctx.mark_style.stroke_dash.clone(),
+    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
+    let stroke_style = to_scene_stroke(
+        stroke_color,
+        ctx.mark_style.stroke_width,
+        1.0,
+        ctx.mark_style.stroke_dash.as_deref(),
+        None,
+        None,
+    );
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Rule,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
     };
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -26,11 +40,14 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
     let x2f_opt = spec.encoding.x2.as_ref().map(|e| e.field.as_str());
 
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
     // Ranged rule: ordinal x + quantitative y + y2 → vertical segment per row.
     if let (Some(xf), Some(yf), Some(y2f)) = (xf_opt, yf_opt, y2f_opt) {
         if let Ok(xs) = col_as_str(ctx.batch, xf) {
-            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-            let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -39,18 +56,30 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
                 let px = px + x_offsets[i];
-                out.line(px, py + y_offsets[i], px, py2 + y_offsets[i], &style);
+                nodes.push(SceneNode::Line {
+                    x1: px,
+                    y1: py + y_offsets[i],
+                    x2: px,
+                    y2: py2 + y_offsets[i],
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
             }
-            return;
+            return MarkBuildResult {
+                kind: MarkBatchKind::Rule,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
         }
-        // x column is not a string (quantitative x with y2) — fall through to spans below.
     }
 
     // Ranged rule: ordinal y + quantitative x + x2 → horizontal segment per row.
     if let (Some(yf), Some(xf), Some(x2f)) = (yf_opt, xf_opt, x2f_opt) {
         if let Ok(ys) = col_as_str(ctx.batch, yf) {
-            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-            let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return };
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
             for i in 0..ys.len() {
                 let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -59,16 +88,26 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                 let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
                 let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
                 let py = py + y_offsets[i];
-                out.line(px + x_offsets[i], py, px2 + x_offsets[i], py, &style);
+                nodes.push(SceneNode::Line {
+                    x1: px + x_offsets[i],
+                    y1: py,
+                    x2: px2 + x_offsets[i],
+                    y2: py,
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
             }
-            return;
+            return MarkBuildResult {
+                kind: MarkBatchKind::Rule,
+                nodes,
+                data_indices: Some(indices),
+                tooltips,
+                hrefs,
+                descriptions,            };
         }
     }
 
-    // Horizontal span: y only (no x), or y + x inherited from chart-level
-    // encoding (Schwabish SB3: PR baseline rule layer inherits the chart's
-    // x for axis-domain resolution; the rule still spans the full plot
-    // width). Bail out if a ranged-rule path (y2 present) actually applies.
+    // Horizontal span: y only (no x), or y + x inherited from chart-level encoding.
     if let Some(yf) = yf_opt {
         if let Ok(ys) = col_as_f64(ctx.batch, yf) {
             if y2f_opt.is_none() {
@@ -81,22 +120,51 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                         Some(p) => p, None => continue,
                     };
                     let py = py + y_offsets[i];
-                    out.line(panel.x, py, panel.x + panel.w, py, &style);
+                    nodes.push(SceneNode::Line {
+                        x1: panel.x,
+                        y1: py,
+                        x2: panel.x + panel.w,
+                        y2: py,
+                        style: stroke_style.clone(),
+                    });
+                    indices.push(i);
                 }
-                return;
+                return MarkBuildResult {
+                    kind: MarkBatchKind::Rule,
+                    nodes,
+                    data_indices: Some(indices),
+                    tooltips,
+                    hrefs,
+                    descriptions,                };
             }
         }
     }
+
     // Vertical span: x only (no y).
     if let (Some(xf), None) = (xf_opt, yf_opt) {
-        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
+        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
         for (i, xopt) in xs.iter().enumerate() {
             let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
             let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
             let px = px + x_offsets[i];
-            out.line(px, panel.y, px, panel.y + panel.h, &style);
+            nodes.push(SceneNode::Line {
+                x1: px,
+                y1: panel.y,
+                x2: px,
+                y2: panel.y + panel.h,
+                style: stroke_style.clone(),
+            });
+            indices.push(i);
         }
     }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rule,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
 #[cfg(test)]
@@ -109,6 +177,7 @@ mod tests {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
+    use ferrum_scene::SceneNode;
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -128,6 +197,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", arrow::datatypes::DataType::Utf8, false),
@@ -144,10 +214,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<line ").count(), 2, "expected 2 ranged rule lines");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2, "expected 2 ranged rule lines");
     }
 
     #[test]
@@ -166,6 +234,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", arrow::datatypes::DataType::Utf8, false),
@@ -182,10 +251,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<line ").count(), 2, "expected 2 horizontal-ranged rule lines");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2, "expected 2 horizontal-ranged rule lines");
     }
 
     #[test]
@@ -204,6 +271,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -220,9 +288,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec_for_scales, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rule);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<line ").count(), 2);
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2);
     }
 }

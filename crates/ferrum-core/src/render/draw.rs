@@ -6,9 +6,13 @@ use crate::layout::{PanelLayout, ThemeInputs};
 use crate::spec::mark::Mark;
 use crate::spec::mark_style::MarkKwargsSpec;
 
+use ferrum_scene::{
+    MarkBatchKind, SceneNode as FsSceneNode, TooltipContent as FsTooltipContent,
+    TooltipField as FsTooltipField,
+};
+
 use super::color::{from_hex_str, with_opacity, Color};
 use super::scale_resolve::ResolvedScales;
-use super::svg::SvgBuffer;
 
 pub struct DrawCtx<'a> {
     pub spec: &'a crate::spec::chart::ChartSpec,
@@ -149,8 +153,16 @@ pub fn resolve_mark_style(
         Mark::Point => {
             style.opacity = theme.point_opacity;
         }
-        Mark::Tick | Mark::Text | Mark::Image => {
+        Mark::Tick | Mark::Text | Mark::Image | Mark::Label => {
             // Baseline applies as-is.
+        }
+        Mark::Arc => {
+            style.stroke_width = 0.0;
+        }
+        Mark::Geoshape => {
+            style.fill = theme.mark_color;
+            style.stroke = Some(theme.mark_color);
+            style.stroke_width = 0.5;
         }
     }
 
@@ -216,7 +228,7 @@ pub(crate) use super::arrow_cast::{col_as_f64, col_as_str};
 /// Constructed once per draw call; individual mark renderers call
 /// `open_metadata`/`close_metadata` around each mark element.
 pub struct MetadataColumns {
-    pub tooltip: Option<Vec<Option<String>>>,
+    pub tooltip_cols: Vec<(String, Vec<Option<String>>)>,
     pub href: Option<Vec<Option<String>>>,
     pub description: Option<Vec<Option<String>>>,
 }
@@ -226,17 +238,35 @@ impl MetadataColumns {
     /// corresponding encoding is present. Falls back to f64 → string
     /// conversion when the column is numeric.
     pub fn from_ctx(ctx: &DrawCtx) -> Self {
-        let tooltip = ctx.spec.encoding.tooltip.as_ref().and_then(|e| {
-            col_as_str(ctx.batch, &e.field)
+        // Collect tooltip columns: use tooltip_fields if present, fall back to single tooltip.
+        let tooltip_specs: Vec<&crate::spec::encoding::EncodingSpec> =
+            if let Some(fields) = ctx.spec.encoding.tooltip_fields.as_ref() {
+                fields.iter().collect()
+            } else if let Some(t) = ctx.spec.encoding.tooltip.as_ref() {
+                vec![t]
+            } else {
+                vec![]
+            };
+
+        let read_col = |field: &str| -> Option<Vec<Option<String>>> {
+            col_as_str(ctx.batch, field)
                 .ok()
                 .or_else(|| {
-                    col_as_f64(ctx.batch, &e.field).ok().map(|vals| {
+                    col_as_f64(ctx.batch, field).ok().map(|vals| {
                         vals.into_iter()
-                            .map(|v| v.map(|f| format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()))
+                            .map(|v| v.map(|f| {
+                                format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()
+                            }))
                             .collect()
                     })
                 })
-        });
+        };
+
+        let tooltip_cols: Vec<(String, Vec<Option<String>>)> = tooltip_specs
+            .iter()
+            .filter_map(|e| read_col(&e.field).map(|col| (e.field.clone(), col)))
+            .collect();
+
         let href = ctx.spec.encoding.href.as_ref().and_then(|e| {
             col_as_str(ctx.batch, &e.field).ok()
         });
@@ -251,52 +281,9 @@ impl MetadataColumns {
                     })
                 })
         });
-        MetadataColumns { tooltip, href, description }
+        MetadataColumns { tooltip_cols, href, description }
     }
 
-    /// True when at least one metadata channel is present.
-    pub fn has_any(&self) -> bool {
-        self.tooltip.is_some() || self.href.is_some() || self.description.is_some()
-    }
-
-    /// Open wrapping elements for row `i`: `<a>` if href is set, then `<g>`
-    /// containing `<title>` and/or `<desc>` if tooltip/description are set.
-    /// Returns `true` if any wrapper was opened (caller must call `close`).
-    pub fn open(&self, i: usize, out: &mut super::svg::SvgBuffer) -> bool {
-        if !self.has_any() {
-            return false;
-        }
-        let tooltip_val = self.tooltip.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        let desc_val = self.description.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-
-        let needs_wrap = tooltip_val.is_some() || desc_val.is_some() || href_val.is_some();
-        if !needs_wrap {
-            return false;
-        }
-
-        if let Some(url) = href_val {
-            out.a_open(url);
-        }
-        // Wrap in <g> to attach <title>/<desc> to the next mark element.
-        out.g_open(None);
-        if let Some(tip) = tooltip_val {
-            out.title_elem(tip);
-        }
-        if let Some(desc) = desc_val {
-            out.desc_elem(desc);
-        }
-        true
-    }
-
-    /// Close wrapping elements opened by `open`.
-    pub fn close(&self, i: usize, out: &mut super::svg::SvgBuffer) {
-        out.g_close();
-        let href_val = self.href.as_ref().and_then(|v| v.get(i).and_then(|o| o.as_deref()));
-        if href_val.is_some() {
-            out.a_close();
-        }
-    }
 }
 
 pub fn x_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpec) -> Option<&'a str> {
@@ -309,11 +296,155 @@ pub fn color_field<'a>(_ctx: &'a DrawCtx, spec: &'a crate::spec::chart::ChartSpe
     spec.encoding.color.as_ref().map(|e| e.field.as_str())
 }
 
-pub fn dispatch_mark(mark: &Mark, ctx: &DrawCtx, out: &mut SvgBuffer) {
+// ── Scene-graph path (11a) ──────────────────────────────────────────
+
+pub struct MarkBuildResult {
+    pub kind: MarkBatchKind,
+    pub nodes: Vec<FsSceneNode>,
+    pub data_indices: Option<Vec<usize>>,
+    pub tooltips: Option<Vec<FsTooltipContent>>,
+    pub hrefs: Option<Vec<Option<String>>>,
+    pub descriptions: Option<Vec<Option<String>>>,
+}
+
+impl MarkBuildResult {
+    pub fn empty(kind: MarkBatchKind) -> Self {
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None }
+    }
+}
+
+impl MetadataColumns {
+    pub fn build_metadata(
+        &self,
+        _ctx: &DrawCtx,
+    ) -> (Option<Vec<FsTooltipContent>>, Option<Vec<Option<String>>>, Option<Vec<Option<String>>>) {
+        let tooltips = if self.tooltip_cols.is_empty() {
+            None
+        } else {
+            // Use the first col's length as the row count; all cols should have the same length.
+            let n = self.tooltip_cols.first().map(|(_, c)| c.len()).unwrap_or(0);
+            Some((0..n).map(|i| {
+                FsTooltipContent {
+                    fields: self.tooltip_cols.iter()
+                        .map(|(name, col)| FsTooltipField {
+                            name: name.clone(),
+                            value: col.get(i).and_then(|v| v.clone()).unwrap_or_default(),
+                        })
+                        .collect(),
+                }
+            }).collect())
+        };
+        let hrefs = self.href.clone();
+        let descriptions = self.description.clone();
+        (tooltips, hrefs, descriptions)
+    }
+}
+
+pub fn to_scene_color(c: Color) -> ferrum_scene::Color {
+    ferrum_scene::Color { r: c.red, g: c.green, b: c.blue, a: c.alpha }
+}
+
+pub fn to_scene_fill_stroke(
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_width: f64,
+    opacity: f64,
+    stroke_dash: Option<&[f64]>,
+) -> ferrum_scene::FillStroke {
+    ferrum_scene::FillStroke {
+        fill: fill.map(to_scene_color),
+        stroke: stroke.map(to_scene_color),
+        stroke_width,
+        opacity,
+        stroke_dash: stroke_dash.map(|d| d.to_vec()),
+    }
+}
+
+pub fn to_scene_stroke(
+    color: Color,
+    width: f64,
+    opacity: f64,
+    dash: Option<&[f64]>,
+    cap: Option<&str>,
+    join: Option<&str>,
+) -> ferrum_scene::StrokeStyle {
+    ferrum_scene::StrokeStyle {
+        color: to_scene_color(color),
+        width,
+        opacity,
+        dash: dash.map(|d| d.to_vec()),
+        stroke_cap: cap.and_then(|s| match s {
+            "round" => Some(ferrum_scene::StrokeCap::Round),
+            "square" => Some(ferrum_scene::StrokeCap::Square),
+            _ => Some(ferrum_scene::StrokeCap::Butt),
+        }),
+        stroke_join: join.and_then(|s| match s {
+            "round" => Some(ferrum_scene::StrokeJoin::Round),
+            "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
+            _ => Some(ferrum_scene::StrokeJoin::Miter),
+        }),
+    }
+}
+
+pub fn to_scene_text_style(
+    color: Color,
+    font_size: f64,
+    anchor: crate::layout::TextAnchor,
+    angle: f64,
+    font_family: &str,
+    font_weight: Option<&str>,
+    dominant_baseline: Option<&str>,
+    opacity: f64,
+) -> ferrum_scene::TextStyle {
+    ferrum_scene::TextStyle {
+        font_size,
+        font_weight: match font_weight {
+            Some("bold") => ferrum_scene::FontWeight::Bold,
+            Some(w) if w != "normal" => ferrum_scene::FontWeight::Custom(w.to_string()),
+            _ => ferrum_scene::FontWeight::Normal,
+        },
+        anchor: match anchor {
+            crate::layout::TextAnchor::Start => ferrum_scene::TextAnchor::Start,
+            crate::layout::TextAnchor::Middle => ferrum_scene::TextAnchor::Middle,
+            crate::layout::TextAnchor::End => ferrum_scene::TextAnchor::End,
+        },
+        baseline: match dominant_baseline {
+            Some("hanging") | Some("text-before-edge") => ferrum_scene::TextBaseline::Top,
+            Some("central") | Some("middle") => ferrum_scene::TextBaseline::Middle,
+            Some("ideographic") | Some("text-after-edge") => ferrum_scene::TextBaseline::Bottom,
+            Some(other) => ferrum_scene::TextBaseline::Custom(other.to_string()),
+            None => ferrum_scene::TextBaseline::Alphabetic,
+        },
+        angle,
+        color: to_scene_color(color),
+        opacity,
+        font_family: font_family.to_string(),
+    }
+}
+
+pub(crate) fn parse_stroke_cap(s: &str) -> Option<ferrum_scene::StrokeCap> {
+    match s {
+        "round" => Some(ferrum_scene::StrokeCap::Round),
+        "square" => Some(ferrum_scene::StrokeCap::Square),
+        "butt" => Some(ferrum_scene::StrokeCap::Butt),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
+    match s {
+        "round" => Some(ferrum_scene::StrokeJoin::Round),
+        "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
+        "miter" => Some(ferrum_scene::StrokeJoin::Miter),
+        _ => None,
+    }
+}
+
+pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> MarkBuildResult {
     use crate::spec::mark::for_each_mark;
     macro_rules! arm {
         ($($V:ident => $m:ident,)*) => {
-            match mark { $( Mark::$V => super::marks::$m::draw(ctx, out), )* }
+            match mark { $( Mark::$V => super::marks::$m::build(ctx), )* }
         };
     }
     for_each_mark!(arm)

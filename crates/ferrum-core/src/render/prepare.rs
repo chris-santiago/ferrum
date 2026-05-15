@@ -39,6 +39,8 @@ pub struct LayerPrepared {
     /// `Layer.position` (preferred) or `ChartSpec.position` (chart-level
     /// fallback for single-layer charts).
     pub position: Option<crate::spec::position::PositionAdjust>,
+    /// Pixel-level blend mode for this layer's MarkBatch.
+    pub blend: Option<ferrum_scene::BlendMode>,
 }
 
 impl LayerPrepared {
@@ -51,6 +53,7 @@ impl LayerPrepared {
             mark_style: spec.mark_style.clone(),
             data_source: None,
             position: spec.position.clone(),
+            blend: None,
         }
     }
 
@@ -69,6 +72,7 @@ impl LayerPrepared {
             mark_style: layer.mark_style.clone().or_else(|| spec.mark_style.clone()),
             data_source: layer.data_source.clone(),
             position: layer.position.clone().or_else(|| spec.position.clone()),
+            blend: layer.blend,
         }
     }
 }
@@ -926,6 +930,7 @@ mod tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
             }),
@@ -935,6 +940,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1011,6 +1017,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1043,7 +1050,8 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None,
+                position: None,
+                blend: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -1051,7 +1059,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None,
+            position: None, blend: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -1193,7 +1201,7 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
-            position: None,
+            position: None, blend: None,
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();

@@ -8,6 +8,7 @@ pub(crate) mod transform;
 pub(crate) mod layout;
 pub(crate) mod render;
 pub(crate) mod diagnostics;
+pub(crate) mod projection;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -36,6 +37,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::render_interactive, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::rasterize_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_horizontal_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;

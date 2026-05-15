@@ -30,17 +30,18 @@ import pytest
 _MARKS_DIR = Path(__file__).parent.parent / "src" / "ferrum" / "marks"
 _MARK_FILES = (
     "composite.py",
-    "diagnostic.py",
     "heavy_stat.py",
     "statistical.py",
 )
 
 
 def _find_desugar_functions() -> list[tuple[str, ast.FunctionDef]]:
-    """Walk every marks/*.py module and yield (qualname, FunctionDef) pairs
-    for every top-level function named ``desugar_*``.
+    """Walk every marks/*.py and marks/diagnostic/*.py module and yield
+    (qualname, FunctionDef) pairs for every top-level function named
+    ``desugar_*``.
     """
     out: list[tuple[str, ast.FunctionDef]] = []
+    # Top-level mark modules.
     for fname in _MARK_FILES:
         path = _MARKS_DIR / fname
         if not path.exists():
@@ -49,6 +50,14 @@ def _find_desugar_functions() -> list[tuple[str, ast.FunctionDef]]:
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name.startswith("desugar_"):
                 out.append((f"{fname}::{node.name}", node))
+    # Diagnostic subpackage domain modules.
+    diag_dir = _MARKS_DIR / "diagnostic"
+    if diag_dir.is_dir():
+        for path in sorted(diag_dir.glob("_*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("desugar_"):
+                    out.append((f"diagnostic/{path.name}::{node.name}", node))
     return out
 
 

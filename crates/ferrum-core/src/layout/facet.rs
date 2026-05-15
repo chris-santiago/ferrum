@@ -10,7 +10,12 @@ use super::panel::FacetKey;
 /// Spec-side facet declaration. Carried by `ChartSpec.facet`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FacetSpec {
+    /// Primary facet field (column dimension in grid mode, or the sole field in wrap mode).
     pub field: String,
+    /// Row dimension field for grid-mode facets. Stored for wire-format round-trip;
+    /// the renderer distributes panels by `mode.nrows`/`mode.ncols` independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
     pub mode: FacetMode,
     /// If set, overrides `theme.column_padding` / `theme.row_padding` symmetrically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +149,7 @@ mod tests {
     fn facet_spec_round_trip_wrap() {
         let s = FacetSpec {
             field: "species".into(),
+            row: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
         };
@@ -158,6 +164,7 @@ mod tests {
     fn facet_spec_round_trip_grid() {
         let s = FacetSpec {
             field: "year".into(),
+            row: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 3 },
             spacing: Some(12.0),
         };
@@ -171,6 +178,7 @@ mod tests {
     fn facet_spec_omits_spacing_when_none() {
         let s = FacetSpec {
             field: "f".into(),
+            row: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
         };

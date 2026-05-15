@@ -114,12 +114,12 @@ def _direct_label_endpoint(
         pl.Series("_direct_label_text", labels_col, dtype=pl.Utf8),
         pl.Series("_direct_label_y", label_y_col, dtype=pl.Float64),
     )
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart_aug = chart._clone()
     chart_aug._data = augmented
     return chart_aug.layer(
-        Layer(
+        _Layer(
             mark="text",
             encoding={"x": x_col, "y": "_direct_label_y", "text": "_direct_label_text"},
             mark_kwargs={"align": "right", "dx": -4},

@@ -93,7 +93,7 @@ class ChannelBase:
 
     _channel_name: ClassVar[str] = "_unknown_"
     _renders_in_phase_8a: ClassVar[bool] = False
-    _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type"])
+    _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type", "condition"])
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:
         # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.
@@ -106,6 +106,19 @@ class ChannelBase:
                 f"{self.__class__.__name__}: field must be str, _RepeatPlaceholder, or None, "
                 f"got {type(field).__name__}"
             )
+        # Parse shorthand from the field string so Channel("col:Q") works the same
+        # as Channel("col", type_="Q"). This lets users pass shorthand strings
+        # directly to channel constructors without manually splitting field and type.
+        if isinstance(field, str) and ":" in field:
+            from ferrum._shorthand import parse_shorthand
+            try:
+                parsed_field, parsed_type, _ = parse_shorthand(field)
+                if parsed_field is not None:
+                    field = parsed_field
+                    if parsed_type is not None and "type" not in kwargs:
+                        kwargs = {**kwargs, "type": parsed_type}
+            except ValueError:
+                pass  # non-shorthand field containing ":" — keep as-is
         self.field = field
         self._kwargs = dict(kwargs)
         self._validate()
@@ -161,6 +174,12 @@ class ChannelBase:
         # even though the user-facing kwarg and JSON serde key is "formatType".
         if (v := self._kwargs.get("formatType")) is not None:
             out["format_type"] = v
+        # condition: serialize ConditionalSpec or raw dict as opaque JSON for Rust.
+        if (cond := self._kwargs.get("condition")) is not None:
+            if hasattr(cond, "to_spec_dict"):
+                out["condition"] = cond.to_spec_dict()
+            elif isinstance(cond, dict):
+                out["condition"] = cond
         return out
 
     def to_implicit_transforms(self) -> list:

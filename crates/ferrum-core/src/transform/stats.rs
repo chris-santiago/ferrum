@@ -201,8 +201,11 @@ pub fn shapiro_w_scalar(x: &[f64]) -> f64 {
     a[0] = -a_n;
     a[1] = -a_nm1;
     if n > 4 {
+        // Guard against negative eps (can occur for small n with near-linear input);
+        // eps.max(0.0) prevents NaN propagation through the W statistic.
+        let eps_sqrt = eps.max(0.0).sqrt();
         for i in 2..n - 2 {
-            a[i] = m[i] / eps.sqrt();
+            a[i] = if eps_sqrt > 0.0 { m[i] / eps_sqrt } else { 0.0 };
         }
     }
 

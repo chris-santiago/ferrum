@@ -5,7 +5,7 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_RENDERED_HONORED = frozenset(["type", "scale", "title"])
+_RENDERED_HONORED = frozenset(["type", "scale", "title", "legend", "condition"])
 
 
 # Phase 8a renders these (added to scale_resolve in Task 8):
@@ -52,7 +52,7 @@ class Color(ChannelBase):
     # ``legend=None`` (or ``False``) suppresses the categorical color legend
     # at the renderer level. Used by direct-label diagnostic charts to
     # avoid a redundant legend alongside endpoint-anchored series labels.
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "sort"])
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "sort", "condition"])
 
 
 class Size(ChannelBase):
@@ -184,7 +184,7 @@ class Fill(ChannelBase):
 
     _channel_name = "fill"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend"])
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
 
 
 class Stroke(ChannelBase):
@@ -213,7 +213,7 @@ class Stroke(ChannelBase):
 
     _channel_name = "stroke"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title"])
+    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
 
 
 class FillOpacity(ChannelBase):
@@ -243,7 +243,7 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type", "scale", "title"])
+    _honored_kwargs = frozenset(["type", "scale", "title", "legend"])
 
 
 class StrokeOpacity(ChannelBase):
@@ -273,7 +273,7 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = frozenset(["type", "legend"])
 
 
 class StrokeWidth(ChannelBase):
@@ -302,7 +302,7 @@ class StrokeWidth(ChannelBase):
 
     _channel_name = "stroke_width"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = frozenset(["type", "legend"])
 
 
 class StrokeDash(ChannelBase):
@@ -332,7 +332,7 @@ class StrokeDash(ChannelBase):
 
     _channel_name = "stroke_dash"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = frozenset(["type", "legend"])
 
 
 class Angle(ChannelBase):
@@ -362,4 +362,4 @@ class Angle(ChannelBase):
 
     _channel_name = "angle"
     _renders_in_phase_8a = True
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = frozenset(["type", "legend"])

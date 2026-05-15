@@ -17,6 +17,9 @@ pub enum Mark {
     Image,
     Ribbon,
     Segment,
+    Arc,
+    Label,
+    Geoshape,
 }
 
 /// Single source of truth for the 12 primitive `Mark` variants. Mirrors the
@@ -28,18 +31,21 @@ pub enum Mark {
 macro_rules! for_each_mark {
     ($mac:ident) => {
         $mac! {
-            Point   => point,
-            Line    => line,
-            Bar     => bar,
-            Area    => area,
-            Rule    => rule,
-            Text    => text,
-            Tick    => tick,
-            Rect    => rect,
-            Polygon => polygon,
-            Image   => image,
-            Ribbon  => ribbon,
-            Segment => segment,
+            Point    => point,
+            Line     => line,
+            Bar      => bar,
+            Area     => area,
+            Rule     => rule,
+            Text     => text,
+            Tick     => tick,
+            Rect     => rect,
+            Polygon  => polygon,
+            Image    => image,
+            Ribbon   => ribbon,
+            Segment  => segment,
+            Arc      => arc,
+            Label    => label,
+            Geoshape => geoshape,
         }
     };
 }
@@ -69,7 +75,7 @@ impl fmt::Display for ParseMarkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect, polygon, image, ribbon, segment]",
+            "unknown mark '{}'; expected one of [point, line, bar, area, rule, text, tick, rect, polygon, image, ribbon, segment, arc, label, geoshape]",
             self.0
         )
     }
@@ -101,6 +107,7 @@ mod tests {
         for m in [
             Mark::Point, Mark::Line, Mark::Bar, Mark::Area,
             Mark::Rule, Mark::Text, Mark::Tick, Mark::Rect, Mark::Polygon, Mark::Image, Mark::Ribbon, Mark::Segment,
+            Mark::Arc, Mark::Label, Mark::Geoshape,
         ] {
             let json = serde_json::to_string(&m).unwrap();
             let parsed: Mark = serde_json::from_str(&json).unwrap();

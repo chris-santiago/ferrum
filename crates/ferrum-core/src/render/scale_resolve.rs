@@ -121,10 +121,99 @@ impl ScaleKind {
         }
     }
 
+    /// Return the data-space domain `(lo, hi)` for continuous scales.
+    /// Returns `None` for ordinal scales (no numeric domain).
+    pub(crate) fn data_domain(&self) -> Option<(f64, f64)> {
+        match self {
+            ScaleKind::Ordinal(_) => None,
+            _ => {
+                let [lo, hi] = dispatch_continuous!(self, domain_pair);
+                Some((lo, hi))
+            }
+        }
+    }
+
     /// Pixel-range used when constructing this scale (lo, hi).
     pub fn pixel_range(&self) -> (f64, f64) {
         let r = dispatch_all!(self, range_pair);
         (r[0], r[1])
+    }
+
+    pub fn tick_data(&self, count_hint: usize) -> Vec<ferrum_scene::Tick> {
+        match self {
+            Self::Ordinal(_) => Vec::new(),
+            Self::Linear(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Self::Time(s) => {
+                let ticks = s.ticks_internal(count_hint);
+                let spacing = if ticks.len() >= 2 {
+                    (ticks[1] - ticks[0]) as i64
+                } else {
+                    86_400_000
+                };
+                ticks
+                    .into_iter()
+                    .filter_map(|v| {
+                        let px = s.scale_internal(v);
+                        if px.is_finite() {
+                            Some(ferrum_scene::Tick {
+                                value: v,
+                                label: super::format::format_time(v as i64, spacing),
+                                pixel: px,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            Self::Log(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Self::Symlog(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
     }
 }
 
@@ -305,6 +394,22 @@ pub fn resolve_scales_with_outputs(
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
 
+    // Geoshape marks read geometry from __geometry__ column and don't use x/y scales.
+    // Return dummy unit scales so the renderer can proceed; the mark builder ignores them.
+    if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
+        let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
+        ));
+        let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
+        ));
+        return Ok((
+            ResolvedScales { x: dummy_x, y: dummy_y, color: None, size: None, shape: None, opacity: None,
+                x2: None, y2: None },
+            warnings,
+        ));
+    }
+
     let x_enc = spec
         .encoding
         .x
@@ -329,13 +434,16 @@ pub fn resolve_scales_with_outputs(
     // resolved range and produce non-finite pixels downstream.
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
-    let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
-
+    let mut x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+
+    // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
+    // data domain; expand=false removes the default 5% inward padding.
+    apply_coord_domain_overrides(spec, &mut x, &mut y, x_pixel_range, y_pixel_range);
 
     // Color/size/shape/opacity scales are primary-batch only. These channels
     // do not currently participate in cross-layer scale unification: each is
@@ -593,6 +701,23 @@ fn numeric_domain_union(
             channel: channel.to_string(),
             field: field.to_string(),
         });
+    }
+    // Degenerate domain: a single row or all-equal values produce mn == mx.
+    // A zero-span domain collapses every data point to the same pixel, which
+    // causes `to_pixel_f64` to return NaN (0/0 in the linear formula) and the
+    // mark renderer silently drops every row. Expand to a symmetric band so the
+    // mark renders at the centre of the plot area. Guard fires only here because
+    // `numeric_domain_union` is called exclusively from the auto-inferred
+    // (no explicit ScaleSpec) path in `build_axis_scale`; explicit domains go
+    // through `build_from_scale_spec` → `resolve_continuous_domain_and_range`.
+    if mn == mx {
+        if mn == 0.0 {
+            mn = -1.0;
+            mx = 1.0;
+        } else {
+            mn -= 0.5;
+            mx += 0.5;
+        }
     }
     Ok((mn, mx))
 }
@@ -959,6 +1084,67 @@ fn distinct_values_in_order(
     super::arrow_cast::distinct_values_in_order(batch, field)
 }
 
+/// Apply coord-level domain and padding overrides to the x/y scales.
+///
+/// For `CoordCartesian` and `CoordFixed`, explicit `x_domain`/`y_domain` pins
+/// the data domain; `expand=false` removes the 5% inward padding.
+fn apply_coord_domain_overrides(
+    spec: &ChartSpec,
+    x: &mut ScaleKind,
+    y: &mut ScaleKind,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+) {
+    use crate::spec::coord::CoordKind;
+
+    let (x_domain_override, y_domain_override, expand) = match &spec.coord {
+        Some(CoordKind::Cartesian { x_domain, y_domain, expand, .. }) => {
+            (*x_domain, *y_domain, *expand)
+        }
+        Some(CoordKind::Fixed { x_domain, y_domain, expand, .. }) => {
+            (*x_domain, *y_domain, *expand)
+        }
+        _ => return,
+    };
+
+    if let Some((lo, hi)) = x_domain_override {
+        let pr = if expand {
+            inset_pixel_range(x_pixel_range, resolve_padding_fraction(None, false))
+        } else {
+            x_pixel_range
+        };
+        *x = ScaleKind::Linear(LinearScale::new_internal(
+            vec![lo, hi], vec![pr.0, pr.1], false, false,
+        ));
+    } else if !expand {
+        // No explicit domain, but expand=false: rebuild with raw pixel range.
+        if let ScaleKind::Linear(ref inner) = x {
+            let d = inner.domain_pair().to_vec();
+            *x = ScaleKind::Linear(LinearScale::new_internal(
+                d, vec![x_pixel_range.0, x_pixel_range.1], false, false,
+            ));
+        }
+    }
+
+    if let Some((lo, hi)) = y_domain_override {
+        let pr = if expand {
+            inset_pixel_range(y_pixel_range, resolve_padding_fraction(None, false))
+        } else {
+            y_pixel_range
+        };
+        *y = ScaleKind::Linear(LinearScale::new_internal(
+            vec![lo, hi], vec![pr.1, pr.0], false, false, // y is flipped (pixel y increases downward)
+        ));
+    } else if !expand {
+        if let ScaleKind::Linear(ref inner) = y {
+            let d = inner.domain_pair().to_vec();
+            *y = ScaleKind::Linear(LinearScale::new_internal(
+                d, vec![y_pixel_range.1, y_pixel_range.0], false, false,
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,6 +1190,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1089,6 +1276,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1143,6 +1331,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1167,6 +1356,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1191,6 +1381,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -1276,6 +1467,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1331,6 +1523,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1386,6 +1579,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1427,6 +1621,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

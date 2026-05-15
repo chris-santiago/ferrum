@@ -19,6 +19,9 @@ pub struct Layer {
     pub data_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub position: Option<crate::spec::position::PositionAdjust>,
+    /// Pixel-level blending mode for this layer. `None` = Normal (default).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blend: Option<ferrum_scene::BlendMode>,
 }
 
 #[cfg(test)]
@@ -34,7 +37,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None,
+        position: None, blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -54,7 +57,8 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None,
+            position: None,
+            blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -73,7 +77,8 @@ mod tests {
                 ..Default::default()
             }),
             data_source: None,
-        position: None,
+            position: None,
+            blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -88,7 +93,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: Some("box".into()),
-            position: None,
+            position: None, blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -109,6 +114,7 @@ mod tests {
             mark_style: None,
             data_source: None,
             position: Some(PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
+            blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(json.contains(r#""position""#));
@@ -124,7 +130,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-            position: None,
+            position: None, blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(!json.contains("position"), "position=None must be omitted: {json}");
@@ -138,7 +144,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None,
+        position: None, blend: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(

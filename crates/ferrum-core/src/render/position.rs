@@ -893,6 +893,8 @@ mod tests {
             title: None,
             axis_x: None,
             axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
         };
 
         let result = axis_batch_for_y(&spec, "y", &batch);

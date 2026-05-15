@@ -11,9 +11,16 @@ use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
-use crate::render::svg::{FillStroke, SvgBuffer};
 
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+fn count_distinct(values: &[Option<String>]) -> usize {
+    let mut seen = std::collections::HashSet::<&str>::new();
+    for v in values.iter().flatten() { seen.insert(v); }
+    seen.len()
+}
+
+// ── Scene-graph build path (11a) ────────────────────────────────────
+
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let both_ranges = ctx.spec.encoding.x2.is_some() && ctx.spec.encoding.y2.is_some();
     let both_quant = matches!(
         (&ctx.scales.x, &ctx.scales.y),
@@ -23,34 +30,46 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         )
     );
     if both_ranges && both_quant {
-        draw_quantitative_range(ctx, out);
+        build_quantitative_range(ctx)
     } else if ctx.spec.encoding.y2.is_some() {
-        draw_ordinal_range(ctx, out);
+        build_ordinal_range(ctx)
     } else {
-        draw_heatmap(ctx, out);
+        build_heatmap(ctx)
     }
 }
 
-/// Quantitative x + x2 + y + y2 → free-floating rect path. Each row carries
-/// explicit (x_lo, x_hi, y_lo, y_hi) pixel bounds. Color resolves through
-/// either a continuous f64 scale or a categorical string scale, matching
-/// the heatmap path.
-fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
+fn empty_result() -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use ferrum_scene::MarkBatchKind;
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    }
+}
+
+fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
     let spec = ctx.spec;
-    let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
-    let yf = match y_field(ctx, spec) { Some(f) => f, None => return };
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return,
+        Some(f) => f, None => return empty_result(),
     };
     let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return,
+        Some(f) => f, None => return empty_result(),
     };
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
     let n = xs.len();
-    if x2s.len() != n || ys.len() != n || y2s.len() != n { return; }
+    if x2s.len() != n || ys.len() != n || y2s.len() != n { return empty_result(); }
 
     let cfield = color_field(ctx, spec);
     let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
@@ -63,6 +82,10 @@ fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
 
     for i in 0..n {
         let x_lo = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -77,7 +100,6 @@ fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let py_top = py_lo.min(py_hi) + y_offsets[i];
         let w = (px_hi - px_lo).abs().max(0.5);
         let h = (py_hi - py_lo).abs().max(0.5);
-        let r = Rect { x: px_left, y: py_top, w, h };
 
         let fill = match (&ctx.scales.color, &color_numeric, &color_strings) {
             (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
@@ -97,40 +119,57 @@ fn draw_quantitative_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
-        let wrapped = meta.open(i, out);
-        out.rect(r, &FillStroke {
-            fill: Some(fill),
-            stroke: ctx.mark_style.stroke,
-            stroke_width: ctx.mark_style.stroke_width,
-        }, Some(ctx.mark_style.corner_radius));
-        if wrapped { meta.close(i, out); }
+
+        nodes.push(SceneNode::Rect {
+            x: px_left,
+            y: py_top,
+            w,
+            h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
     }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
-/// Ordinal x + quantitative y + y2 → vertical band rect per row (boxplot box body).
-fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
+fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
     let spec = ctx.spec;
-    let xf = match x_field(ctx, spec) { Some(f) => f, None => return };
-    let yf = match y_field(ctx, spec) { Some(f) => f, None => return };
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return,
+        Some(f) => f, None => return empty_result(),
     };
 
     let n_categories = match &ctx.scales.x {
         ScaleKind::Ordinal(_) => {
-            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
+            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
             count_distinct(&xs_probe).max(1)
         }
-        _ => return,
+        _ => return empty_result(),
     };
-    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return };
-    if xs.len() != ys.len() || y2s.len() != ys.len() { return; }
+    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
+    if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
 
     let panel = ctx.panel.plot_area;
-    // S8: band_size (fraction of band width) overrides the 0.6 default.
-    // The Python boxplot desugar passes width=band (e.g. 0.6), now mapped to band_size.
     let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
 
     let cfield = color_field(ctx, spec);
@@ -140,6 +179,10 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
 
     for i in 0..xs.len() {
         let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -151,7 +194,6 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let cx = cx + x_offsets[i];
         let rect_top = py.min(py2) + y_offsets[i];
         let rect_h = (py - py2).abs().max(1.0);
-        let r = Rect { x: cx - box_w / 2.0, y: rect_top, w: box_w, h: rect_h };
 
         let fill = match (&ctx.scales.color, &color_strings) {
             (Some(scale @ ColorScale::Categorical { .. }), Some(values)) => {
@@ -163,34 +205,52 @@ fn draw_ordinal_range(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
-        let wrapped = meta.open(i, out);
-        out.rect(r, &FillStroke {
-            fill: Some(fill),
-            stroke: ctx.mark_style.stroke,
-            stroke_width: ctx.mark_style.stroke_width,
-        }, Some(ctx.mark_style.corner_radius));
-        if wrapped { meta.close(i, out); }
+
+        nodes.push(SceneNode::Rect {
+            x: cx - box_w / 2.0,
+            y: rect_top,
+            w: box_w,
+            h: rect_h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
     }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
-/// Ordinal x × ordinal y → heatmap cell (original path).
-fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
+fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke, to_scene_text_style};
+    use crate::render::format::format_numeric;
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b), _ => return,
+        (Some(a), Some(b)) => (a, b), _ => return empty_result(),
     };
-    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return };
-    let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return };
-    if xs.len() != ys.len() { return; }
+    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    if xs.len() != ys.len() { return empty_result(); }
 
     let panel = ctx.panel.plot_area;
-    let n_x = match &ctx.scales.x { ScaleKind::Ordinal(_) => count_distinct(&xs).max(1), _ => return };
-    let n_y = match &ctx.scales.y { ScaleKind::Ordinal(_) => count_distinct(&ys).max(1), _ => return };
+    let n_x = match &ctx.scales.x { ScaleKind::Ordinal(_) => count_distinct(&xs).max(1), _ => return empty_result() };
+    let n_y = match &ctx.scales.y { ScaleKind::Ordinal(_) => count_distinct(&ys).max(1), _ => return empty_result() };
     let cell_w = panel.w / n_x as f64;
     let cell_h = panel.h / n_y as f64;
 
-    // Phase 10c-pre: read color values as f64 when scale is Continuous, as
-    // string otherwise.
     let cfield = color_field(ctx, spec);
     let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
         (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
@@ -202,6 +262,23 @@ fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    // Optional text annotation channel for heatmap cells.
+    let text_enc = spec.encoding.text.as_ref();
+    let text_field = text_enc.map(|e| e.field.as_str());
+    let text_values: Option<Vec<Option<String>>> = text_field.and_then(|f| {
+        col_as_str(ctx.batch, f).ok().or_else(|| {
+            col_as_f64(ctx.batch, f).ok().map(|nums| {
+                nums.into_iter()
+                    .map(|v| v.map(|n| format_numeric(n)))
+                    .collect()
+            })
+        })
+    });
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
 
     for i in 0..xs.len() {
         let xs_v = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -211,7 +288,6 @@ fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        let r = Rect { x: cx - cell_w / 2.0, y: cy - cell_h / 2.0, w: cell_w, h: cell_h };
         let fill = match (&ctx.scales.color, &color_numeric, &color_strings) {
             (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
                 match values[i] {
@@ -230,20 +306,56 @@ fn draw_heatmap(ctx: &DrawCtx, out: &mut SvgBuffer) {
             _ => ctx.mark_style.fill,
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
-        let wrapped = meta.open(i, out);
-        out.rect(r, &FillStroke {
-            fill: Some(fill),
-            stroke: ctx.mark_style.stroke,
-            stroke_width: ctx.mark_style.stroke_width,
-        }, Some(ctx.mark_style.corner_radius));
-        if wrapped { meta.close(i, out); }
-    }
-}
 
-fn count_distinct(values: &[Option<String>]) -> usize {
-    let mut seen = std::collections::HashSet::<&str>::new();
-    for v in values.iter().flatten() { seen.insert(v); }
-    seen.len()
+        nodes.push(SceneNode::Rect {
+            x: cx - cell_w / 2.0,
+            y: cy - cell_h / 2.0,
+            w: cell_w,
+            h: cell_h,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            corner_radius: ctx.mark_style.corner_radius,
+        });
+        indices.push(i);
+
+        // Emit text annotation at cell center when text encoding is present.
+        if let Some(ref texts) = text_values {
+            if let Some(Some(content)) = texts.get(i) {
+                if !content.is_empty() {
+                    let text_color = ctx.theme.font_color;
+                    let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
+                    nodes.push(SceneNode::Text {
+                        x: cx,
+                        y: cy,
+                        content: content.clone(),
+                        style: to_scene_text_style(
+                            text_color,
+                            font_size,
+                            crate::layout::TextAnchor::Middle,
+                            0.0,
+                            &ctx.theme.font_family,
+                            None,
+                            Some("central"),
+                            1.0,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Rect,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
 #[cfg(test)]
@@ -256,6 +368,7 @@ mod tests {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
+    use ferrum_scene::SceneNode;
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -275,6 +388,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
             arrow::datatypes::Field::new("cat", DataType::Utf8, false),
@@ -291,9 +405,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        assert_eq!(out.finish().matches("<rect ").count(), 2, "expected 2 band rects");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 2, "expected 2 band rects");
     }
 
     #[test]
@@ -312,6 +425,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("row", DataType::Utf8, false),
@@ -326,10 +440,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<rect ").count(), 4);
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
     }
 
     #[test]
@@ -352,6 +464,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("row", DataType::Utf8, false),
@@ -377,21 +490,15 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<rect ").count(), 4);
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
         // Distinct values 0/2/5/10 must produce distinct fill colors.
-        // Pull all `fill="..."` attribute values and count unique ones.
         let mut fills: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut cursor = 0usize;
-        while let Some(start) = s[cursor..].find(r#"fill=""#) {
-            let from = cursor + start + r#"fill=""#.len();
-            if let Some(end) = s[from..].find('"') {
-                fills.insert(s[from..from + end].to_string());
-                cursor = from + end + 1;
-            } else {
-                break;
+        for node in &result.nodes {
+            if let SceneNode::Rect { style, .. } = node {
+                if let Some(c) = &style.fill {
+                    fills.insert(format!("{},{},{},{}", c.r, c.g, c.b, c.a));
+                }
             }
         }
         // At least 3 distinct fill values among the rects (colormap may collapse extremes).
@@ -419,6 +526,7 @@ mod tests {
             transforms: Vec::new(), facet: None, layers: None,
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x",  DataType::Float64, false),
@@ -437,10 +545,9 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
+        let result = super::build(&ctx);
         assert_eq!(
-            out.finish().matches("<rect ").count(),
+            result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(),
             3,
             "expected 3 quant-range rects (one per row)",
         );
@@ -463,6 +570,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -477,8 +585,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        assert!(!out.finish().contains("<rect "));
+        let result = super::build(&ctx);
+        assert!(result.nodes.iter().all(|n| !matches!(n, SceneNode::Rect { .. })));
     }
 }

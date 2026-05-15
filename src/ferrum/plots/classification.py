@@ -366,10 +366,10 @@ def _pr_chart_from_source(
         )
 
     if baseline_prevalence is not None:
-        from ferrum.layer import Layer
+        from ferrum._layer import _Layer
 
         chart = chart.layer(
-            Layer(
+            _Layer(
                 mark="rule",
                 encoding={"y": "_baseline_y"},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
@@ -474,13 +474,13 @@ def _calibration_chart_from_source(
             position="corner",
         )
 
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     point_enc: dict = {"x": "mean_predicted", "y": "fraction_positive"}
     if color is not None:
         point_enc["color"] = color
     chart = chart.layer(
-        Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
+        _Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
     )
 
     chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
@@ -784,7 +784,7 @@ def _classification_report_chart(
             )
     df = pl.DataFrame(rows)
 
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart = (
         ferrum.Chart(df)
@@ -795,7 +795,7 @@ def _classification_report_chart(
             color="value",
         )
         .layer(
-            Layer(
+            _Layer(
                 mark="text",
                 encoding={"x": "metric", "y": "class", "text": "value_fmt"},
                 name="annotation",

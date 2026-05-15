@@ -74,10 +74,10 @@ def _learning_curve_chart_from_source(
         x_col="train_size",
         y_col="mean_score",
     )
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart = chart.layer(
-        Layer(
+        _Layer(
             mark="point",
             encoding={"x": "train_size", "y": "mean_score", "color": "split"},
             mark_kwargs={"size": 40, "filled": True},
@@ -149,10 +149,10 @@ def _validation_curve_chart_from_source(
         x_col="param_value",
         y_col="mean_score",
     )
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart = chart.layer(
-        Layer(
+        _Layer(
             mark="point",
             encoding={"x": "param_value", "y": "mean_score", "color": "split"},
             mark_kwargs={"size": 40, "filled": True},
@@ -229,10 +229,10 @@ def _alpha_selection_chart_from_source(
     )
     chart = chart.encode(y=Y("mean_score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Alpha Selection"))
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     chart = chart.layer(
-        Layer(
+        _Layer(
             mark="point",
             encoding={"x": "alpha", "y": "mean_score"},
             mark_kwargs={"size": 40, "filled": True},
@@ -263,13 +263,13 @@ def _alpha_selection_chart_from_source(
         chart = chart.encode(y=Y("mean_score", title="Score"))
         chart = chart.properties(title=ferrum.Title("Alpha Selection"))
         chart = chart.layer(
-            Layer(
+            _Layer(
                 mark="point",
                 encoding={"x": "alpha", "y": "mean_score"},
                 mark_kwargs={"size": 40, "filled": True},
                 name="point",
             ),
-            Layer(
+            _Layer(
                 mark="text",
                 encoding={"x": "_best_alpha", "y": "_best_alpha_y", "text": "_best_alpha_text"},
                 mark_kwargs={"dx": 8, "dy": -8, "align": "left"},

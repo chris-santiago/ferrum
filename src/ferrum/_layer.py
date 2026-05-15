@@ -23,6 +23,31 @@ class _Layer:
     mark_kwargs: Optional[dict] = None
     data_source: Optional[str] = None
     position: Any = None
+    blend: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MarkDesugarResult:
+    """Typed return from a desugar function consumed by ``_resolve_pending``.
+
+    Replaces the legacy tuple protocol that used 3-tuple, 4-tuple, and 5-tuple
+    shapes to signal different modes.
+
+    Modes
+    -----
+    **Layered** (``layers`` is not ``None``): multi-layer chart.
+    ``mark`` is ignored; ``transforms`` apply at the chart level.
+
+    **Single-mark** (``layers`` is ``None``): single mark with optional
+    encoding remap and position adjustment.
+    """
+
+    mark: Optional[str] = None
+    transforms: list = field(default_factory=list)
+    remap: dict = field(default_factory=dict)
+    position: Any = None
+    layers: Optional[list] = None
+    data: Any = None  # synthetic data (e.g. desugar_function)
 
 
 @dataclass(frozen=True)
@@ -37,5 +62,5 @@ class _PendingMark:
 
     kind: str
     kwargs: dict
-    desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], tuple]
+    desugar_fn: Any  # Callable[[Optional[str], Optional[str], **Any], MarkDesugarResult]
     prior_mark: str | None = None  # Existing primitive mark to preserve as a layer

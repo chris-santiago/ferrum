@@ -231,6 +231,8 @@ pub struct EncodingSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impute: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
@@ -256,7 +258,7 @@ impl EncodingSpec {
         field, type_ = None, *,
         scale = None, title = None,
         axis = None, legend = None, sort = None, stack = None,
-        impute = None, scheme = None, format = None, format_type = None,
+        condition = None, impute = None, scheme = None, format = None, format_type = None,
     ))]
     fn new(
         py: Python,
@@ -268,6 +270,7 @@ impl EncodingSpec {
         legend: Option<&Bound<'_, PyAny>>,
         sort: Option<&Bound<'_, PyAny>>,
         stack: Option<String>,
+        condition: Option<&Bound<'_, PyAny>>,
         impute: Option<&Bound<'_, PyAny>>,
         scheme: Option<String>,
         format: Option<String>,
@@ -307,6 +310,7 @@ impl EncodingSpec {
             legend: json_round(py, legend, "legend")?,
             sort: json_round(py, sort, "sort")?,
             stack,
+            condition: json_round(py, condition, "condition")?,
             impute: json_round(py, impute, "impute")?,
             scheme,
             format,
@@ -462,12 +466,19 @@ pub struct Encoding {
     // Phase 10 gallery-defaults: tooltip field emitted as SVG <title> on each mark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<EncodingSpec>,
+    // Multi-field tooltip support: when set, takes precedence over `tooltip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip_fields: Option<Vec<EncodingSpec>>,
     // Phase 10 gallery-defaults: href field wraps marks in SVG <a xlink:href=...>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<EncodingSpec>,
     // Phase 10 gallery-defaults: description field emits SVG <desc> for accessibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<EncodingSpec>,
+    // Phase 11c: key channel for animated transitions — identifies marks
+    // across data updates so the WASM renderer can lerp between old/new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -531,8 +542,12 @@ impl Encoding {
         inherit(&mut self.y2, &parent.y2);
         inherit(&mut self.text, &parent.text);
         inherit(&mut self.tooltip, &parent.tooltip);
+        if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
+            self.tooltip_fields = parent.tooltip_fields.clone();
+        }
         inherit(&mut self.href, &parent.href);
         inherit(&mut self.description, &parent.description);
+        inherit(&mut self.key, &parent.key);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -551,7 +566,7 @@ impl Encoding {
                 $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
             };
         }
-        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description);
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key);
     }
 }
 
@@ -895,8 +910,10 @@ mod tests {
             y2: Some(EncodingSpec { field: "by2".into(), ..Default::default() }),
             text: Some(EncodingSpec { field: "bt".into(), ..Default::default() }),
             tooltip: Some(EncodingSpec { field: "btt".into(), ..Default::default() }),
+            tooltip_fields: None,
             href: Some(EncodingSpec { field: "bh".into(), ..Default::default() }),
             description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
+            key: Some(EncodingSpec { field: "bk".into(), ..Default::default() }),
         };
         // Overlay only tooltip, href, description (the three that were missed
         // by the old inline merge).

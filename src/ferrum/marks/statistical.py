@@ -1,12 +1,12 @@
 """Statistical mark desugaring — convert mark_density/histogram/smooth kwargs
-into (mark, transforms, encoding_remap) tuples consumed by Chart."""
+into MarkDesugarResult objects consumed by Chart._resolve_pending."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from ferrum import Bin, Kde, Smooth
-from ferrum._layer import _Layer
+from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 
 
@@ -29,7 +29,7 @@ def desugar_density(
     thresholds: int = 6,
     smooth: bool = True,
     cmap: str | None = None,
-) -> tuple:
+) -> MarkDesugarResult:
     """Kernel-density-estimate area/line mark desugar.
 
     Routes to either a 1D or bivariate 2D KDE path based on the chart's
@@ -65,9 +65,8 @@ def desugar_density(
     bandwidth : str or float, default "scott"
         KDE bandwidth rule or numeric value.
     bw_adjust : float, default 1.0
-        Multiplier applied to a numeric ``bandwidth``.  Raises
-        ``NotImplementedError`` when combined with a string bandwidth rule
-        (e.g. ``"scott"``).
+        Multiplier applied to the resolved bandwidth after rule evaluation.
+        Works with all bandwidth rules (``"scott"``, ``"silverman"``, numeric).
     kernel : str, default "gaussian"
         Reserved for future use (no-op today — the ``Kde`` transform uses
         Gaussian exclusively).
@@ -77,9 +76,9 @@ def desugar_density(
         Explicit ``[min, max]`` range for the KDE.
     cumulative : bool, default False
         Whether to emit the cumulative density rather than the PDF.
-    multiple : str, default "layer"
-        Reserved for future use (only ``"layer"`` is supported today;
-        other values raise ``NotImplementedError``).
+    multiple : {"layer", "stack", "fill", "dodge"}, default "layer"
+        How to render multiple density curves.  ``"stack"`` and ``"fill"``
+        stack areas; ``"dodge"`` is not yet implemented.
     fill : bool, default True
         If ``True`` (default), emit ``mark_area``; otherwise ``mark_line``.
     groupby : str, optional
@@ -104,14 +103,16 @@ def desugar_density(
     Returns
     -------
     tuple
-        3-tuple ``(mark, transforms, remap)`` on the 1D path, or 5-tuple
-        ``("__layered__", transforms, None, None, layers)`` on the 2D path.
+        3-tuple ``(mark, transforms, remap)`` for ``multiple="layer"``;
+        4-tuple ``(mark, transforms, remap, position)`` for ``multiple="stack"``
+        or ``"fill"``; or 5-tuple ``("__layered__", transforms, None, None, layers)``
+        on the 2D bivariate path.
 
     Raises
     ------
-    NotImplementedError
-        If ``multiple != "layer"`` or if ``bw_adjust`` is combined with a
-        string bandwidth rule.
+    ValueError
+        If ``multiple`` is not one of ``"layer"``, ``"stack"``, ``"fill"``,
+        ``"dodge"`` (dodge raises because it is not yet implemented).
     """
     # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
     # contour fill instead of a 1D KDE area.
@@ -138,23 +139,11 @@ def desugar_density(
         raise ValueError(
             f"mark_density(kernel={kernel!r}) is not supported; only 'gaussian' is available"
         )
-    if multiple != "layer":
-        # `multiple` parameter from spec §3.3 deferred (no stack support yet).
-        raise NotImplementedError(
-            f"mark_density(multiple={multiple!r}) lands in Phase 11; "
-            "only 'layer' is supported today."
+    if multiple not in ("layer", "stack", "fill", "dodge"):
+        raise ValueError(
+            f"mark_density(multiple={multiple!r}) must be one of "
+            "'layer', 'stack', 'fill' (dodge not yet implemented)"
         )
-    # Resolve bw_adjust on the numeric path; raise on the "scott" path.
-    if bw_adjust != 1.0:
-        if isinstance(bandwidth, (int, float)):
-            bandwidth = float(bandwidth) * float(bw_adjust)
-        else:
-            raise NotImplementedError(
-                "mark_density(bw_adjust=...) with a string bandwidth rule "
-                "('scott', etc.) requires resolving the rule on the data "
-                "first; pass a numeric bandwidth (and bw_adjust multiplies "
-                "it), or land bw_adjust support inside the Rust Kde."
-            )
 
     if orientation not in ("vertical", "horizontal"):
         raise ValueError(
@@ -162,21 +151,40 @@ def desugar_density(
         )
     kde_kwargs: dict = dict(
         bandwidth=bandwidth,
+        bw_adjust=float(bw_adjust),
         n=n,
         extent=extent,
         cumulative=cumulative,
+        # shared_extent=True forces a global x-grid across groups (required for stack/fill).
+        shared_extent=(multiple in ("stack", "fill")),
     )
     if groupby is not None:
         kde_kwargs["groupby"] = groupby
     transforms = [Kde(field, **kde_kwargs)]
-    # Phase 5 Kde produces columns ("value", "density") — remap both x and y.
+    # Kde produces columns ("value", "density") — remap both x and y.
     # With groupby, output also contains the group column for color encoding.
     if orientation == "horizontal":
         encoding_remap = {"y": "value", "x": "density"}
     else:
         encoding_remap = {"x": "value", "y": "density"}
     mark = "area" if fill else "line"
-    return (mark, transforms, encoding_remap)
+
+    # multiple="stack" and "fill" use the Stack position adjuster.
+    # multiple="dodge": Rust KDE normalize_mode handles per-group normalization.
+    if multiple == "stack":
+        from ferrum.position import Stack
+        position = Stack(offset="zero")
+    elif multiple == "fill":
+        from ferrum.position import Stack
+        position = Stack(offset="normalize")
+    elif multiple == "dodge":
+        # For density plots, "dodge" produces overlapping curves (same as "layer").
+        # Histogram dodge (side-by-side bars) is handled separately in mark_histogram.
+        position = None
+    else:
+        position = None
+
+    return MarkDesugarResult(mark=mark, transforms=transforms, remap=encoding_remap, position=position)
 
 
 def desugar_histogram(
@@ -192,7 +200,7 @@ def desugar_histogram(
     multiple: str = "layer",
     groupby: Any = None,
     orientation: str = "vertical",
-) -> tuple[str, list, dict]:
+) -> MarkDesugarResult:
     """Histogram mark desugar.
 
     Converts ``chart.mark_histogram(...)`` into a ``Bin`` transform plus a
@@ -287,7 +295,7 @@ def desugar_histogram(
         encoding_remap = {"y": "bin_start", "y2": "bin_end", "x": count_column}
     else:
         encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": count_column}
-    return ("bar", transforms, encoding_remap)
+    return MarkDesugarResult(mark="bar", transforms=transforms, remap=encoding_remap)
 
 
 def desugar_smooth(
@@ -305,7 +313,7 @@ def desugar_smooth(
     show_metrics: bool = False,
     groupby: Any = None,
     name: str | None = None,
-) -> tuple:
+) -> MarkDesugarResult:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
     Converts ``chart.mark_smooth(...)`` into a ``Smooth`` transform plus
@@ -392,7 +400,7 @@ def desugar_smooth(
             smooth_kwargs["name"] = name
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": "x", "y": "y"}
-        return ("line", transforms, encoding_remap)
+        return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
 
     # Layered path: ci band and/or metrics-corner overlay.
     smooth_kwargs = dict(
@@ -440,9 +448,72 @@ def desugar_smooth(
                 data_source="smooth",
             )
         )
-    return ("__layered__", transforms, None, None, layers)
+    return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
 register_layer_names("smooth", frozenset({
     "ribbon", "line", "metrics",
 }))
+
+
+# ---- Resolve adapters ---------------------------------------------------
+# These convert the mark-specific deferred-resolution semantics (orientation
+# field-channel choice, bivariate routing, post-desugar remap rewriting) into
+# the generic ``desugar_fn(x_field, y_field, **kwargs)`` protocol that
+# ``Chart._resolve_pending`` consumes uniformly.
+
+
+def _resolve_density(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_density()`` call once the encoding is known."""
+    orientation = kwargs.get("orientation", "vertical")
+    field = y_field if orientation == "horizontal" else x_field
+    if field is None:
+        ch = "y" if orientation == "horizontal" else "x"
+        raise ValueError(f"mark_density() requires .encode({ch}=...) to specify the density field")
+    # Reconstruct a chart_encoding hint so density's bivariate path can route
+    # through desugar_contour(fill=True) when both x AND y are encoded.
+    chart_encoding: dict = {}
+    if x_field is not None:
+        chart_encoding["x"] = x_field
+    if y_field is not None:
+        chart_encoding["y"] = y_field
+    return desugar_density(field, chart_encoding=chart_encoding, **kwargs)
+
+
+def _resolve_histogram(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_histogram()`` call once the encoding is known.
+
+    ``desugar_histogram`` already emits the correctly-oriented remap
+    (vertical: ``{x, x2, y}``; horizontal: ``{x, y, y2}``); pass through
+    unchanged.
+    """
+    orientation = kwargs.get("orientation", "vertical")
+    field = y_field if orientation == "horizontal" else x_field
+    if field is None:
+        ch = "y" if orientation == "horizontal" else "x"
+        raise ValueError(
+            f"mark_histogram() requires .encode({ch}=...) to specify the histogram field"
+        )
+    return desugar_histogram(field, **kwargs)
+
+
+def _resolve_smooth(x_field, y_field, **kwargs):
+    """Resolve a deferred ``mark_smooth()`` call once the encoding is known."""
+    if x_field is None or y_field is None:
+        raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
+    return desugar_smooth(x_field, y_field, **kwargs)
+
+
+def _build_prior_layer(mark, encoding, mark_kwargs, position):
+    """Build a ``_Layer`` preserving a prior primitive mark as a scatter layer.
+
+    Used by ``Chart._resolve_pending`` when ``mark_smooth()`` is called on a
+    chart that already has a primitive mark set (e.g.
+    ``chart.mark_point().mark_smooth()``).
+    """
+    return _Layer(
+        mark=mark,
+        encoding=dict(encoding),
+        mark_kwargs=dict(mark_kwargs) if mark_kwargs else None,
+        position=position,
+    )

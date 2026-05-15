@@ -78,6 +78,16 @@ from ferrum.annotations import (
     OutlierLabel,
 )
 from ferrum.title import Title
+from ferrum.selection import (
+    Selection,
+    SelectionMark,
+    ConditionalSpec,
+    selection_point,
+    selection_interval,
+    selection_single,
+    selection_multi,
+    value,
+)
 
 # Phase 10 — model diagnostics
 from ferrum._diagnostics import ComparedModelSource, ModelSource
@@ -333,6 +343,15 @@ __all__ = [
     "BrierLabel",
     "OutlierLabel",
     "Title",
+    # Phase 11c — selections
+    "Selection",
+    "SelectionMark",
+    "ConditionalSpec",
+    "selection_point",
+    "selection_interval",
+    "selection_single",
+    "selection_multi",
+    "value",
     # Phase 8b
     "ContinuousScheme",
     "continuous_palette",

@@ -12,13 +12,14 @@ if TYPE_CHECKING:
 
 
 def save_chart(
-    chart: "Chart", path: Union[str, Path], *, format: str | None = None, **render_kwargs
+    chart: "Chart",
+    path: Union[str, Path],
+    *,
+    format: str | None = None,
+    embed_wasm: bool = True,
+    **render_kwargs,
 ) -> None:
-    """Save a chart to disk as SVG or PNG.
-
-    The output format is derived from ``path``'s file extension when
-    ``format`` is not supplied.  HTML and JSON output raise
-    ``NotImplementedError`` (planned for Phase 11+).
+    """Save a chart to disk.
 
     Parameters
     ----------
@@ -27,24 +28,15 @@ def save_chart(
     path : str or Path
         Destination file path.  The extension determines the format unless
         ``format`` is given explicitly.
-    format : {"svg", "png"}, optional
+    format : {"svg", "png", "html", "json"}, optional
         Explicit format override.  When omitted the extension of ``path``
-        is used.  Raises ``ValueError`` if the path has no extension and
-        ``format`` is also omitted.
+        is used.
+    embed_wasm : bool
+        For ``"html"`` format only.  When True (default), the WASM binary is
+        base64-inlined for single-file distribution.  When False, an adjacent
+        ``ferrum_wasm_bg.wasm`` sidecar file is required.
     **render_kwargs
-        Additional keyword arguments forwarded to ``chart.show_svg()`` or
-        ``chart.show_png()``.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    ValueError
-        If the format cannot be determined or is not ``"svg"`` / ``"png"``.
-    NotImplementedError
-        If ``format`` is ``"html"`` or ``"json"`` (planned for Phase 11+).
+        Additional keyword arguments forwarded to the render backend.
 
     Examples
     --------
@@ -52,7 +44,8 @@ def save_chart(
     >>> chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
     >>> fm.save_chart(chart, "scatter.svg")
     >>> fm.save_chart(chart, "scatter.png")
-    >>> fm.save_chart(chart, "output", format="svg")
+    >>> fm.save_chart(chart, "scatter.html")
+    >>> fm.save_chart(chart, "scatter.json")
     """
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
@@ -60,15 +53,35 @@ def save_chart(
         path.write_text(chart.show_svg(**render_kwargs))
     elif fmt == "png":
         path.write_bytes(chart.show_png(**render_kwargs))
-    elif fmt in ("html", "json"):
-        raise NotImplementedError(
-            f"save({fmt!r}) is planned for Phase 11+. Use 'svg' or 'png' today."
+    elif fmt == "html":
+        scene_json = _render_scene_json(chart)
+        from ferrum._html import assemble_html
+
+        html = assemble_html(
+            scene_json,
+            title=chart._title or "Ferrum chart",
+            embed_wasm=embed_wasm,
         )
+        path.write_text(html)
+        if not embed_wasm:
+            import shutil
+
+            wasm_src = Path(__file__).parent / "_wasm" / "ferrum_wasm_bg.wasm"
+            if wasm_src.exists():
+                shutil.copy2(wasm_src, path.parent / "ferrum_wasm_bg.wasm")
+            js_src = Path(__file__).parent / "_wasm" / "ferrum_wasm.js"
+            if js_src.exists():
+                shutil.copy2(js_src, path.parent / "ferrum_wasm.js")
+    elif fmt == "json":
+        scene_json = _render_scene_json(chart)
+        path.write_text(scene_json)
     elif fmt == "":
-        raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
+        raise ValueError(
+            f"save({str(path)!r}) requires a format= or a path with extension."
+        )
     else:
         raise ValueError(
-            f"unknown extension {fmt!r}; supported: svg, png. (html, json planned for Phase 11+.)"
+            f"unknown extension {fmt!r}; supported: svg, png, html, json."
         )
 
 
@@ -130,3 +143,11 @@ def _wrap_svg_in_html(svg: str, *, title: str = "Ferrum chart") -> str:
         f"<body style='margin:0;padding:20px;font-family:sans-serif'>"
         f"<h2>{title}</h2>{svg}</body></html>"
     )
+
+
+def _render_scene_json(chart: "Chart") -> str:
+    """Render a chart to SceneGraph JSON for the WASM renderer."""
+    from ferrum._core import render_interactive
+
+    spec, data, viewport, theme_dict = chart._render_inputs()
+    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

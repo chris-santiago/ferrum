@@ -134,6 +134,10 @@ impl LinearScale {
         self.0.range
     }
 
+    pub(crate) fn domain_pair(&self) -> [f64; 2] {
+        self.0.domain
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         let LinearScaleData { domain, range, clamp } = &self.0;
         format!(

@@ -130,6 +130,8 @@ impl SymlogScale {
 
     pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
 
+    pub(crate) fn domain_pair(&self) -> [f64; 2] { self.0.domain }
+
     pub(crate) fn repr_string(&self) -> String {
         let SymlogScaleData { domain, range, constant, clamp } = &self.0;
         format!(

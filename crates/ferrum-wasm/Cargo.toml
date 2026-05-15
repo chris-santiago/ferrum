@@ -1,0 +1,22 @@
+[package]
+name = "ferrum-wasm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ferrum-scene = { path = "../ferrum-scene" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wgpu = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true }
+js-sys = { workspace = true }
+lyon = { workspace = true }
+bytemuck = { workspace = true }
+console_error_panic_hook = { workspace = true }
+png = { workspace = true }
+raw-window-handle = "0.6"

@@ -1,4 +1,5 @@
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
+use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -54,17 +55,34 @@ fn apply_one_group(
         ))
     })?;
     let field = schema.field(idx);
-    if field.data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_bin: column '{}' must be Float64; got {:?}",
-            spec.field, field.data_type()
-        )));
-    }
-    let arr = batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("dtype check above guarantees Float64Array");
+    // Auto-cast integer types to Float64 so that Int32/Int64 columns work without
+    // requiring the caller to pre-cast (e.g. JointChart marginal histograms).
+    let col_ref: ArrayRef;
+    let arr: &Float64Array = match field.data_type() {
+        DataType::Float64 => batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("dtype guarantees Float64Array"),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+        | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+        | DataType::Float32 => {
+            col_ref = cast(batch.column(idx), &DataType::Float64)
+                .map_err(|e| PyValueError::new_err(format!(
+                    "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
+                )))?;
+            col_ref
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("cast to Float64 succeeded")
+        }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "stat_bin: column '{}' must be numeric; got {:?}",
+                spec.field, other
+            )));
+        }
+    };
 
     // Drop nulls and NaN; optionally restrict to a subset of row indices (for groupby).
     let mut clean: Vec<f64> = Vec::new();

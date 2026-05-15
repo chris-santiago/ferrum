@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 use super::core::validate_continuous_pair;
 use super::linear::LinearScaleData;
-use super::ticks::nice_time_interval_ms;
+use super::ticks::{calendar_ticks, nice_calendar_interval, nice_time_interval_ms, CalendarInterval};
 
 /// Continuous temporal scale backed by Unix epoch milliseconds.
 ///
@@ -61,6 +61,10 @@ impl TimeScale {
         self.0.range
     }
 
+    pub(crate) fn domain_pair(&self) -> [f64; 2] {
+        self.0.domain
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         let LinearScaleData { domain, range, clamp } = &self.0;
         format!(
@@ -71,37 +75,59 @@ impl TimeScale {
 
     fn time_ticks(&self, count: usize) -> Vec<f64> {
         let [d0, d1] = self.0.domain;
-        let lo = d0.min(d1);
-        let hi = d0.max(d1);
-        let span = hi - lo;
-        let interval = nice_time_interval_ms(span, count);
-        if !interval.is_finite() || interval <= 0.0 {
-            return Vec::new();
-        }
-        let start = (lo / interval).ceil() * interval;
-        let end = (hi / interval).floor() * interval;
-        let n_steps = ((end - start) / interval).round() as i64;
-        if n_steps < 0 {
-            return Vec::new();
-        }
-        let n = (n_steps + 1) as usize;
-        let mut out: Vec<f64> = (0..n).map(|i| start + (i as f64) * interval).collect();
-        if d0 > d1 {
-            out.reverse();
-        }
-        out
+        // Pass domain values directly; calendar_ticks handles reversal when d0 > d1.
+        calendar_ticks(d0, d1, count)
     }
 
     fn time_nice(&self) -> Self {
         let [d0, d1] = self.0.domain;
         let lo = d0.min(d1);
         let hi = d0.max(d1);
-        let interval = nice_time_interval_ms(hi - lo, 10);
-        if !interval.is_finite() || interval <= 0.0 {
-            return self.clone();
-        }
-        let new_lo = (lo / interval).floor() * interval;
-        let new_hi = (hi / interval).ceil() * interval;
+        let span = hi - lo;
+        let cal = nice_calendar_interval(span, 10);
+        let (new_lo, new_hi) = match cal {
+            CalendarInterval::Month | CalendarInterval::Year => {
+                use chrono::{Datelike, TimeZone, Utc};
+                // Safe conversion: fall back to approximate arithmetic on out-of-range timestamps.
+                let Some(dt_lo) = Utc.timestamp_millis_opt(lo as i64).single() else {
+                    let iv = nice_time_interval_ms(span, 10);
+                    if !iv.is_finite() || iv <= 0.0 { return self.clone(); }
+                    return TimeScale(LinearScaleData {
+                        domain: [(lo / iv).floor() * iv, (hi / iv).ceil() * iv],
+                        range: self.0.range, clamp: self.0.clamp,
+                    }, self.1);
+                };
+                let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
+                    return self.clone();
+                };
+                let snapped_lo = if cal == CalendarInterval::Year {
+                    Utc.with_ymd_and_hms(dt_lo.year(), 1, 1, 0, 0, 0)
+                        .single().map(|t| t.timestamp_millis() as f64)
+                        .unwrap_or(lo)
+                } else {
+                    Utc.with_ymd_and_hms(dt_lo.year(), dt_lo.month(), 1, 0, 0, 0)
+                        .single().map(|t| t.timestamp_millis() as f64)
+                        .unwrap_or(lo)
+                };
+                let (ny, nm) = if cal == CalendarInterval::Year {
+                    (dt_hi.year() + 1, 1u32)
+                } else {
+                    let m = dt_hi.month() + 1;
+                    if m > 12 { (dt_hi.year() + 1, 1u32) } else { (dt_hi.year(), m) }
+                };
+                let snapped_hi = Utc.with_ymd_and_hms(ny, nm, 1, 0, 0, 0)
+                    .single().map(|t| t.timestamp_millis() as f64)
+                    .unwrap_or(hi);
+                (snapped_lo, snapped_hi)
+            }
+            _ => {
+                let interval = nice_time_interval_ms(span, 10);
+                if !interval.is_finite() || interval <= 0.0 {
+                    return self.clone();
+                }
+                ((lo / interval).floor() * interval, (hi / interval).ceil() * interval)
+            }
+        };
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
         TimeScale(
             LinearScaleData { domain: new_domain, range: self.0.range, clamp: self.0.clamp },

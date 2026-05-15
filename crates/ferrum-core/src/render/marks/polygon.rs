@@ -18,19 +18,27 @@ use arrow::array::{Array, Float64Array, UInt32Array};
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ColorScale;
-use crate::render::svg::{FillStroke, SvgBuffer};
 
-pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
+pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::{to_scene_fill_stroke, MarkBuildResult, MetadataColumns};
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let empty = || MarkBuildResult {
+        kind: MarkBatchKind::Polygon,
+        nodes: vec![],
+        data_indices: Some(vec![]),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+    };
+
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b),
-        _ => return,
+        _ => return empty(),
     };
-    // Pre-resolve per-row x pixel positions so the ring loop is dtype-agnostic.
-    // Handles both numeric x (continuous scales) and ordinal-category x (the
-    // mark_violin path: polygon vertices live at category band centers, with
-    // `__pos_x_offset__` providing the per-vertex horizontal spread emitted by
-    // the violin transform).
+
+    // Pre-resolve per-row x pixel positions (numeric or ordinal).
     let xpx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, xf) {
         v.into_iter()
             .map(|opt| opt.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
@@ -40,21 +48,20 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
             .collect()
     } else {
-        return;
+        return empty();
     };
     let ys = match col_as_f64(ctx.batch, yf) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return empty(),
     };
 
     // --- Group rows by detail column (or single group if unset) ---
-    // BTreeMap keeps groups ordered for deterministic SVG emission.
     let detail_field = ctx.mark_style.detail.as_deref();
     let groups: BTreeMap<i64, Vec<usize>> = match detail_field {
         Some(field) => {
             let arr = match ctx.batch.column_by_name(field) {
                 Some(a) => a,
-                None => return, // detail column missing: nothing to draw
+                None => return empty(),
             };
             let mut g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
             if let Some(u) = arr.as_any().downcast_ref::<UInt32Array>() {
@@ -70,7 +77,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
                     }
                 }
             } else {
-                // Unknown dtype: fall back to a single group containing all rows.
                 g.insert(0, (0..xpx.len()).collect());
             }
             g
@@ -89,8 +95,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         .map(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
         .unwrap_or(false);
 
-    // Categorical lookup values (parallel to row index) — only populated when
-    // color encoding is set + column is Utf8.
     let color_str_values: Option<Vec<Option<String>>> =
         if !color_is_quantitative {
             cf.and_then(|f| col_as_str(ctx.batch, f).ok())
@@ -98,7 +102,6 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
             None
         };
 
-    // For quantitative coloring: compute global vmin/vmax + scheme.
     let scheme = if color_is_quantitative {
         let named = ctx
             .mark_style
@@ -135,11 +138,17 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
     };
     let denom = (vmax - vmin).max(f64::EPSILON);
 
-    // Phase 9c — per-row position-adjustment pixel offsets.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
     // --- Emit one polygon per group ---
-    for (_id, indices) in &groups {
-        let ring: Vec<(f64, f64)> = indices
+    for (_id, group_indices) in &groups {
+        let ring: Vec<(f64, f64)> = group_indices
             .iter()
             .filter_map(|&i| {
                 let cx = xpx.get(i).copied().flatten()?;
@@ -159,8 +168,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
 
         // Resolve fill for this group.
         let fill = if color_is_quantitative {
-            // Quantitative: take first row's color value, normalize, sample cmap.
-            let first_row = indices[0];
+            let first_row = group_indices[0];
             if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
                 if a.is_null(first_row) {
                     ctx.mark_style.fill
@@ -175,8 +183,7 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         } else if let (Some(values), Some(scale)) =
             (color_str_values.as_ref(), &ctx.scales.color)
         {
-            // Categorical: take first row's category string, look up in scale.
-            let first_row = indices[0];
+            let first_row = group_indices[0];
             match values.get(first_row).and_then(|v| v.as_deref()) {
                 Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
                 None => ctx.mark_style.fill,
@@ -186,15 +193,27 @@ pub fn draw(ctx: &DrawCtx, out: &mut SvgBuffer) {
         };
         let fill = with_opacity(fill, ctx.mark_style.opacity);
 
-        out.polygon(
-            &[ring],
-            &FillStroke {
-                fill: Some(fill),
-                stroke: ctx.mark_style.stroke,
-                stroke_width: ctx.mark_style.stroke_width,
-            },
-        );
+        let points: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
+        nodes.push(SceneNode::Polygon {
+            points,
+            style: to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                None,
+            ),
+        });
+        indices.push(group_indices[0]);
     }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Polygon,
+        nodes,
+        data_indices: Some(indices),
+        tooltips,
+        hrefs,
+        descriptions,    }
 }
 
 #[cfg(test)]
@@ -235,6 +254,7 @@ mod tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         }
     }
 
@@ -264,12 +284,13 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<path ").count(), 1, "expected 1 path: {s}");
-        assert!(s.contains(" Z\""), "polygon path must close with Z: {s}");
-        assert!(s.contains(r#"d="M "#), "polygon path must start with M: {s}");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 1, "expected 1 polygon");
+        // Polygon must have at least 3 points.
+        let has_points = result.nodes.iter().any(|n| {
+            if let ferrum_scene::SceneNode::Polygon { points, .. } = n { points.len() >= 3 } else { false }
+        });
+        assert!(has_points, "polygon must have at least 3 points");
     }
 
     #[test]
@@ -290,10 +311,8 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<path ").count(), 2, "expected 2 paths (one per group): {s}");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 2, "expected 2 paths (one per group)");
     }
 
     #[test]
@@ -320,23 +339,14 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
-        assert_eq!(s.matches("<path ").count(), 3, "expected 3 paths: {s}");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 3, "expected 3 paths");
     }
 
     #[test]
     fn polygon_quantitative_color_yields_distinct_fills() {
         // 3 groups, color column = Float64 with values 0.0, 0.5, 1.0 across groups.
-        // Expect 3 distinct fill="..." attributes (sampled from viridis).
-        //
-        // NOTE: `resolve_scales` only supports categorical color (Utf8 column).
-        // For quantitative color, the polygon renderer reads the Float64 column
-        // directly via `color_field()` and bypasses the scale entirely. To exercise
-        // that path in this unit test, we construct ResolvedScales manually with
-        // `color: None` while keeping `spec.encoding.color = Some("value")` so the
-        // renderer's `color_field()` returns "value".
+        // Expect 3 distinct fill colors (sampled from viridis).
         use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
         use crate::scale::linear::LinearScale;
 
@@ -379,22 +389,17 @@ mod tests {
         };
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let mut out = SvgBuffer::new(panel.plot_area, None, false);
-        super::draw(&ctx, &mut out);
-        let s = out.finish();
+        let result = super::build(&ctx);
 
-        // Collect distinct fill="#..." values from the polygon paths.
-        let mut fills: Vec<&str> = Vec::new();
-        for chunk in s.split("<path ").skip(1) {
-            if let Some(rest) = chunk.split_once(r#"fill=""#) {
-                if let Some(end) = rest.1.find('"') {
-                    fills.push(&rest.1[..end]);
+        // Collect distinct fill colors from Polygon nodes.
+        let mut fills: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &result.nodes {
+            if let ferrum_scene::SceneNode::Polygon { style, .. } = node {
+                if let Some(c) = &style.fill {
+                    fills.insert(format!("{},{},{},{}", c.r, c.g, c.b, c.a));
                 }
             }
         }
-        let mut uniq: Vec<&&str> = fills.iter().collect();
-        uniq.sort();
-        uniq.dedup();
-        assert_eq!(uniq.len(), 3, "expected 3 distinct polygon fills, got {fills:?} from svg: {s}");
+        assert_eq!(fills.len(), 3, "expected 3 distinct polygon fills, got {}: {:?}", fills.len(), fills);
     }
 }

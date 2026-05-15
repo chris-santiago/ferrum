@@ -19,6 +19,8 @@ pub(crate) mod marks;
 pub(crate) mod position;
 pub mod compositor;
 pub(crate) mod grid_compose;
+pub(crate) mod scene_build;
+pub(crate) mod svg_walk;
 pub use compositor::{
     compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
 };
@@ -55,6 +57,8 @@ pub enum RenderError {
     /// The unioned numeric/temporal extent for an axis or color channel
     /// produced no finite values (all rows null/NaN or empty after filter).
     EmptyDomain { channel: String, field: String },
+    SceneConstruction(String),
+    HtmlBundleAssembly(String),
 }
 
 impl std::fmt::Display for RenderError {
@@ -86,6 +90,10 @@ impl std::fmt::Display for RenderError {
             },
             Self::EmptyDomain { channel, field } =>
                 write!(f, "{channel}: no usable values found for field '{field}'"),
+            Self::SceneConstruction(msg) =>
+                write!(f, "scene construction failed: {msg}"),
+            Self::HtmlBundleAssembly(msg) =>
+                write!(f, "HTML bundle assembly failed: {msg}"),
         }
     }
 }
@@ -186,7 +194,6 @@ pub fn render_svg(
         width: config.width.unwrap_or(viewport.width),
         height: config.height.unwrap_or(viewport.height),
     };
-    let background = config.background.or(Some(theme.background_color));
 
     let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
@@ -233,156 +240,11 @@ pub fn render_svg(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
-    let mut out = svg::SvgBuffer::new(layout.viewport, background, config.embed_fonts);
+    let scene = scene_build::build_scene(
+        spec, &prep, &layout, theme_ref, config, &mut warnings,
+    )?;
+    let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
 
-    render_title(&layout, spec, theme, &mut out);
-
-    for (panel_idx, panel) in layout.panels.iter().enumerate() {
-        if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
-            warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
-            continue;
-        }
-
-        // Per-panel axes: collect first so we can hand both x and y to
-        // draw_grid before the axis lines themselves render.
-        let panel_axes: Vec<&crate::layout::AxisLayout> = layout
-            .axes
-            .iter()
-            .filter(|a| a.panel_index == panel_idx)
-            .collect();
-        let panel_x_axis = panel_axes
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
-        let panel_y_axis = panel_axes
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
-
-        // Gridlines render below axis lines + marks so they sit behind both.
-        marks::axis::draw_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, &mut out);
-
-        for axis in &panel_axes {
-            marks::axis::draw(axis, theme, &mut out);
-        }
-
-        if let Some(strip) = &panel.strip_title {
-            marks::strip_title::draw(strip, &panel.plot_area, theme, &mut out);
-        }
-
-        let panel_batch = if let Some(key) = &panel.facet_key {
-            filter_batch_by_facet(prep.final_batch(), &key.field, &key.value)?
-        } else {
-            prep.final_batch().clone()
-        };
-        if panel_batch.num_rows() == 0 {
-            continue;
-        }
-
-        // Per-layer source batches: layers with data_source: None reuse
-        // panel_batch (the facet-filtered chart-level final output, identical
-        // to phase 8a behavior). Layers with data_source: Some(name) look up
-        // the named output and apply the same facet filter to it.
-        // prepare_render_inputs has already validated every layer's
-        // data_source resolves to a known key, so .get() is total here.
-        let layer_batches: Vec<arrow::record_batch::RecordBatch> = prep
-            .layers
-            .iter()
-            .map(|layer| match &layer.data_source {
-                None => Ok(panel_batch.clone()),
-                Some(name) => {
-                    let src = prep.transform_outputs.get(name).expect(
-                        "layer.data_source validated by prepare_render_inputs",
-                    );
-                    if let Some(key) = &panel.facet_key {
-                        filter_batch_by_facet(src, &key.field, &key.value)
-                    } else {
-                        Ok(src.clone())
-                    }
-                }
-            })
-            .collect::<Result<Vec<_>, RenderError>>()?;
-
-        // Build a rendering spec for scale resolution. Start from the
-        // chart-level encoding (so chart-level scale/title/etc. flow into
-        // every layer) and overlay the first layer's encoding per-channel
-        // (so CoordFlip and any layer-specific encoding wins for axes the
-        // layer overrides). For single-layer non-flipped specs this is
-        // structurally identical to `spec`, since layer-0.encoding == spec.encoding.
-        let mut merged_encoding = spec.encoding.clone();
-        merged_encoding.overlay_from(&prep.layers[0].encoding);
-        let rendering_spec_for_panel = ChartSpec {
-            encoding: merged_encoding,
-            ..spec.clone()
-        };
-
-        let (scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
-            &rendering_spec_for_panel,
-            &panel_batch,
-            &prep.transform_outputs,
-            (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
-            (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
-            theme,
-        )?;
-        warnings.extend(scale_warnings);
-
-        let clip_id = format!("{}{}", CLIP_ID_PREFIX, panel_idx);
-        out.clip_open(&clip_id, panel.plot_area);
-        out.use_clip_open(&clip_id);
-
-        // Phase 8a: iterate layers. Single-layer charts have prep.layers.len() == 1.
-        // Phase 8b Task 9: each layer reads its own per-layer batch resolved
-        // from data_source. For layers with data_source: None this is exactly
-        // panel_batch (preserving 8a byte-identical SVG output).
-        for (li, layer) in prep.layers.iter().enumerate() {
-            let layer_batch = &layer_batches[li];
-            if layer_batch.num_rows() == 0 {
-                continue;
-            }
-            // Phase 9c — apply layer (or chart-level) position adjustment to
-            // rewrite per-row coordinate columns / inject pixel-offset columns
-            // *after* scale resolution and *before* mark drawing. When
-            // `layer.position` is None the call is a clone (byte-identical
-            // pre-9c behavior).
-            let adjusted_owned;
-            let layer_batch: &arrow::record_batch::RecordBatch = if layer.position.is_some() {
-                adjusted_owned = position::apply_position(
-                    layer_batch,
-                    layer.position.as_ref(),
-                    &scales,
-                    &layer.encoding,
-                )?;
-                &adjusted_owned
-            } else {
-                layer_batch
-            };
-            // Build a synthetic ChartSpec with the layer's mark + encoding so
-            // mark renderers (which read ctx.spec) see the correct per-layer values.
-            let layer_spec = ChartSpec {
-                mark: layer.mark,
-                encoding: layer.encoding.clone(),
-                ..spec.clone()
-            };
-            let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
-            let ctx = draw::DrawCtx {
-                spec: &layer_spec,
-                panel,
-                theme,
-                scales: &scales,
-                batch: layer_batch,
-                mark_style: &mark_style,
-            };
-            draw::dispatch_mark(&layer.mark, &ctx, &mut out);
-        }
-
-        out.use_clip_close();
-    }
-
-    render_legend(&layout, spec, &prep, theme, &mut out)?;
-
-    let svg_string = out.finish();
     Ok(RenderOutput { bytes: svg_string, layout, warnings })
 }
 
@@ -400,100 +262,73 @@ pub fn render_png(
     Ok(RenderOutput { bytes, layout: svg_out.layout, warnings: svg_out.warnings })
 }
 
-/// Emit the chart-level title and optional subtitle into the SVG buffer.
-///
-/// Resolves per-chart `TitleSpec` overrides (font size, weight, color,
-/// subtitle color/size) falling back to `theme` defaults. Pure output —
-/// no state escapes beyond what is written to `out`.
-fn render_title(
-    layout: &crate::layout::LayoutResult,
+pub fn render_scene_json(
     spec: &ChartSpec,
+    batch: &RecordBatch,
     theme: &ThemeInputs,
-    out: &mut svg::SvgBuffer,
-) {
-    let Some(title) = &layout.chart_title else { return };
-    let title_spec = spec.title.as_ref();
-    let resolved_font_size = title_spec
-        .and_then(|t| t.font_size)
-        .unwrap_or(theme.title_font_size);
-    let resolved_font_weight: String = title_spec
-        .and_then(|t| t.font_weight.clone())
-        .unwrap_or_else(|| theme.title_font_weight.clone());
-    let resolved_color = title_spec
-        .and_then(|t| t.color.as_deref())
-        .and_then(|hex| color::from_hex_str(hex).ok())
-        .unwrap_or(theme.title_color);
-    let style = svg::TextStyle {
-        fill: resolved_color,
-        font_size: resolved_font_size,
-        anchor: title.anchor,
-        angle: 0.0,
-        font_family: &theme.title_font_family,
-        font_weight: if resolved_font_weight == "normal" {
-            None
-        } else {
-            Some(&resolved_font_weight)
-        },
-        dominant_baseline: None,
-    };
-    out.text(title.x, title.y, &title.text, &style);
-    if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
-        let resolved_sub_color = title_spec
-            .and_then(|t| t.subtitle_color.as_deref())
-            .and_then(|hex| color::from_hex_str(hex).ok())
-            .unwrap_or(theme.font_color);
-        let resolved_sub_font_size = title_spec
-            .and_then(|t| t.subtitle_font_size)
-            .unwrap_or(resolved_font_size * 0.85);
-        let sub_style = svg::TextStyle {
-            fill: resolved_sub_color,
-            font_size: resolved_sub_font_size,
-            anchor: title.anchor,
-            angle: 0.0,
-            font_family: &theme.font_family,
-            font_weight: None,
-            dominant_baseline: None,
-        };
-        out.text(title.x, sy, subtitle, &sub_style);
+    viewport: Viewport,
+    config: &config::RenderConfig,
+) -> Result<String, RenderError> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(RenderError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
     }
-}
 
-/// Emit the legend (categorical or colorbar) into the SVG buffer.
-///
-/// Builds a rendering spec from the first layer's encoding (accounts for
-/// CoordFlip), re-resolves the color scale for the legend palette, and
-/// dispatches to `marks::legend::draw`. Returns `Err` only if scale
-/// resolution fails.
-fn render_legend(
-    layout: &crate::layout::LayoutResult,
-    spec: &ChartSpec,
-    prep: &prepare::PreparedInputs,
-    theme: &ThemeInputs,
-    out: &mut svg::SvgBuffer,
-) -> Result<(), RenderError> {
-    let Some(legend) = &layout.legend else { return Ok(()) };
-    let rendering_spec_for_legend = ChartSpec {
-        encoding: prep.layers[0].encoding.clone(),
-        ..spec.clone()
+    let viewport = Viewport {
+        width: config.width.unwrap_or(viewport.width),
+        height: config.height.unwrap_or(viewport.height),
     };
-    let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
-        let (gs, _) = scale_resolve::resolve_scales_with_outputs(
-            &rendering_spec_for_legend,
-            prep.final_batch(),
-            &prep.transform_outputs,
-            (0.0, 1.0),
-            (0.0, 1.0),
-            theme,
-        )?;
-        gs.color
+
+    let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
+    let mut warnings = prep.warnings.clone();
+
+    let mut effective_theme;
+    let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
+        || prep.legend_title_font_size_override.is_some()
+    {
+        effective_theme = theme.clone();
+        if let Some(orient) = prep.legend_orient_override {
+            effective_theme.legend_orient = orient;
+        }
+        if let Some(fs) = prep.legend_title_font_size_override {
+            effective_theme.legend_title_font_size = fs;
+        }
+        &effective_theme
     } else {
-        None
+        theme
     };
-    marks::legend::draw(legend, color_scale.as_ref(), theme, out);
-    Ok(())
+    let effective_legend_title = prep
+        .legend_title_override
+        .clone()
+        .or_else(|| prep.legend_title.clone());
+
+    let metrics = font::FontdueMetrics::new();
+    let layout = compute_layout(
+        spec,
+        theme_ref,
+        viewport,
+        &prep.axes,
+        &prep.facet_groups,
+        &prep.legend_entries,
+        effective_legend_title,
+        prep.colorbar.as_ref(),
+        &metrics,
+    )
+    .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
+    for w in &layout.warnings {
+        warnings.push(RenderWarning::Layout(w.clone()));
+    }
+
+    let scene = scene_build::build_scene(
+        spec, &prep, &layout, theme_ref, config, &mut warnings,
+    )?;
+    serde_json::to_string(&scene)
+        .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))
 }
 
-fn filter_batch_by_facet(
+pub(crate) fn filter_batch_by_facet(
     batch: &RecordBatch,
     field: &str,
     value: &str,
@@ -545,6 +380,7 @@ mod orchestration_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -631,6 +467,7 @@ mod orchestration_tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
@@ -640,6 +477,7 @@ mod orchestration_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec,
@@ -664,6 +502,77 @@ mod orchestration_tests {
         let a = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
         let b = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
         assert_eq!(a.bytes, b.bytes);
+    }
+
+    #[test]
+    fn scene_graph_path_matches_old_path_scatter() {
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let cfg = config::RenderConfig::default();
+        let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg).unwrap().bytes;
+
+        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme).unwrap();
+        let mut warnings = prep.warnings.clone();
+
+        let mut effective_theme;
+        let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
+            || prep.legend_title_font_size_override.is_some()
+        {
+            effective_theme = theme.clone();
+            if let Some(orient) = prep.legend_orient_override {
+                effective_theme.legend_orient = orient;
+            }
+            if let Some(fs) = prep.legend_title_font_size_override {
+                effective_theme.legend_title_font_size = fs;
+            }
+            &effective_theme
+        } else {
+            &theme
+        };
+        let effective_legend_title = prep
+            .legend_title_override
+            .clone()
+            .or_else(|| prep.legend_title.clone());
+
+        let metrics = font::FontdueMetrics::new();
+        let vp2 = Viewport {
+            width: cfg.width.unwrap_or(viewport.width),
+            height: cfg.height.unwrap_or(viewport.height),
+        };
+        let layout = compute_layout(
+            &spec, theme_ref, vp2,
+            &prep.axes, &prep.facet_groups, &prep.legend_entries,
+            effective_legend_title, prep.colorbar.as_ref(), &metrics,
+        ).unwrap();
+        for w in &layout.warnings {
+            warnings.push(RenderWarning::Layout(w.clone()));
+        }
+
+        let scene = scene_build::build_scene(
+            &spec, &prep, &layout, theme_ref, &cfg, &mut warnings,
+        ).unwrap();
+        let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts);
+
+        if old_svg != new_svg {
+            let old_chars: Vec<char> = old_svg.chars().collect();
+            let new_chars: Vec<char> = new_svg.chars().collect();
+            let first_diff = old_chars.iter().zip(new_chars.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(old_chars.len().min(new_chars.len()));
+            let context_start = first_diff.saturating_sub(80);
+            let context_end = (first_diff + 80).min(old_svg.len()).min(new_svg.len());
+            panic!(
+                "Scene graph SVG differs from old path at byte {}.\n\
+                 OLD[{}..{}]: {:?}\n\
+                 NEW[{}..{}]: {:?}\n\
+                 old len={}, new len={}",
+                first_diff,
+                context_start, context_end, &old_svg[context_start..context_end.min(old_svg.len())],
+                context_start, context_end, &new_svg[context_start..context_end.min(new_svg.len())],
+                old_svg.len(), new_svg.len(),
+            );
+        }
     }
 }
 
@@ -693,6 +602,7 @@ mod png_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -726,6 +636,7 @@ mod png_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -805,6 +716,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -855,6 +767,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -889,6 +802,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -922,6 +836,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -955,6 +870,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -987,6 +903,7 @@ mod golden_tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
@@ -996,6 +913,7 @@ mod golden_tests {
         position: None,
         title: None,
         axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

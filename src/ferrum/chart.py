@@ -7,6 +7,7 @@ spec is deep-copied on each call so chains compose without aliasing surprises.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Union
@@ -17,8 +18,15 @@ from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import MarkBase
-from ferrum.marks.deferred import deferred_mark_error, PHASE_8B_MARKS, PHASE_9_PLUS_MARKS
-from ferrum.marks.statistical import desugar_density, desugar_histogram, desugar_smooth
+from ferrum.marks.statistical import (
+    desugar_density,
+    desugar_histogram,
+    desugar_smooth,
+    _build_prior_layer,
+    _resolve_density,
+    _resolve_histogram,
+    _resolve_smooth,
+)
 
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
@@ -162,68 +170,6 @@ def _channel_class_map() -> dict:
 def _channel_class_for(name: str):
     """Return the channel-class for a given parameter name."""
     return _channel_class_map().get(name)
-
-
-# ---- _pending_stat_mark closure adapters for the legacy density/histogram/
-# smooth marks. These convert the mark-specific deferred-resolution semantics
-# (orientation field-channel choice, bivariate routing, post-desugar remap
-# rewriting) into the generic 3-tuple ``desugar_fn(x_field, y_field, **kwargs)``
-# protocol that ``_resolve_pending`` consumes uniformly. ----
-
-
-def _resolve_density(x_field, y_field, **kwargs):
-    """Resolve a deferred ``mark_density()`` call once the encoding is known."""
-    orientation = kwargs.get("orientation", "vertical")
-    field = y_field if orientation == "horizontal" else x_field
-    if field is None:
-        ch = "y" if orientation == "horizontal" else "x"
-        raise ValueError(f"mark_density() requires .encode({ch}=...) to specify the density field")
-    # Reconstruct a chart_encoding hint so density's bivariate path can route
-    # through desugar_contour(fill=True) when both x AND y are encoded.
-    chart_encoding: dict = {}
-    if x_field is not None:
-        chart_encoding["x"] = x_field
-    if y_field is not None:
-        chart_encoding["y"] = y_field
-    return desugar_density(field, chart_encoding=chart_encoding, **kwargs)
-
-
-def _resolve_histogram(x_field, y_field, **kwargs):
-    """Resolve a deferred ``mark_histogram()`` call once the encoding is known.
-
-    ``desugar_histogram`` already emits the correctly-oriented remap
-    (vertical: ``{x, x2, y}``; horizontal: ``{x, y, y2}``); pass through
-    unchanged.
-    """
-    orientation = kwargs.get("orientation", "vertical")
-    field = y_field if orientation == "horizontal" else x_field
-    if field is None:
-        ch = "y" if orientation == "horizontal" else "x"
-        raise ValueError(
-            f"mark_histogram() requires .encode({ch}=...) to specify the histogram field"
-        )
-    return desugar_histogram(field, **kwargs)
-
-
-def _resolve_smooth(x_field, y_field, **kwargs):
-    """Resolve a deferred ``mark_smooth()`` call once the encoding is known."""
-    if x_field is None or y_field is None:
-        raise ValueError("mark_smooth() requires .encode(x=..., y=...)")
-    return desugar_smooth(x_field, y_field, **kwargs)
-
-
-def _build_prior_layer(mark, encoding, mark_kwargs, position):
-    """Build a ``_Layer`` preserving a prior primitive mark as a scatter layer.
-
-    Used by ``_resolve_pending`` when ``mark_smooth()`` is called on a chart
-    that already has a primitive mark set (e.g. ``chart.mark_point().mark_smooth()``).
-    """
-    return _Layer(
-        mark=mark,
-        encoding=dict(encoding),
-        mark_kwargs=dict(mark_kwargs) if mark_kwargs else None,
-        position=position,
-    )
 
 
 def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
@@ -394,6 +340,8 @@ class Chart:
         "_axis_x",
         "_axis_y",  # spec-level axis suppression (.axis(x=False) / .axis(y=False))
         "_composite_kind",
+        "_selections",
+        "_conditionals",
     )
 
     def __init__(
@@ -431,6 +379,8 @@ class Chart:
         self._axis_x: Optional[bool] = None
         self._axis_y: Optional[bool] = None
         self._composite_kind: Optional[str] = None
+        self._selections: list = []
+        self._conditionals: list = []
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -452,23 +402,22 @@ class Chart:
         new._axis_x = self._axis_x
         new._axis_y = self._axis_y
         new._composite_kind = self._composite_kind
+        new._selections = list(self._selections)
+        new._conditionals = list(self._conditionals)
         return new
 
     def _resolve_pending(self) -> "Chart":
         """Resolve a pending statistical mark desugar once encoding is known.
 
         Calling a composite/diagnostic ``mark_*()`` before ``.encode()`` stores
-        a ``_pending_stat_mark`` 3-tuple sentinel
-        ``(kind, kwargs, desugar_fn)``. ``_resolve_pending`` is called at the
+        a ``_PendingMark`` sentinel. ``_resolve_pending`` is called at the
         start of every render/spec-build path to apply ``desugar_fn`` against
         the now-populated encoding dict.
 
-        ``desugar_fn(x_field, y_field, **kwargs)`` may return a 5-tuple
-        ``("__layered__", transforms, _, _, layers)`` to emit a multi-layer
-        ``ChartSpec``, or the legacy 3-tuple ``(mark, transforms, remap)`` for
-        a single-mark desugar. The remap dict supports keys ``x``, ``y``,
-        ``x2``, ``y2`` — the resolver rewrites the corresponding encoding
-        slots to the post-transform field names.
+        ``desugar_fn(x_field, y_field, **kwargs)`` returns a
+        ``MarkDesugarResult``. When ``result.layers`` is set, the chart enters
+        layered mode; otherwise it applies the single-mark ``result.mark``,
+        ``result.remap``, and ``result.position``.
         """
         if self._pending_stat_mark is None:
             return self
@@ -493,6 +442,20 @@ class Chart:
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 kwargs = {**kwargs, "y2_field": y2_field}
+        # density: auto-set groupby from color encoding when not explicit.
+        if kind == "density" and "groupby" not in kwargs:
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    kwargs = {**kwargs, "groupby": color_field}
+        # hex: infer aggregate field from color encoding when not explicit.
+        if kind == "hex" and kwargs.get("aggregate", "count") != "count" and kwargs.get("field") is None:
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    kwargs = {**kwargs, "field": color_field}
         # When mark_smooth was called on a chart that already had a primitive
         # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
         # the existing mark as a scatter layer. Force the Smooth transform
@@ -504,6 +467,23 @@ class Chart:
         new = self._clone()
         new._pending_stat_mark = None
 
+        # swarm: Rust swarm transform requires the value column to be Float64.
+        # Cast it here where we have both encoding (value field name) and data.
+        if kind == "swarm":
+            try:
+                import polars as pl
+                orient = kwargs.get("orient", "vertical")
+                value_field = y_field if orient != "horizontal" else x_field
+                if (value_field and new._data is not None
+                        and isinstance(new._data, pl.DataFrame)
+                        and value_field in new._data.columns
+                        and new._data[value_field].dtype != pl.Float64):
+                    new._data = new._data.with_columns(
+                        pl.col(value_field).cast(pl.Float64)
+                    )
+            except Exception:
+                pass
+
         # Build a scatter layer from the prior mark if present.
         _prior_layer = None
         if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
@@ -511,18 +491,20 @@ class Chart:
                 _prior_mark, self._encoding, self._mark_kwargs, self._position,
             )
 
-        if isinstance(result, tuple) and len(result) >= 1 and result[0] == "__layered__":
-            # ("__layered__", transforms, _, _, layers)
-            _, transforms, _ignored1, _ignored2, layers_list = result
-            new._transforms = list(self._transforms) + list(transforms or [])
-            all_layers = list(layers_list)
+        # Layered mode: result.layers is set.
+        if result.layers is not None:
+            new._transforms = list(self._transforms) + list(result.transforms)
+            all_layers = list(result.layers)
             if _prior_layer is not None:
                 all_layers = [_prior_layer] + all_layers
             new._layers = all_layers
             new._mark = None  # signals layered mode in to_spec
             return new
-        # Legacy single-mark 3-tuple: (mark, transforms, remap)
-        mark, transforms, remap = result
+
+        # Single-mark mode.
+        mark = result.mark
+        transforms = result.transforms
+        remap = result.remap
         if _prior_layer is not None:
             from ferrum._layer import _Layer as _SmoothLyr
             from ferrum.encoding import X as _XS, Y as _YS
@@ -539,12 +521,14 @@ class Chart:
                 mark_kwargs=None,
                 data_source="smooth",
             )
-            new._transforms = list(self._transforms) + list(transforms or [])
+            new._transforms = list(self._transforms) + list(transforms)
             new._layers = [_prior_layer, smooth_layer]
             new._mark = None
             return new
         new._mark = mark
-        new._transforms = list(self._transforms) + list(transforms or [])
+        new._transforms = list(self._transforms) + list(transforms)
+        if result.position is not None:
+            new._position = result.position
         if remap:
             from ferrum.encoding import X, X2, Y, Y2
 
@@ -1794,8 +1778,6 @@ class Chart:
 
         Raises
         ------
-        NotImplementedError
-            When called on a chart that already has layers (use ``+`` instead).
         ValueError
             When ``domain`` is not provided and no parent ``x`` data can be
             inferred.
@@ -1812,28 +1794,47 @@ class Chart:
             from ferrum.position import validate_position_eligibility
 
             validate_position_eligibility("function", position)
-        if self._layers is not None and self._layers:
-            raise NotImplementedError(
-                "mark_function as a layer in a multi-layer Chart is deferred to Phase 9+; "
-                "use a separate Chart composed via + instead"
-            )
         from ferrum.marks.heavy_stat import desugar_function
 
-        # Try to infer parent x data for domain inference
+        # Infer parent x data for domain resolution.
+        # For multi-layer charts, try the first layer's data; for single-chart,
+        # use self._data.
         parent_x_data = None
         x_enc = self._encoding.get("x")
-        if x_enc is not None and self._data is not None:
+        data_source = self._data
+        if data_source is None and self._layers:
+            # Extract data from the first non-function layer.
+            for existing_layer in self._layers:
+                if hasattr(existing_layer, "_data") and existing_layer._data is not None:  # type: ignore[attr-defined]
+                    data_source = existing_layer._data  # type: ignore[attr-defined]
+                    break
+        if x_enc is not None and data_source is not None:
             try:
                 from ferrum._coerce import to_arrow_table
 
                 x_field_name = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-                tbl = to_arrow_table(self._data)
+                tbl = to_arrow_table(data_source)
                 if x_field_name in tbl.column_names:
                     parent_x_data = tbl[x_field_name]
             except Exception:
                 pass
+        elif x_enc is None and data_source is not None and domain is None:
+            # Encoding not set yet (mark_function called before .encode()).
+            # Infer domain from the first numeric column in the chart's data.
+            try:
+                import pyarrow as pa
+                from ferrum._coerce import to_arrow_table
 
-        mark, transforms, remap, synthetic = desugar_function(
+                tbl = to_arrow_table(data_source)
+                for _col_name in tbl.column_names:
+                    _col = tbl[_col_name]
+                    if pa.types.is_floating(_col.type) or pa.types.is_integer(_col.type):
+                        parent_x_data = _col
+                        break
+            except Exception:
+                pass
+
+        result = desugar_function(
             fn,
             parent_chart_x_data=parent_x_data,
             domain=domain,
@@ -1841,13 +1842,30 @@ class Chart:
             clip=clip,
             **mark_kwargs,
         )
+        mark = result.mark
+        transforms = result.transforms
+        remap = result.remap
+        synthetic = result.data
+        if self._layers is not None and self._layers:
+            # Multi-layer: build a fresh single-chart with the function data and
+            # compose via + so it becomes a proper layer alongside existing layers.
+            from ferrum.encoding import X as _X, Y as _Y
+            fn_chart = self.__class__(synthetic)
+            fn_chart._mark = mark
+            if remap:
+                if "x" in remap:
+                    fn_chart._encoding["x"] = _X(remap["x"], type="Q")
+                if "y" in remap:
+                    fn_chart._encoding["y"] = _Y(remap["y"], type="Q")
+            fn_chart._position = position
+            return self + fn_chart
+
         new = self._clone()
         new._mark = mark
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if remap:
             from ferrum.encoding import X, Y
-
             if "x" in remap:
                 new._encoding["x"] = X(remap["x"], type="Q")
             if "y" in remap:
@@ -3621,56 +3639,87 @@ class Chart:
         )
 
     def mark_arc(self, **kwargs):
-        """Render data as arcs (pie/donut slices).
+        """Render data as arcs (pie or donut slices).
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Requires ``Chart.coord(fm.CoordPolar(theta="x"))`` to be set.
+        The theta-mapped encoding channel (``x`` by default) determines
+        each slice's angular sweep proportional to its value.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_arc().encode(x="value", color="category").coord(
+        ...     fm.CoordPolar(theta="x")
+        ... )
         """
-        raise deferred_mark_error("arc")
+        return self._set_mark("arc", **kwargs)
 
     def mark_image(self, **kwargs):
         """Render data as raster images.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Each row in the dataset becomes one image tile.  Supply a base64-encoded
+        PNG/JPEG via the ``url`` encoding channel.  Requires Cartesian coordinates;
+        returns an empty scene for Polar or Geo coord systems.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``width``, ``height``, ``opacity``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_image().encode(x="x", y="y", url="data_url")
         """
-        raise deferred_mark_error("image")
+        return self._set_mark("image", **kwargs)
 
     def mark_geoshape(self, **kwargs):
-        """Render geographic shape data.
+        """Render geographic shapes from a GeoJSON FeatureCollection.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Pass a GeoJSON FeatureCollection dict to ``Chart(data)`` — ferrum
+        auto-detects the format and splits properties into encoding channels
+        and geometry into a ``__geometry__`` column.  Set the projection via
+        ``Chart.coord(fm.CoordGeo(projection="mercator"))``.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        **kwargs
+            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+
+        Examples
+        --------
+        >>> fm.Chart(geojson_data).mark_geoshape().coord(
+        ...     fm.CoordGeo(projection="equal_earth")
+        ... )
         """
-        raise deferred_mark_error("geoshape")
+        return self._set_mark("geoshape", **kwargs)
 
     def mark_label(self, **kwargs):
-        """Render smart text labels with automatic collision avoidance.
+        """Render positioned text labels near data points.
 
-        .. note::
-            Not yet implemented.  Calling this method raises ``NotImplementedError``.
+        Each row in the dataset becomes one text label placed at (x, y) +
+        optional (dx, dy) offset.  Use the ``text`` encoding channel to
+        specify label content; omitting it formats the x value.
 
-        Raises
-        ------
-        NotImplementedError
-            Always — deferred to a future phase.
+        Parameters
+        ----------
+        dx : float, optional
+            Horizontal offset from the data position (pixels, default 0).
+        dy : float, optional
+            Vertical offset from the data position (pixels, default -8).
+        font_size : float, optional
+            Label font size in points.
+        **kwargs
+            Additional mark style overrides.
+
+        Examples
+        --------
+        >>> fm.Chart(df).mark_label(dy=-10).encode(x="x", y="y", text="label")
         """
-        raise deferred_mark_error("label")
+        return self._set_mark("label", **kwargs)
 
     # ---- Encoding ----
 
@@ -3769,13 +3818,16 @@ class Chart:
         return new
 
     def layer(self, *layers) -> "Chart":
-        """Add one or more ``Layer`` objects to this chart.
+        """Add one or more layer objects to this chart.
+
+        Accepts both public ``Layer`` instances (user-facing API) and
+        internal ``_Layer`` instances (used by ferrum internals).
 
         Parameters
         ----------
-        *layers : Layer
-            Layer objects to append. Each layer inherits the parent chart's
-            data when ``Layer.data`` is ``None``.
+        *layers : Layer or _Layer
+            Layer objects to append. Public ``Layer`` instances with
+            ``data`` set are not yet supported.
 
         Returns
         -------
@@ -3789,22 +3841,25 @@ class Chart:
         existing, _ = _expand_layers(new)
         converted = []
         for ly in layers:
-            if not isinstance(ly, PublicLayer):
-                raise TypeError(f"layer() expects Layer instances; got {type(ly).__name__}")
-            if ly.data is not None:
-                raise ValueError(
-                    "Layer(data=...) is not yet supported by Chart.layer(); "
-                    "use the + operator for layers with independent data"
+            if isinstance(ly, _Layer):
+                converted.append(ly)
+            elif isinstance(ly, PublicLayer):
+                if ly.data is not None:
+                    raise ValueError(
+                        "Layer(data=...) is not yet supported by Chart.layer(); "
+                        "use the + operator for layers with independent data"
+                    )
+                converted.append(
+                    _Layer(
+                        name=ly.name,
+                        mark=ly.mark,
+                        encoding=dict(ly.encoding),
+                        transforms=list(ly.transforms),
+                        mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
+                    )
                 )
-            converted.append(
-                _Layer(
-                    name=ly.name,
-                    mark=ly.mark,
-                    encoding=dict(ly.encoding),
-                    transforms=list(ly.transforms),
-                    mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
-                )
-            )
+            else:
+                raise TypeError(f"layer() expects Layer or _Layer instances; got {type(ly).__name__}")
         new._layers = existing + converted
         return new
 
@@ -4198,14 +4253,15 @@ class Chart:
         >>> fm.Chart(df).mark_bar().encode(x="cat", y="val").coord(fm.CoordFlip())
         Chart(mark='bar', encoding=['x', 'y'])
         """
-        from ferrum.coord import CoordFlip
+        from ferrum.coord import CoordCartesian, CoordFixed, CoordFlip, CoordGeo, CoordPolar
 
         new = self._clone()
-        if isinstance(coord, CoordFlip):
-            new._coord = "flip"
+        if isinstance(coord, (CoordFlip, CoordCartesian, CoordFixed, CoordPolar, CoordGeo)):
+            new._coord = coord
         else:
             raise TypeError(
-                f"unsupported coord: {type(coord).__name__}; only CoordFlip supported in Phase 8a"
+                f"unsupported coord: {type(coord).__name__}; "
+                "expected CoordFlip, CoordCartesian, CoordFixed, CoordPolar, or CoordGeo"
             )
         return new
 
@@ -4219,12 +4275,11 @@ class Chart:
         """
         if not transforms:
             return []
-        import json as _json
         from ferrum import ChartSpec
 
         # Build a minimal spec with the transforms; extract the "transforms" array.
         dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=transforms)
-        parsed = _json.loads(dummy.to_json())
+        parsed = json.loads(dummy.to_json())
         return parsed.get("transforms", [])
 
     def _build_layers_list(self) -> list:
@@ -4291,6 +4346,8 @@ class Chart:
                     if hasattr(layer.position, "to_spec_dict")
                     else layer.position
                 )
+            if layer.blend is not None:
+                layer_dict["blend"] = layer.blend
             out.append(layer_dict)
         return out
 
@@ -4300,14 +4357,17 @@ class Chart:
         if f.mode_kind == "wrap":
             ncols = f.ncols or 1  # u32 required; default 1
             return {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
-        # grid: Rust FacetSpec has a single `field`. Use col as primary, row for nrows.
+        # grid: col is the primary (column) field; row is the secondary (row) field.
         field = f.col if f.col is not None else (f.field or "")
         nrows = f.nrows or 1
         ncols = f.ncols or 1
-        return {
+        d: dict = {
             "field": field,
             "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
         }
+        if f.row is not None:
+            d["row"] = f.row
+        return d
 
     # ---- Properties ----
 
@@ -4385,22 +4445,31 @@ class Chart:
         from ferrum import ChartSpec, EncodingSpec
         from ferrum.repeat import _RepeatPlaceholder
 
-        # --- Polar channels: raise early if theta/radius are actually used ---
-        for polar_ch in _POLAR_CHANNELS:
-            if polar_ch in resolved._encoding:
-                ch = resolved._encoding[polar_ch]
-                field = getattr(ch, "field", None)
-                if field is not None and not isinstance(field, _RepeatPlaceholder):
-                    raise NotImplementedError(
-                        f"Polar coordinates ({polar_ch!r}) require interactive "
-                        "rendering mode (planned for Phase 11+). Static SVG "
-                        "rendering does not support polar coordinate channels."
-                    )
-
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
         mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         enc, mk = _apply_channel_aliases(enc, mk)
+
+        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
+        # When CoordPolar is set, the spec-side declares theta (angular variable)
+        # and optionally radius (radial variable).  Rust's encoding layer only
+        # knows x/y; the spec-side coord conversion in scene_build.rs handles
+        # the polar→Cartesian pixel transformation.
+        from ferrum.coord import CoordPolar
+        if isinstance(resolved._coord, CoordPolar):
+            theta_ch = resolved._coord.theta  # "x" or "y"
+            radius_ch = "y" if theta_ch == "x" else "x"
+            if "theta" in enc:
+                enc[theta_ch] = enc.pop("theta")
+            if "radius" in enc:
+                enc[radius_ch] = enc.pop("radius")
+            # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
+            # only one axis is encoded.  The arc builder ignores the dummy scale.
+            if resolved._mark == "arc":
+                if theta_ch == "x" and "y" not in enc and "x" in enc:
+                    enc["y"] = enc["x"]
+                elif theta_ch == "y" and "x" not in enc and "y" in enc:
+                    enc["x"] = enc["y"]
 
         # Safety net: any channel not in honored/silent/polar/facet sets would
         # fall through to this warning. After all 18 channels are wired this
@@ -4437,7 +4506,23 @@ class Chart:
             if axis in enc:
                 ch = enc[axis]
                 if ch.field is None:
-                    continue  # Tooltip(*fields) etc. with no single field
+                    # Multi-field Tooltip(*fields) — serialize as tooltip_fields JSON list.
+                    if axis == "tooltip" and hasattr(ch, "_field_list") and ch._field_list:
+                        tf_list = []
+                        for f in ch._field_list:
+                            if isinstance(f, str):
+                                tf_list.append({"field": f})
+                            elif hasattr(f, "field") and f.field:
+                                entry: dict = {"field": f.field}
+                                d_f = f.to_encoding_spec_dict()
+                                if d_f.get("format"):
+                                    entry["format"] = d_f["format"]
+                                if d_f.get("title"):
+                                    entry["title"] = d_f["title"]
+                                tf_list.append(entry)
+                        if tf_list:
+                            kw["tooltip_fields"] = json.dumps(tf_list)
+                    continue
                 # Phase 9: skip channels whose field is an unresolved Repeat
                 # placeholder. RepeatChart.expand() materializes concrete charts
                 # before render; the bare template's spec just omits placeholder
@@ -4463,7 +4548,10 @@ class Chart:
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:
-            kw["coord"] = resolved._coord
+            c = resolved._coord
+            # Back-compat: orient_coord_flip sets _coord = "flip" (a string).
+            # New coord objects expose _to_spec_dict(); CoordFlip returns "flip".
+            kw["coord"] = c._to_spec_dict() if hasattr(c, "_to_spec_dict") else c
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:
@@ -4482,6 +4570,14 @@ class Chart:
         # crates/ferrum-core/src/spec/chart.rs has no `description` field yet.
         # When added, wire it here as `kw["description"] = resolved._description`
         # so the renderer can emit a `<desc>` element inside the root `<svg>`.
+        if resolved._selections:
+            kw["selections"] = json.dumps(
+                [s.to_spec_dict() for s in resolved._selections]
+            )
+        if resolved._conditionals:
+            kw["conditionals"] = json.dumps(
+                [c.to_spec_dict() for c in resolved._conditionals]
+            )
         return ChartSpec(**kw)
 
     def _build_spec(self):
@@ -4531,18 +4627,19 @@ class Chart:
         >>> '"mark"' in spec_json
         True
         """
-        import json as _json
-
         spec = self.to_spec()
         compact = spec.to_json()
         if indent is None:
             return compact
-        return _json.dumps(_json.loads(compact), indent=indent)
+        return json.dumps(json.loads(compact), indent=indent)
 
     def _render_inputs(self) -> tuple:
         # Shared render plumbing for show_svg / show_png: spec, data, viewport, theme.
+        # Use the resolved chart's _data (not self._data) so that any dtype casts
+        # applied in _resolve_pending (e.g. swarm value column → Float64) take effect.
+        resolved = self._resolve_pending()
         spec = self.to_spec()
-        data = to_arrow_table(self._data)
+        data = to_arrow_table(resolved._data)
         viewport = (self._width or 600.0, self._height or 400.0)
         theme_dict = self._theme.to_theme_inputs_dict() if self._theme else {}
         return spec, data, viewport, theme_dict
@@ -4570,6 +4667,12 @@ class Chart:
         from ferrum._core import render_svg
 
         spec, data, viewport, theme_dict = self._render_inputs()
+        if data.num_rows == 0:
+            w, h = viewport
+            return (
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
+                f"<!-- empty dataset --></svg>"
+            )
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
     def show_png(self) -> bytes:
@@ -4598,7 +4701,7 @@ class Chart:
         spec, data, viewport, theme_dict = self._render_inputs()
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
-    def save(self, path, *, format=None, **render_kwargs) -> None:
+    def save(self, path, *, format=None, embed_wasm=True, **render_kwargs) -> None:
         """Save the chart to a file on disk.
 
         Delegates to ``ferrum.display.save_chart``.  The file format is
@@ -4608,16 +4711,14 @@ class Chart:
         ----------
         path : str or pathlib.Path
             Destination file path.  Extension determines the default format:
-            ``.svg`` → SVG, ``.png`` → PNG.
-        format : {"svg", "png"} or None, optional
+            ``.svg`` → SVG, ``.png`` → PNG, ``.html`` → HTML, ``.json`` → JSON.
+        format : {"svg", "png", "html", "json"} or None, optional
             Explicit format override.  ``None`` (default) infers from ``path``.
+        embed_wasm : bool
+            For ``"html"`` format only.  When True (default), the WASM binary
+            is base64-inlined for single-file distribution.
         **render_kwargs
-            Additional keyword arguments forwarded to the underlying renderer
-            (e.g. ``width``, ``height`` viewport overrides).
-
-        Returns
-        -------
-        None
+            Additional keyword arguments forwarded to the underlying renderer.
 
         Examples
         --------
@@ -4628,7 +4729,7 @@ class Chart:
         """
         from ferrum.display import save_chart
 
-        save_chart(self, path, format=format, **render_kwargs)
+        save_chart(self, path, format=format, embed_wasm=embed_wasm, **render_kwargs)
 
     def show(self) -> None:
         """Display the chart inline or in a browser.
@@ -4698,8 +4799,9 @@ class Chart:
         >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_selection()
         """
-        del selections  # ignored under SVG/PNG; placeholder for Phase 11 wiring
-        return self._clone()
+        new = self._clone()
+        new._selections.extend(selections)
+        return new
 
     def interactive(self) -> "Chart":
         """Mark this chart as interactive.
@@ -4721,7 +4823,53 @@ class Chart:
         >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").interactive()
         """
-        return self._clone()
+        from ferrum._interactive import InteractiveChart
+        return InteractiveChart(self)
+
+    def conditional(self, spec: Any) -> "Chart":
+        """Apply a conditional encoding to this chart.
+
+        Convenience sugar: ``chart.conditional(sel.when(Color("x")).otherwise(value("#ccc")))``
+        is equivalent to::
+
+            chart.add_selection(sel).encode(color=sel.when(Color("x")).otherwise(value("#ccc")))
+
+        Parameters
+        ----------
+        spec : ConditionalSpec
+            A ``ConditionalSpec`` produced by ``sel.when(...).otherwise(...)``.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the conditional recorded.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> from ferrum.selection import selection_point, value
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "z": ["a", "b"]})
+        >>> sel = selection_point(fields=["z"])
+        >>> chart = (
+        ...     fm.Chart(df)
+        ...     .mark_point()
+        ...     .encode(x="x", y="y")
+        ...     .conditional(sel.when(fm.Color("z")).otherwise(value("#ccc")))
+        ... )
+        """
+        new = self._clone()
+        new._conditionals.append(spec)
+        if hasattr(spec, "selection_name"):
+            # Ensure the selection is also registered so scene_build can wire it.
+            existing = {s.name: s for s in new._selections if hasattr(s, "name")}
+            if spec.selection_name not in existing:
+                raise ValueError(
+                    f"Chart.conditional(): no selection named {spec.selection_name!r} "
+                    f"is attached to this chart. Call .add_selection(sel) first, or use "
+                    f"chart.add_selection(sel).encode(...) with the conditional encoding."
+                )
+        return new
 
     def __repr__(self) -> str:
         """Return a concise string representation of the chart.

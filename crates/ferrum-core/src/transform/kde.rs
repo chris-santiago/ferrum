@@ -17,18 +17,25 @@ pub(crate) enum BandwidthSpec {
 pub(crate) struct KdeSpec {
     pub field: String,
     pub bandwidth: BandwidthSpec,
+    /// Multiplier applied to the resolved bandwidth after rule evaluation.
+    /// `bw_adjust = 1.0` is the identity. Works with all BandwidthSpec variants.
+    #[serde(default = "default_bw_adjust")]
+    pub bw_adjust: f64,
     pub n: usize,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub extent: Option<(f64, f64)>,
     #[serde(default)]
     pub cumulative: bool,
-    /// When set, partition input by this Utf8 column and emit per-(grid, group)
-    /// rows. Output schema gains the groupby column as the 3rd field.
+    /// When true, all groups share the same x-grid (required for stack/fill).
+    #[serde(default)]
+    pub shared_extent: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub groupby: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
+
+pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     if let Some(g) = &spec.groupby {
@@ -94,7 +101,7 @@ fn apply_one_group(
     let density: Vec<f64> = if clean.len() < 2 {
         vec![f64::NAN; spec.n]
     } else {
-        let h = bandwidth(&clean, &spec.bandwidth)?;
+        let h = bandwidth(&clean, &spec.bandwidth)? * spec.bw_adjust;
         if h <= 0.0 || !h.is_finite() {
             vec![f64::NAN; spec.n]
         } else {
@@ -153,12 +160,35 @@ fn apply_grouped(
         group_idx_map.entry(gv).or_default().push(i);
     }
 
+    // Compute global extent across all groups when shared_extent=true (stack/fill).
+    // When false (layer mode), each group uses its own extent.
+    let global_extent: Option<(f64, f64)> = if spec.extent.is_some() {
+        spec.extent // user-specified extent always shared
+    } else if !spec.shared_extent {
+        None // per-group extents (default, layer mode)
+    } else {
+        let field_idx = schema.index_of(&spec.field).ok();
+        field_idx.and_then(|fi| {
+            let arr = batch.column(fi).as_any().downcast_ref::<Float64Array>()?;
+            let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+                if arr.is_null(i) { return (lo, hi); }
+                let v = arr.value(i);
+                if !v.is_nan() { (lo.min(v), hi.max(v)) } else { (lo, hi) }
+            });
+            if lo.is_finite() && hi.is_finite() && lo < hi { Some((lo, hi)) } else { None }
+        })
+    };
+    let shared_spec = KdeSpec {
+        extent: global_extent.or(spec.extent),
+        ..spec.clone()
+    };
+
     let mut all_values: Vec<f64> = Vec::new();
     let mut all_density: Vec<f64> = Vec::new();
     let mut all_groups: Vec<String> = Vec::new();
     for g in &group_order {
         let ixs = group_idx_map.get(g).unwrap();
-        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let out = apply_one_group(&shared_spec, batch, Some(ixs))?;
         let n = out.num_rows();
         let values = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let density = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -285,16 +315,21 @@ pub(crate) struct PyKde(pub(crate) TransformSpec);
 #[pymethods]
 impl PyKde {
     #[new]
-    #[pyo3(signature = (field, *, bandwidth = None, n = 512, extent = None, cumulative = false, groupby = None, name = None))]
+    #[pyo3(signature = (field, *, bandwidth = None, bw_adjust = 1.0, n = 512, extent = None, cumulative = false, shared_extent = false, groupby = None, name = None))]
     fn new(
         field: &str,
         bandwidth: Option<&Bound<'_, PyAny>>,
+        bw_adjust: f64,
         n: usize,
         extent: Option<(f64, f64)>,
         cumulative: bool,
+        shared_extent: bool,
         groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
+        if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
+            return Err(PyValueError::new_err("Kde: bw_adjust must be a positive finite number"));
+        }
         if field.is_empty() {
             return Err(PyValueError::new_err("Kde: field must be non-empty"));
         }
@@ -336,9 +371,11 @@ impl PyKde {
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),
             bandwidth: bw,
+            bw_adjust,
             n,
             extent,
             cumulative,
+            shared_extent,
             groupby,
             name,
         })))
@@ -420,6 +457,8 @@ mod tests {
             let spec = KdeSpec {
                 field: "x".into(),
                 bandwidth: bw,
+                bw_adjust: 1.0,
+                shared_extent: false,
                 n: case.n,
                 extent: Some((case.extent[0], case.extent[1])),
                 cumulative: case.cumulative,
@@ -458,6 +497,8 @@ mod tests {
         let spec = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                shared_extent: false,
             n: 16,
             extent: Some((0.0, 6.0)),
             cumulative: false,
@@ -475,6 +516,8 @@ mod tests {
         let spec = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                shared_extent: false,
             n: 8,
             extent: Some((0.0, 2.0)),
             cumulative: false,
@@ -505,6 +548,8 @@ mod tests {
         let spec = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                shared_extent: false,
             n: 8,
             extent: None,
             cumulative: false,
@@ -539,6 +584,8 @@ mod tests {
         let spec = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                shared_extent: false,
             n: 4,
             extent: Some((0.0, 6.0)),
             cumulative: false,
@@ -558,6 +605,8 @@ mod tests {
         let spec = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                shared_extent: false,
             n: 4,
             extent: None,
             cumulative: false,
@@ -573,9 +622,11 @@ mod tests {
         let original = KdeSpec {
             field: "x".into(),
             bandwidth: BandwidthSpec::Fixed { value: 0.5 },
+            bw_adjust: 1.0,
             n: 32,
             extent: Some((-1.0, 5.0)),
             cumulative: true,
+            shared_extent: false,
             groupby: None,
             name: None,
         };

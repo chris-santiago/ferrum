@@ -152,6 +152,8 @@ impl LogScale {
 
     pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
 
+    pub(crate) fn domain_pair(&self) -> [f64; 2] { self.0.domain }
+
     pub(crate) fn repr_string(&self) -> String {
         let LogScaleData { domain, range, base, clamp } = &self.0;
         format!(

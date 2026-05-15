@@ -115,13 +115,13 @@ def _overlay_metrics_corner(chart):
     Schwabish SB3 (2026-05-11). Returns the original chart unchanged
     when the columns are absent, so callers can invoke unconditionally.
     """
-    from ferrum.layer import Layer
+    from ferrum._layer import _Layer
 
     data = chart._data
     if data is None or "_metrics_text" not in data.columns:
         return chart
     return chart.layer(
-        Layer(
+        _Layer(
             mark="text",
             encoding={"x": "y_pred", "y": "_metrics_y", "text": "_metrics_text"},
             mark_kwargs={"align": "right", "dx": -4, "dy": 4},

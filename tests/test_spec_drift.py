@@ -2,11 +2,6 @@
 from pathlib import Path
 
 
-def test_phase_8b_marks_set_is_empty():
-    from ferrum.marks.deferred import PHASE_8B_MARKS
-    assert PHASE_8B_MARKS == frozenset()
-
-
 def test_transform_count_15_total():
     """Verify TransformSpec exposes 15 transforms (Phase 5: 5 + Phase 8b: 10)."""
     from ferrum import (Bin, Kde, Smooth, Aggregate, Summary,
