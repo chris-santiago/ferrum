@@ -892,4 +892,547 @@ mod tests {
             "degenerate 2-point polygon should produce zero mesh vertices"
         );
     }
+
+    // ── Shared helpers for all mark-type tests ────────────────────────
+
+    fn default_fill_stroke() -> FillStroke {
+        FillStroke {
+            fill: Some(Color { r: 70, g: 130, b: 180, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+
+    fn default_stroke_style() -> ferrum_scene::StrokeStyle {
+        ferrum_scene::StrokeStyle {
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 1.5,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        }
+    }
+
+    fn make_scene_with_nodes(
+        kind: ferrum_scene::MarkBatchKind,
+        nodes: Vec<SceneNode>,
+    ) -> SceneGraph {
+        use ferrum_scene::{Panel, MarkBatch, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind,
+                    nodes,
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    // ── Circle (point marks) ──────────────────────────────────────────
+
+    #[test]
+    fn circle_node_produces_instance() {
+        let nodes = vec![
+            SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: default_fill_stroke() },
+            SceneNode::Circle { cx: 200.0, cy: 150.0, r: 8.0, style: default_fill_stroke() },
+            SceneNode::Circle { cx: 300.0, cy: 200.0, r: 3.0, style: default_fill_stroke() },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
+        let data = load_scene(&scene);
+        assert_eq!(data.circle_instances.len(), 3, "3 circles → 3 instances");
+        let c = &data.circle_instances[0];
+        assert!((c.center[0] - 100.0).abs() < 1e-3);
+        assert!((c.center[1] - 100.0).abs() < 1e-3);
+        assert!((c.radius - 5.0).abs() < 1e-3);
+        assert!(c.fill_color[3] > 0.0, "fill alpha must be nonzero");
+    }
+
+    #[test]
+    fn circle_stroke_fields_populated() {
+        let mut style = default_fill_stroke();
+        style.stroke_opacity = 0.7;
+        style.stroke_dash = Some(vec![6.0, 3.0]);
+        style.angle = 30.0;
+        let scene = make_scene_with_nodes(
+            MarkBatchKind::Point,
+            vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style }],
+        );
+        let data = load_scene(&scene);
+        let c = &data.circle_instances[0];
+        assert!((c.stroke_opacity - 0.7).abs() < 1e-3);
+        assert!((c.stroke_dash - 1.0).abs() < 1e-3, "6,3 → dashed index 1");
+        assert!((c.angle - 30.0).abs() < 1e-3);
+    }
+
+    // ── Rect (bar marks) ──────────────────────────────────────────────
+
+    #[test]
+    fn rect_node_produces_instance() {
+        let nodes = vec![
+            SceneNode::Rect { x: 60.0, y: 50.0, w: 30.0, h: 200.0,
+                              style: default_fill_stroke(), corner_radius: 0.0 },
+            SceneNode::Rect { x: 100.0, y: 80.0, w: 30.0, h: 170.0,
+                              style: default_fill_stroke(), corner_radius: 2.0 },
+            SceneNode::Rect { x: 140.0, y: 30.0, w: 30.0, h: 220.0,
+                              style: default_fill_stroke(), corner_radius: 0.0 },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Bar, nodes);
+        let data = load_scene(&scene);
+        assert_eq!(data.rect_instances.len(), 3, "3 rects → 3 instances");
+        let r = &data.rect_instances[0];
+        assert!((r.position[0] - 60.0).abs() < 1e-3);
+        assert!((r.size[0] - 30.0).abs() < 1e-3);
+        assert!((r.size[1] - 200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn rect_corner_radius_preserved() {
+        let scene = make_scene_with_nodes(
+            MarkBatchKind::Rect,
+            vec![SceneNode::Rect {
+                x: 10.0, y: 20.0, w: 80.0, h: 60.0,
+                style: default_fill_stroke(), corner_radius: 5.5,
+            }],
+        );
+        let data = load_scene(&scene);
+        let r = &data.rect_instances[0];
+        assert!((r.corner_radius - 5.5).abs() < 1e-3);
+    }
+
+    // ── Line (rule / tick / segment marks) ────────────────────────────
+
+    #[test]
+    fn line_node_tessellates_to_mesh() {
+        let nodes = vec![
+            SceneNode::Line {
+                x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
+                style: default_stroke_style(),
+            },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "Line node must produce mesh vertices"
+        );
+        assert!(
+            data.mesh_buffers.indices.len() >= 6,
+            "Line tessellates to ≥2 triangles (6 indices); got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    #[test]
+    fn multiple_lines_all_tessellate() {
+        let nodes: Vec<SceneNode> = (0..10)
+            .map(|i| SceneNode::Line {
+                x1: 50.0, y1: 30.0 + i as f64 * 30.0,
+                x2: 400.0, y2: 30.0 + i as f64 * 30.0,
+                style: default_stroke_style(),
+            })
+            .collect();
+        let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            data.mesh_buffers.indices.len() >= 10 * 6,
+            "10 lines must produce ≥60 indices; got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    // ── Polyline (line marks) ─────────────────────────────────────────
+
+    #[test]
+    fn polyline_node_tessellates_to_mesh() {
+        let points = vec![
+            (50.0, 300.0), (150.0, 100.0), (250.0, 250.0), (350.0, 50.0),
+        ];
+        let nodes = vec![SceneNode::Polyline {
+            points,
+            style: default_stroke_style(),
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "Polyline must produce mesh vertices"
+        );
+        assert!(
+            data.mesh_buffers.indices.len() >= 3 * 6,
+            "4-point polyline (3 segments) → ≥18 indices; got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    #[test]
+    fn polyline_single_segment() {
+        let nodes = vec![SceneNode::Polyline {
+            points: vec![(100.0, 100.0), (400.0, 300.0)],
+            style: default_stroke_style(),
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Line, nodes);
+        let data = load_scene(&scene);
+        assert!(!data.mesh_buffers.vertices.is_empty());
+    }
+
+    // ── Path (arc / area / ribbon marks) ──────────────────────────────
+
+    #[test]
+    fn closed_path_tessellates_fill_and_stroke() {
+        use ferrum_scene::PathCmd;
+        let commands = vec![
+            PathCmd::MoveTo { x: 100.0, y: 100.0 },
+            PathCmd::LineTo { x: 300.0, y: 100.0 },
+            PathCmd::LineTo { x: 300.0, y: 300.0 },
+            PathCmd::LineTo { x: 100.0, y: 300.0 },
+            PathCmd::Close,
+        ];
+        let nodes = vec![SceneNode::Path {
+            commands,
+            style: default_fill_stroke(),
+            closed: true,
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Area, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "closed Path must produce mesh vertices"
+        );
+        assert!(
+            data.mesh_buffers.indices.len() >= 6,
+            "closed square path → ≥2 fill triangles; got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    #[test]
+    fn arc_path_with_arc_to_tessellates() {
+        use ferrum_scene::PathCmd;
+        // Simulate a pie wedge: move to center, line to edge, arc, close.
+        let commands = vec![
+            PathCmd::MoveTo { x: 200.0, y: 200.0 },
+            PathCmd::LineTo { x: 200.0, y: 100.0 },
+            PathCmd::ArcTo {
+                rx: 100.0, ry: 100.0, rotation: 0.0,
+                large_arc: false, sweep: true,
+                x: 300.0, y: 200.0,
+            },
+            PathCmd::Close,
+        ];
+        let nodes = vec![SceneNode::Path {
+            commands,
+            style: default_fill_stroke(),
+            closed: true,
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Arc, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "arc wedge Path must produce mesh vertices"
+        );
+        assert!(
+            data.mesh_buffers.indices.len() >= 3,
+            "arc wedge must tessellate to ≥1 triangle"
+        );
+    }
+
+    #[test]
+    fn open_path_stroke_only() {
+        use ferrum_scene::PathCmd;
+        let commands = vec![
+            PathCmd::MoveTo { x: 50.0, y: 200.0 },
+            PathCmd::CubicTo {
+                c1x: 150.0, c1y: 50.0, c2x: 250.0, c2y: 350.0, x: 350.0, y: 200.0,
+            },
+        ];
+        let mut style = default_fill_stroke();
+        style.fill = None;
+        let nodes = vec![SceneNode::Path {
+            commands, style, closed: false,
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Ribbon, nodes);
+        let data = load_scene(&scene);
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "open stroke-only cubic Path must produce mesh vertices"
+        );
+    }
+
+    #[test]
+    fn multiple_arc_wedges_tessellate() {
+        use ferrum_scene::PathCmd;
+        // 3 pie wedges
+        let wedges: Vec<SceneNode> = (0..3).map(|i| {
+            let angle_start = i as f64 * 120.0_f64.to_radians();
+            let angle_end = (i + 1) as f64 * 120.0_f64.to_radians();
+            let cx = 200.0;
+            let cy = 200.0;
+            let r = 100.0;
+            let commands = vec![
+                PathCmd::MoveTo { x: cx, y: cy },
+                PathCmd::LineTo {
+                    x: cx + r * angle_start.cos(),
+                    y: cy + r * angle_start.sin(),
+                },
+                PathCmd::ArcTo {
+                    rx: r, ry: r, rotation: 0.0,
+                    large_arc: false, sweep: true,
+                    x: cx + r * angle_end.cos(),
+                    y: cy + r * angle_end.sin(),
+                },
+                PathCmd::Close,
+            ];
+            SceneNode::Path { commands, style: default_fill_stroke(), closed: true }
+        }).collect();
+        let scene = make_scene_with_nodes(MarkBatchKind::Arc, wedges);
+        let data = load_scene(&scene);
+        assert!(
+            data.mesh_buffers.indices.len() >= 3 * 3,
+            "3 arc wedges must produce ≥9 indices; got {}",
+            data.mesh_buffers.indices.len()
+        );
+    }
+
+    // ── Text ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn text_node_produces_text_element() {
+        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let nodes = vec![
+            SceneNode::Text { x: 100.0, y: 50.0, content: "Hello".to_string(), style: style.clone() },
+            SceneNode::Text { x: 200.0, y: 80.0, content: "World".to_string(), style },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
+        let data = load_scene(&scene);
+        assert_eq!(data.text_elements.len(), 2, "2 Text nodes → 2 text elements");
+        assert_eq!(data.text_elements[0].content, "Hello");
+        assert!((data.text_elements[0].x - 100.0).abs() < 1e-3);
+        assert_eq!(data.text_elements[1].content, "World");
+    }
+
+    #[test]
+    fn text_does_not_produce_mesh_or_instances() {
+        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+        let style = TextStyle {
+            font_size: 14.0,
+            font_weight: FontWeight::Bold,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Middle,
+            angle: 0.0,
+            color: Color { r: 50, g: 50, b: 50, a: 255 },
+            opacity: 1.0,
+            font_family: "serif".to_string(),
+        };
+        let nodes = vec![
+            SceneNode::Text { x: 100.0, y: 100.0, content: "Label".to_string(), style },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
+        let data = load_scene(&scene);
+        assert!(data.circle_instances.is_empty(), "text must not produce circles");
+        assert!(data.rect_instances.is_empty(), "text must not produce rects");
+        assert!(data.mesh_buffers.vertices.is_empty(), "text must not produce mesh");
+    }
+
+    // ── Group (recursive) ─────────────────────────────────────────────
+
+    #[test]
+    fn group_node_recurses_into_children() {
+        let children = vec![
+            SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: default_fill_stroke() },
+            SceneNode::Rect { x: 200.0, y: 50.0, w: 40.0, h: 30.0,
+                              style: default_fill_stroke(), corner_radius: 0.0 },
+        ];
+        let nodes = vec![SceneNode::Group {
+            attrs: vec![],
+            children,
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
+        let data = load_scene(&scene);
+        assert_eq!(data.circle_instances.len(), 1, "group child circle must be collected");
+        assert_eq!(data.rect_instances.len(), 1, "group child rect must be collected");
+    }
+
+    // ── Mixed scene (all node types at once) ──────────────────────────
+
+    #[test]
+    fn mixed_scene_all_buffers_populated() {
+        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode, PathCmd};
+        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+
+        let circle = SceneNode::Circle {
+            cx: 100.0, cy: 100.0, r: 8.0, style: default_fill_stroke(),
+        };
+        let rect = SceneNode::Rect {
+            x: 200.0, y: 50.0, w: 50.0, h: 100.0,
+            style: default_fill_stroke(), corner_radius: 0.0,
+        };
+        let line = SceneNode::Line {
+            x1: 50.0, y1: 300.0, x2: 400.0, y2: 300.0,
+            style: default_stroke_style(),
+        };
+        let path = SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 100.0, y: 200.0 },
+                PathCmd::LineTo { x: 200.0, y: 100.0 },
+                PathCmd::LineTo { x: 300.0, y: 200.0 },
+                PathCmd::Close,
+            ],
+            style: default_fill_stroke(),
+            closed: true,
+        };
+        let polygon = hex_polygon(350.0, 200.0, 20.0);
+        let polyline = SceneNode::Polyline {
+            points: vec![(50.0, 350.0), (150.0, 320.0), (250.0, 340.0)],
+            style: default_stroke_style(),
+        };
+        let text = SceneNode::Text {
+            x: 250.0, y: 30.0,
+            content: "Title".to_string(),
+            style: TextStyle {
+                font_size: 16.0,
+                font_weight: FontWeight::Bold,
+                anchor: TextAnchor::Middle,
+                baseline: TextBaseline::Top,
+                angle: 0.0,
+                color: Color { r: 0, g: 0, b: 0, a: 255 },
+                opacity: 1.0,
+                font_family: "sans-serif".to_string(),
+            },
+        };
+
+        let scene = SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![text],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Bar,
+                        nodes: vec![rect],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Rule,
+                        nodes: vec![line],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Area,
+                        nodes: vec![path],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Polygon,
+                        nodes: vec![polygon],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Line,
+                        nodes: vec![polyline],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None,
+                    },
+                ],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(data.circle_instances.len(), 1, "1 circle from point batch");
+        assert_eq!(data.rect_instances.len(), 1, "1 rect from bar batch");
+        assert!(!data.mesh_buffers.vertices.is_empty(), "mesh from line+path+polygon+polyline");
+        assert!(!data.mesh_buffers.indices.is_empty(), "mesh indices from tessellation");
+        assert_eq!(data.text_elements.len(), 1, "1 text from title");
+
+        // Verify all mesh vertices are finite
+        for (i, v) in data.mesh_buffers.vertices.iter().enumerate() {
+            assert!(
+                v.position[0].is_finite() && v.position[1].is_finite(),
+                "mixed scene: mesh vertex {i} has non-finite position"
+            );
+        }
+    }
 }
