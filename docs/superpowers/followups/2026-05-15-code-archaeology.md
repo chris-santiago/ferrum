@@ -85,7 +85,7 @@
 | `mark_hex(stroke=..., stroke_width=...)` | Open — still raises |
 | `mark_function(clip=False)` | Open — still no-op |
 
-> **2026-05-15:** `mark_raster(blend="additive")` SVG already implemented; WASM additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` already wired. Legend kwargs **partially** wired: `orient` ✅ and `title` ✅ confirmed working; `format` ❌ and `columns` ❌ silently ignored (failing tests in `test_silent_drop_verification.py::TestLegendKwargsSVGPosition`). Verified by `tests/test_silent_drop_verification.py`.
+> **2026-05-15:** `mark_raster(blend="additive")` SVG already implemented; WASM additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` already wired. Legend kwargs fully confirmed: `orient` ✅ `title` ✅ `format` ✅ `columns` ✅ — all four verified by behavioral tests (`test_silent_drop_verification.py::TestLegendKwargsSVGPosition`). `format` and `columns` wired in `10c1931`.
 
 ### `VisualBase.score()` not overridden in 14 visualizer subclasses
 
