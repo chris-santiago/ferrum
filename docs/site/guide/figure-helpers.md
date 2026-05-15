@@ -2,7 +2,7 @@
 
 Figure-level helpers are one-line entry points for common chart patterns. They are convenience over the grammar, not parallel objects: each helper builds a [`Chart`][ferrum.Chart] (or a compound view like [`JointChart`][ferrum.JointChart] / [`RepeatChart`][ferrum.RepeatChart] / [`ClusterMapChart`][ferrum.ClusterMapChart]) and returns it. The result is themeable, composable, savable, and renderable in exactly the same way as a chart you wrote from primitives.
 
-This page covers the eight helpers in [`ferrum.plots`][]. Each is also available at the top level ([`fm.displot`][ferrum.displot] ≡ `fm.plots.displot`).
+This page covers the grammar-level helpers in [`ferrum.plots`][]. Each is also available at the top level ([`fm.displot`][ferrum.displot] ≡ `fm.plots.displot`). For diagnostic helpers (`roc_chart`, `confusion_matrix_chart`, etc.), see [Model diagnostics](model-diagnostics.md).
 
 ## When to use a helper
 
@@ -20,12 +20,13 @@ Drop down into the grammar when:
 
 The two paths converge: a helper's output and a grammar-authored chart are the same kind of object. Switching between them mid-pipeline is a non-event.
 
-## The eight helpers
+## Grammar-level helpers
 
 | Helper | What it produces | Family |
 |---|---|---|
 | [`displot`][ferrum.displot] | Univariate distribution | Distribution |
 | [`catplot`][ferrum.catplot] | Categorical comparison | Categorical |
+| [`relplot`][ferrum.relplot] | Relational scatter or line | Relational |
 | [`lmplot`][ferrum.lmplot] | Regression scatter with fit overlay | Regression |
 | [`residplot`][ferrum.residplot] | Residuals from a regression fit | Regression |
 | [`pairplot`][ferrum.pairplot] | Pairwise scatter grid | Matrix |
@@ -75,6 +76,27 @@ assert chart.show_svg().startswith("<svg")
 
 `catplot` is the one-call entry point for the boxplot / violin / strip / swarm family. It selects the right composite mark based on `kind=` and applies sensible defaults (jitter for strip plots, dodge for grouped bars, bootstrap CIs for point and bar estimates).
 
+## Relational: `relplot`
+
+`relplot` produces a relational plot — scatter or line — with optional faceting. Supports `kind="scatter"` (default) and `"line"`. Returns a `Chart`.
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = fm.relplot(iris, x="sepal_length", y="petal_length", hue="species", kind="scatter")
+assert chart.show_svg().startswith("<svg")
+```
+
+![relplot scatter](img/figure-helpers_03.png)
+
+`relplot` follows seaborn's signature: `x`, `y`, `hue`, `size`, `style`, `col`, `row` for encoding; `kind` for the geometry. Use it when you want a quick faceted scatter or line chart without dropping into the grammar.
+
 ## Regression: `lmplot` and `residplot`
 
 `lmplot` produces a regression scatter with a fit overlay. The fit is configurable through `method=` (`"lm"`, `"loess"`, `"logistic"`, polynomial order) and `ci=` for the confidence band. Returns a `Chart` with the scatter and the fit as layers.
@@ -92,7 +114,7 @@ chart = fm.lmplot(iris, x="sepal_length", y="petal_length")
 assert chart.show_svg().startswith("<svg")
 ```
 
-![lmplot](img/figure-helpers_03.png)
+![lmplot](img/figure-helpers_04.png)
 
 `residplot` plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a `Chart`.
 
@@ -109,7 +131,7 @@ chart = fm.residplot(iris, x="sepal_length", y="petal_length")
 assert chart.show_svg().startswith("<svg")
 ```
 
-![residplot](img/figure-helpers_04.png)
+![residplot](img/figure-helpers_05.png)
 
 Pass `lowess=True` to overlay a lowess smoother on the residuals; `robust=True` switches the fit to a robust regression so outliers don't pull the line.
 
@@ -130,7 +152,7 @@ chart = fm.pairplot(iris, vars=["sepal_length", "petal_length"], hue="species")
 assert chart.show_svg().startswith("<svg")
 ```
 
-![pairplot](img/figure-helpers_05.png)
+![pairplot](img/figure-helpers_06.png)
 
 For a triangular instead of square layout, pass `corner=True`. To set diagonal cells separately (typically univariate distributions), use `diag_kind="hist"` or `"kde"`.
 
@@ -152,7 +174,7 @@ chart = fm.heatmap(table, annot=True, cmap="blues")
 assert chart.show_svg().startswith("<svg")
 ```
 
-![heatmap](img/figure-helpers_06.png)
+![heatmap](img/figure-helpers_07.png)
 
 `clustermap` returns a `ClusterMapChart` — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
 
@@ -176,7 +198,7 @@ chart = fm.jointplot(iris, x="sepal_length", y="petal_length", kind="scatter", m
 assert chart.show_svg().startswith("<svg")
 ```
 
-![jointplot](img/figure-helpers_07.png)
+![jointplot](img/figure-helpers_08.png)
 
 `kind=` controls the center plot (`"scatter"`, `"kde"`, `"hist"`, `"hex"`, `"reg"`); `marginal_kind=` controls both marginals (`"hist"`, `"kde"`, `"rug"`, `"box"`). The marginals share their data axis with the center.
 
@@ -197,7 +219,7 @@ chart = fm.displot(iris, x="sepal_length", kind="hist").properties(title="Sepal 
 assert chart.show_svg().startswith("<svg")
 ```
 
-![displot with title](img/figure-helpers_08.png)
+![displot with title](img/figure-helpers_09.png)
 
 Composite marks (boxplot, errorbar, smooth with CI, etc.) have **named sub-layers** you can inspect:
 
@@ -241,7 +263,7 @@ report = fit | distribution
 assert report.show_svg().startswith("<svg")
 ```
 
-![lmplot | displot composition](img/figure-helpers_09.png)
+![lmplot | displot composition](img/figure-helpers_10.png)
 
 The regression fit and the distribution plot are concatenated horizontally with the same `|` operator that works for any two charts.
 

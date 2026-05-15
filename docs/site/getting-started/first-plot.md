@@ -47,7 +47,7 @@ points = (
 )
 trend = (
     fm.Chart(iris)
-    .mark_smooth(method="loess")
+    .mark_smooth(method="loess", groupby="species")
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 chart = points + trend

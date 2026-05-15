@@ -208,6 +208,33 @@ assert chart.show_svg().startswith("<svg")
 
 Stat marks are described in detail in [Stats in the rendering pipeline](concepts/stats-pipeline.md).
 
+### Grouped transforms with `groupby`
+
+Statistical marks compute their transform over the entire dataset by default. To compute independently per group — one LOESS line per species, one KDE per category — pass `groupby=`:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = (
+    fm.Chart(iris)
+    .mark_smooth(method="loess", groupby="species")
+    .encode(x="sepal_length", y="petal_length", color="species:N")
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+![Grouped LOESS](img/marks-encodings_05.png)
+
+The `groupby` parameter is available on `mark_smooth`, `mark_density`, and `mark_histogram`. The group column is preserved in the transform output so downstream `color=` encoding maps each group to a distinct visual.
+
+This is especially important when layering a statistical mark with a scatter via `+` — without `groupby`, the transform runs over all data combined and produces a single aggregate line.
+
 ### Distribution-summary marks
 
 For comparing categorical distributions at a glance:
@@ -237,7 +264,7 @@ chart = (
 assert chart.show_svg().startswith("<svg")
 ```
 
-![Boxplot by species](img/marks-encodings_05.png)
+![Boxplot by species](img/marks-encodings_06.png)
 
 ### Uncertainty marks
 
@@ -305,7 +332,7 @@ combined = points + trend
 assert combined.show_svg().startswith("<svg")
 ```
 
-![Points + LOESS trend](img/marks-encodings_06.png)
+![Points + LOESS trend](img/marks-encodings_07.png)
 
 This puts a per-species LOESS overlay on top of a scatter. Same encoding, two marks, one layered chart — the `+` operator on `Chart` produces a layered view that renders both marks against the same axes.
 

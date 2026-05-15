@@ -38,6 +38,8 @@ nav = [
     { Themes = "guide/themes.md" },
     { "Figure-level helpers" = "guide/figure-helpers.md" },
     { "Model diagnostics" = "guide/model-diagnostics.md" },
+    { "Saving & export" = "guide/saving-and-export.md" },
+    { Recipes = "guide/recipes.md" },
     { "Interactive rendering" = "guide/interactive.md" },
   ] },
   { Gallery = "gallery/index.md" },

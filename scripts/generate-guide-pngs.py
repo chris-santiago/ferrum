@@ -25,6 +25,7 @@ PAGES = [
     (GUIDE_DIR / "themes.md", GUIDE_DIR / "img"),
     (GUIDE_DIR / "figure-helpers.md", GUIDE_DIR / "img"),
     (GUIDE_DIR / "model-diagnostics.md", GUIDE_DIR / "img"),
+    (GUIDE_DIR / "recipes.md", GUIDE_DIR / "img"),
 ]
 
 
