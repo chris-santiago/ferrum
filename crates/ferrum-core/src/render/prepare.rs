@@ -174,6 +174,14 @@ pub struct PreparedInputs {
     pub legend_title_override: Option<String>,
     /// D13: legend title font size override from `encoding.color.legend.titleFontSize`.
     pub legend_title_font_size_override: Option<f64>,
+    /// D13: legend format override from `encoding.color.legend.format`.
+    /// When `Some`, colorbar tick labels are reformatted with this Python-style
+    /// format spec (e.g. `".0%"` → multiply by 100, zero decimal places, `%` suffix).
+    pub legend_format_override: Option<String>,
+    /// D13: legend columns override from `encoding.color.legend.columns`.
+    /// When `Some`, categorical legend entries are arranged in N columns instead of
+    /// the default single vertical column.
+    pub legend_columns_override: Option<u32>,
 }
 
 impl PreparedInputs {
@@ -507,14 +515,20 @@ pub fn prepare_render_inputs(
                 // Tick labels: check for explicit tickLabels override from
                 // legend extra (e.g. ["Low", "High"] for SHAP beeswarm),
                 // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
-                let custom_tick_labels: Option<Vec<String>> = spec
+                // When `format=` is set, apply a Python-style format spec to each tick value.
+                let legend_extra_ref = spec
                     .encoding
                     .color
                     .as_ref()
                     .and_then(|c| c.legend.as_ref())
-                    .and_then(|l| l.extra.get("tickLabels"))
+                    .map(|l| &l.extra);
+                let custom_tick_labels: Option<Vec<String>> = legend_extra_ref
+                    .and_then(|extra| extra.get("tickLabels"))
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
+                let format_spec: Option<&str> = legend_extra_ref
+                    .and_then(|extra| extra.get("format"))
+                    .and_then(|v| v.as_str());
                 let tick_labels = if let Some(labels) = custom_tick_labels {
                     labels
                 } else {
@@ -522,7 +536,11 @@ pub fn prepare_render_inputs(
                     (0..5).map(|i| {
                         let t = i as f64 / 4.0;
                         let v = lo + t * (hi - lo);
-                        format_colorbar_tick(v, lo, hi)
+                        if let Some(spec_str) = format_spec {
+                            apply_format_spec(v, spec_str)
+                        } else {
+                            format_colorbar_tick(v, lo, hi)
+                        }
                     }).collect()
                 };
                 (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
@@ -564,6 +582,14 @@ pub fn prepare_render_inputs(
             extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
         })
         .and_then(|v| v.as_f64());
+    let legend_format_override = color_legend_extra
+        .and_then(|extra| extra.get("format"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let legend_columns_override = color_legend_extra
+        .and_then(|extra| extra.get("columns"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
 
     Ok(PreparedInputs {
         transform_outputs,
@@ -579,7 +605,45 @@ pub fn prepare_render_inputs(
         legend_orient_override,
         legend_title_override,
         legend_title_font_size_override,
+        legend_format_override,
+        legend_columns_override,
     })
+}
+
+/// Apply a Python-style format spec string to a numeric value.
+///
+/// Supports the subset commonly used for chart tick labels:
+/// - `".Nf"` — fixed-point with N decimal places (e.g. `".2f"` → `"3.14"`)
+/// - `".N"` — same as `.Nf` (vega-lite shorthand)
+/// - `".N%"` or `"%"` — multiply by 100, format with N decimal places, append `%`
+///   (e.g. `".0%"` → `"75%"`, `".1%"` → `"74.5%"`)
+/// - `".Ne"` or `".Ng"` — scientific / general notation (falls back to `format_colorbar_tick`)
+///
+/// Unrecognized specs fall back to `format_colorbar_tick`.
+fn apply_format_spec(value: f64, spec: &str) -> String {
+    let s = spec.trim();
+    // Percent: optional leading `.N` then `%`
+    if s.ends_with('%') {
+        let prefix = s.trim_end_matches('%');
+        let precision: usize = if prefix.is_empty() {
+            0
+        } else if let Some(n) = prefix.strip_prefix('.') {
+            n.parse().unwrap_or(0)
+        } else {
+            0
+        };
+        let pct = value * 100.0;
+        return format!("{:.prec$}%", pct, prec = precision);
+    }
+    // Fixed-point: `.Nf` or `.N` (no suffix letter, or `f`)
+    let prefix = if s.ends_with('f') { s.trim_end_matches('f') } else { s };
+    if let Some(n) = prefix.strip_prefix('.') {
+        if let Ok(precision) = n.parse::<usize>() {
+            return format!("{:.prec$}", value, prec = precision);
+        }
+    }
+    // Fallback: auto-precision
+    format_colorbar_tick(value, value, value)
 }
 
 /// Format a single colorbar tick value into a short human-readable label.

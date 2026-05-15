@@ -770,7 +770,7 @@ def manifold_chart(
     chart = (
         ferrum.Chart(emb)
         .mark_point()
-        .encode(x="dim_0", y="dim_1", color="label")
+        .encode(x="dim_0", y="dim_1", color="label:N")
     )
     chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
     if theme is not None:

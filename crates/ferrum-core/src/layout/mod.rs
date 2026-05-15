@@ -175,6 +175,11 @@ pub struct ThemeInputs {
     // Legend
     pub legend_direction: Option<LegendDirection>,
     pub legend_title_font_size: f64,
+    /// Number of columns for categorical legend entries. `None` (default) means
+    /// a single vertical column (Right/Left orient) or a single horizontal row
+    /// (Top/Bottom orient). `Some(N)` arranges entries left-to-right, top-to-bottom
+    /// in N columns; only meaningful for vertical-direction legends.
+    pub legend_columns: Option<u32>,
 
     // Reference lines
     pub reference_line_color: palette::Srgba<u8>,
@@ -249,6 +254,7 @@ impl Default for ThemeInputs {
             legend_orient: LegendOrient::Right,
             legend_direction: None,
             legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
+            legend_columns: None,
 
             reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
             reference_line_dash: Some(vec![4.0, 4.0]),
@@ -376,6 +382,7 @@ pub fn compute_layout(
             theme.legend_direction,
             legend_title.as_deref(),
             theme.legend_title_font_size,
+            theme.legend_columns,
         ),
     };
     let legend_dropped = legend_entries

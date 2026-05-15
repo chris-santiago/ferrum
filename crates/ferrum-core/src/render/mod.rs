@@ -205,6 +205,7 @@ pub fn render_svg(
     let mut effective_theme;
     let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
         || prep.legend_title_font_size_override.is_some()
+        || prep.legend_columns_override.is_some()
     {
         effective_theme = theme.clone();
         if let Some(orient) = prep.legend_orient_override {
@@ -212,6 +213,9 @@ pub fn render_svg(
         }
         if let Some(fs) = prep.legend_title_font_size_override {
             effective_theme.legend_title_font_size = fs;
+        }
+        if let Some(cols) = prep.legend_columns_override {
+            effective_theme.legend_columns = Some(cols);
         }
         &effective_theme
     } else {
@@ -287,6 +291,7 @@ pub fn render_scene_json(
     let mut effective_theme;
     let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
         || prep.legend_title_font_size_override.is_some()
+        || prep.legend_columns_override.is_some()
     {
         effective_theme = theme.clone();
         if let Some(orient) = prep.legend_orient_override {
@@ -294,6 +299,9 @@ pub fn render_scene_json(
         }
         if let Some(fs) = prep.legend_title_font_size_override {
             effective_theme.legend_title_font_size = fs;
+        }
+        if let Some(cols) = prep.legend_columns_override {
+            effective_theme.legend_columns = Some(cols);
         }
         &effective_theme
     } else {
@@ -518,6 +526,7 @@ mod orchestration_tests {
         let mut effective_theme;
         let theme_ref: &ThemeInputs = if prep.legend_orient_override.is_some()
             || prep.legend_title_font_size_override.is_some()
+            || prep.legend_columns_override.is_some()
         {
             effective_theme = theme.clone();
             if let Some(orient) = prep.legend_orient_override {
@@ -525,6 +534,9 @@ mod orchestration_tests {
             }
             if let Some(fs) = prep.legend_title_font_size_override {
                 effective_theme.legend_title_font_size = fs;
+            }
+            if let Some(cols) = prep.legend_columns_override {
+                effective_theme.legend_columns = Some(cols);
             }
             &effective_theme
         } else {

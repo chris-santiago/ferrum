@@ -196,6 +196,7 @@ pub fn layout_legend(
     direction_override: Option<LegendDirection>,
     title: Option<&str>,
     title_font_size: f64,
+    columns: Option<u32>,
 ) -> (Option<LegendLayout>, Rect) {
     if entries.is_empty() {
         return (None, inner);
@@ -285,22 +286,38 @@ pub fn layout_legend(
     let entries_laid_out: Vec<LegendEntryLayout> = match direction {
         LegendDirection::Vertical => {
             let avail_h = (legend_rect.h - 2.0 * LEGEND_OUTER_PAD - title_y_offset).max(0.0);
+            let avail_w = (legend_rect.w - 2.0 * LEGEND_OUTER_PAD).max(0.0);
             let row_pitch = line_h + LEGEND_ENTRY_ROW_PAD;
+            let n_cols = columns.unwrap_or(1).max(1) as usize;
+
+            // Column width: divide available width evenly across N columns.
+            let col_w = if n_cols > 1 { avail_w / n_cols as f64 } else { avail_w };
+            let max_label_w = entries
+                .iter()
+                .map(|e| metrics.measure_width(&e.label, label_font_size))
+                .fold(0.0_f64, f64::max);
+            let _ = max_label_w; // layout uses col_w; label may overflow but text truncation is render-side
+
             let max_rows = if row_pitch > 0.0 {
                 ((avail_h + LEGEND_ENTRY_ROW_PAD) / row_pitch).floor() as usize
             } else {
                 0
             };
-            let n_fit = entries.len().min(max_rows);
+            // Maximum entries that fit: rows × columns.
+            let max_fit = max_rows * n_cols;
+            let n_fit = entries.len().min(max_fit.max(1));
             entries
                 .iter()
                 .take(n_fit)
                 .enumerate()
                 .map(|(i, e)| {
+                    let col = i % n_cols;
+                    let row = i / n_cols;
+                    let col_origin_x = legend_rect.x + LEGEND_OUTER_PAD + col as f64 * col_w;
                     let y = legend_rect.y + LEGEND_OUTER_PAD + title_y_offset
-                        + (i as f64) * row_pitch + line_h / 2.0;
-                    let symbol_x = legend_rect.x + LEGEND_OUTER_PAD + SYMBOL_WIDTH / 2.0;
-                    let label_x = legend_rect.x + LEGEND_OUTER_PAD + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
+                        + (row as f64) * row_pitch + line_h / 2.0;
+                    let symbol_x = col_origin_x + SYMBOL_WIDTH / 2.0;
+                    let label_x = col_origin_x + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
                     LegendEntryLayout {
                         label: e.label.clone(),
                         label_anchor_x: label_x,
@@ -565,7 +582,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
         let legend = legend.expect("legend should be Some");
         assert_eq!(legend.orient, LegendOrient::Right);
         assert_eq!(legend.direction, LegendDirection::Vertical);
@@ -580,7 +597,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0, None);
         let legend = legend.unwrap();
         assert_eq!(legend.rect.x, inner.x);
         // plot area starts LEGEND_PLOT_GAP to the right of the legend rect end.
@@ -592,7 +609,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None, None, 13.0);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None, None, 13.0, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert_eq!(legend.rect.y, inner.y);
@@ -604,7 +621,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None, None, 13.0);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None, None, 13.0, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert!((legend.rect.y - (inner.y + plot_inner.h)).abs() < 1e-6);
@@ -614,7 +631,7 @@ mod tests {
     fn legend_layout_empty_entries_returns_none_and_inner_unchanged() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
+        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
         assert!(legend.is_none());
         assert_eq!(plot_inner, inner);
     }
@@ -624,7 +641,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let es = entries(50, 4);
         let m = mock(10.0);
-        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0);
+        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
         let legend = legend.unwrap();
         assert!(legend.entries.len() < 50, "expected overflow drop; got {} entries", legend.entries.len());
     }

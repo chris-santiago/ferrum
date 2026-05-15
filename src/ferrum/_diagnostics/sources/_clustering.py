@@ -135,11 +135,6 @@ class ClusteringMixin:
                 method_kwargs.get("n_epochs"),
             )
             df = pl.from_arrow(result)
-            if self._y is not None:
-                label_arr = np.asarray(self._y)
-            else:
-                label_arr = np.zeros(df.height)
-            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "tsne":
             x_arrow = _x_to_arrow(self._X)
             result = _core.tsne_embedding(
@@ -149,24 +144,21 @@ class ClusteringMixin:
                 method_kwargs.get("n_iter"),
             )
             df = pl.from_arrow(result)
-            if self._y is not None:
-                label_arr = np.asarray(self._y)
-            else:
-                label_arr = np.zeros(df.height)
-            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         elif method == "pca":
             x_arrow = _x_to_arrow(self._X)
             scores_batch = _core.pca_scores(x_arrow, n_components)
             df = pl.from_arrow(scores_batch)
-            if self._y is not None:
-                label_arr = np.asarray(self._y)
-            else:
-                label_arr = np.zeros(df.height)
-            df = df.with_columns(pl.Series("label", label_arr.tolist()))
         else:
             raise ValueError(
                 f"ModelSource.embeddings(method={method!r}) — expected 'umap', 'tsne', or 'pca'."
             )
+        if self._y is not None:
+            label_arr = np.asarray(self._y)
+        elif hasattr(self._model, "labels_"):
+            label_arr = np.asarray(self._model.labels_)
+        else:
+            label_arr = np.zeros(df.height, dtype=int)
+        df = df.with_columns(pl.Series("label", label_arr.astype(str).tolist()))
         self._cache[key] = df
         return df
 
