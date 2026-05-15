@@ -787,8 +787,7 @@ class TestStrokeDashSVG:
         # Index 0 = solid: stroke-dasharray should NOT appear for mark elements
         # (it may appear for gridlines but not on circles)
         # The simplest check: the circle element itself should not carry stroke-dasharray
-        import re as re2
-        circles = re2.findall(r"<circle[^/]*/?>", svg)
+        circles = re.findall(r"<circle[^/]*/?>", svg)
         for c in circles:
             assert "stroke-dasharray" not in c, (
                 f"Index 0 should be solid; got dasharray in: {c}"
@@ -865,8 +864,7 @@ class TestAngleSVG:
             .show_svg()
         )
         # Row with angle=0.0 should not emit a rotate transform on that element
-        import re as re2
-        circles = re2.findall(r"<circle[^/]*/?>", svg)
+        circles = re.findall(r"<circle[^/]*/?>", svg)
         for c in circles:
             assert "transform" not in c, (
                 f"angle=0 should not emit transform; got: {c}"

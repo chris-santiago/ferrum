@@ -545,8 +545,8 @@ def lmplot(
             if hasattr(_df, "to_arrow"):
                 _x_series = _df[x_col_name]
                 x_range = [float(_x_series.min()), float(_x_series.max())]
-        except Exception:
-            x_range = None  # fall back to truncated fit if data resolution fails
+        except (AttributeError, KeyError):
+            x_range = None
 
     # Shared encoding.
     enc: dict = {"x": x, "y": y}

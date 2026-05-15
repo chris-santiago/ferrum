@@ -3952,9 +3952,7 @@ class Chart:
                         try:
                             chart_df = _to_polars(new._data)
                             new._data = pl.concat([chart_df, layer_df], how="diagonal")
-                        except Exception:
-                            # If chart data can't be converted (shouldn't happen),
-                            # use layer data only.
+                        except (TypeError, ValueError):
                             new._data = layer_df
                 converted.append(
                     _Layer(

@@ -26,11 +26,7 @@ fn shape_from_str(s: &str) -> ShapeKind {
 ///
 /// `stroke_opacity` and `angle` flow directly from encoding columns into
 /// the emitted `FillStroke` style — no scale transform.
-fn emit_shape_nodes(
-    kind: ShapeKind,
-    cx: f64,
-    cy: f64,
-    r: f64,
+struct ShapeStyle {
     fill: Option<crate::render::color::Color>,
     stroke: Option<crate::render::color::Color>,
     stroke_width: f64,
@@ -38,7 +34,16 @@ fn emit_shape_nodes(
     stroke_opacity: f64,
     stroke_dash_idx: Option<f64>,
     angle: f64,
+}
+
+fn emit_shape_nodes(
+    kind: ShapeKind,
+    cx: f64,
+    cy: f64,
+    r: f64,
+    style: ShapeStyle,
 ) -> Vec<ferrum_scene::SceneNode> {
+    let ShapeStyle { fill, stroke, stroke_width, opacity, stroke_opacity, stroke_dash_idx, angle } = style;
     use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
@@ -387,8 +392,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let shape_nodes = emit_shape_nodes(
             shape_kind, cx, cy, radius,
-            effective_fill, effective_stroke, row_stroke_width, row_opacity,
-            row_stroke_opacity, row_stroke_dash, row_angle,
+            ShapeStyle {
+                fill: effective_fill,
+                stroke: effective_stroke,
+                stroke_width: row_stroke_width,
+                opacity: row_opacity,
+                stroke_opacity: row_stroke_opacity,
+                stroke_dash_idx: row_stroke_dash,
+                angle: row_angle,
+            },
         );
         nodes.extend(shape_nodes);
         indices.push(i);

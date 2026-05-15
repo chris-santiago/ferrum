@@ -4,7 +4,7 @@
 //!   ordinal y + x + x2 → ranged horizontal segment (Phase 10d-pre,
 //!     feature-importance error bars).
 
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 
 /// Build a per-row stroke style for rule segments, applying encoding column values.
 fn rule_stroke_style(

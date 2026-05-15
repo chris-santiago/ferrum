@@ -3,7 +3,7 @@ use ferrum_scene::{
     TextStyle as FsText,
 };
 
-use super::color::{fmt_svg, from_rgba, Color};
+use super::color::from_rgba;
 use super::svg::{fmt_f, FillStroke, Stroke, SvgBuffer, TextStyle};
 use super::CLIP_ID_PREFIX;
 use crate::layout::{Rect, TextAnchor};

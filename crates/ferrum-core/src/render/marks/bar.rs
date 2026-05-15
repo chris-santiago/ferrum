@@ -10,6 +10,13 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
+struct BarBaseStyle<'a> {
+    stroke_width: f64,
+    opacity: f64,
+    stroke_dash: Option<&'a [f64]>,
+    corner_radius: f64,
+}
+
 /// Per-row stroke encoding column vectors loaded from a batch.
 struct StrokeChannels {
     opacity: Option<Vec<Option<f64>>>,
@@ -38,12 +45,11 @@ impl StrokeChannels {
         &self,
         fill: Option<ferrum_scene::Color>,
         stroke: Option<ferrum_scene::Color>,
-        base_sw: f64,
-        opacity: f64,
-        base_dash: Option<&[f64]>,
-        corner_radius: f64,
+        base: &BarBaseStyle<'_>,
         i: usize,
     ) -> (ferrum_scene::FillStroke, f64) {
+        let (base_sw, opacity, base_dash, corner_radius) =
+            (base.stroke_width, base.opacity, base.stroke_dash, base.corner_radius);
         let stroke_opacity = self.opacity.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .filter(|v| v.is_finite())
@@ -189,11 +195,13 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
-        let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), stroke_sc,
-            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
-            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
-        );
+        let base = BarBaseStyle {
+            stroke_width: ctx.mark_style.stroke_width,
+            opacity: ctx.mark_style.opacity,
+            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.corner_radius,
+        };
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
 
         nodes.push(SceneNode::Rect {
             x: cx - bar_width / 2.0,
@@ -284,11 +292,13 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
-        let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), stroke_sc,
-            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
-            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
-        );
+        let base = BarBaseStyle {
+            stroke_width: ctx.mark_style.stroke_width,
+            opacity: ctx.mark_style.opacity,
+            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.corner_radius,
+        };
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
 
         nodes.push(SceneNode::Rect {
             x: left_x,
@@ -367,11 +377,13 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
-        let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), stroke_sc,
-            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
-            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
-        );
+        let base = BarBaseStyle {
+            stroke_width: ctx.mark_style.stroke_width,
+            opacity: ctx.mark_style.opacity,
+            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.corner_radius,
+        };
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
 
         nodes.push(SceneNode::Rect {
             x: px_left.min(px_right),
@@ -451,11 +463,13 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
-        let (style, cr) = sc.row_fill_stroke(
-            Some(fill_sc), stroke_sc,
-            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
-            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
-        );
+        let base = BarBaseStyle {
+            stroke_width: ctx.mark_style.stroke_width,
+            opacity: ctx.mark_style.opacity,
+            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.corner_radius,
+        };
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
 
         nodes.push(SceneNode::Rect {
             x: baseline_x,
