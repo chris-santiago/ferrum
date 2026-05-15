@@ -38,6 +38,10 @@ include = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
+markers = [
+    "slow: scale/performance tests (10k–50k rows) — skipped by default, run with: pytest -m slow",
+]
+addopts = "-m 'not slow'"
 
 [dependency-groups]
 dev = [

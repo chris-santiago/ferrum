@@ -178,6 +178,21 @@ pub struct PreparedInputs {
     /// When `Some`, categorical legend entries are arranged in N columns instead of
     /// the default single vertical column.
     pub legend_columns_override: Option<u32>,
+    /// D13+: maximum number of colorbar ticks from `encoding.color.legend.tickCount`.
+    pub legend_tick_count_override: Option<usize>,
+    /// D13+: label font size from `encoding.color.legend.labelFontSize`.
+    pub legend_label_font_size_override: Option<f64>,
+    /// D13+: colorbar gradient bar length in pixels from `encoding.color.legend.gradientLength`.
+    pub legend_gradient_length_override: Option<f64>,
+    /// D13+: colorbar gradient bar thickness in pixels from `encoding.color.legend.gradientThickness`.
+    pub legend_gradient_thickness_override: Option<f64>,
+    /// D13+: direction override from `encoding.color.legend.direction`.
+    pub legend_direction_override: Option<crate::layout::LegendDirection>,
+    /// D13+: explicit tick/entry values from `encoding.color.legend.values`.
+    pub legend_values_override: Option<Vec<String>>,
+    /// D13+: legend type override from `encoding.color.legend.type`.
+    /// "gradient" forces colorbar rendering; "symbol" forces discrete entries.
+    pub legend_type_override: Option<String>,
 }
 
 impl PreparedInputs {
@@ -582,6 +597,54 @@ pub fn prepare_render_inputs(
         .and_then(|extra| extra.get("columns"))
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
+    let legend_tick_count_override = color_legend_extra
+        .and_then(|extra| extra.get("tickCount"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let legend_label_font_size_override = color_legend_extra
+        .and_then(|extra| extra.get("labelFontSize").or_else(|| extra.get("label_font_size")))
+        .and_then(|v| v.as_f64());
+    let legend_gradient_length_override = color_legend_extra
+        .and_then(|extra| extra.get("gradientLength").or_else(|| extra.get("gradient_length")))
+        .and_then(|v| v.as_f64());
+    let legend_gradient_thickness_override = color_legend_extra
+        .and_then(|extra| extra.get("gradientThickness").or_else(|| extra.get("gradient_thickness")))
+        .and_then(|v| v.as_f64());
+    let legend_direction_override = color_legend_extra
+        .and_then(|extra| extra.get("direction"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s {
+            "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
+            "vertical"   => Some(crate::layout::LegendDirection::Vertical),
+            _ => None,
+        });
+    // `values`: explicit tick/entry labels for the legend. Accepts an array of
+    // strings or numbers. Numbers are formatted to a short decimal string.
+    let legend_values_override: Option<Vec<String>> = color_legend_extra
+        .and_then(|extra| extra.get("values"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| {
+                    if let Some(s) = item.as_str() {
+                        s.to_string()
+                    } else if let Some(n) = item.as_f64() {
+                        if n.fract() == 0.0 && n.abs() < 1e15 {
+                            format!("{}", n as i64)
+                        } else {
+                            format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
+                        }
+                    } else {
+                        item.to_string()
+                    }
+                })
+                .collect()
+        });
+    // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
+    let legend_type_override = color_legend_extra
+        .and_then(|extra| extra.get("type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
 
     Ok(PreparedInputs {
         transform_outputs,
@@ -598,6 +661,13 @@ pub fn prepare_render_inputs(
         legend_title_override,
         legend_title_font_size_override,
         legend_columns_override,
+        legend_tick_count_override,
+        legend_label_font_size_override,
+        legend_gradient_length_override,
+        legend_gradient_thickness_override,
+        legend_direction_override,
+        legend_values_override,
+        legend_type_override,
     })
 }
 

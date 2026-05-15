@@ -26,7 +26,7 @@ pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
-    LegendEntryLayout, LegendLayout, LegendOrient, SymbolKind,
+    LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -272,6 +272,7 @@ pub fn compute_layout(
     legend_title: Option<String>,
     colorbar: Option<&ColorbarInput>,
     metrics: &dyn TextMetrics,
+    legend_overrides: &legend::LegendOverrides,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
@@ -361,29 +362,56 @@ pub fn compute_layout(
     // 3. Reserve legend strip. Continuous color scales emit a colorbar
     //    instead of categorical entries; both paths consume the same
     //    legend gutter.
-    let (legend_layout, inner_after_legend) = match colorbar {
-        Some(cb) if legend_entries.is_empty() => legend::layout_colorbar(
+    //
+    // D13+: Per-chart overrides from `encoding.color.legend` extra fields:
+    //   labelFontSize  → overrides theme.label_font_size for entries/ticks
+    //   direction      → overrides theme.legend_direction for categorical layout
+    //   type="gradient"→ force colorbar even when categorical entries exist
+    //   type="symbol"  → force categorical legend even when colorbar available
+    //   tickCount      → subsample colorbar ticks to at most N
+    //   values         → replace auto-generated tick labels
+    //   gradientLength / gradientThickness → colorbar bar dimensions
+    let effective_label_font_size = legend_overrides.label_font_size.unwrap_or(theme.label_font_size);
+    let effective_direction = legend_overrides.direction.or(theme.legend_direction);
+    let force_colorbar = legend_overrides.legend_type.as_deref() == Some("gradient");
+    let force_symbol   = legend_overrides.legend_type.as_deref() == Some("symbol");
+    let use_colorbar   = (colorbar.is_some() && legend_entries.is_empty() && !force_symbol)
+        || (colorbar.is_some() && force_colorbar);
+
+    let (legend_layout, inner_after_legend) = if use_colorbar {
+        let cb = colorbar.unwrap();
+        let tick_labels: Vec<String> =
+            legend_overrides.values.clone().unwrap_or_else(|| cb.tick_labels.clone());
+        let tick_labels = if let Some(n) = legend_overrides.tick_count {
+            legend::subsample_tick_labels(tick_labels, n)
+        } else {
+            tick_labels
+        };
+        legend::layout_colorbar(
             inner,
             theme.legend_orient,
             legend_title.clone(),
             cb.stops.clone(),
-            cb.tick_labels.clone(),
-            theme.label_font_size,
+            tick_labels,
+            effective_label_font_size,
             theme.legend_title_font_size,
             metrics,
             theme.column_padding,
-        ),
-        _ => legend::layout_legend(
+            legend_overrides.gradient_length,
+            legend_overrides.gradient_thickness,
+        )
+    } else {
+        legend::layout_legend(
             legend_entries,
             theme.legend_orient,
             inner,
-            theme.label_font_size,
+            effective_label_font_size,
             metrics,
-            theme.legend_direction,
+            effective_direction,
             legend_title.as_deref(),
             theme.legend_title_font_size,
             theme.legend_columns,
-        ),
+        )
     };
     let legend_dropped = legend_entries
         .len()
@@ -705,6 +733,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -736,6 +765,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .unwrap_err();
         match err {
@@ -760,6 +790,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .unwrap_err();
         match err {
@@ -783,6 +814,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -834,6 +866,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .unwrap();
 
@@ -875,6 +908,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         )
         .unwrap();
 
@@ -903,6 +937,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         ).unwrap();
 
         assert_eq!(result.panels.len(), 3);
@@ -933,6 +968,7 @@ mod tests {
             None,
             None,
             &m,
+            &legend::LegendOverrides::default(),
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());
     }

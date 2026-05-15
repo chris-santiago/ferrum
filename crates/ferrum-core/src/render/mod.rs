@@ -172,9 +172,22 @@ mod tests {
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
 
-use crate::layout::{compute_layout, ThemeInputs, Viewport};
+use crate::layout::{compute_layout, LegendOverrides, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
+
+/// Build a [`LegendOverrides`] from a [`prepare::PreparedInputs`].
+fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides {
+    LegendOverrides {
+        tick_count:         prep.legend_tick_count_override,
+        label_font_size:    prep.legend_label_font_size_override,
+        gradient_length:    prep.legend_gradient_length_override,
+        gradient_thickness: prep.legend_gradient_thickness_override,
+        direction:          prep.legend_direction_override,
+        values:             prep.legend_values_override.clone(),
+        legend_type:        prep.legend_type_override.clone(),
+    }
+}
 
 pub fn render_svg(
     spec: &ChartSpec,
@@ -227,6 +240,7 @@ pub fn render_svg(
         .clone()
         .or_else(|| prep.legend_title.clone());
 
+    let legend_overrides = legend_overrides_from_prep(&prep);
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
@@ -238,6 +252,7 @@ pub fn render_svg(
         effective_legend_title,
         prep.colorbar.as_ref(),
         &metrics,
+        &legend_overrides,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -312,6 +327,7 @@ pub fn render_scene_json(
         .clone()
         .or_else(|| prep.legend_title.clone());
 
+    let legend_overrides = legend_overrides_from_prep(&prep);
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
@@ -323,6 +339,7 @@ pub fn render_scene_json(
         effective_legend_title,
         prep.colorbar.as_ref(),
         &metrics,
+        &legend_overrides,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -549,6 +566,7 @@ mod orchestration_tests {
             .clone()
             .or_else(|| prep.legend_title.clone());
 
+        let legend_overrides = legend_overrides_from_prep(&prep);
         let metrics = font::FontdueMetrics::new();
         let vp2 = Viewport {
             width: cfg.width.unwrap_or(viewport.width),
@@ -558,6 +576,7 @@ mod orchestration_tests {
             &spec, theme_ref, vp2,
             &prep.axes, &prep.facet_groups, &prep.legend_entries,
             effective_legend_title, prep.colorbar.as_ref(), &metrics,
+            &legend_overrides,
         ).unwrap();
         for w in &layout.warnings {
             warnings.push(RenderWarning::Layout(w.clone()));

@@ -135,6 +135,7 @@ pub fn compute_layout(
     let metrics = HeuristicMetrics::default();
     let result = compute_layout_internal(
         spec, &theme, viewport, &axes, &groups, &entries, None, None, &metrics,
+        &super::legend::LegendOverrides::default(),
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 

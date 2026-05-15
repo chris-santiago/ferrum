@@ -240,7 +240,23 @@ impl SvgBuffer {
             push_attr(&mut self.buf, "transform", &t);
         }
         self.buf.push('>');
-        self.buf.push_str(&escape_text(content));
+        if content.contains('\n') {
+            let x_str = fmt_f(x);
+            for (i, line) in content.split('\n').enumerate() {
+                self.buf.push_str("<tspan");
+                push_attr(&mut self.buf, "x", &x_str);
+                if i == 0 {
+                    push_attr(&mut self.buf, "dy", "0");
+                } else {
+                    push_attr(&mut self.buf, "dy", "1.2em");
+                }
+                self.buf.push('>');
+                self.buf.push_str(&escape_text(line));
+                self.buf.push_str("</tspan>");
+            }
+        } else {
+            self.buf.push_str(&escape_text(content));
+        }
         self.buf.push_str("</text>");
     }
 
@@ -463,6 +479,54 @@ mod tests {
         buf.text(0.0, 0.0, "Price > 0 & < 1", &style);
         let out = buf.finish();
         assert!(out.contains("Price &gt; 0 &amp; &lt; 1"), "got: {out}");
+    }
+
+    #[test]
+    fn text_single_line_no_tspan() {
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 11.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        buf.text(50.0, 30.0, "hello", &style);
+        let out = buf.finish();
+        assert!(!out.contains("<tspan"), "single-line text must not emit <tspan>; got: {out}");
+        assert!(out.contains(">hello<"), "content must appear directly in <text>; got: {out}");
+    }
+
+    #[test]
+    fn text_multiline_emits_tspan_per_line() {
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        buf.text(50.0, 30.0, "line1\nline2\nline3", &style);
+        let out = buf.finish();
+        assert_eq!(out.matches("<tspan").count(), 3, "expected 3 tspans; got: {out}");
+        assert!(out.contains(">line1<"), "line1 content missing; got: {out}");
+        assert!(out.contains(">line2<"), "line2 content missing; got: {out}");
+        assert!(out.contains(">line3<"), "line3 content missing; got: {out}");
+    }
+
+    #[test]
+    fn text_multiline_dy_sequence_is_correct() {
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Middle, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        buf.text(50.0, 30.0, "a\nb", &style);
+        let out = buf.finish();
+        // First tspan: dy="0"; second tspan: dy="1.2em"
+        let tspan_a_idx = out.find(">a<").expect("tspan 'a' missing");
+        let tspan_b_idx = out.find(">b<").expect("tspan 'b' missing");
+        let first_region = &out[..tspan_a_idx];
+        let second_region = &out[tspan_a_idx..tspan_b_idx];
+        assert!(first_region.contains("dy=\"0\""), "first tspan must have dy=\"0\"; region: {first_region}");
+        assert!(second_region.contains("dy=\"1.2em\""), "second tspan must have dy=\"1.2em\"; region: {second_region}");
+    }
+
+    #[test]
+    fn text_multiline_x_attribute_repeated_on_each_tspan() {
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        let style = TextStyle { fill: from_rgb(0,0,0), font_size: 12.0, anchor: TextAnchor::Start, angle: 0.0, font_family: "Inter", font_weight: None, dominant_baseline: None };
+        buf.text(42.5, 20.0, "foo\nbar", &style);
+        let out = buf.finish();
+        // Both tspan elements must carry x="42.5"
+        let x_in_tspan = out.matches(r#"<tspan x="42.5""#).count();
+        assert_eq!(x_in_tspan, 2, "each tspan must carry the parent x; got: {out}");
     }
 
     #[test]

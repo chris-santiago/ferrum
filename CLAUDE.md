@@ -21,6 +21,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Install / rebuild Rust extension | `unset CONDA_PREFIX && uv run --no-sync maturin develop` |
 | Release build | `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` |
 | Run tests | `uv run pytest` |
+| Run scale tests | `uv run pytest -m slow` (10k–50k row tests, skipped by default) |
 | Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
 | Verify skeleton | `unset CONDA_PREFIX && uv run --no-sync python -c "from ferrum._core import ChartSpec; s=ChartSpec(mark='point', x='a', y='b'); assert s == ChartSpec.from_json(s.to_json()); print('OK')"` |
 | Build WASM module | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --out-dir ../../src/ferrum/_wasm/` |

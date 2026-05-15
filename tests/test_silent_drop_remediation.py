@@ -469,6 +469,235 @@ class TestLegendKwargs:
         )
 
 
+class TestLegendKwargsExtended:
+    """Tests for the D13+ legend kwargs wired in the second pass:
+    tickCount, labelFontSize, gradientLength, gradientThickness, direction,
+    values, and type.
+    """
+
+    def _continuous_df(self) -> pl.DataFrame:
+        """Small DataFrame with a continuous numeric 'val' column for colorbar tests."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        return pl.DataFrame({
+            "x": rng.uniform(0, 1, 10).tolist(),
+            "y": rng.uniform(0, 1, 10).tolist(),
+            "val": rng.uniform(0, 100, 10).tolist(),
+        })
+
+    def _categorical_df(self) -> pl.DataFrame:
+        return pl.DataFrame({
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "g": ["a", "b", "c", "d"],
+        })
+
+    # -- tickCount -----------------------------------------------------------
+
+    def test_tick_count_does_not_crash(self):
+        """legend={'tickCount': 3} on a continuous color encoding renders."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"tickCount": 3}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_tick_count_limits_colorbar_ticks(self):
+        """legend={'tickCount': 3} → at most 3 tick labels in the SVG colorbar."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"tickCount": 3}))
+            .show_svg()
+        )
+        # Default colorbar has 5 ticks; with tickCount=3 it should have ≤ 3.
+        # Count text elements that appear inside the legend area — use the
+        # heuristic that default has more ticks than 3.
+        default_svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val"))
+            .show_svg()
+        )
+        default_texts = len(re.findall(r"<text", default_svg))
+        limited_texts = len(re.findall(r"<text", svg))
+        assert limited_texts <= default_texts, (
+            f"tickCount=3 should reduce text elements; "
+            f"default={default_texts}, limited={limited_texts}"
+        )
+
+    # -- labelFontSize -------------------------------------------------------
+
+    def test_label_font_size_does_not_crash(self):
+        """legend={'labelFontSize': 14} renders without error."""
+        svg = (
+            fm.Chart(self._categorical_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"labelFontSize": 14}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_label_font_size_appears_in_svg(self):
+        """legend={'labelFontSize': 14} → font-size:14 appears in SVG text styles."""
+        svg = (
+            fm.Chart(self._categorical_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"labelFontSize": 14}))
+            .show_svg()
+        )
+        # Font size may appear as font-size="14" or as part of a style attribute.
+        assert "14" in svg, (
+            "Expected font size 14 to appear in SVG for labelFontSize=14"
+        )
+
+    # -- gradientLength ------------------------------------------------------
+
+    def test_gradient_length_does_not_crash(self):
+        """legend={'gradientLength': 200} renders without error."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"gradientLength": 200}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_gradient_length_affects_colorbar_height(self):
+        """legend={'gradientLength': 80} → colorbar gradient rect has height=80 in SVG."""
+        short_svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"gradientLength": 80}))
+            .show_svg()
+        )
+        # The gradient rect uses fill="url(#ferrum-colorbar-0)"; extract its height.
+        gradient_rect = re.search(
+            r'<rect[^>]+fill="url\(#ferrum-colorbar[^"]*\)"[^>]*>', short_svg
+        )
+        assert gradient_rect is not None, (
+            "Expected a gradient-filled rect in SVG; got:\n" + short_svg[:3000]
+        )
+        height_match = re.search(r'height="([\d.]+)"', gradient_rect.group())
+        assert height_match is not None, (
+            f"Expected height attr on gradient rect; got: {gradient_rect.group()}"
+        )
+        rect_h = float(height_match.group(1))
+        assert abs(rect_h - 80.0) < 5.0, (
+            f"Expected gradient rect height ≈ 80; got {rect_h:.1f}"
+        )
+
+    # -- gradientThickness ---------------------------------------------------
+
+    def test_gradient_thickness_does_not_crash(self):
+        """legend={'gradientThickness': 30} renders without error."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"gradientThickness": 30}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    # -- direction -----------------------------------------------------------
+
+    def test_direction_horizontal_renders(self):
+        """legend={'direction': 'horizontal'} renders a horizontal categorical legend."""
+        svg = (
+            fm.Chart(self._categorical_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"direction": "horizontal"}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_direction_vertical_renders(self):
+        """legend={'direction': 'vertical'} renders a vertical categorical legend."""
+        svg = (
+            fm.Chart(self._categorical_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"direction": "vertical"}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    # -- type ----------------------------------------------------------------
+
+    def test_type_symbol_accepted_without_crash(self):
+        """legend={'type': 'symbol'} on a categorical color encoding renders."""
+        svg = (
+            fm.Chart(self._categorical_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"type": "symbol"}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_type_gradient_forces_colorbar_path(self):
+        """legend={'type': 'gradient'} on a continuous encoding renders colorbar."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"type": "gradient"}))
+            .show_svg()
+        )
+        assert "<svg" in svg
+        # The colorbar uses a linearGradient — verify it appears.
+        assert "linearGradient" in svg, (
+            "Expected linearGradient in SVG for type='gradient' on continuous color"
+        )
+
+    # -- values --------------------------------------------------------------
+
+    def test_values_string_accepted_without_crash(self):
+        """legend={'values': ['low', 'mid', 'high']} renders without crash."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(
+                x="x", y="y",
+                color=fm.Color("val", legend={"values": ["low", "mid", "high"]}),
+            )
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+    def test_values_appear_in_svg(self):
+        """legend={'values': ['low', 'high']} → those labels appear in SVG."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(
+                x="x", y="y",
+                color=fm.Color("val", legend={"values": ["low", "high"]}),
+            )
+            .show_svg()
+        )
+        assert "low" in svg, "Expected 'low' in SVG from legend values"
+        assert "high" in svg, "Expected 'high' in SVG from legend values"
+
+    # -- combined kwargs -----------------------------------------------------
+
+    def test_multiple_kwargs_combined(self):
+        """Multiple legend kwargs can be combined without error."""
+        svg = (
+            fm.Chart(self._continuous_df())
+            .mark_point()
+            .encode(
+                x="x", y="y",
+                color=fm.Color("val", legend={
+                    "tickCount": 3,
+                    "gradientLength": 120,
+                    "gradientThickness": 20,
+                }),
+            )
+            .show_svg()
+        )
+        assert "<svg" in svg
+
+
 # ---------------------------------------------------------------------------
 # Task 7: histogram and density multiple=
 # ---------------------------------------------------------------------------
@@ -1079,3 +1308,127 @@ class TestFillOpacitySVG:
         )
         vals = re.findall(r'fill-opacity="([^"]+)"', svg)
         assert len(vals) >= 2, f"Expected multiple fill-opacity values; got {vals}"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: mark_text multiline \n → <tspan> elements
+# ---------------------------------------------------------------------------
+
+
+def _text_df_multiline() -> pl.DataFrame:
+    """Data with a text column containing embedded newlines."""
+    return pl.DataFrame({
+        "x": [1.0, 2.0],
+        "y": [1.0, 2.0],
+        "label": ["hello\nworld", "foo\nbar\nbaz"],
+    })
+
+
+def _text_df_singleline() -> pl.DataFrame:
+    """Data with a text column containing no newlines."""
+    return pl.DataFrame({
+        "x": [1.0, 2.0],
+        "y": [1.0, 2.0],
+        "label": ["alpha", "beta"],
+    })
+
+
+class TestMarkTextMultiline:
+    def test_multiline_text_produces_tspan_elements(self):
+        """mark_text with \\n in content produces <tspan> children in the SVG."""
+        svg = (
+            fm.Chart(_text_df_multiline())
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        assert "<tspan" in svg, (
+            "Expected <tspan> elements for multiline text; got:\n" + svg[:3000]
+        )
+
+    def test_each_newline_line_is_separate_tspan(self):
+        """Each line separated by \\n becomes its own <tspan> element."""
+        svg = (
+            fm.Chart(_text_df_multiline())
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        # "hello\nworld" → 2 tspans; "foo\nbar\nbaz" → 3 tspans; total = 5
+        tspan_count = svg.count("<tspan")
+        assert tspan_count >= 5, (
+            f"Expected ≥5 <tspan> elements (2+3); got {tspan_count}:\n" + svg[:3000]
+        )
+        # Verify the actual line content is present
+        assert "hello" in svg and "world" in svg, "Line content 'hello'/'world' missing"
+        assert "foo" in svg and "bar" in svg and "baz" in svg, (
+            "Line content 'foo'/'bar'/'baz' missing"
+        )
+
+    def test_subsequent_tspans_have_dy_attribute(self):
+        """Non-first <tspan> elements carry a dy attribute for line spacing."""
+        svg = (
+            fm.Chart(_text_df_multiline())
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        # Look for tspan elements with dy="1.2em"
+        dy_matches = re.findall(r'<tspan[^>]*dy="1\.2em"', svg)
+        assert len(dy_matches) >= 1, (
+            "Expected at least one <tspan dy=\"1.2em\"> for line-two+ lines; "
+            f"got:\n{svg[:3000]}"
+        )
+
+    def test_first_tspan_has_dy_zero(self):
+        """First <tspan> of each multiline text block has dy='0'."""
+        svg = (
+            fm.Chart(_text_df_multiline())
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        dy_zero = re.findall(r'<tspan[^>]*dy="0"', svg)
+        assert len(dy_zero) >= 1, (
+            "Expected at least one <tspan dy=\"0\"> for the first line; "
+            f"got:\n{svg[:3000]}"
+        )
+
+    def test_singleline_text_does_not_wrap_in_tspan(self):
+        """Single-line text content is emitted directly inside <text>, not in <tspan>."""
+        svg = (
+            fm.Chart(_text_df_singleline())
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        assert "<tspan" not in svg, (
+            "Single-line text should NOT be wrapped in <tspan>; "
+            f"got:\n{svg[:3000]}"
+        )
+        # The label content must still be present
+        assert "alpha" in svg and "beta" in svg, "Single-line label content missing"
+
+    def test_three_line_text_produces_correct_tspan_count(self):
+        """'foo\\nbar\\nbaz' produces exactly 3 <tspan> elements for that data point."""
+        df = pl.DataFrame({
+            "x": [1.0],
+            "y": [1.0],
+            "label": ["foo\nbar\nbaz"],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_text()
+            .encode(x="x", y="y", text="label")
+            .show_svg()
+        )
+        tspan_count = svg.count("<tspan")
+        assert tspan_count == 3, (
+            f"Expected exactly 3 <tspan> elements for 3-line text; got {tspan_count}:\n"
+            + svg[:3000]
+        )
+        # Verify dy sequence: first=0, second=1.2em, third=1.2em
+        dy_values = re.findall(r'<tspan[^>]*dy="([^"]+)"', svg)
+        assert dy_values == ["0", "1.2em", "1.2em"], (
+            f"Expected dy sequence ['0','1.2em','1.2em']; got {dy_values}"
+        )

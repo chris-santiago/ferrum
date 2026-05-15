@@ -107,6 +107,26 @@ pub struct LegendEntryLayout {
 
 use super::text_metrics::TextMetrics;
 
+/// Per-chart legend overrides extracted from `encoding.color.legend` dict.
+/// These are applied on top of `ThemeInputs` defaults at layout time.
+#[derive(Debug, Clone, Default)]
+pub struct LegendOverrides {
+    /// Max ticks for a continuous colorbar. Subsets `tick_labels` before layout.
+    pub tick_count: Option<usize>,
+    /// Font size for entry/tick labels (overrides `theme.label_font_size`).
+    pub label_font_size: Option<f64>,
+    /// Pixel length (height) of the colorbar gradient bar (overrides `COLORBAR_HEIGHT`).
+    pub gradient_length: Option<f64>,
+    /// Pixel thickness (width) of the colorbar gradient bar (overrides `COLORBAR_WIDTH`).
+    pub gradient_thickness: Option<f64>,
+    /// Direction override for categorical legend (overrides `theme.legend_direction`).
+    pub direction: Option<LegendDirection>,
+    /// Explicit tick/entry labels. Replaces the auto-generated `tick_labels`.
+    pub values: Option<Vec<String>>,
+    /// `"gradient"` → force colorbar; `"symbol"` → force discrete entries.
+    pub legend_type: Option<String>,
+}
+
 const SYMBOL_WIDTH: f64 = 12.0;
 const SYMBOL_LABEL_GAP: f64 = 4.0;
 const LEGEND_OUTER_PAD: f64 = 8.0;
@@ -373,21 +393,52 @@ pub fn layout_legend(
     (Some(legend), plot_inner)
 }
 
+pub(crate) const COLORBAR_WIDTH: f64 = 14.0;
+pub(crate) const COLORBAR_HEIGHT: f64 = 180.0;
+const COLORBAR_TICK_GAP: f64 = 4.0;
+
+/// Subsample `labels` to at most `max_count` evenly-spaced entries, always
+/// keeping the first and last. Used when `tickCount` is set on a colorbar.
+pub fn subsample_tick_labels(labels: Vec<String>, max_count: usize) -> Vec<String> {
+    let n = labels.len();
+    if max_count == 0 || n == 0 {
+        return Vec::new();
+    }
+    if max_count >= n {
+        return labels;
+    }
+    if max_count == 1 {
+        return vec![labels[0].clone()];
+    }
+    // Always keep first and last; distribute the rest evenly.
+    let mut result = Vec::with_capacity(max_count);
+    for i in 0..max_count {
+        let idx = (i * (n - 1)) / (max_count - 1);
+        result.push(labels[idx].clone());
+    }
+    result
+}
+
 /// Estimate the bounding rect of a continuous colorbar (vertical bar +
-/// tick labels). Width: bar (`COLORBAR_WIDTH`) + gap + max tick label.
+/// tick labels). Width: bar width + gap + max tick label.
 /// Height: pixel range of the bar plus title (when set) and outer padding.
+///
+/// `bar_w_override` / `bar_h_override` replace the default constants when
+/// `Some` (from `gradientThickness` / `gradientLength` legend kwargs).
 pub fn estimate_colorbar_size(
     title: Option<&str>,
     tick_labels: &[String],
     label_font_size: f64,
     title_font_size: f64,
     metrics: &dyn TextMetrics,
+    bar_w_override: Option<f64>,
+    bar_h_override: Option<f64>,
 ) -> LegendSize {
     let line_h = metrics.line_height(label_font_size);
     let max_tick_w = tick_labels.iter().map(|s|
         metrics.measure_width(s, label_font_size)).fold(0.0_f64, f64::max);
-    let bar_h = COLORBAR_HEIGHT;
-    let bar_w = COLORBAR_WIDTH;
+    let bar_h = bar_h_override.unwrap_or(COLORBAR_HEIGHT);
+    let bar_w = bar_w_override.unwrap_or(COLORBAR_WIDTH);
     let mut width = bar_w + COLORBAR_TICK_GAP + max_tick_w + 2.0 * LEGEND_OUTER_PAD;
     let title_h = title.map(|t| {
         let tw = metrics.measure_width(t, title_font_size);
@@ -398,10 +449,6 @@ pub fn estimate_colorbar_size(
     LegendSize { width, height }
 }
 
-const COLORBAR_WIDTH: f64 = 14.0;
-const COLORBAR_HEIGHT: f64 = 180.0;
-const COLORBAR_TICK_GAP: f64 = 4.0;
-
 /// Build a colorbar legend (continuous color scale variant). Mirrors
 /// `layout_legend` but for the gradient/colorbar shape — bar geometry,
 /// per-tick y-positions, and title placement.
@@ -409,6 +456,9 @@ const COLORBAR_TICK_GAP: f64 = 4.0;
 /// `stops` is the gradient definition as (position in [0, 1], hex color);
 /// `tick_labels` is the data-domain labels (low → high) used to position
 /// tick marks on the bar.
+///
+/// `gradient_length_override` / `gradient_thickness_override` — when `Some`,
+/// replace the default `COLORBAR_HEIGHT` / `COLORBAR_WIDTH` constants.
 pub fn layout_colorbar(
     plot_inner: Rect,
     orient: LegendOrient,
@@ -419,12 +469,17 @@ pub fn layout_colorbar(
     title_font_size: f64,
     metrics: &dyn TextMetrics,
     legend_gutter: f64,
+    gradient_length_override: Option<f64>,
+    gradient_thickness_override: Option<f64>,
 ) -> (Option<LegendLayout>, Rect) {
     if stops.is_empty() {
         return (None, plot_inner);
     }
+    let effective_bar_h = gradient_length_override.unwrap_or(COLORBAR_HEIGHT).max(1.0);
+    let effective_bar_w = gradient_thickness_override.unwrap_or(COLORBAR_WIDTH).max(1.0);
     let size = estimate_colorbar_size(
         title.as_deref(), &tick_labels, label_font_size, title_font_size, metrics,
+        Some(effective_bar_w), Some(effective_bar_h),
     );
 
     // Place the colorbar in the same gutter slot a categorical legend would
@@ -478,12 +533,12 @@ pub fn layout_colorbar(
         .map(|_| metrics.line_height(title_font_size) + LEGEND_TITLE_GAP)
         .unwrap_or(0.0);
     let bar_top = legend_rect.y + LEGEND_OUTER_PAD + title_h;
-    let bar_bottom = (bar_top + COLORBAR_HEIGHT).min(legend_rect.y + legend_rect.h - LEGEND_OUTER_PAD);
+    let bar_bottom = (bar_top + effective_bar_h).min(legend_rect.y + legend_rect.h - LEGEND_OUTER_PAD);
     let bar_left = legend_rect.x + LEGEND_OUTER_PAD;
     let bar_rect = Rect {
         x: bar_left,
         y: bar_top,
-        w: COLORBAR_WIDTH,
+        w: effective_bar_w,
         h: (bar_bottom - bar_top).max(0.0),
     };
 
