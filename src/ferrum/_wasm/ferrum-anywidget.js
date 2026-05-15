@@ -225,7 +225,7 @@ async function _render(container, sceneJson, model) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
 
-  return { canvas, renderer, scene };
+  return { canvas, renderer, scene, ov };
 }
 
 export async function render({ model, el }) {
@@ -270,7 +270,7 @@ export async function render({ model, el }) {
             try {
               const textJson = _state.renderer.onWheel(
                 0, e.deltaY, e.clientX - r.left, e.clientY - r.top);
-              _placeText(ov, JSON.parse(textJson));
+              _placeText(_state.ov, JSON.parse(textJson));
             } catch (err) { /* GPU not ready */ }
           }
           // Debounced Python round-trip (for mark_function/mark_raster recompute).
@@ -294,7 +294,7 @@ export async function render({ model, el }) {
           if (!_state || !_state.renderer) return;
           try {
             const textJson = _state.renderer.resetZoom(0);
-            _placeText(ov, JSON.parse(textJson));
+            _placeText(_state.ov, JSON.parse(textJson));
           } catch (err) { /* ignore */ }
         });
       }
