@@ -1,8 +1,11 @@
-use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
+use ferrum_scene::{
+    MarkBatchKind, PathCmd, SceneNode, TooltipContent as FsTooltipContent,
+    TooltipField as FsTooltipField,
+};
 
 use crate::render::arrow_cast::{col_as_f64, col_as_str};
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_fill_stroke, DrawCtx, MarkBuildResult};
+use crate::render::draw::{to_scene_fill_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::render::scale_resolve::ColorScale;
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 
@@ -55,6 +58,9 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         _ => None,
     };
 
+    // Collect tooltip column data up front so we can index by row later.
+    let meta = MetadataColumns::from_ctx(ctx);
+
     let mut nodes: Vec<SceneNode> = Vec::with_capacity(values.len());
     let mut data_indices: Vec<usize> = Vec::with_capacity(values.len());
     let mut cum_angle = start_angle;
@@ -103,11 +109,35 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         data_indices.push(i);
     }
 
+    // Build one tooltip per rendered node, indexed via data_indices.
+    let tooltips: Option<Vec<FsTooltipContent>> = if meta.tooltip_cols.is_empty() {
+        None
+    } else {
+        Some(
+            data_indices
+                .iter()
+                .map(|&row_idx| FsTooltipContent {
+                    fields: meta
+                        .tooltip_cols
+                        .iter()
+                        .map(|(name, col)| FsTooltipField {
+                            name: name.clone(),
+                            value: col
+                                .get(row_idx)
+                                .and_then(|v| v.clone())
+                                .unwrap_or_default(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    };
+
     MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
-        tooltips: None,
+        tooltips,
         hrefs: None,
         descriptions: None,
     }

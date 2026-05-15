@@ -214,10 +214,9 @@ def test_pie_chart_has_arc_nodes_with_path_type():
     assert batch["kind"] == "arc"
     assert len(batch["nodes"]) == 3, "expected 3 arc nodes"
     assert all(n["type"] == "path" for n in batch["nodes"]), "arc nodes must be path type"
-    # Tooltips are populated by the arc mark renderer via tooltip_fields.
-    # NOTE: arc.rs currently sets tooltips: None — this test documents the gap.
-    # When arc tooltips are fixed, update this assertion to check content.
-    # assert batch["tooltips"] is not None
+    assert batch["tooltips"] is not None, "arc tooltips must be populated"
+    field_names = {f["name"] for f in batch["tooltips"][0]["fields"]}
+    assert field_names == {"cat", "val"}
 
 
 def test_pie_chart_arc_nodes_have_path_commands():

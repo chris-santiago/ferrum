@@ -113,12 +113,23 @@ async function _render(container, sceneJson, model) {
     ? scene.panels.flatMap(p => (p.marks || []).map(b => ({ batch: b, panel: p })))
     : [];
 
-  // ── Hover tooltip ────────────────────────────────────────────────────
+  // ── Pan + hover tooltip (combined mousemove) ─────────────────────
+  // renderer is declared below (let), captured by closure.
+  let _isDragging = false;
+  let _panStart = null;
+  canvas.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const r = canvas.getBoundingClientRect();
+    _panStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+    _isDragging = false;
+  });
   canvas.addEventListener('mousemove', e => {
     const r = canvas.getBoundingClientRect();
-    const h = _hitTest(marks, e.clientX - r.left, e.clientY - r.top);
-    if (h && h.batch.tooltips && h.batch.tooltips[h.idx]) {
-      const t = h.batch.tooltips[h.idx];
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    // Tooltip hover (always active).
+    const hh = _hitTest(marks, mx, my);
+    if (hh && hh.batch.tooltips && hh.batch.tooltips[hh.idx]) {
+      const t = hh.batch.tooltips[hh.idx];
       tip.replaceChildren();
       const tbl = document.createElement('table');
       for (const f of t.fields) {
@@ -129,33 +140,43 @@ async function _render(container, sceneJson, model) {
         tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
       }
       tip.appendChild(tbl);
-      tip.style.left = (e.clientX - r.left + 12) + 'px';
-      tip.style.top = (e.clientY - r.top - 12) + 'px';
+      tip.style.left = (mx + 12) + 'px';
+      tip.style.top = (my - 12) + 'px';
       tip.style.opacity = '1';
     } else {
       tip.style.opacity = '0';
     }
+    // Pan drag.
+    if (!_panStart) return;
+    const dx = mx - _panStart.x, dy = my - _panStart.y;
+    if (!_isDragging && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) _isDragging = true;
+    if (!_isDragging || !renderer) return;
+    try {
+      const textJson = renderer.onPan(0, dx, dy);
+      _placeText(ov, JSON.parse(textJson));
+    } catch (err) { /* GPU not ready */ }
+    _panStart = { x: mx, y: my };
   });
-  canvas.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });
+  const _endPan = () => { _panStart = null; setTimeout(() => { _isDragging = false; }, 0); };
+  canvas.addEventListener('mouseup', _endPan);
+  canvas.addEventListener('mouseleave', () => { tip.style.opacity = '0'; _endPan(); });
 
   // ── Click: href navigation + selection ──────────────────────────────
-  // renderer is declared below (let), captured by closure — sees the updated
-  // value after GPU init completes (JS let closures capture the binding).
   canvas.addEventListener('click', e => {
+    if (_isDragging) return; // suppress click fired immediately after a pan drag
     const r = canvas.getBoundingClientRect();
     const cx = e.clientX - r.left, cy = e.clientY - r.top;
-    const h = _hitTest(marks, cx, cy);
-    if (!h) return;
 
-    if (h.batch.hrefs && h.batch.hrefs[h.idx]) {
+    // Href navigation: use JS hit test (doesn't need WASM).
+    const h = _hitTest(marks, cx, cy);
+    if (h && h.batch.hrefs && h.batch.hrefs[h.idx]) {
       window.open(h.batch.hrefs[h.idx], '_blank', 'noopener,noreferrer');
       return;
     }
 
-    // Delegate to WASM handleClick when GPU renderer is available.
-    // handleClick() does authoritative hit-test, updates selection state,
-    // dims non-selected marks via conditional encodings, re-renders frame,
-    // and returns the new selection JSON for Python sync.
+    // Delegate ALL clicks (hit or miss) to WASM handleClick so Rust is
+    // authoritative: background clicks deselect, post-zoom clicks use
+    // actual rendered geometry rather than stale JS scene positions.
     if (renderer) {
       try {
         const stateJson = renderer.handleClick(cx, cy);
@@ -168,8 +189,8 @@ async function _render(container, sceneJson, model) {
       return;
     }
 
-    // Fallback (no GPU): extract field values from tooltip, build selection
-    // state from registered selection specs in interaction_config.
+    // Fallback (no GPU): use JS hit test + tooltip field extraction.
+    if (!h) return;
     const cfg = model.get('interaction_config');
     let selConfig = {};
     try { selConfig = JSON.parse(cfg || '{}'); } catch (e) { /* ignore */ }

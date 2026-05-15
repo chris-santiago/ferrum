@@ -244,7 +244,12 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "onWheel")]
     pub fn on_wheel(&mut self, panel_id: u32, delta_y: f32, cx: f32, cy: f32) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        let scale_mode = match loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord) {
+        let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
+        // Polar and Geo panels have no affine-transform-compatible coordinate space.
+        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. })) {
+            return Ok("[]".to_string());
+        }
+        let scale_mode = match coord {
             Some(ferrum_scene::CoordKind::Fixed { .. }) => ScaleMode::Uniform,
             _ => ScaleMode::Independent,
         };
