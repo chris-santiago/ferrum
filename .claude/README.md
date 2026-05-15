@@ -17,6 +17,7 @@ This directory contains ferrum's project-specific Claude Code automations: **ski
 | Senior Python code review on a module/subsystem | `/python-review` |
 | Senior Rust code review on a crate/module | `/rust-review` |
 | Add or update a docstring | `/ferrum-docstrings` |
+| Surface unimplemented features, silent drops, spec gaps | `/code-archaeology` |
 
 ---
 
@@ -103,6 +104,14 @@ Same structure as `/python-review` but for Rust: orient → diagnose → propose
 Reference for adding or updating docstrings in ferrum. Covers the NumPy convention, PyO3 placement rules (class docstring owns `Parameters`, not `__init__`), and ferrum-specific example shapes. Invoke when adding a new public class, mark, transform, or encoding channel.
 
 Full rationale: `docs/superpowers/specs/2026-05-11-docstrings-design.md`
+
+---
+
+### `/code-archaeology` — Unimplemented feature and silent-drop sweep
+
+**File:** `skills/code-archaeology/SKILL.md`
+
+Dispatches three parallel agents (Python, Rust, Tests+Docs) to sweep the entire codebase for unimplemented features, silently dropped parameters, dead code paths, skipped tests, and spec-vs-impl gaps. Produces a prioritized report saved to `docs/superpowers/followups/YYYY-MM-DD-code-archaeology.md`. The key non-obvious patterns: `_ => {}` match-arm fallthroughs in Rust dispatch tables, `warn_once`-gated silent drops in Python, and `#[allow(dead_code)]` blanket suppressions that hide unused helpers.
 
 ---
 
