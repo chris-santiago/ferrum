@@ -42,3 +42,31 @@ def test_boxplot_render_smoke(df):
     chart = fe.Chart(df).mark_boxplot().encode(x="group", y="value")
     svg = chart.show_svg()
     assert svg.startswith("<?xml") or svg.startswith("<svg")
+
+
+def test_boxplot_width_sets_box_band_size(df):
+    """mark_boxplot(width=0.3) should control box width (maps to size/band_size)."""
+    # width=0.3 should produce a narrower box than the default (0.6).
+    chart_narrow = fe.Chart(df).mark_boxplot(width=0.3).encode(x="group", y="value")
+    chart_default = fe.Chart(df).mark_boxplot().encode(x="group", y="value")
+
+    # Should render without error.
+    svg_narrow = chart_narrow.show_svg()
+    svg_default = chart_default.show_svg()
+    assert "<svg" in svg_narrow or svg_narrow.startswith("<?xml"), "width=0.3 should produce valid SVG"
+
+    # The box layer uses band_size; narrow (0.3) should produce smaller box rects
+    # than the default (0.6). Compare the minimum width of <rect> elements.
+    import re
+
+    def _rect_widths(svg: str) -> list:
+        return [float(m) for m in re.findall(r'<rect[^>]+width="([^"]+)"', svg)]
+
+    widths_narrow = _rect_widths(svg_narrow)
+    widths_default = _rect_widths(svg_default)
+    assert widths_narrow, "narrow boxplot should contain <rect> elements"
+    assert widths_default, "default boxplot should contain <rect> elements"
+    assert min(widths_narrow) < min(widths_default), (
+        f"width=0.3 should produce narrower boxes than default (0.6); "
+        f"narrow_min={min(widths_narrow):.2f}, default_min={min(widths_default):.2f}"
+    )

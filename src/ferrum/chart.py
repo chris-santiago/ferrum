@@ -1126,6 +1126,7 @@ class Chart:
         *,
         extent=1.5,
         size=None,
+        width=None,
         outliers=True,
         color_field=None,
         horizontal=False,
@@ -1144,7 +1145,12 @@ class Chart:
         extent : float, optional
             Whisker reach as a multiple of IQR.  Default is ``1.5``.
         size : float or None, optional
-            Box width in pixels.  ``None`` (default) lets the renderer choose.
+            Box band-width as a fraction of the category band (default ``0.6``).
+            Alias: ``width``.
+        width : float or None, optional
+            Alias for ``size``.  Controls box band-width as a fraction of the
+            category band.  When both ``size`` and ``width`` are provided,
+            ``size`` takes precedence.
         outliers : bool, optional
             Whether to draw outlier points beyond the whiskers.  Default is
             ``True``.
@@ -1172,12 +1178,15 @@ class Chart:
         """
         from ferrum.marks.composite import desugar_boxplot
 
+        # width is an alias for size; size takes precedence when both are given.
+        effective_size = size if size is not None else width
+
         return self._set_composite_mark(
             "boxplot",
             desugar_boxplot,
             {
                 "extent": extent,
-                "size": size,
+                "size": effective_size,
                 "outliers": outliers,
                 "color_field": color_field,
                 "horizontal": horizontal,
