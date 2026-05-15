@@ -219,6 +219,90 @@ mod bug_hunt_tests {
         let level = state.current_tick_level_idx(0);
         assert_eq!(level, 1);
     }
+
+    #[test]
+    fn bug_hunt_accumulated_wheel_then_pan_translation_is_finite() {
+        // After many wheel + pan operations the translation must remain finite.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        for i in 0..50 {
+            let delta = if i % 2 == 0 { 300.0 } else { -200.0 };
+            state.on_wheel(0, delta, 150.0, 120.0, ScaleMode::Independent);
+            state.on_pan(0, 5.0 * (i as f64), -3.0 * (i as f64));
+        }
+        let t = &state.transforms[0];
+        assert!(t.tx.is_finite(), "tx must remain finite after accumulated ops");
+        assert!(t.ty.is_finite(), "ty must remain finite after accumulated ops");
+        assert!(t.sx.is_finite(), "sx must remain finite");
+        assert!(t.sy.is_finite(), "sy must remain finite");
+    }
+
+    #[test]
+    fn bug_hunt_wheel_cursor_invariant_preserved_through_sequence() {
+        // The cursor point should not move visually under repeated wheel zoom.
+        // This mirrors the JS property: forward(cursor) == cursor after each wheel call.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        let (cx, cy) = (200.0, 150.0);
+        for delta in [200.0_f64, 500.0, -300.0, 100.0] {
+            state.on_wheel(0, delta, cx, cy, ScaleMode::Independent);
+            let t = &state.transforms[0];
+            let (fx, fy) = t.apply(cx, cy);
+            assert!(
+                (fx - cx).abs() < 1e-6,
+                "cursor x must not move after wheel delta={delta}: expected={cx}, got={fx}"
+            );
+            assert!(
+                (fy - cy).abs() < 1e-6,
+                "cursor y must not move after wheel delta={delta}: expected={cy}, got={fy}"
+            );
+        }
+    }
+
+    #[test]
+    fn bug_hunt_uniform_mode_sx_equals_sy_after_asymmetric_initial_state() {
+        // Even if sx != sy initially, a Uniform wheel event must make them equal.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.transforms[0].sx = 1.5;
+        state.transforms[0].sy = 3.0;
+        state.on_wheel(0, 100.0, 50.0, 50.0, ScaleMode::Uniform);
+        let t = &state.transforms[0];
+        assert!(
+            (t.sx - t.sy).abs() < 1e-10,
+            "Uniform mode must produce sx == sy; got sx={}, sy={}", t.sx, t.sy
+        );
+    }
+
+    #[test]
+    fn bug_hunt_pan_then_reset_restores_identity() {
+        // reset() must undo any pan + zoom combination.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.on_wheel(0, 1000.0, 100.0, 100.0, ScaleMode::Independent);
+        state.on_pan(0, 300.0, -200.0);
+        state.reset(0);
+        let t = &state.transforms[0];
+        assert!((t.sx - 1.0).abs() < 1e-10);
+        assert!((t.sy - 1.0).abs() < 1e-10);
+        assert!(t.tx.abs() < 1e-10);
+        assert!(t.ty.abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_apply_inverse_apply_roundtrip_after_wheel_and_pan() {
+        // After a wheel+pan sequence, forward then inverse must recover the original point.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.on_wheel(0, 800.0, 200.0, 150.0, ScaleMode::Independent);
+        state.on_pan(0, 40.0, -25.0);
+        let t = state.transforms[0];
+        let orig = (77.0_f64, 123.0_f64);
+        let (fx, fy) = t.apply(orig.0, orig.1);
+        let (bx, by) = t.inverse_apply(fx, fy);
+        assert!((bx - orig.0).abs() < 1e-8, "roundtrip x failed: got {bx}");
+        assert!((by - orig.1).abs() < 1e-8, "roundtrip y failed: got {by}");
+    }
 }
 
 #[cfg(test)]

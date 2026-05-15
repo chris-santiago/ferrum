@@ -175,6 +175,69 @@ mod bug_hunt_tests {
             "ease_in_out_cubic discontinuity at 0.5: left={left}, right={right}"
         );
     }
+
+    #[test]
+    fn bug_hunt_ease_in_out_values_in_zero_one_range() {
+        // All outputs must be in [0, 1] for all inputs in [0, 1].
+        for i in 0..=200 {
+            let t = i as f32 / 200.0;
+            let v = ease_in_out_cubic(t);
+            assert!(
+                v >= 0.0 && v <= 1.0,
+                "ease_in_out_cubic({t}) = {v}, out of [0, 1]"
+            );
+        }
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_color_clamps_or_remains_in_range() {
+        // Verify that lerp of two colors (white/black) at midpoint produces mid-grey.
+        let white = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 1.0,
+            fill_color: [1.0, 1.0, 1.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+        };
+        let black = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 1.0,
+            fill_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+        };
+        let mid = lerp_circles(&[white], &[black], 0.5);
+        assert!((mid[0].fill_color[0] - 0.5).abs() < 0.01, "mid-grey R channel");
+        assert!((mid[0].fill_color[1] - 0.5).abs() < 0.01, "mid-grey G channel");
+        assert!((mid[0].fill_color[2] - 0.5).abs() < 0.01, "mid-grey B channel");
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_corner_radius_interpolates() {
+        // corner_radius must be linearly interpolated between old and new.
+        let old = make_rect(0.0, 0.0, 100.0, 50.0);
+        let mut new_r = make_rect(0.0, 0.0, 100.0, 50.0);
+        new_r.corner_radius = 20.0;
+        let mid = lerp_rects(&[old], &[new_r], 0.5);
+        assert!(
+            (mid[0].corner_radius - 10.0).abs() < 0.01,
+            "corner_radius must lerp to 10.0 at t=0.5, got {}", mid[0].corner_radius
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_new_longer_than_old_truncates() {
+        // zip() truncates to min(old.len, new.len). When new is longer, extra new elements dropped.
+        let old = vec![make_circle(0.0, 0.0, 5.0)];
+        let new = vec![
+            make_circle(50.0, 50.0, 8.0),
+            make_circle(100.0, 100.0, 10.0),
+        ];
+        let result = lerp_circles(&old, &new, 0.5);
+        assert_eq!(result.len(), 1, "zip truncates to min(1, 2) = 1");
+    }
 }
 
 #[cfg(test)]

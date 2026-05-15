@@ -379,4 +379,149 @@ mod tests {
         let json = state.to_json();
         assert!(json.contains("\"empty\""));
     }
+
+    // ── bug_hunt: InteractionState edge cases ─────────────────────────────────
+
+    #[test]
+    fn bug_hunt_new_with_empty_specs_has_no_selections() {
+        let state = InteractionState::new(&[]);
+        assert!(state.selections.is_empty(), "empty specs must produce empty selections map");
+    }
+
+    #[test]
+    fn bug_hunt_to_json_produces_valid_json_for_point_selection() {
+        let specs = vec![point_spec("sel1")];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "sel1".to_string(),
+            SelectionState::Point {
+                indices: vec![0, 2, 5],
+                field_values: Vec::new(),
+            },
+        );
+        let json_str = state.to_json();
+        // Must be valid JSON
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("to_json must produce valid JSON");
+        let sel = &parsed["sel1"];
+        assert_eq!(sel["type"], "point");
+        let indices = sel["indices"].as_array().expect("indices must be array");
+        assert_eq!(indices.len(), 3);
+    }
+
+    #[test]
+    fn bug_hunt_to_json_produces_valid_json_for_interval_selection() {
+        let specs = vec![
+            SelectionSpec::Interval {
+                name: "brush".to_string(),
+                fields: None,
+                encodings: None,
+                translate: true,
+                zoom: true,
+                mark: None,
+                resolve: ferrum_scene::SelectionResolve::Global,
+            }
+        ];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "brush".to_string(),
+            SelectionState::Interval {
+                x_range: Some((10.0, 200.0)),
+                y_range: Some((50.0, 300.0)),
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("to_json must produce valid JSON");
+        assert_eq!(parsed["brush"]["type"], "interval");
+        let xr = parsed["brush"]["x_range"].as_array().expect("x_range must be array");
+        assert!((xr[0].as_f64().unwrap() - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_handle_drag_clamps_lo_hi_regardless_of_order() {
+        // Dragging right-to-left (x0 > x1) must still produce correct lo/hi ordering.
+        let specs = vec![
+            SelectionSpec::Interval {
+                name: "b".to_string(),
+                fields: None,
+                encodings: None,
+                translate: true,
+                zoom: true,
+                mark: None,
+                resolve: ferrum_scene::SelectionResolve::Global,
+            }
+        ];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&specs, 0, 300.0, 200.0, 100.0, 50.0);
+        match state.selections.get("b") {
+            Some(SelectionState::Interval { x_range: Some((lo, hi)), .. }) => {
+                assert!(lo <= hi, "x_range lo must be <= hi regardless of drag direction");
+                assert!((lo - 100.0).abs() < 1e-10, "lo must be min(x0,x1)=100");
+                assert!((hi - 300.0).abs() < 1e-10, "hi must be max(x0,x1)=300");
+            }
+            other => panic!("expected Interval x_range, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_toggle_points_deselects_when_all_already_selected() {
+        // Toggling indices that are already all selected must deselect them.
+        let mut sel = SelectionState::Point {
+            indices: vec![1, 2, 3],
+            field_values: Vec::new(),
+        };
+        toggle_points(&mut sel, &[1, 2, 3]);
+        assert!(matches!(sel, SelectionState::Empty), "all-selected toggle must deselect to Empty");
+    }
+
+    #[test]
+    fn bug_hunt_toggle_points_adds_when_none_selected() {
+        // Toggling from Empty must add the indices.
+        let mut sel = SelectionState::Empty;
+        toggle_points(&mut sel, &[4, 5]);
+        match &sel {
+            SelectionState::Point { indices, .. } => {
+                assert!(indices.contains(&4) && indices.contains(&5));
+            }
+            other => panic!("expected Point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_toggle_points_partial_overlap_adds_missing() {
+        // [0, 1] already selected; toggle [1, 2] — should add 2 since not all are selected.
+        let mut sel = SelectionState::Point {
+            indices: vec![0, 1],
+            field_values: Vec::new(),
+        };
+        toggle_points(&mut sel, &[1, 2]);
+        match &sel {
+            SelectionState::Point { indices, .. } => {
+                assert!(indices.contains(&2), "index 2 must be added");
+                // 1 was already there, must still be present
+                assert!(indices.contains(&1));
+            }
+            other => panic!("expected Point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_selection_contains_empty_always_false() {
+        let sel = SelectionState::Empty;
+        assert!(!sel.contains(0));
+        assert!(!sel.contains(999));
+    }
+
+    #[test]
+    fn bug_hunt_selection_contains_point_correct_membership() {
+        let sel = SelectionState::Point {
+            indices: vec![3, 7, 11],
+            field_values: Vec::new(),
+        };
+        assert!(sel.contains(3));
+        assert!(sel.contains(7));
+        assert!(!sel.contains(0));
+        assert!(!sel.contains(100));
+    }
 }

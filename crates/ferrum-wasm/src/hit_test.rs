@@ -426,6 +426,127 @@ mod bug_hunt_tests {
         assert!(hit_test_rects(&nodes, -40.0, -25.0).is_some());
         assert!(hit_test_rects(&nodes, 0.0, 0.0).is_none());
     }
+
+    // ── hit_test_nearest: new coverage ─────────────────────────────────────────
+
+    fn make_panel_two_circles(c1: (f64, f64), c2: (f64, f64)) -> Vec<ferrum_scene::Panel> {
+        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        let style = FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+        };
+        vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: c1.0, cy: c1.1, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: c2.0, cy: c2.1, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }]
+    }
+
+    fn identity_zoom_n(n: usize) -> crate::zoom_pan::ZoomPanState {
+        let config = ferrum_scene::InteractionConfig::default();
+        crate::zoom_pan::ZoomPanState::new(n, &config)
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_empty_panels_returns_none() {
+        // No panels: nearest must return None, not panic
+        let zoom = identity_zoom_n(0);
+        let result = hit_test_nearest(&[], 100.0, 100.0, &zoom);
+        assert!(result.is_none(), "nearest on empty panels must return None");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_returns_closest_circle() {
+        // Two circles: (100, 100) and (300, 300). Click near (110, 100) — closest is idx 0.
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = identity_zoom_n(1);
+        let result = hit_test_nearest(&panels, 110.0, 100.0, &zoom);
+        let r = result.expect("must find nearest mark");
+        assert_eq!(r.data_idx, Some(0), "circle at (100,100) must be nearest to (110,100)");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_returns_second_circle_when_closer() {
+        // Two circles: (100, 100) and (300, 300). Click near (295, 295) — closest is idx 1.
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = identity_zoom_n(1);
+        let result = hit_test_nearest(&panels, 295.0, 295.0, &zoom);
+        let r = result.expect("must find nearest mark");
+        assert_eq!(r.data_idx, Some(1), "circle at (300,300) must be nearest to (295,295)");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_click_outside_plot_area_returns_none() {
+        // plot_area is (0..500, 0..500). Click at (-50, 250) is outside.
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = identity_zoom_n(1);
+        let result = hit_test_nearest(&panels, -50.0, 250.0, &zoom);
+        assert!(result.is_none(), "click outside plot_area must miss even for nearest");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_equidistant_returns_first_found() {
+        // Two circles exactly equidistant from click at (200, 100):
+        // circle A at (100, 100) → dist = 100, circle B at (300, 100) → dist = 100.
+        // Whichever batch is first in the iteration wins (no panic, deterministic).
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 100.0));
+        let zoom = identity_zoom_n(1);
+        let result = hit_test_nearest(&panels, 200.0, 100.0, &zoom);
+        assert!(result.is_some(), "equidistant case must not return None");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_panel_with_no_marks() {
+        // Panel with no mark batches: nearest must return None, not panic.
+        use ferrum_scene::{CoordKind, Panel, Rect};
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],  // no marks
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+        let zoom = identity_zoom_n(1);
+        let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom);
+        assert!(result.is_none(), "panel with no marks must yield None for nearest");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_data_idx_threaded_correctly() {
+        // Verify data_indices are read correctly for nearest result
+        let panels = make_panel_two_circles((200.0, 200.0), (400.0, 200.0));
+        let zoom = identity_zoom_n(1);
+        // Click just next to first circle
+        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom).expect("must hit");
+        assert_eq!(result.data_idx, Some(0));
+    }
 }
 
 #[cfg(test)]
