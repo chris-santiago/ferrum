@@ -1112,25 +1112,36 @@ Returns a `JointChart`. `kind` controls the center panel mark; `marginal_kind` c
 #### Model Diagnostics (figure-level)
 
 ```
-ferrum.roc_chart(model_or_source, X=None, y=None, *, per_class=True,
+ferrum.roc_chart(model_or_source=None, X=None, y=None, *,
+                 y_true=None, y_pred=None,   # precomputed path (1-D binary or 2-D multiclass scores)
+                 per_class=True,
                  average="macro", annotate_auc=True,
                  compare=None,     # dict[str, estimator] for multi-model overlay
                  theme=None)
 
-ferrum.pr_chart(model_or_source, X=None, y=None, *, per_class=True,
+ferrum.pr_chart(model_or_source=None, X=None, y=None, *,
+                y_true=None, y_pred=None,    # precomputed path (1-D binary or 2-D multiclass scores)
+                per_class=True,
                 annotate_ap=True, iso_lines=True, compare=None, theme=None)
 
-ferrum.confusion_matrix_chart(model_or_source, X=None, y=None, *,
+ferrum.confusion_matrix_chart(model_or_source=None, X=None, y=None, *,
+                               y_true=None, y_pred=None,   # precomputed path (1-D hard labels)
                                normalize="true", cmap="blues", theme=None)
 
-ferrum.calibration_chart(*model_or_sources, X=None, y=None, *,
+ferrum.calibration_chart(model_or_source=None, X=None, y=None, *,
+                          y_true=None, y_pred=None,  # precomputed path (1-D positive-class proba)
                           n_bins=10, theme=None)
 
-ferrum.gain_chart(model_or_source, X=None, y=None, *, compare=None, theme=None)
+ferrum.gain_chart(model_or_source=None, X=None, y=None, *,
+                  y_true=None, y_pred=None,          # precomputed path (soft scores)
+                  compare=None, theme=None)
 
-ferrum.lift_chart(model_or_source, X=None, y=None, *, compare=None, theme=None)
+ferrum.lift_chart(model_or_source=None, X=None, y=None, *,
+                  y_true=None, y_pred=None,          # precomputed path (soft scores)
+                  compare=None, theme=None)
 
-ferrum.residuals_chart(model_or_source, X=None, y=None, *,
+ferrum.residuals_chart(model_or_source=None, X=None, y=None, *,
+                        y_true=None, y_pred=None,    # precomputed path (fitted values); residuals = y_true − y_pred
                         kind="studentized", panels="auto",
                         # panels: "auto" | "single" | None | list of
                         #         "residuals_vs_fitted" | "qq" |
@@ -1144,6 +1155,12 @@ ferrum.residuals_chart(model_or_source, X=None, y=None, *,
 # `ModelSource.predictions()` emits all-NaN `leverage`; the chart
 # builder silently drops the leverage panel from the auto layout so
 # `panels="auto"` stays safe for RandomForest / GBM / etc.
+#
+# **2026-05-15 (precomputed path):** `y_true=`, `y_pred=` bypass the model
+# entirely. Residuals are computed as `y_true − y_pred`. Leverage and
+# Cook's distance are unavailable (no design matrix), so the leverage
+# panel is silently dropped when `panels="auto"`. `compare=` is
+# incompatible with the precomputed path (raises `ValueError`).
 
 ferrum.importance_chart(model_or_source, X=None, y=None, *,
                          method="builtin", top_k=20, orient="horizontal",
@@ -1188,7 +1205,8 @@ ferrum.decision_boundary_chart(model, X, y, *,
                                  proba=False,         # plot probability surface if True
                                  scatter=True, theme=None)
 
-ferrum.discrimination_threshold_chart(model_or_source, X=None, y=None, *,
+ferrum.discrimination_threshold_chart(model_or_source=None, X=None, y=None, *,
+                                       y_true=None, y_pred=None,  # precomputed path (1-D positive-class scores); cv= not supported
                                        n_thresholds=50,
                                        metrics=("precision", "recall", "f1", "queue_rate"),
                                        highlight_best=True, compare=None, theme=None)
@@ -1200,7 +1218,8 @@ ferrum.parallel_coordinates_chart(data_or_source, X=None, y=None, *,
                                    rescale="minmax",   # "minmax" | "zscore" | None
                                    alpha=0.5, theme=None)
 
-ferrum.class_prediction_error_chart(model_or_source, X=None, y=None, *,
+ferrum.class_prediction_error_chart(model_or_source=None, X=None, y=None, *,
+                                     y_true=None, y_pred=None,  # precomputed path (1-D hard labels)
                                      normalize=False, theme=None)
 
 ferrum.pca_scree_chart(model_or_source, X=None, *, n_components=None,
@@ -1232,6 +1251,21 @@ ferrum.intercluster_distance_chart(model_or_source, X=None, *, k=None,
 ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
                         kind="box", split="both", theme=None)
 ```
+
+> **2026-05-15 — Precomputed input path.** The nine prediction-evaluation
+> figure functions that appear above — `roc_chart`, `pr_chart`,
+> `calibration_chart`, `gain_chart`, `lift_chart`,
+> `discrimination_threshold_chart`, `confusion_matrix_chart`,
+> `class_prediction_error_chart`, and `residuals_chart` — each accept
+> `y_true=` and `y_pred=` as keyword-only arguments, bypassing the fitted
+> model entirely. Callers supply arrays they have already computed; the
+> function returns a chart visually identical to the model-backed path.
+> Exactly one of {model path, precomputed path} must be active — supplying
+> both, neither, or only one of `y_true`/`y_pred` raises `ValueError`.
+> `compare=` is incompatible with the precomputed path. `y_pred` semantics
+> vary by function: soft scores/probabilities for curve functions, hard
+> labels for matrix functions, fitted values for `residuals_chart`. See each
+> function's docstring for the exact expected shape.
 
 > **Schwabish SB3 — 2026-05-11 — figure-function defaults.** Eight
 > Group-B functions adopt the Schwabish defaults from §3.19's principles doc:

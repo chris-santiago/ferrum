@@ -198,12 +198,52 @@ def _resolve_source(
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ``ModelSource`` or ``ComparedModelSource``."""
+    """Resolve a figure-function input into a ``ModelSource``, ``ComparedModelSource``,
+    or ``_PrecomputedSource``.
+
+    Exactly one input path must be active:
+    - **Model path**: ``model_or_source`` is not ``None``; ``y_true``/``y_pred`` must both be ``None``.
+    - **Precomputed path**: both ``y_true`` and ``y_pred`` are not ``None``; ``model_or_source`` must be ``None``.
+    - **Neither**: ``ValueError``.
+
+    The precomputed path is incompatible with ``compare=``.
+    """
     import ferrum
     from ferrum._diagnostics.source import ComparedModelSource
+
+    has_precomputed = y_true is not None or y_pred is not None
+    has_model = model_or_source is not None
+
+    if has_precomputed:
+        if has_model:
+            raise ValueError(
+                "Supply either a model/source (model_or_source=) or precomputed arrays "
+                "(y_true=, y_pred=), not both."
+            )
+        if compare is not None:
+            raise ValueError(
+                "compare= is not supported with precomputed y_true/y_pred inputs.  "
+                "Multi-model comparison requires a fitted model on each path."
+            )
+        if y_true is None or y_pred is None:
+            missing = "y_pred" if y_true is not None else "y_true"
+            raise ValueError(
+                f"Precomputed path requires both y_true= and y_pred=; {missing}= is missing."
+            )
+        from ferrum._diagnostics.precomputed import _PrecomputedSource
+
+        return _PrecomputedSource(y_true, y_pred)
+
+    if not has_model:
+        raise ValueError(
+            "Supply either a fitted model/source (model_or_source=) or precomputed arrays "
+            "(y_true=, y_pred=)."
+        )
 
     if isinstance(model_or_source, ComparedModelSource):
         return model_or_source

@@ -853,25 +853,32 @@ def _resolve_source(
     X_data: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ModelSource or ComparedModelSource.
+    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
+    or _PrecomputedSource.
 
-    Thin wrapper that imports from ``ferrum.figures`` -- the canonical
-    location of ``_resolve_source`` -- so this module does not duplicate
-    the dispatch logic.
+    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
     """
     from ferrum.plots._helpers import _resolve_source as _resolve
 
-    return _resolve(model_or_source, X_data, y, random_state=random_state, compare=compare)
+    return _resolve(
+        model_or_source, X_data, y,
+        y_true=y_true, y_pred=y_pred,
+        random_state=random_state, compare=compare,
+    )
 
 
 def roc_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     per_class: bool = True,
     average: str | None = "macro",
     annotate_auc: bool = True,
@@ -892,17 +899,24 @@ def roc_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator
+    model_or_source : estimator, ModelSource, or dict of str -> estimator, optional
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.  When a dict is passed, each estimator is evaluated
-        and curves are overlaid.
+        and curves are overlaid.  Mutually exclusive with ``y_true``/``y_pred``.
     X : array-like, optional
         Feature matrix.  Required when ``model_or_source`` is a raw
         estimator.
     y : array-like, optional
         True class labels.  Required when ``model_or_source`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model_or_source``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     per_class : bool, default True
         When ``True``, one ROC curve per class is drawn using the
         one-vs-rest scheme.  When ``False``, a single curve averaged
@@ -935,11 +949,17 @@ def roc_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.roc_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path — bypass the model entirely:
+
+    >>> fm.roc_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
         model_or_source,
         X,
         y,
+        y_true=y_true,
+        y_pred=y_pred,
         random_state=random_state,
         compare=compare,
     )
@@ -958,10 +978,12 @@ def roc_chart(
 
 
 def pr_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     per_class: bool = True,
     average: str | None = "macro",
     annotate_ap: bool = True,
@@ -1035,11 +1057,17 @@ def pr_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.pr_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path:
+
+    >>> fm.pr_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
         model_or_source,
         X,
         y,
+        y_true=y_true,
+        y_pred=y_pred,
         random_state=random_state,
         compare=compare,
     )
@@ -1059,10 +1087,12 @@ def pr_chart(
 
 
 def calibration_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     n_bins: int = 10,
     strategy: str = "uniform",
     annotate_brier: bool = True,
@@ -1126,11 +1156,17 @@ def calibration_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.calibration_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path (``y_pred`` = 1-D predicted probabilities for positive class):
+
+    >>> fm.calibration_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
     source = _resolve_source(
         model_or_source,
         X,
         y,
+        y_true=y_true,
+        y_pred=y_pred,
         random_state=random_state,
         compare=compare,
     )
@@ -1149,10 +1185,12 @@ def calibration_chart(
 
 
 def gain_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
@@ -1204,16 +1242,22 @@ def gain_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.gain_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path (``y_pred`` = soft scores, 1-D binary or 2-D multiclass):
+
+    >>> fm.gain_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _gain_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def lift_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
@@ -1264,16 +1308,22 @@ def lift_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.lift_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path (``y_pred`` = soft scores, 1-D binary or 2-D multiclass):
+
+    >>> fm.lift_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _lift_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def confusion_matrix_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     normalize: str | None = "true",
     annotate: bool = True,
     random_state: int | None = None,
@@ -1323,8 +1373,12 @@ def confusion_matrix_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.confusion_matrix_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path (``y_pred`` = 1-D hard class labels):
+
+    >>> fm.confusion_matrix_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _confusion_chart_from_source(
         source,
         normalize=normalize,
@@ -1338,10 +1392,12 @@ def confusion_matrix_chart(
 
 
 def class_prediction_error_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     normalize: bool = False,
     show_counts: bool = True,
     random_state: int | None = None,
@@ -1390,8 +1446,12 @@ def class_prediction_error_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.class_prediction_error_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path (``y_pred`` = 1-D hard class labels):
+
+    >>> fm.class_prediction_error_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _class_prediction_error_chart_from_source(
         source,
         normalize=normalize,
@@ -1405,10 +1465,12 @@ def class_prediction_error_chart(
 
 
 def discrimination_threshold_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     n_thresholds: int = 50,
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
@@ -1478,8 +1540,13 @@ def discrimination_threshold_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import LogisticRegression
     >>> fm.discrimination_threshold_chart(LogisticRegression().fit(X_train, y_train), X_test, y_test)
+
+
+    Precomputed path (``y_pred`` = 1-D positive-class scores; ``cv=`` not supported):
+
+    >>> fm.discrimination_threshold_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state, compare=compare)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _discrimination_threshold_chart_from_source(
         source,
         n_thresholds=n_thresholds,

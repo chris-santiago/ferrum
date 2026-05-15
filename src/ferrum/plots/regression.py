@@ -59,18 +59,23 @@ def _resolve_source(
     X_data: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     random_state: int | None = None,
     compare: dict[str, Any] | None = None,
 ) -> Any:
-    """Resolve a figure-function input into a ModelSource or ComparedModelSource.
+    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
+    or _PrecomputedSource.
 
-    Thin wrapper that imports from ``ferrum.figures`` -- the canonical
-    location of ``_resolve_source`` -- so this module does not duplicate
-    the dispatch logic.
+    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
     """
     from ferrum.plots._helpers import _resolve_source as _resolve
 
-    return _resolve(model_or_source, X_data, y, random_state=random_state, compare=compare)
+    return _resolve(
+        model_or_source, X_data, y,
+        y_true=y_true, y_pred=y_pred,
+        random_state=random_state, compare=compare,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -844,10 +849,12 @@ def residplot(
 
 
 def residuals_chart(
-    model_or_source: Any,
+    model_or_source: Any = None,
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     kind: str = "studentized",
     cook_threshold: float | str | None = None,
     panels: Any = "auto",
@@ -918,8 +925,14 @@ def residuals_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import Ridge
     >>> fm.residuals_chart(Ridge().fit(X_train, y_train), X_test, y_test)
+
+    Precomputed path — residuals are computed as ``y_true − y_pred`` internally.
+    Leverage and Cook's distance are unavailable, so the leverage panel is
+    omitted when ``panels="auto"``:
+
+    >>> fm.residuals_chart(y_true=y_test, y_pred=reg.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     if panels in (None, "single"):
         panel_list: Any = None
     elif panels == "auto":
