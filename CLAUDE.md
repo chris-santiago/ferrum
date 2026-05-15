@@ -84,6 +84,11 @@ This rule governs Phase 9 forward; it does not retroactively reopen closed phase
 | Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
 | Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
 | Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
+| Bug-hunt skill | `.claude/skills/bug-hunt/` |
+| Bug-hunter agent | `.claude/agents/bug-hunter.md` |
+| Schwabish text-integration skill | `.claude/skills/schwabish/` |
+| Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
+| Automations index | `.claude/README.md` |
 
 ---
 
@@ -186,7 +191,7 @@ The lite agents apply the same rubric as the heavyweight skills so reading both 
 ## Key architectural decisions
 
 - **Build backend:** `maturin >= 1.7`
-- **Workspace:** Cargo workspace at repo root; `ferrum-core` is the only member today; `ferrum-wasm` and `ferrum-shared` are reserved for phases 11 and beyond
+- **Workspace:** Cargo workspace at repo root; `ferrum-core` is the computation engine; `ferrum-wasm` is the WASM renderer (Phase 11, active); `ferrum-shared` is reserved for future phases
 - **ABI:** `abi3-py310` — one wheel per platform-arch, works for Python ≥ 3.10
 - **`extension-module` feature:** feature-gated (not unconditional) so `cargo test` can link libpython
 - **PyO3 version:** pinned in `[workspace.dependencies]`; re-verify against crates.io at the start of any session that adds a new PyO3 API
@@ -203,9 +208,10 @@ The lite agents apply the same rubric as the heavyweight skills so reading both 
 
 ## Docs site work in progress
 
-  - **Worktree**: `.claude/worktrees/docs-continue/`
-  - **Branch**: `docs/continue` (based on `main`, 2 commits ahead)
-  - **Spec**: `design-docs/DOCS_SITE_PLAN.md`
+  - **Worktree**: `../ferrum-worktree-docs-continue/` (sibling of repo root — `git worktree list` to confirm)
+  - **Branch**: `docs/continue` (based on `main`)
+  - **Spec**: `design-docs/DOCS_SITE_PLAN.md` (in worktree, not main branch)
+  - **Zensical config**: `zensical.toml` (in worktree root)
 
   **Status (paused 2026-05-11):**
   - Phase 1 scaffold landed: Zensical at repo root (`zensical.toml`), docs source at `docs/site/`, `docs_dir = "docs/site"` set so the legacy
