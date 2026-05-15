@@ -343,6 +343,33 @@ mod tests {
     }
 
     #[test]
+    fn background_click_clears_existing_selection() {
+        // The JS click handler now calls handleClick for ALL clicks (hit or miss).
+        // A click at coordinates that hit no mark must clear Point selections to Empty.
+        let specs = vec![point_spec("sel1")];
+        let mut state = InteractionState::new(&specs);
+        // Pre-populate a selection as if a mark had been clicked earlier.
+        state.selections.insert(
+            "sel1".to_string(),
+            SelectionState::Point { indices: vec![0, 1], field_values: Vec::new() },
+        );
+        // Click on empty panels (no marks) — simulates a background click.
+        state.handle_click(&[], &specs, 50.0, 50.0);
+        assert!(
+            matches!(state.selections.get("sel1"), Some(SelectionState::Empty)),
+            "background click must deselect to Empty"
+        );
+    }
+
+    #[test]
+    fn background_click_with_no_prior_selection_stays_empty() {
+        let specs = vec![point_spec("s")];
+        let mut state = InteractionState::new(&specs);
+        state.handle_click(&[], &specs, 0.0, 0.0);
+        assert!(matches!(state.selections.get("s"), Some(SelectionState::Empty)));
+    }
+
+    #[test]
     fn to_json_empty() {
         let state = InteractionState::new(&[point_spec("s")]);
         let json = state.to_json();

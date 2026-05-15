@@ -233,3 +233,54 @@ def test_pie_chart_arc_nodes_have_path_commands():
         assert any(c["op"] == "arc_to" for c in cmds), "arc wedge missing arc_to"
         arc_cmd = next(c for c in cmds if c["op"] == "arc_to")
         assert arc_cmd["rx"] > 0, "arc_to must have positive rx (outer radius)"
+
+
+def test_arc_tooltip_count_equals_node_count():
+    # Tooltip array must be 1-to-1 with rendered nodes (not 1-to-1 with raw rows).
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    batch = scene["panels"][0]["marks"][0]
+    assert len(batch["tooltips"]) == len(batch["nodes"]), "one tooltip entry per rendered node"
+
+
+def test_arc_tooltip_excludes_zero_value_rows():
+    # Rows with val=0 are skipped by the arc renderer; their tooltips must also be absent.
+    df = pl.DataFrame({"cat": ["A", "B", "C", "D"], "val": [10.0, 0.0, 20.0, 30.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    batch = scene["panels"][0]["marks"][0]
+    assert len(batch["nodes"]) == 3, "zero-value row must be excluded"
+    assert len(batch["tooltips"]) == 3, "tooltip count must match node count, not row count"
+    labels = {t["fields"][0]["value"] for t in batch["tooltips"]}
+    assert "B" not in labels, "category B (val=0) must be absent from tooltips"
+
+
+def test_arc_no_tooltip_encoding_produces_null_tooltips():
+    # Without tooltip encoding, arc marks must have no tooltip data.
+    df = pl.DataFrame({"cat": ["A", "B"], "val": [40.0, 60.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N")
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    batch = scene["panels"][0]["marks"][0]
+    assert not batch.get("tooltips"), "no tooltips when encoding absent"
+
+
+def test_polar_chart_coord_kind_is_polar():
+    # Polar coord kind must be present in scene so the GPU zoom guard can inspect it.
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N")
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    coord = scene["panels"][0]["coord"]
+    assert coord.get("kind") == "polar", "polar chart must have coord.kind == 'polar'"
