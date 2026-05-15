@@ -362,10 +362,18 @@ fn build_text_json(data: &SceneData) -> String {
 
 /// Build text-element JSON for a zoomed panel.
 ///
-/// Static text (titles, axis labels) stays at original canvas positions. Axis tick
-/// labels are replaced with those from the active `TickLevel` at their new zoomed
-/// positions. Tick labels are identified by matching (content, x-position) for
-/// x-axis or (content, y-position) for y-axis against the baseline tick level.
+/// Axis tick labels are identified by clustering text elements that share the
+/// same y coordinate (x-axis row) or same x coordinate (y-axis column) and
+/// whose content appears in the known tick-label set.  Each identified tick
+/// label is repositioned by applying the affine zoom transform to its varying
+/// coordinate (x for x-axis ticks, y for y-axis ticks).  All other text
+/// (chart title, axis title, legend) is emitted at its original position.
+///
+/// This replaces the old pixel-match approach, which compared `tick_data`
+/// scale-function outputs against axis text positions.  Those values differ
+/// because the axis layout uses uniform band centering (`plot_area.x +
+/// (i+0.5)*slot_w`) while `tick_data` uses the actual scale function — a
+/// systematically different mapping that never matches.
 #[cfg(target_arch = "wasm32")]
 fn build_zoomed_text_json(
     all_text: &[crate::scene_load::TextElementData],
@@ -373,20 +381,13 @@ fn build_zoomed_text_json(
     panel_id: usize,
     transform: &crate::zoom_pan::Affine2,
 ) -> String {
-    use std::collections::HashSet;
-    use crate::zoom_pan::tick_level_for_zoom;
+    use std::collections::{HashMap, HashSet};
 
     let Some(ptl) = interaction.tick_levels.iter().find(|p| p.panel_id == panel_id) else {
         return build_text_json_from(all_text);
     };
 
-    // Collect all tick pixel positions (×10 integer key to avoid float hash) for exclusion.
-    let x_tick_px: HashSet<i64> = ptl.x_levels.iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| (t.pixel * 10.0) as i64))
-        .collect();
-    let y_tick_px: HashSet<i64> = ptl.y_levels.iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| (t.pixel * 10.0) as i64))
-        .collect();
+    // Union of tick label strings across all zoom levels.
     let x_tick_labels: HashSet<&str> = ptl.x_levels.iter()
         .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
         .collect();
@@ -394,43 +395,51 @@ fn build_zoomed_text_json(
         .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
         .collect();
 
+    // --- Identify x-axis tick row ------------------------------------------
+    // All x-axis tick labels share the same y coordinate.  Find the most
+    // common rounded-y among elements whose content is a known x-tick label.
+    let mut x_y_freq: HashMap<i64, usize> = HashMap::new();
+    for te in all_text.iter().filter(|te| x_tick_labels.contains(te.content.as_str())) {
+        *x_y_freq.entry((te.y * 10.0) as i64).or_insert(0) += 1;
+    }
+    let x_axis_y: Option<f64> = x_y_freq.into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(k, _)| k as f64 / 10.0);
+
+    // --- Identify y-axis tick column ----------------------------------------
+    // All y-axis tick labels share the same x coordinate.
+    let mut y_x_freq: HashMap<i64, usize> = HashMap::new();
+    for te in all_text.iter().filter(|te| y_tick_labels.contains(te.content.as_str())) {
+        *y_x_freq.entry((te.x * 10.0) as i64).or_insert(0) += 1;
+    }
+    let y_axis_x: Option<f64> = y_x_freq.into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(k, _)| k as f64 / 10.0);
+
+    // 1 px tolerance covers label_font_size / 3.0 baseline offset and rounding.
+    const COORD_TOL: f64 = 1.5;
+
     let is_x_tick = |te: &crate::scene_load::TextElementData| {
-        x_tick_px.contains(&((te.x * 10.0) as i64)) && x_tick_labels.contains(te.content.as_str())
+        x_tick_labels.contains(te.content.as_str())
+            && x_axis_y.map(|ay| (te.y - ay).abs() < COORD_TOL).unwrap_or(false)
     };
     let is_y_tick = |te: &crate::scene_load::TextElementData| {
-        y_tick_px.contains(&((te.y * 10.0) as i64)) && y_tick_labels.contains(te.content.as_str())
+        y_tick_labels.contains(te.content.as_str())
+            && y_axis_x.map(|ax| (te.x - ax).abs() < COORD_TOL).unwrap_or(false)
     };
 
-    // Positions of the axis rows/columns (constant during zoom).
-    let x_axis_y: Option<f64> = all_text.iter().find(|te| is_x_tick(te)).map(|te| te.y);
-    let y_axis_x: Option<f64> = all_text.iter().find(|te| is_y_tick(te)).map(|te| te.x);
-
-    // Reference style for tick labels (borrow from any existing tick element).
-    let tick_style = all_text.iter()
-        .find(|te| is_x_tick(te) || is_y_tick(te))
-        .map(|te| te.style.clone());
-
-    // Static text first.
-    let mut elements: Vec<serde_json::Value> = all_text.iter()
-        .filter(|te| !is_x_tick(te) && !is_y_tick(te))
-        .map(text_element_to_json)
-        .collect();
-
-    let level_idx = tick_level_for_zoom(transform.zoom_factor());
-
-    // Zoomed x-axis tick labels.
-    if let (Some(y_pos), Some(level)) = (x_axis_y, ptl.x_levels.get(level_idx)) {
-        for tick in &level.ticks {
-            let new_x = tick.pixel * transform.sx + transform.tx;
-            elements.push(tick_label_json(new_x, y_pos, &tick.label, "center", tick_style.as_ref()));
-        }
-    }
-
-    // Zoomed y-axis tick labels.
-    if let (Some(x_pos), Some(level)) = (y_axis_x, ptl.y_levels.get(level_idx)) {
-        for tick in &level.ticks {
-            let new_y = tick.pixel * transform.sy + transform.ty;
-            elements.push(tick_label_json(x_pos, new_y, &tick.label, "end", tick_style.as_ref()));
+    let mut elements: Vec<serde_json::Value> = Vec::new();
+    for te in all_text {
+        if is_x_tick(te) {
+            // Apply sx + tx to the x coordinate; y stays at the axis level.
+            let new_x = te.x * transform.sx + transform.tx;
+            elements.push(tick_label_json(new_x, te.y, &te.content, "center", Some(&te.style)));
+        } else if is_y_tick(te) {
+            // Apply sy + ty to the y coordinate; x stays at the axis level.
+            let new_y = te.y * transform.sy + transform.ty;
+            elements.push(tick_label_json(te.x, new_y, &te.content, "end", Some(&te.style)));
+        } else {
+            elements.push(text_element_to_json(te));
         }
     }
 
