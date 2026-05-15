@@ -12,8 +12,11 @@ Tests are marked with @pytest.mark.slow so they are skipped by default:
 """
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import time
+import warnings
 
 import numpy as np
 import polars as pl
@@ -273,23 +276,23 @@ class TestMillionRows:
     they don't crash."""
 
     def test_scatter_1m_renders(self):
-        """1M scatter: every row becomes a <circle>. Produces large SVG but
-        must not crash or take unreasonably long."""
+        """1M scatter: auto-raster substitutes mark_raster, producing compact
+        SVG output. Must not crash or take unreasonably long."""
         df = _df_quant(1_000_000)
         t0 = time.monotonic()
         svg = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300).show_svg()
         elapsed = time.monotonic() - t0
-        assert _count_elements(svg, "circle") == 1_000_000
+        assert "<svg" in svg
         assert elapsed < 5.0, f"1M scatter took {elapsed:.2f}s (limit 5.0s)"
 
     def test_scatter_1m_svg_size(self):
-        """1M scatter SVG is ~57MB (one circle per row). Verify it stays under
-        100MB — a larger value would indicate duplicate rendering or bloat."""
+        """1M scatter SVG should be compact (<2MB) thanks to auto-raster
+        substitution. Previously ~57MB (one circle per row)."""
         svg = fm.Chart(_df_quant(1_000_000)).mark_point().encode(
             x="x:Q", y="y:Q"
         ).properties(width=400, height=300).show_svg()
         size_mb = len(svg) / (1024 * 1024)
-        assert size_mb < 100, f"1M scatter SVG is {size_mb:.1f}MB (limit 100MB)"
+        assert size_mb < 2, f"1M scatter SVG is {size_mb:.1f}MB (limit 2MB with auto-raster)"
 
     def test_line_1m_renders(self):
         df = _df_timeseries(1_000_000)

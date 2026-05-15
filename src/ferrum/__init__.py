@@ -55,6 +55,7 @@ from ferrum.themes import (
 import ferrum.themes as themes  # so users can write ferrum.themes.dark
 
 from ferrum.chart import Chart
+from ferrum.render_config import RenderConfig
 from ferrum.position import Identity, Dodge, Jitter, Stack
 from ferrum.coord import (
     CoordFlip,
@@ -305,6 +306,7 @@ __all__ = [
     "compose_svg_grid",
     # Phase 8a
     "Chart",
+    "RenderConfig",
     "Layer",
     "HConcatChart",
     "VConcatChart",

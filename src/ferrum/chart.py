@@ -385,6 +385,7 @@ class Chart:
         "_composite_kind",
         "_selections",
         "_conditionals",
+        "_render_config",
     )
 
     def __init__(
@@ -424,6 +425,7 @@ class Chart:
         self._composite_kind: Optional[str] = None
         self._selections: list = []
         self._conditionals: list = []
+        self._render_config = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -447,6 +449,7 @@ class Chart:
         new._composite_kind = self._composite_kind
         new._selections = list(self._selections)
         new._conditionals = list(self._conditionals)
+        new._render_config = self._render_config
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -4676,7 +4679,7 @@ class Chart:
 
     # ---- Properties ----
 
-    def properties(self, *, width=None, height=None, title=None, description=None) -> "Chart":
+    def properties(self, *, width=None, height=None, title=None, description=None, render_config=None) -> "Chart":
         """Set chart-level display properties.
 
         Only the keyword arguments that are explicitly provided are updated;
@@ -4692,6 +4695,10 @@ class Chart:
             Chart title rendered above the plot area.
         description : str or None, optional
             Accessible description attached to the SVG root.
+        render_config : RenderConfig or None, optional
+            Rendering policy configuration. Controls auto-raster threshold
+            and behavior. Set ``render_config=fm.RenderConfig(raster_threshold=None)``
+            to disable auto-raster and force per-element SVG at any data size.
 
         Returns
         -------
@@ -4720,6 +4727,8 @@ class Chart:
             new._title = title if isinstance(title, _TitleCls) else _TitleCls(text=str(title))
         if description is not None:
             new._description = description
+        if render_config is not None:
+            new._render_config = render_config
         return new
 
     # ---- Spec output ----
