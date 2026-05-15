@@ -152,48 +152,7 @@ The lite agents gate every commit; the heavyweight skills (`python-review` / `ru
 
 Always announce the offer before running — e.g. "This feels like sibling drift across the figure-function family; want me to run `python-review` on `figures.py`?" — and wait for user approval. The user opts in before any architectural audit begins; heavy review is invasive and produces a roadmap the user has to act on.
 
-### Review surfaces
-
-Ferrum has four code-review surfaces: two heavyweight interactive skills for human-invoked audits, and two lightweight autonomous agents for regression-gating fixes the orchestrator is about to commit. Pick the right one for the job.
-
-| Surface | Type | Invoked by | Scope | Writes code? |
-|---|---|---|---|---|
-| `python-review` | skill | human (`/python-review`) | whole package or named subsystem | yes, with approval |
-| `rust-review` | skill | human (`/rust-review`) | whole crate or named subsystem | yes, with approval |
-| `python-review-lite` | agent | orchestrator (before any `*.py` commit) | only staged `*.py` diff | **never** |
-| `rust-review-lite` | agent | orchestrator (before any `*.rs` commit) | only staged `*.rs` diff | **never** |
-
-### Heavyweight skills (`.claude/skills/{python,rust}-review/`)
-
-Multi-phase reviews (orient → diagnose → propose → execute → review) that produce a six-section report with architecture map, drift findings tagged S1–S5, refactor roadmap, and a proposed first patch. Use them when you want a senior pass over a subsystem ("review this package", "this module feels off", "audit our Rust API"). They are interactive and propose before they edit.
-
-### Lightweight agents (`.claude/agents/{python,rust}-review-lite.md`)
-
-Autonomous read-only quality gates that run **before any commit that touches Python or Rust source** — the gallery-fixer flow is one caller, but the gate now applies to every commit (see "Before committing code" above). They read only `git diff --cached`, apply a trimmed diff-level idiom checklist, run `ruff` / `cargo clippy -D warnings` on the affected files, and return one of three signals:
-
-- **clean** — no S3+ findings, linters pass → orchestrator commits
-- **block** — ≥1 S3 finding OR linter failed → orchestrator un-stages, the orchestrator (or the editing subagent, e.g. `gallery-fixer`) addresses the verdict, re-stages, re-dispatches
-- **escalate** — ≥1 S4+ finding, OR 3 consecutive block cycles on the same area → orchestrator surfaces to user and halts; consider escalating to the heavyweight skill (see "When to escalate to heavyweight review" above)
-
-Both lite agents are **read-only by design** — their `tools:` frontmatter restricts them to `Read`, `Grep`, `Glob`, `Bash`. They cannot modify code; only the orchestrator (or an editing subagent like `gallery-fixer`) does. The lite agents never speculate refactors beyond a single-sentence "suggested fix" per finding.
-
-The orchestrator (parent Claude session) is responsible for: staging the changes, dispatching both lite agents in parallel when both languages were touched, tracking the cycle count across loops, and acting on the returned status.
-
-### Audit trail
-
-Lite-agent verdicts land at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_{python,rust}.md` regardless of trigger — the path is historical (lite started life as a post-`gallery-fixer` gate) but the directory now serves as the canonical verdict log for *all* lite-agent runs, including the commit gate above. Each verdict carries YAML frontmatter (`status`, `cycle`, `n_findings` by severity, `linters` state, `files_reviewed`) followed by per-finding prose. The directory is gitignored alongside the rest of `output/`; the verdicts exist for the orchestrator and for the human reviewing a multi-cycle session, not as permanent artifacts.
-
-### Severity rubric (shared across all four surfaces)
-
-| Tag | Meaning |
-|---|---|
-| S1 | cosmetic inconsistency; low risk, low impact |
-| S2 | readability / maintainability issue; moderate leverage |
-| S3 | structural cohesion issue; high leverage — **blocks lite agents** |
-| S4 | risky design flaw or bug-prone seam — **escalates lite agents** |
-| S5 | critical correctness or API hazard — **escalates lite agents** |
-
-The lite agents apply the same rubric as the heavyweight skills so reading both outputs is calibrated to the same scale.
+For the full surface comparison table, severity rubric (S1–S5), audit trail paths, and detailed descriptions of what each agent does — see **`.claude/README.md`**.
 
 ---
 

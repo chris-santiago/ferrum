@@ -190,6 +190,35 @@ Dispatched by `/schwabish-improve --from-audit` after all `schwabish-judge` verd
 
 ---
 
+## Review surfaces reference
+
+### Surface comparison
+
+| Surface | Type | Invoked by | Scope | Writes code? |
+|---|---|---|---|---|
+| `python-review` | skill | human (`/python-review`) | whole package or named subsystem | yes, with approval |
+| `rust-review` | skill | human (`/rust-review`) | whole crate or named subsystem | yes, with approval |
+| `python-review-lite` | agent | orchestrator (before any `*.py` commit) | only staged `*.py` diff | **never** |
+| `rust-review-lite` | agent | orchestrator (before any `*.rs` commit) | only staged `*.rs` diff | **never** |
+
+The heavyweight skills are interactive: they orient, diagnose, propose, and only execute with user approval. The lite agents are autonomous read-only gates — they never modify code.
+
+### Severity rubric (shared across all four surfaces)
+
+| Tag | Meaning |
+|---|---|
+| S1 | cosmetic inconsistency; low risk, low impact |
+| S2 | readability / maintainability issue; moderate leverage |
+| S3 | structural cohesion issue; high leverage — **blocks lite agents** |
+| S4 | risky design flaw or bug-prone seam — **escalates lite agents** |
+| S5 | critical correctness or API hazard — **escalates lite agents** |
+
+### Audit trail
+
+Lite-agent verdicts land at `skills/gallery-audit/output/_review_lite/<ISO-timestamp>_{python,rust}.md` regardless of trigger (the path is historical — lite started as a post-`gallery-fixer` gate). Each verdict carries YAML frontmatter (`status`, `cycle`, `n_findings` by severity, `linters`, `files_reviewed`) followed by per-finding prose. Gitignored alongside the rest of `output/`.
+
+---
+
 ## How the pieces fit together
 
 ```
