@@ -298,6 +298,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         });
@@ -331,6 +332,7 @@ mod tests {
                 extent: Some((1.0, 10.0)),
                 nice: false,
                 cumulative: false,
+                shared_extent: false,
                 groupby: None,
                 name: None,
             }),
@@ -368,6 +370,7 @@ mod tests {
                 extent: Some((1.0, 5.0)),
                 nice: false,
                 cumulative: false,
+                shared_extent: false,
                 groupby: None,
                 name: None,
             }),
@@ -397,6 +400,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         });
@@ -460,6 +464,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         });

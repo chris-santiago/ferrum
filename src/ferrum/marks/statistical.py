@@ -283,7 +283,11 @@ def desugar_histogram(
             f"'horizontal'; got {orientation!r}"
         )
     bin_kwargs: dict = dict(
-        bin_count=bin_count, bin_width=bin_width, extent=extent, nice=nice, cumulative=cumulative
+        bin_count=bin_count, bin_width=bin_width, extent=extent, nice=nice, cumulative=cumulative,
+        # shared_extent=True forces a global bin-edge range across all groups so
+        # that multiple="stack" / "fill" always produces aligned bars that
+        # apply_stack can match on x-key pairs.
+        shared_extent=(multiple in ("stack", "fill")),
     )
     if groupby is not None:
         bin_kwargs["groupby"] = groupby
@@ -327,6 +331,7 @@ def desugar_smooth(
     show_metrics: bool = False,
     groupby: Any = None,
     name: str | None = None,
+    x_range: list[float] | None = None,
 ) -> MarkDesugarResult:
     """Smoothed-regression line (LOESS/etc.) mark desugar.
 
@@ -381,6 +386,11 @@ def desugar_smooth(
         When set, the smoothing is computed per group and the output
         retains the group column so a downstream ``color=`` encoding
         can map to it.
+    x_range : [float, float] or None, default None
+        Explicit evaluation domain ``[x_min, x_max]`` forwarded to the
+        ``Smooth`` transform.  When set, the fit line is evaluated over
+        this range rather than the observed data range — used by
+        ``lmplot(truncate=False)`` to extend the fit beyond the data.
 
     Returns
     -------
@@ -412,6 +422,8 @@ def desugar_smooth(
             smooth_kwargs["groupby"] = groupby
         if name is not None:
             smooth_kwargs["name"] = name
+        if x_range is not None:
+            smooth_kwargs["x_range"] = x_range
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
         encoding_remap = {"x": "x", "y": "y"}
         return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
@@ -426,6 +438,8 @@ def desugar_smooth(
         smooth_kwargs["x_estimator"] = x_estimator
     if groupby is not None:
         smooth_kwargs["groupby"] = groupby
+    if x_range is not None:
+        smooth_kwargs["x_range"] = x_range
     if show_metrics:
         # Schwabish SB-followup (2026-05-12): emit R²/RMSE/MAE columns
         # on the fit-grid output so a same-source mark_text layer reads

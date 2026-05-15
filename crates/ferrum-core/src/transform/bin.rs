@@ -21,6 +21,12 @@ pub(crate) struct BinSpec {
     pub nice: bool,
     #[serde(default)]
     pub cumulative: bool,
+    /// When ``true`` and ``groupby`` is set, compute a single global extent
+    /// from all rows before per-group binning so every group shares the same
+    /// bin edges. Required for ``multiple="stack"`` / ``"fill"`` to produce
+    /// aligned bars that can be stacked correctly.
+    #[serde(default)]
+    pub shared_extent: bool,
     /// When set, partition input by this Utf8 column and emit per-(bin, group)
     /// rows. Output schema gains the groupby column as the 5th field.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -192,6 +198,11 @@ fn apply_one_group(
 /// Partition input batch by `group_col` (Utf8), call apply_one_group per
 /// partition, then stack the results into a single batch with the group
 /// column preserved as the 5th field.
+///
+/// When `spec.shared_extent` is `true` and `spec.extent` is `None`, a global
+/// extent is computed across all rows of the field before per-group binning so
+/// every group produces the same bin edges — required for `multiple="stack"` /
+/// `"fill"` stacking to find matching x-key pairs.
 fn apply_grouped(
     spec: &BinSpec,
     batch: &RecordBatch,
@@ -222,6 +233,56 @@ fn apply_grouped(
         group_idx_map.entry(gv).or_default().push(i);
     }
 
+    // When shared_extent=true, compute the global extent from all rows of the
+    // field so all groups receive the same bin edges. Only override when the
+    // caller has not explicitly set spec.extent.
+    let effective_spec: std::borrow::Cow<BinSpec> = if spec.shared_extent && spec.extent.is_none() {
+        let fidx = schema.index_of(&spec.field).map_err(|_| {
+            PyValueError::new_err(format!(
+                "stat_bin: column '{}' not found", spec.field
+            ))
+        })?;
+        let col = batch.column(fidx);
+        // Cast to Float64 to handle integer columns (same cast as apply_one_group).
+        let col_cast;
+        let farr: &Float64Array = match col.data_type() {
+            DataType::Float64 => col.as_any().downcast_ref::<Float64Array>().unwrap(),
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+            | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+            | DataType::Float32 => {
+                col_cast = arrow::compute::cast(col, &DataType::Float64)
+                    .map_err(|e| PyValueError::new_err(format!(
+                        "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
+                    )))?;
+                col_cast.as_any().downcast_ref::<Float64Array>().unwrap()
+            }
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "stat_bin: column '{}' must be numeric for shared_extent", spec.field
+                )));
+            }
+        };
+        let (global_lo, global_hi) = (0..farr.len()).fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(a, b), i| {
+                if farr.is_null(i) { return (a, b); }
+                let v = farr.value(i);
+                if v.is_nan() { return (a, b); }
+                (a.min(v), b.max(v))
+            },
+        );
+        if global_lo.is_finite() && global_hi.is_finite() && global_lo < global_hi {
+            let mut patched = spec.clone();
+            patched.extent = Some((global_lo, global_hi));
+            std::borrow::Cow::Owned(patched)
+        } else {
+            std::borrow::Cow::Borrowed(spec)
+        }
+    } else {
+        std::borrow::Cow::Borrowed(spec)
+    };
+    let spec_ref: &BinSpec = &effective_spec;
+
     // Per-group output, then stack.
     let mut all_starts: Vec<f64> = Vec::new();
     let mut all_ends: Vec<f64> = Vec::new();
@@ -230,7 +291,7 @@ fn apply_grouped(
     let mut all_groups: Vec<String> = Vec::new();
     for g in &group_order {
         let ixs = group_idx_map.get(g).unwrap();
-        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let out = apply_one_group(spec_ref, batch, Some(ixs))?;
         let n = out.num_rows();
         let starts = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let ends = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -357,7 +418,7 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, groupby = None, name = None))]
+    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, shared_extent = false, groupby = None, name = None))]
     fn new(
         field: &str,
         bin_count: Option<usize>,
@@ -365,6 +426,7 @@ impl PyBin {
         extent: Option<(f64, f64)>,
         nice: bool,
         cumulative: bool,
+        shared_extent: bool,
         groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -397,6 +459,7 @@ impl PyBin {
             extent,
             nice,
             cumulative,
+            shared_extent,
             groupby,
             name,
         })))
@@ -457,6 +520,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -486,6 +550,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -511,6 +576,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -528,6 +594,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -555,6 +622,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -575,6 +643,7 @@ mod tests {
             extent: None,
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -600,6 +669,7 @@ mod tests {
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -622,6 +692,7 @@ mod tests {
             extent: None,
             nice: true,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name: None,
         };
@@ -652,6 +723,7 @@ mod tests {
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: true,
+            shared_extent: false,
             groupby: None,
             name: None,
         };

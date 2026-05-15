@@ -686,6 +686,7 @@ mod tests {
                 extent: None,
                 nice: true,
                 cumulative: false,
+                shared_extent: false,
                 groupby: None,
                 name: None,
             })],

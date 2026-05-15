@@ -1094,6 +1094,7 @@ mod tests {
             extent: Some((10.0, 30.0)),
             nice: false,
             cumulative: false,
+            shared_extent: false,
             groupby: None,
             name,
         })];
