@@ -333,3 +333,187 @@ class TestMillionRows:
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 5.0, f"1M area took {elapsed:.2f}s (limit 5.0s)"
+
+
+# ---------------------------------------------------------------------------
+# Auto-raster policy tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutoRaster:
+    """Test the auto-raster policy that substitutes mark_raster when the mark
+    count exceeds ``raster_threshold`` (default 500k)."""
+
+    def test_auto_raster_fires_on_1m_scatter(self):
+        """1M mark_point with x:Q, y:Q triggers auto-raster: SVG < 2 MB and
+        a UserWarning matching 'Auto-raster' is emitted."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
+        with pytest.warns(UserWarning, match="Auto-raster"):
+            svg = chart.show_svg()
+        size_mb = len(svg) / (1024 * 1024)
+        assert size_mb < 2, f"auto-raster SVG is {size_mb:.1f}MB; expected <2MB"
+
+    def test_auto_raster_disabled_with_none_threshold(self):
+        """raster_threshold=None disables auto-raster: full per-element SVG
+        (>10MB) is produced with no warning."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(
+                width=400,
+                height=300,
+                render_config=fm.RenderConfig(raster_threshold=None),
+            )
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings, "Expected no auto-raster warning"
+        size_mb = len(svg) / (1024 * 1024)
+        assert size_mb > 10, f"Expected full SVG >10MB; got {size_mb:.1f}MB"
+
+    def test_auto_raster_error_mode(self):
+        """raster_behavior='error' raises ValueError instead of substituting."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(render_config=fm.RenderConfig(raster_behavior="error"))
+        )
+        with pytest.raises(ValueError, match="threshold"):
+            chart.show_svg()
+
+    def test_auto_raster_silent_mode(self):
+        """raster_behavior='silent' substitutes without warning."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(
+                width=400,
+                height=300,
+                render_config=fm.RenderConfig(raster_behavior="silent"),
+            )
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings, "silent mode should emit no warning"
+        size_mb = len(svg) / (1024 * 1024)
+        assert size_mb < 2, f"Expected compact SVG <2MB; got {size_mb:.1f}MB"
+
+    def test_auto_raster_skips_color_encoded(self):
+        """Charts with color encoding do NOT get auto-raster; a guidance
+        warning is emitted instead."""
+        df = _df_grouped(1_000_000, n_groups=5)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="group:N")
+            .properties(width=400, height=300)
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        # Should NOT have auto-raster substitution warning
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings, "auto-raster should not fire with color encoding"
+        # Should have guidance warning
+        guidance_warnings = [
+            w for w in caught if "mark_raster" in str(w.message)
+        ]
+        assert guidance_warnings, "Expected guidance warning for large chart with color"
+        # SVG should be large (no substitution)
+        size_mb = len(svg) / (1024 * 1024)
+        assert size_mb > 10, f"Expected full SVG >10MB; got {size_mb:.1f}MB"
+
+    def test_auto_raster_below_threshold_no_change(self):
+        """Charts below the threshold are unaffected."""
+        df = _df_quant(10_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings
+        assert _count_elements(svg, "circle") == 10_000
+
+    def test_auto_raster_skips_line_marks(self):
+        """Line marks are not eligible for auto-raster."""
+        df = _df_timeseries(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_line()
+            .encode(x="t:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings
+        assert "<svg" in svg
+
+    def test_auto_raster_skips_hex_marks(self):
+        """Hex marks are composite (aggregate) and skip auto-raster."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_hex(aggregate="count")
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.show_svg()
+        auto_raster_warnings = [
+            w for w in caught if "Auto-raster" in str(w.message)
+        ]
+        assert not auto_raster_warnings
+        assert "<svg" in svg
+
+    def test_auto_raster_save_png(self):
+        """Auto-raster applies to save() as well (via _render_inputs)."""
+        df = _df_quant(1_000_000)
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            with pytest.warns(UserWarning, match="Auto-raster"):
+                chart.save(path)
+            size_kb = os.path.getsize(path) / 1024
+            assert size_kb < 500, f"PNG should be compact; got {size_kb:.0f}KB"
+        finally:
+            os.unlink(path)

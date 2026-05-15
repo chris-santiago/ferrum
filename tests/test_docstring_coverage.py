@@ -86,6 +86,8 @@ _DOC_ALLOWLIST: set[str] = {
     "Selection", "SelectionMark", "ConditionalSpec",
     "selection_point", "selection_interval", "selection_single", "selection_multi",
     "value",
+    # Auto-raster policy (Phase 12)
+    "RenderConfig",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
