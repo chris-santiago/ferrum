@@ -122,12 +122,13 @@ class FerrumVisualizer:
         return None
 
     def score(self, X: Any, y: Any) -> float:
-        """Compute a scalar model-quality score on ``(X, y)``.
+        """Returns 0.0 for visualizers that do not compute a test-set score.
 
-        Subclasses override this to return an appropriate metric (e.g.
-        ``roc_auc_score`` for ``ROCVisualizer``, ``r2_score`` for
-        ``ResidualsVisualizer``). The base implementation always raises
-        ``NotImplementedError`` — do not call it directly.
+        Subclasses that wrap a fitted estimator override this to return an
+        appropriate metric (e.g. ``roc_auc_score`` for ``ROCVisualizer``,
+        ``r2_score`` for ``ResidualsVisualizer``). The base implementation
+        returns ``0.0`` so that no-model / exploratory visualizers satisfy
+        the sklearn visualizer protocol without raising.
 
         Parameters
         ----------
@@ -139,14 +140,10 @@ class FerrumVisualizer:
         Returns
         -------
         float
-            A scalar quality metric (higher is conventionally better).
-
-        Raises
-        ------
-        NotImplementedError
-            When the concrete subclass has not overridden this method.
+            ``0.0`` for the base class; a meaningful scalar for subclasses
+            that override this method.
         """
-        raise NotImplementedError(f"{type(self).__name__}.score() is not implemented")
+        return 0.0
 
     def show(self) -> Any:
         """Return the ferrum ``Chart`` for this visualizer.
