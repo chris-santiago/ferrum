@@ -184,7 +184,7 @@ pub fn build_scene(
 
             let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
 
-            // For CoordPolar, transform Circle/Polyline nodes from Cartesian pixel
+            // For CoordPolar, transform all mark nodes from Cartesian pixel
             // space to polar pixel space (arc marks handle their own transform).
             if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
                 && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
@@ -428,11 +428,21 @@ fn polar_outer_radius(plot_area: &crate::layout::Rect) -> f64 {
     plot_area.w.min(plot_area.h) / 2.0
 }
 
-/// Transform Circle and Polyline SceneNodes from Cartesian pixel coordinates
-/// to polar pixel coordinates. Used for mark_point and mark_line under CoordPolar.
+/// Transform SceneNodes from Cartesian pixel coordinates to polar pixel
+/// coordinates. Used for all mark types under CoordPolar.
 ///
-/// Cartesian interpretation: cx → θ (0..2π mapped across plot width),
-/// cy → r (plot height mapped to outer_radius, y-inverted because SVG y grows down).
+/// Cartesian interpretation: x → θ (0..2π mapped across plot width),
+/// y → r (plot height mapped to outer_radius, y-inverted because SVG y grows down).
+///
+/// Covered node types:
+/// - `Circle`: anchor point (cx, cy) is remapped.
+/// - `Polyline`: every vertex is remapped.
+/// - `Line`: both endpoints (x1,y1) and (x2,y2) are remapped.
+/// - `Text`: anchor point (x, y) is remapped; content and style are unchanged.
+/// - `Rect`: converted to a `Polygon` whose perimeter approximates the curved
+///   arc the rect describes in polar space. Arc edges (constant-y) are sampled
+///   with `RECT_ARC_SEGMENTS` points; radial edges (constant-x) use 2 points.
+///   The Rect's `FillStroke` is preserved so fill colour is not lost.
 fn apply_polar_node_transform(
     nodes: &mut [SceneNode],
     plot_area: &crate::layout::Rect,
@@ -445,24 +455,84 @@ fn apply_polar_node_transform(
     let center_x = plot_x + plot_w / 2.0;
     let center_y = plot_y + plot_h / 2.0;
     let outer_r = polar_outer_radius(plot_area);
-    for node in nodes.iter_mut() {
+
+    const RECT_ARC_SEGMENTS: usize = 12;
+
+    let map_pt = |px: f64, py: f64| -> (f64, f64) {
+        let theta = (px - plot_x) / plot_w * TAU;
+        let r = (plot_y + plot_h - py) / plot_h * outer_r;
+        (center_x + r * theta.sin(), center_y - r * theta.cos())
+    };
+
+    let mut replacements: Vec<(usize, SceneNode)> = Vec::new();
+
+    for (idx, node) in nodes.iter_mut().enumerate() {
         match node {
             SceneNode::Circle { ref mut cx, ref mut cy, .. } => {
-                let theta = (*cx - plot_x) / plot_w * TAU;
-                let r = (plot_y + plot_h - *cy) / plot_h * outer_r;
-                *cx = center_x + r * theta.sin();
-                *cy = center_y - r * theta.cos();
+                let (nx, ny) = map_pt(*cx, *cy);
+                *cx = nx;
+                *cy = ny;
             }
             SceneNode::Polyline { ref mut points, .. } => {
                 for pt in points.iter_mut() {
-                    let theta = (pt.0 - plot_x) / plot_w * TAU;
-                    let r = (plot_y + plot_h - pt.1) / plot_h * outer_r;
-                    pt.0 = center_x + r * theta.sin();
-                    pt.1 = center_y - r * theta.cos();
+                    let (nx, ny) = map_pt(pt.0, pt.1);
+                    pt.0 = nx;
+                    pt.1 = ny;
                 }
+            }
+            SceneNode::Line {
+                ref mut x1,
+                ref mut y1,
+                ref mut x2,
+                ref mut y2,
+                ..
+            } => {
+                let (nx1, ny1) = map_pt(*x1, *y1);
+                let (nx2, ny2) = map_pt(*x2, *y2);
+                *x1 = nx1;
+                *y1 = ny1;
+                *x2 = nx2;
+                *y2 = ny2;
+            }
+            SceneNode::Text { ref mut x, ref mut y, .. } => {
+                let (nx, ny) = map_pt(*x, *y);
+                *x = nx;
+                *y = ny;
+            }
+            SceneNode::Rect { x, y, w, h, style, .. } => {
+                // Convert the Cartesian rect to a polar Polygon by sampling
+                // its perimeter. Constant-y (arc) edges get RECT_ARC_SEGMENTS
+                // points; constant-x (radial) edges use 2 points (straight).
+                // Perimeter order: bottom-left → bottom-right (arc) →
+                // top-right (radial) → top-left (arc, reversed) → close.
+                let (rx, ry, rw, rh, fill_stroke) = (*x, *y, *w, *h, style.clone());
+                let mut pts: Vec<[f64; 2]> =
+                    Vec::with_capacity(2 * (RECT_ARC_SEGMENTS + 1) + 1);
+                // Bottom arc: y = ry + rh, x sweeps left → right.
+                for i in 0..=RECT_ARC_SEGMENTS {
+                    let t = i as f64 / RECT_ARC_SEGMENTS as f64;
+                    let (nx, ny) = map_pt(rx + t * rw, ry + rh);
+                    pts.push([nx, ny]);
+                }
+                // Right radial edge: x = rx + rw, y sweeps bottom → top.
+                let (nx, ny) = map_pt(rx + rw, ry);
+                pts.push([nx, ny]);
+                // Top arc: y = ry, x sweeps right → left.
+                for i in (0..=RECT_ARC_SEGMENTS).rev() {
+                    let t = i as f64 / RECT_ARC_SEGMENTS as f64;
+                    let (nx, ny) = map_pt(rx + t * rw, ry);
+                    pts.push([nx, ny]);
+                }
+                // Left radial edge closes back to start (polygon auto-closes).
+                replacements.push((idx, SceneNode::Polygon { rings: vec![pts], style: fill_stroke }));
             }
             _ => {}
         }
+    }
+
+    // Apply Rect → Polygon replacements after the borrow-safe iteration above.
+    for (idx, replacement) in replacements {
+        nodes[idx] = replacement;
     }
 }
 
