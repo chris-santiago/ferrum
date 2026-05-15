@@ -54,6 +54,74 @@ def test_facet_to_spec_round_trips_wrap():
     assert facet["mode"]["ncols"] == 2
 
 
+def test_encode_facet_col_sets_facet():
+    """encode(facet_col=...) must set _facet, not silently drop the channel."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6], "species": ["a", "b", "a"]})
+    c = Chart(df).mark_point().encode(x="x", y="y", facet_col="species:N")
+    assert c._facet is not None
+    assert c._facet.mode_kind == "wrap"
+    assert c._facet.field == "species"
+
+
+def test_encode_facet_col_produces_panels():
+    """encode(facet_col=...) must produce multiple panels in the SVG."""
+    import pyarrow as pa
+    from ferrum._core import render_svg
+
+    tbl = pa.table({
+        "x": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+        "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+        "species": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+    })
+    df = pl.from_arrow(tbl)
+    chart = Chart(df).mark_point().encode(x="x", y="y", facet_col="species:N")
+    spec = chart.to_spec()
+    svg = render_svg(spec, tbl, viewport=(600.0, 400.0), theme={})
+    # 3 panels → ≥6 clipPath elements (2 per panel)
+    assert svg.count("clipPath") >= 6, f"Expected ≥6 clipPaths for 3 panels, got {svg.count('clipPath')}"
+
+
+def test_encode_facet_row_sets_facet():
+    """encode(facet_row=...) must set _facet."""
+    df = pl.DataFrame({"x": [1], "y": [2], "grp": ["a"]})
+    c = Chart(df).mark_point().encode(x="x", y="y", facet_row="grp:N")
+    assert c._facet is not None
+    assert c._facet.mode_kind == "wrap"
+    assert c._facet.field == "grp"
+
+
+def test_encode_facet_bare_sets_facet():
+    """encode(facet=...) must set _facet."""
+    df = pl.DataFrame({"x": [1], "y": [2], "grp": ["a"]})
+    c = Chart(df).mark_point().encode(x="x", y="y", facet="grp:N")
+    assert c._facet is not None
+    assert c._facet.mode_kind == "wrap"
+    assert c._facet.field == "grp"
+
+
+def test_encode_facet_col_and_row_grid_mode():
+    """encode(facet_col=..., facet_row=...) must produce grid mode."""
+    df = pl.DataFrame({"x": [1], "y": [2], "col": ["c1"], "row": ["r1"]})
+    c = Chart(df).mark_point().encode(x="x", y="y", facet_col="col:N", facet_row="row:N")
+    assert c._facet is not None
+    assert c._facet.mode_kind == "grid"
+    assert c._facet.col == "col"
+    assert c._facet.row == "row"
+
+
+def test_encode_facet_preserves_ncols_from_prior_facet_call():
+    """encode(facet_col=...) applied after .facet(ncols=N) must preserve ncols."""
+    df = pl.DataFrame({"x": [1], "y": [2], "grp": ["a"]})
+    # This is an unusual pattern but should not lose ncols.
+    c = (
+        Chart(df).mark_point().encode(x="x", y="y")
+        .facet(col="grp", ncols=3)
+        .encode(facet_col="grp:N")
+    )
+    assert c._facet is not None
+    assert c._facet.ncols == 3
+
+
 def test_faceted_svg_contains_strip_titles():
     """Phase 7 strip-title implementation emits text elements for each facet.
 

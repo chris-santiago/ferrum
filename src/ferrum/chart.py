@@ -3849,6 +3849,27 @@ class Chart:
 
             new._encoding[name] = channel
             new._transforms.extend(channel.to_implicit_transforms())
+
+        # Synthesize _facet whenever facet encoding channels are passed in this
+        # call. This wires encode(facet_col=...) / encode(facet_row=...) /
+        # encode(facet=...) to the same _facet path that .facet() uses.
+        if any(name in _FACET_CHANNELS for name in channels):
+            facet_enc = new._encoding.get("facet")
+            col_enc = new._encoding.get("facet_col")
+            row_enc = new._encoding.get("facet_row")
+            # Preserve ncols/nrows from any existing _facet (e.g. a prior .facet() call).
+            existing = new._facet
+            ncols = existing.ncols if existing is not None else None
+            nrows = existing.nrows if existing is not None else None
+            if facet_enc is not None:
+                new._facet = _Facet(mode_kind="wrap", field=facet_enc.field, ncols=ncols, nrows=nrows)
+            elif col_enc is not None and row_enc is not None:
+                new._facet = _Facet(mode_kind="grid", col=col_enc.field, row=row_enc.field, ncols=ncols, nrows=nrows)
+            elif col_enc is not None:
+                new._facet = _Facet(mode_kind="wrap", field=col_enc.field, ncols=ncols, nrows=nrows)
+            elif row_enc is not None:
+                new._facet = _Facet(mode_kind="wrap", field=row_enc.field, ncols=ncols, nrows=nrows)
+
         return new
 
     def layer(self, *layers) -> "Chart":
