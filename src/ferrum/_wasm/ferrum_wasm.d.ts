@@ -15,7 +15,7 @@ export class WasmRenderer {
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      */
     handleClick(x: number, y: number): string;
-    loadScene(scene_json: string): string;
+    loadScene(scene_json: string, packed_data: Uint8Array): string;
     /**
      * Apply a pan delta on the given panel and re-render via GPU affine transform.
      *
@@ -65,7 +65,7 @@ export interface InitOutput {
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
     readonly wasmrenderer_create: (a: any) => any;
     readonly wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly wasmrenderer_loadScene: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];

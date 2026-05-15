@@ -7,11 +7,26 @@
 //!
 //! The byte layout matches `CircleInstance` (16 × f32 = 64 bytes) and
 //! `RectInstance` (18 × f32 = 72 bytes) defined in `ferrum-wasm/src/scene_load.rs`.
+//!
+//! ## Extended header (v2)
+//!
+//! Each packed batch now uses a 20-byte header:
+//! ```text
+//! [panel_idx: u32][batch_idx: u32][kind: u32][count: u32][flags: u32]
+//! ```
+//! After instance data, optional sections follow based on `flags`:
+//! - `HAS_DATA_INDICES (0x2)`: `count × u32` little-endian data indices
+//! - `HAS_TOOLTIPS (0x1)`: length-prefixed string table (field names then row values)
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
 /// Minimum node count for a batch to qualify for packing.
 const PACK_THRESHOLD: usize = 1000;
+
+/// Flag: tooltips string table follows instance data (+ optional data_indices).
+const HAS_TOOLTIPS: u32 = 0x1;
+/// Flag: `count × u32` data-index array follows instance data.
+const HAS_DATA_INDICES: u32 = 0x2;
 
 /// Extract packed instance bytes from large homogeneous mark batches.
 ///
@@ -20,9 +35,15 @@ const PACK_THRESHOLD: usize = 1000;
 /// representation. The WASM renderer receives these bytes as a separate
 /// `Uint8Array`, bypassing JSON entirely.
 ///
-/// Byte layout: `[batch_header][instance_data]` repeated per batch.
-/// Batch header: `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32]` (16 bytes).
-/// Instance data: `count × sizeof(CircleInstance|RectInstance)` bytes.
+/// Byte layout per batch:
+///   `[header 20B][instance_data][data_indices?][tooltips?]`
+///
+/// Header (20 bytes):
+///   `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32][flags: u32]`
+///
+/// After instance data, optional trailing sections appear in flag order:
+///   - `HAS_DATA_INDICES`: `count × u32` LE data indices
+///   - `HAS_TOOLTIPS`: length-prefixed string table (see `pack_tooltips`)
 pub fn extract_packed_bytes(scene: &mut SceneGraph) -> Vec<u8> {
     let mut packed = Vec::new();
     for (pi, panel) in scene.panels.iter_mut().enumerate() {
@@ -48,17 +69,83 @@ pub fn extract_packed_bytes(scene: &mut SceneGraph) -> Vec<u8> {
                 _ => continue,
             };
 
-            // Header: panel_idx, batch_idx, kind (0=circle, 1=rect), count
+            // Build flags and optional trailing sections.
+            let mut flags: u32 = 0;
+            let mut trailing = Vec::new();
+
+            // data_indices — written first after instance bytes.
+            if let Some(ref indices) = batch.data_indices {
+                flags |= HAS_DATA_INDICES;
+                for &idx in indices {
+                    trailing.extend_from_slice(&(idx as u32).to_le_bytes());
+                }
+            }
+
+            // tooltips — written after data_indices (if any).
+            if let Some(ref tooltips) = batch.tooltips {
+                if !tooltips.is_empty() {
+                    flags |= HAS_TOOLTIPS;
+                    pack_tooltips(tooltips, &mut trailing);
+                }
+            }
+
+            // Header: panel_idx, batch_idx, kind, count, flags (20 bytes)
             packed.extend_from_slice(&(pi as u32).to_le_bytes());
             packed.extend_from_slice(&(bi as u32).to_le_bytes());
             packed.extend_from_slice(&kind_tag.to_le_bytes());
             packed.extend_from_slice(&(n as u32).to_le_bytes());
+            packed.extend_from_slice(&flags.to_le_bytes());
             packed.extend_from_slice(&instance_bytes);
+            packed.extend_from_slice(&trailing);
 
             batch.nodes.clear();
+
+            // Clear the fields we just packed — they are now in the binary sidecar.
+            if flags & HAS_DATA_INDICES != 0 {
+                batch.data_indices = None;
+            }
+            if flags & HAS_TOOLTIPS != 0 {
+                batch.tooltips = None;
+            }
         }
     }
     packed
+}
+
+// ── Tooltip string-table packing ────────────────────────────────────
+
+/// Append a tooltip string table to `buf`.
+///
+/// Layout:
+/// ```text
+/// [num_fields: u32]
+/// [field_name_0_len: u32][field_name_0 UTF-8 bytes]
+/// …
+/// [row_0_field_0_value_len: u32][row_0_field_0_value UTF-8 bytes]
+/// [row_0_field_1_value_len: u32][row_0_field_1_value UTF-8 bytes]
+/// …
+/// [row_N-1_field_M-1_value_len: u32][row_N-1_field_M-1 UTF-8 bytes]
+/// ```
+fn pack_tooltips(tooltips: &[ferrum_scene::TooltipContent], buf: &mut Vec<u8>) {
+    // Field names come from the first row.
+    let num_fields = tooltips[0].fields.len() as u32;
+    buf.extend_from_slice(&num_fields.to_le_bytes());
+
+    // Write field names.
+    for field in &tooltips[0].fields {
+        let name_bytes = field.name.as_bytes();
+        buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+    }
+
+    // Write per-row values in field order.
+    for row in tooltips {
+        for field in &row.fields {
+            let val_bytes = field.value.as_bytes();
+            buf.extend_from_slice(&(val_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(val_bytes);
+        }
+    }
 }
 
 // ── Predicate helpers ────────────────────────────────────────────────
@@ -318,15 +405,17 @@ mod tests {
         let expected = 20 + n * 16 * 4;
         assert_eq!(bytes.len(), expected, "packed byte count");
 
-        // Verify header
+        // Verify header (20 bytes: panel_idx, batch_idx, kind, count, flags)
         let panel_idx = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let batch_idx = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
         assert_eq!(panel_idx, 0);
         assert_eq!(batch_idx, 0);
         assert_eq!(kind, 0); // circle
         assert_eq!(count, n as u32);
+        assert_eq!(flags, 0, "no data_indices or tooltips → flags = 0");
 
         // Nodes should be cleared after extraction
         assert!(scene.panels[0].marks[0].nodes.is_empty(), "nodes must be cleared");
@@ -351,6 +440,15 @@ mod tests {
     }
 
     fn test_scene(kind: MarkBatchKind, nodes: Vec<SceneNode>) -> ferrum_scene::SceneGraph {
+        test_scene_with_metadata(kind, nodes, None, None)
+    }
+
+    fn test_scene_with_metadata(
+        kind: MarkBatchKind,
+        nodes: Vec<SceneNode>,
+        data_indices: Option<Vec<usize>>,
+        tooltips: Option<Vec<ferrum_scene::TooltipContent>>,
+    ) -> ferrum_scene::SceneGraph {
         use ferrum_scene::*;
         SceneGraph {
             width: 500.0, height: 400.0, background: None, title: vec![],
@@ -362,7 +460,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![MarkBatch {
                     kind, nodes,
-                    data_indices: None, tooltips: None, hrefs: None,
+                    data_indices, tooltips, hrefs: None,
                     descriptions: None, keys: None,
                     blend: BlendMode::Normal, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
@@ -372,6 +470,107 @@ mod tests {
             legend: vec![], decorations: vec![], selections: vec![],
             interaction: InteractionConfig::default(), chart_description: None,
         }
+    }
+
+    #[test]
+    fn extract_packed_bytes_packs_data_indices_and_tooltips() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 5;
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64, cy: i as f64, r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+
+        let data_indices: Vec<usize> = (0..n).collect();
+        let tooltips: Vec<TooltipContent> = (0..n)
+            .map(|i| TooltipContent {
+                fields: vec![
+                    TooltipField { name: "x".into(), value: format!("{}.0", i) },
+                    TooltipField { name: "y".into(), value: format!("{}.0", i * 2) },
+                ],
+            })
+            .collect();
+
+        let mut scene = test_scene_with_metadata(
+            MarkBatchKind::Point,
+            nodes,
+            Some(data_indices),
+            Some(tooltips),
+        );
+        let bytes = extract_packed_bytes(&mut scene);
+
+        // ── Parse header ──
+        assert!(bytes.len() >= 20, "must have at least a 20-byte header");
+        let panel_idx = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let batch_idx = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let kind = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+
+        assert_eq!(panel_idx, 0);
+        assert_eq!(batch_idx, 0);
+        assert_eq!(kind, 0);
+        assert_eq!(count, n as u32);
+        assert_eq!(flags, HAS_DATA_INDICES | HAS_TOOLTIPS, "both flags set");
+
+        // ── Skip instance data ──
+        let instance_size = n * 16 * 4; // 16 f32 per circle
+        let mut cursor = 20 + instance_size;
+
+        // ── Verify data_indices section ──
+        for i in 0..n {
+            let idx = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+            assert_eq!(idx, i as u32, "data_index[{i}]");
+            cursor += 4;
+        }
+
+        // ── Verify tooltips section ──
+        let num_fields = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        assert_eq!(num_fields, 2, "two tooltip fields: x, y");
+        cursor += 4;
+
+        // Field names
+        let read_str = |cur: &mut usize| -> String {
+            let len = u32::from_le_bytes(bytes[*cur..*cur + 4].try_into().unwrap()) as usize;
+            *cur += 4;
+            let s = std::str::from_utf8(&bytes[*cur..*cur + len]).unwrap().to_string();
+            *cur += len;
+            s
+        };
+        assert_eq!(read_str(&mut cursor), "x");
+        assert_eq!(read_str(&mut cursor), "y");
+
+        // Spot-check first and last row values.
+        // Row 0: "0.0", "0.0"
+        assert_eq!(read_str(&mut cursor), "0.0");
+        assert_eq!(read_str(&mut cursor), "0.0");
+
+        // Skip to last row: each row is 2 string-table entries.
+        // We already consumed row 0 (2 entries). Skip rows 1..n-1.
+        for _ in 1..n - 1 {
+            // Skip 2 fields per row.
+            for _ in 0..2 {
+                let len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4 + len;
+            }
+        }
+
+        // Last row: format!("{}.0", n-1), format!("{}.0", (n-1)*2)
+        let last = n - 1;
+        assert_eq!(read_str(&mut cursor), format!("{last}.0"));
+        assert_eq!(read_str(&mut cursor), format!("{}.0", last * 2));
+
+        // cursor should be at the end of bytes
+        assert_eq!(cursor, bytes.len(), "all bytes consumed");
+
+        // ── Verify fields cleared on batch ──
+        let batch = &scene.panels[0].marks[0];
+        assert!(batch.nodes.is_empty(), "nodes cleared");
+        assert!(batch.data_indices.is_none(), "data_indices cleared");
+        assert!(batch.tooltips.is_none(), "tooltips cleared");
     }
 
     #[test]
