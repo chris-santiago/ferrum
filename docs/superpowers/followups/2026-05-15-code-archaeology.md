@@ -20,25 +20,29 @@
 
 ## Skipped Tests (known bugs, never fixed)
 
-| File | Line | Reason |
-|---|---|---|
-| `tests/marks/test_heavy_stats.py` | 188 | `mark_violin(inner=None)` fails on scale-resolve integration for small samples — never fixed |
+| File | Status |
+|---|---|
+| `tests/marks/test_heavy_stats.py:188` — `mark_violin(inner=None)` scale-resolve on small samples | ✅ Fixed `531f10d` |
+| `tests/test_phase_8b_e2e.py:60` — `test_contour_renders` | ✅ Skip removed `30c4732` (was already passing) |
+| `tests/test_phase_8b_e2e.py:87` — `test_hex_renders` | ✅ Skip removed `30c4732` (was already passing) |
 
-> **2026-05-15 update:** `test_contour_renders` and `test_hex_renders` were verified passing and their skip markers removed. The "Task 37 follow-up" coloring work was completed at some point but the skips were never cleaned up.
+> **Violin fix:** loosened `vals.len() < 2` guard to `vals.is_empty()` in `violin.rs`; single-element groups now emit degenerate vertices (visible to scale resolution, invisible to renderer). **Gap: no test for the degenerate-path branch specifically — follow-up needed.**
 
 ---
 
 ## High-Severity Rust Gaps
 
-| ID | Location | Issue |
-|---|---|---|
-| F3 | `crates/ferrum-core/src/render/marks/label.rs:42` | Leader lines hardcoded `draw_leader = false` — entire feature path is dead code, no wiring path to `mark_style` |
-| F1 | `crates/ferrum-core/src/render/arrow_cast.rs:35` | `is_numeric` helper for color-type widening (labelled F16) written but never called; old narrow `Float64\|UInt64` branch still live in `scale_resolve.rs` |
-| F14 | `crates/ferrum-core/src/render/scene_build.rs:464` | Polar coordinate transform only handles `Circle` and `Polyline`; `Rect`, `Line`, `Text`, `Segment`, `Path`, `Polygon` nodes silently stay in Cartesian space |
-| F13 | `crates/ferrum-core/src/render/marks/geoshape.rs:111` | Interior polygon rings (holes) silently discarded; `Point`, `MultiPoint`, `LineString`, `MultiLineString` geometry types produce empty output |
-| F9 | `crates/ferrum-wasm/src/conditional.rs:148` | `Size` conditional encoding silently dropped for Rect/Bar instances (handled for Circle at line 130, missing counterpart for Rect) |
-| F11 | `crates/ferrum-wasm/src/zoom_pan.rs:5` | `ScaleMode::Independent` declared and `#[allow(dead_code)]`-suppressed but never constructed — per-axis independent zoom structurally planned but not wired |
-| F7 | `crates/ferrum-core/src/transform/swarm.rs:253` | `eprintln!` debug output left in production code; fires to stderr in end-user environments when swarm has no pixel context |
+| ID | Location | Issue | Status |
+|---|---|---|---|
+| F3 | `crates/ferrum-core/src/render/marks/label.rs:42` | Leader lines hardcoded `draw_leader = false` | ✅ Fixed `87e8c6b` — `leader_line: Option<bool>` wired through `MarkStyleSpec` → `mark_label()` kwarg |
+| F1 | `crates/ferrum-core/src/render/arrow_cast.rs:35` | `is_numeric` helper written but never called; stale `#[allow(dead_code)]` | ✅ Fixed `f87bccd` — stale attribute removed (was already called at `scale_resolve.rs`) |
+| F14 | `crates/ferrum-core/src/render/scene_build.rs:464` | Polar transform only handled `Circle`/`Polyline` | ✅ Fixed `a5d1de0` — extended to `Line`, `Text`, `Rect`→`Polygon` arc sampling |
+| F13 | `crates/ferrum-core/src/render/marks/geoshape.rs:111` | Interior polygon rings discarded; `Point`/`LineString` produced empty output | ✅ Fixed `9d299f2` — `SceneNode::Polygon` now carries `rings: Vec<Vec<...>>`; holes via `fill-rule evenodd`; `Point`→`Circle`; `LineString`→`Polyline` |
+| F9 | `crates/ferrum-wasm/src/conditional.rs:148` | `Size` conditional dropped for Rect/Bar | ✅ Fixed `26a77c0` — `Size` arm added to `apply_value_to_rect` |
+| F11 | `crates/ferrum-wasm/src/zoom_pan.rs:5` | `ScaleMode::Independent` stale `#[allow(dead_code)]` | ✅ Fixed `26a77c0` — variant was already live; stale attribute removed |
+| F7 | `crates/ferrum-core/src/transform/swarm.rs:253` | `eprintln!` debug output in production code | ✅ Fixed `f87bccd` — replaced with comment |
+
+> **Test gaps identified:** F13, F14, and F3 have **zero** inline tests. A revert to any of these three would be silent. Follow-up test coverage needed for: geoshape interior rings / geometry types, polar transform remapping correctness, and leader-line node emission.
 
 ---
 
