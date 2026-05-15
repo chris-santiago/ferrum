@@ -104,7 +104,7 @@
 | `ferrum.color` namespace (`palette()`, `to_hex()`, `diverging_palette()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `ferrum.config` namespace (`set_max_rows()`, `set_renderer()`, `set_default_width/height()`, `set_raster_threshold()`, `set_raster_behavior()`, `set_default_backend()`, `set_font_paths()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `Axis(...)` value class | `ferrum-spec.md §3.7` | Not publicly constructable; `axis=` kwarg accepted but stored as opaque dict and ignored by Rust renderer |
-| `Legend(...)` kwargs beyond `disabled` | `ferrum-spec.md §3.7` | `orient`, `values`, `format`, `tick_count`, `label_font_size`, `columns`, etc. silently dropped |
+| `Legend(...)` kwargs beyond `disabled` | `ferrum-spec.md §3.7` | ✅ `orient`, `title`, `format`, `columns` confirmed working (`10c1931`). Remaining kwargs (`values`, `tick_count`, `label_font_size`, `gradient_length`, `gradient_thickness`, `direction`, `type`) untested — may or may not be wired through the opaque `extra` map |
 | Auto-raster policy (`raster_threshold`, `raster_behavior`, `raster_aggregate`, `raster_cmap`) | `ferrum-spec.md §3.16/3.18` | Documented, not implemented |
 | `RenderConfig` Python class (public) | `ferrum-spec.md §3.16` | No public `RenderConfig` class exists; `embed_fonts=False` is untestable |
 | `ferrum.Grid` utility class | `ferrum-spec.md §3.19` | Absent from source |
