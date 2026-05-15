@@ -297,6 +297,7 @@ impl WasmRenderer {
         let uniforms = Uniforms {
             canvas_w: loaded.data.width,
             canvas_h: loaded.data.height,
+            _canvas_pad: [0.0; 2],
             sx: transform.sx as f32,
             sy: transform.sy as f32,
             tx: transform.tx as f32,
@@ -305,7 +306,6 @@ impl WasmRenderer {
             clip_y: 0.0,
             clip_w: loaded.data.width,
             clip_h: loaded.data.height,
-            _pad: [0.0; 6],
         };
         loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
         render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)

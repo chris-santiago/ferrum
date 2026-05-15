@@ -26,25 +26,31 @@ pub struct GpuBuffers {
 
 /// Uniform data uploaded to the GPU once per panel draw.
 ///
-/// Layout (64 bytes / 16 × f32):
-///   [0..1]  canvas width, height
-///   [2..5]  affine transform: sx, sy, tx, ty (identity = 1,1,0,0)
-///   [6..9]  clip rect in canvas pixels: x, y, w, h (full canvas = 0,0,w,h)
-///   [10..15] padding
+/// Layout (48 bytes / 3 × vec4<f32>):
+///   canvas:    {canvas_w, canvas_h, 0, 0}
+///   transform: {sx, sy, tx, ty}         identity = {1,1,0,0}
+///   clip:      {clip_x, clip_y, clip_w, clip_h}
+///
+/// Must use vec4 packing — WGSL uniform address space enforces a 16-byte
+/// stride for `array<f32, N>`, which would cause a size mismatch with the
+/// Rust struct if individual padding arrays are used instead.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
+    // vec4: canvas_w, canvas_h, unused, unused
     pub canvas_w: f32,
     pub canvas_h: f32,
+    pub _canvas_pad: [f32; 2],
+    // vec4: sx, sy, tx, ty
     pub sx: f32,
     pub sy: f32,
     pub tx: f32,
     pub ty: f32,
+    // vec4: clip_x, clip_y, clip_w, clip_h
     pub clip_x: f32,
     pub clip_y: f32,
     pub clip_w: f32,
     pub clip_h: f32,
-    pub _pad: [f32; 6],
 }
 
 impl Uniforms {
@@ -52,6 +58,7 @@ impl Uniforms {
         Self {
             canvas_w,
             canvas_h,
+            _canvas_pad: [0.0; 2],
             sx: 1.0,
             sy: 1.0,
             tx: 0.0,
@@ -60,7 +67,6 @@ impl Uniforms {
             clip_y: 0.0,
             clip_w: canvas_w,
             clip_h: canvas_h,
-            _pad: [0.0; 6],
         }
     }
 }
