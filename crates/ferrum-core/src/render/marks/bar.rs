@@ -10,6 +10,83 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
+/// Per-row stroke encoding column vectors loaded from a batch.
+struct StrokeChannels {
+    opacity: Option<Vec<Option<f64>>>,
+    width: Option<Vec<Option<f64>>>,
+    dash: Option<Vec<Option<f64>>>,
+    angle: Option<Vec<Option<f64>>>,
+}
+
+impl StrokeChannels {
+    fn load(ctx: &DrawCtx) -> Self {
+        Self {
+            opacity: ctx.spec.encoding.stroke_opacity.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            width: ctx.spec.encoding.stroke_width.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            dash: ctx.spec.encoding.stroke_dash.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            angle: ctx.spec.encoding.angle.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+        }
+    }
+
+    /// Build a `FillStroke` for row `i`, overriding `base_*` defaults with any
+    /// per-row column values.  `corner_radius` is passed through unchanged.
+    fn row_fill_stroke(
+        &self,
+        fill: Option<ferrum_scene::Color>,
+        stroke: Option<ferrum_scene::Color>,
+        base_sw: f64,
+        opacity: f64,
+        base_dash: Option<&[f64]>,
+        corner_radius: f64,
+        i: usize,
+    ) -> (ferrum_scene::FillStroke, f64) {
+        let stroke_opacity = self.opacity.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
+        let stroke_width = self.width.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(base_sw);
+
+        let dash_vec: Option<Vec<f64>> = self.dash.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .and_then(|idx| {
+                let idx = (idx.round() as i64).clamp(0, 3);
+                match idx {
+                    1 => Some(vec![6.0, 3.0]),
+                    2 => Some(vec![2.0, 3.0]),
+                    3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+                    _ => None,
+                }
+            });
+        let effective_dash = dash_vec.as_deref().or(base_dash).map(|d| d.to_vec());
+
+        let angle = self.angle.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0);
+
+        let fs = ferrum_scene::FillStroke {
+            fill,
+            stroke,
+            stroke_width,
+            opacity,
+            stroke_dash: effective_dash,
+            stroke_opacity,
+            angle,
+        };
+        (fs, corner_radius)
+    }
+}
+
 // ── Scene-graph build path (11a) ────────────────────────────────────
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -40,7 +117,7 @@ fn empty_result() -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use crate::render::draw::{MarkBuildResult, to_scene_color};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -75,6 +152,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -96,7 +174,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let top_y = top_y + y_offsets[i];
 
-        let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
+        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -107,21 +185,23 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else {
             ctx.mark_style.fill
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+
+        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let fill_sc = to_scene_color(fill);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), stroke_sc,
+            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
+            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
+        );
 
         nodes.push(SceneNode::Rect {
             x: cx - bar_width / 2.0,
             y: top_y,
             w: bar_width,
             h: height,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
-            corner_radius: ctx.mark_style.corner_radius,
+            style,
+            corner_radius: cr,
         });
         indices.push(i);
     }
@@ -136,7 +216,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use crate::render::draw::{MarkBuildResult, to_scene_color};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -164,6 +244,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let bar_height = (panel.h / n_categories as f64) * 0.8;
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -188,7 +269,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (baseline_x, (px - baseline_x).max(0.0))
         };
 
-        let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
+        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -199,21 +280,23 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else {
             ctx.mark_style.fill
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+
+        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let fill_sc = to_scene_color(fill);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), stroke_sc,
+            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
+            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
+        );
 
         nodes.push(SceneNode::Rect {
             x: left_x,
             y: cy - bar_height / 2.0,
             w: width,
             h: bar_height,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
-            corner_radius: ctx.mark_style.corner_radius,
+            style,
+            corner_radius: cr,
         });
         indices.push(i);
     }
@@ -228,7 +311,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use crate::render::draw::{MarkBuildResult, to_scene_color};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -249,6 +332,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -268,7 +352,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let width = (px_right - px_left).abs().max(1.0);
         let height = (baseline_y - top_y).max(0.0);
 
-        let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
+        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -279,21 +363,23 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else {
             ctx.mark_style.fill
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+
+        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let fill_sc = to_scene_color(fill);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), stroke_sc,
+            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
+            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
+        );
 
         nodes.push(SceneNode::Rect {
             x: px_left.min(px_right),
             y: top_y,
             w: width,
             h: height,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
-            corner_radius: ctx.mark_style.corner_radius,
+            style,
+            corner_radius: cr,
         });
         indices.push(i);
     }
@@ -308,7 +394,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke};
+    use crate::render::draw::{MarkBuildResult, to_scene_color};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
@@ -329,6 +415,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -349,7 +436,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let width  = (px_right - baseline_x).max(0.0);
         let height = (py_top - py_bottom).abs().max(1.0);
 
-        let fill = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
+        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
                 Some(v) => match scale {
                     ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -360,21 +447,23 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         } else {
             ctx.mark_style.fill
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+
+        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let fill_sc = to_scene_color(fill);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), stroke_sc,
+            ctx.mark_style.stroke_width, ctx.mark_style.opacity,
+            ctx.mark_style.stroke_dash.as_deref(), ctx.mark_style.corner_radius, i,
+        );
 
         nodes.push(SceneNode::Rect {
             x: baseline_x,
             y: py_top.min(py_bottom),
             w: width,
             h: height,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
-            corner_radius: ctx.mark_style.corner_radius,
+            style,
+            corner_radius: cr,
         });
         indices.push(i);
     }

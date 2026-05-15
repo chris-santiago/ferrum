@@ -114,6 +114,10 @@ impl ChartSpec {
         selections = None,                                        // Phase 11c (JSON)
         conditionals = None,                                      // Phase 11c (JSON)
         url = None,                                               // mark_image URL-tile path
+        stroke_opacity = None,                                    // Task 10: per-element stroke opacity
+        stroke_width = None,                                      // Task 10: per-element stroke width
+        stroke_dash = None,                                       // Task 10: per-element dash palette index
+        angle = None,                                             // Task 10: per-element rotation degrees
     ))]
     fn new(
         mark: &str,
@@ -145,6 +149,10 @@ impl ChartSpec {
         selections: Option<&str>,
         conditionals: Option<&str>,
         url: Option<&Bound<'_, PyAny>>,
+        stroke_opacity: Option<&Bound<'_, PyAny>>,
+        stroke_width: Option<&Bound<'_, PyAny>>,
+        stroke_dash: Option<&Bound<'_, PyAny>>,
+        angle: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -167,6 +175,10 @@ impl ChartSpec {
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("tooltip_fields JSON: {e}"))))
             .transpose()?;
         let key = key.map(coerce_encoding).transpose()?;
+        let stroke_opacity = stroke_opacity.map(coerce_encoding).transpose()?;
+        let stroke_width = stroke_width.map(coerce_encoding).transpose()?;
+        let stroke_dash = stroke_dash.map(coerce_encoding).transpose()?;
+        let angle = angle.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -259,7 +271,7 @@ impl ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
-                stroke_width: None, stroke_opacity: None, stroke_dash: None, angle: None },
+                stroke_width, stroke_opacity, stroke_dash, angle },
             transforms,
             facet,
             layers,

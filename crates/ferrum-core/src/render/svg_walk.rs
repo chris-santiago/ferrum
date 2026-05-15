@@ -171,21 +171,30 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
     match node {
         SceneNode::Rect { x, y, w, h, style, corner_radius } => {
             let cr = if *corner_radius > 0.0 { Some(*corner_radius) } else { None };
+            // Anchor: center of the rect.
+            let svg_style = to_svg_fill_stroke_with_anchor(style, x + w / 2.0, y + h / 2.0);
             svg.rect(
                 Rect { x: *x, y: *y, w: *w, h: *h },
-                &to_svg_fill_stroke(style),
+                &svg_style,
                 cr,
             );
         }
         SceneNode::Circle { cx, cy, r, style } => {
-            svg.circle(*cx, *cy, *r, &to_svg_fill_stroke(style));
+            // Anchor: circle center.
+            let svg_style = to_svg_fill_stroke_with_anchor(style, *cx, *cy);
+            svg.circle(*cx, *cy, *r, &svg_style);
         }
         SceneNode::Line { x1, y1, x2, y2, style } => {
             svg.line(*x1, *y1, *x2, *y2, &to_svg_stroke(style));
         }
         SceneNode::Path { commands, style, closed: _ } => {
             let d = path_cmds_to_d(commands);
-            svg.path(&d, &to_svg_fill_stroke(style));
+            // Anchor: first MoveTo coordinates.
+            let (anchor_x, anchor_y) = commands.iter().find_map(|c| {
+                if let ferrum_scene::PathCmd::MoveTo { x, y } = c { Some((*x, *y)) } else { None }
+            }).unwrap_or((0.0, 0.0));
+            let svg_style = to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y);
+            svg.path(&d, &svg_style);
         }
         SceneNode::Text { x, y, content, style } => {
             emit_text(svg, *x, *y, content, style);
@@ -208,7 +217,16 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
                 .iter()
                 .map(|r| r.iter().map(|p| (p[0], p[1])).collect())
                 .collect();
-            svg.polygon(&svg_rings, &to_svg_fill_stroke(style));
+            // Anchor: centroid of first ring's points (good enough for rotation anchor).
+            let (anchor_x, anchor_y) = if let Some(ring) = rings.first() {
+                if ring.is_empty() { (0.0, 0.0) } else {
+                    let n = ring.len() as f64;
+                    let sx: f64 = ring.iter().map(|p| p[0]).sum();
+                    let sy: f64 = ring.iter().map(|p| p[1]).sum();
+                    (sx / n, sy / n)
+                }
+            } else { (0.0, 0.0) };
+            svg.polygon(&svg_rings, &to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y));
         }
         SceneNode::Group { attrs, children } => {
             if attrs.is_empty() {
@@ -245,11 +263,16 @@ fn emit_gridline_node(svg: &mut SvgBuffer, node: &SceneNode) {
     }
 }
 
-fn to_svg_fill_stroke(s: &FsFillStroke) -> FillStroke {
+fn to_svg_fill_stroke_with_anchor(s: &FsFillStroke, anchor_x: f64, anchor_y: f64) -> FillStroke {
     FillStroke {
         fill: s.fill.map(|c| from_rgba(c.r, c.g, c.b, c.a)),
         stroke: s.stroke.map(|c| from_rgba(c.r, c.g, c.b, c.a)),
         stroke_width: s.stroke_width,
+        stroke_opacity: s.stroke_opacity,
+        stroke_dash: s.stroke_dash.clone(),
+        angle: s.angle,
+        angle_cx: anchor_x,
+        angle_cy: anchor_y,
     }
 }
 
@@ -258,6 +281,7 @@ fn to_svg_stroke(s: &FsStroke) -> Stroke {
         stroke: from_rgba(s.color.r, s.color.g, s.color.b, s.color.a),
         stroke_width: s.width,
         stroke_dash: s.dash.clone(),
+        stroke_opacity: s.stroke_opacity,
     }
 }
 

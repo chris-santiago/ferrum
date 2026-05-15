@@ -674,3 +674,212 @@ class TestChartDataNone:
             assert "Phase 8a" not in str(e), (
                 f"Old 'Phase 8a' error message should be updated; got: {e}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Task 10 + Task 5: stroke/angle SVG attribute emission + _SILENT_CHANNELS
+# ---------------------------------------------------------------------------
+
+
+def _stroke_df() -> pl.DataFrame:
+    """Small DataFrame with stroke/angle columns for SVG attribute tests."""
+    return pl.DataFrame({
+        "x":  [1.0, 2.0, 3.0],
+        "y":  [1.0, 4.0, 9.0],
+        "sw": [1.0, 2.0, 3.0],       # stroke_width
+        "so": [0.3, 0.6, 0.9],       # stroke_opacity
+        "sd": [0.0, 1.0, 2.0],       # stroke_dash index (0=solid, 1=dashed, 2=dotted)
+        "ang": [0.0, 45.0, 90.0],    # angle in degrees
+    })
+
+
+class TestStrokeWidthSVG:
+    def test_stroke_width_not_in_silent_channels(self):
+        """stroke_width must not be in _SILENT_CHANNELS after Task 5."""
+        from ferrum.chart import _SILENT_CHANNELS
+        assert "stroke_width" not in _SILENT_CHANNELS, (
+            "stroke_width should have been removed from _SILENT_CHANNELS"
+        )
+
+    def test_scatter_stroke_width_encodes_without_error(self):
+        """encode(stroke_width='sw') on a scatter chart renders without error."""
+        svg = (
+            fm.Chart(_stroke_df())
+            .mark_point()
+            .encode(x="x", y="y", stroke_width="sw")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        assert "<circle" in svg
+
+    def test_line_stroke_width_encodes_without_error(self):
+        """encode(stroke_width='sw') on a line chart renders without error."""
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                           "y": [1.0, 4.0, 9.0, 16.0, 25.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_line()
+            .encode(x="x", y="y")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        # Line marks emit polyline or path elements
+        assert "<polyline" in svg or "<path" in svg
+
+
+class TestStrokeOpacitySVG:
+    def test_stroke_opacity_not_in_silent_channels(self):
+        """stroke_opacity must not be in _SILENT_CHANNELS after Task 5."""
+        from ferrum.chart import _SILENT_CHANNELS
+        assert "stroke_opacity" not in _SILENT_CHANNELS, (
+            "stroke_opacity should have been removed from _SILENT_CHANNELS"
+        )
+
+    def test_scatter_stroke_opacity_emits_attribute(self):
+        """encode(stroke_opacity='so') → SVG circles carry stroke-opacity attributes."""
+        svg = (
+            fm.Chart(_stroke_df())
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_opacity="so")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        assert "stroke-opacity" in svg, (
+            "Expected stroke-opacity attribute in SVG; got:\n" + svg[:2000]
+        )
+
+    def test_scatter_stroke_opacity_values_vary_per_row(self):
+        """Distinct stroke_opacity column values → multiple stroke-opacity values in SVG."""
+        svg = (
+            fm.Chart(_stroke_df())
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_opacity="so")
+            .show_svg()
+        )
+        # Extract stroke-opacity values from SVG
+        vals = re.findall(r'stroke-opacity="([^"]+)"', svg)
+        # Filter out any gridline/axis stroke-opacities (those come from theme)
+        # We expect the row values 0.3, 0.6, 0.9 to appear
+        float_vals = [float(v) for v in vals]
+        per_row_vals = [v for v in float_vals if v < 1.0]
+        assert len(per_row_vals) >= 3, (
+            f"Expected at least 3 distinct stroke-opacity values; got {per_row_vals}"
+        )
+
+
+class TestStrokeDashSVG:
+    def test_stroke_dash_not_in_silent_channels(self):
+        """stroke_dash must not be in _SILENT_CHANNELS after Task 5."""
+        from ferrum.chart import _SILENT_CHANNELS
+        assert "stroke_dash" not in _SILENT_CHANNELS, (
+            "stroke_dash should have been removed from _SILENT_CHANNELS"
+        )
+
+    def test_scatter_stroke_dash_index_0_is_solid(self):
+        """stroke_dash index 0 → no stroke-dasharray attribute (solid)."""
+        df_solid = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [0.0]})
+        svg = (
+            fm.Chart(df_solid)
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_dash="sd")
+            .show_svg()
+        )
+        # Index 0 = solid: stroke-dasharray should NOT appear for mark elements
+        # (it may appear for gridlines but not on circles)
+        # The simplest check: the circle element itself should not carry stroke-dasharray
+        import re as re2
+        circles = re2.findall(r"<circle[^/]*/?>", svg)
+        for c in circles:
+            assert "stroke-dasharray" not in c, (
+                f"Index 0 should be solid; got dasharray in: {c}"
+            )
+
+    def test_scatter_stroke_dash_index_1_is_dashed(self):
+        """stroke_dash index 1 → stroke-dasharray='6,3'."""
+        df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [1.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_dash="sd")
+            .show_svg()
+        )
+        assert 'stroke-dasharray="6,3"' in svg, (
+            f"Expected stroke-dasharray=6,3 for index 1; got:\n{svg[:2000]}"
+        )
+
+    def test_scatter_stroke_dash_index_2_is_dotted(self):
+        """stroke_dash index 2 → stroke-dasharray='2,3'."""
+        df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [2.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_dash="sd")
+            .show_svg()
+        )
+        assert 'stroke-dasharray="2,3"' in svg, (
+            f"Expected stroke-dasharray=2,3 for index 2; got:\n{svg[:2000]}"
+        )
+
+    def test_scatter_stroke_dash_index_3_is_dash_dot(self):
+        """stroke_dash index 3 → stroke-dasharray='6,3,2,3'."""
+        df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [3.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point(filled=False)
+            .encode(x="x", y="y", stroke_dash="sd")
+            .show_svg()
+        )
+        assert 'stroke-dasharray="6,3,2,3"' in svg, (
+            f"Expected stroke-dasharray=6,3,2,3 for index 3; got:\n{svg[:2000]}"
+        )
+
+
+class TestAngleSVG:
+    def test_angle_not_in_silent_channels(self):
+        """angle must not be in _SILENT_CHANNELS after Task 5."""
+        from ferrum.chart import _SILENT_CHANNELS
+        assert "angle" not in _SILENT_CHANNELS, (
+            "angle should have been removed from _SILENT_CHANNELS"
+        )
+
+    def test_scatter_angle_45_emits_rotate(self):
+        """encode(angle='ang') with ang=45 → transform='rotate(45 ...)' in SVG."""
+        df = pl.DataFrame({"x": [1.0], "y": [1.0], "ang": [45.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", angle="ang")
+            .show_svg()
+        )
+        assert "rotate(45" in svg, (
+            f"Expected rotate(45 ...) transform in SVG; got:\n{svg[:2000]}"
+        )
+
+    def test_scatter_angle_zero_does_not_emit_transform(self):
+        """encode(angle='ang') with ang=0 → no rotate transform attribute emitted."""
+        df = pl.DataFrame({"x": [1.0], "y": [1.0], "ang": [0.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", angle="ang")
+            .show_svg()
+        )
+        # Row with angle=0.0 should not emit a rotate transform on that element
+        import re as re2
+        circles = re2.findall(r"<circle[^/]*/?>", svg)
+        for c in circles:
+            assert "transform" not in c, (
+                f"angle=0 should not emit transform; got: {c}"
+            )
+
+    def test_scatter_angle_varies_per_row(self):
+        """Different angle values per row → distinct rotate(...) transforms in SVG."""
+        svg = (
+            fm.Chart(_stroke_df())
+            .mark_point()
+            .encode(x="x", y="y", angle="ang")
+            .show_svg()
+        )
+        # rows 1 and 2 have angle=45, 90 → rotates should appear
+        assert "rotate(45" in svg, "Expected rotate(45 ...) for row 1"
+        assert "rotate(90" in svg, "Expected rotate(90 ...) for row 2"

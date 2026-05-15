@@ -167,6 +167,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let interpolate = ctx.mark_style.interpolate.as_deref();
     let use_path = interpolate.is_some() && interpolate != Some("linear");
 
+    // Per-row stroke channel vectors — sampled at the first valid row of each group.
+    let so_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -186,6 +194,31 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }
         if points.len() < 2 { continue; }
 
+        // Sample stroke-channel values from the first row of the group.
+        let first = row_indices.first().copied().unwrap_or(0);
+        let group_stroke_opacity = so_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+        let group_stroke_width = sw_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(ctx.mark_style.stroke_width);
+        let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| v.is_finite())
+            .and_then(|idx| {
+                let idx = (idx.round() as i64).clamp(0, 3);
+                match idx {
+                    1 => Some(vec![6.0, 3.0]),
+                    2 => Some(vec![2.0, 3.0]),
+                    3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+                    _ => None,
+                }
+            });
+        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
+
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
@@ -195,27 +228,29 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         if use_path {
             let cmds = build_line_cmds(&points, interpolate);
-            let style = to_scene_fill_stroke(
+            let mut style = to_scene_fill_stroke(
                 None,
                 Some(stroke_color),
-                ctx.mark_style.stroke_width,
+                group_stroke_width,
                 1.0,
-                ctx.mark_style.stroke_dash.as_deref(),
+                effective_dash,
             );
+            style.stroke_opacity = group_stroke_opacity;
             nodes.push(ferrum_scene::SceneNode::Path {
                 commands: cmds,
                 style,
                 closed: false,
             });
         } else {
-            let stroke_style = to_scene_stroke(
+            let mut stroke_style = to_scene_stroke(
                 stroke_color,
-                ctx.mark_style.stroke_width,
+                group_stroke_width,
                 1.0,
-                ctx.mark_style.stroke_dash.as_deref(),
+                effective_dash,
                 ctx.mark_style.stroke_cap.as_deref(),
                 ctx.mark_style.stroke_join.as_deref(),
             );
+            stroke_style.stroke_opacity = group_stroke_opacity;
             nodes.push(ferrum_scene::SceneNode::Polyline {
                 points: points.clone(),
                 style: stroke_style,

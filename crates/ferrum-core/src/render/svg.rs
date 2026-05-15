@@ -11,11 +11,36 @@ pub struct SvgBuffer {
     buf: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FillStroke {
     pub fill: Option<Color>,
     pub stroke: Option<Color>,
     pub stroke_width: f64,
+    /// Per-element stroke opacity in [0, 1]. Omit attribute when == 1.0.
+    pub stroke_opacity: f64,
+    /// Per-element stroke dash pattern. None = solid.
+    pub stroke_dash: Option<Vec<f64>>,
+    /// Rotation in degrees around (`angle_cx`, `angle_cy`). Omit when 0.0.
+    pub angle: f64,
+    /// Anchor x for `rotate(angle cx cy)` — typically element center.
+    pub angle_cx: f64,
+    /// Anchor y for `rotate(angle cx cy)` — typically element center.
+    pub angle_cy: f64,
+}
+
+impl Default for FillStroke {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            stroke: None,
+            stroke_width: 0.0,
+            stroke_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+            angle_cx: 0.0,
+            angle_cy: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +48,8 @@ pub struct Stroke {
     pub stroke: Color,
     pub stroke_width: f64,
     pub stroke_dash: Option<Vec<f64>>,
+    /// Per-element stroke opacity in [0, 1]. Omit attribute when == 1.0.
+    pub stroke_opacity: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -327,6 +354,17 @@ fn push_fill_stroke(buf: &mut String, s: &FillStroke) {
             push_attr(buf, "stroke-width", &fmt_f(s.stroke_width));
         }
     }
+    if s.stroke_opacity < 1.0 {
+        push_attr(buf, "stroke-opacity", &fmt_f(s.stroke_opacity));
+    }
+    if let Some(ref dash) = s.stroke_dash {
+        let v: Vec<String> = dash.iter().map(|x| fmt_f(*x)).collect();
+        push_attr(buf, "stroke-dasharray", &v.join(","));
+    }
+    if s.angle != 0.0 {
+        let t = format!("rotate({} {} {})", fmt_f(s.angle), fmt_f(s.angle_cx), fmt_f(s.angle_cy));
+        push_attr(buf, "transform", &t);
+    }
 }
 
 fn push_stroke(buf: &mut String, s: &Stroke) {
@@ -335,6 +373,9 @@ fn push_stroke(buf: &mut String, s: &Stroke) {
     if let Some(dash) = &s.stroke_dash {
         let v: Vec<String> = dash.iter().map(|x| fmt_f(*x)).collect();
         push_attr(buf, "stroke-dasharray", &v.join(","));
+    }
+    if s.stroke_opacity < 1.0 {
+        push_attr(buf, "stroke-opacity", &fmt_f(s.stroke_opacity));
     }
 }
 
@@ -402,7 +443,7 @@ mod tests {
     #[test]
     fn circle_attribute_order_is_fixed() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        buf.circle(10.5, 20.5, 3.0, &FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 });
+        buf.circle(10.5, 20.5, 3.0, &FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() });
         let out = buf.finish();
         let needle = "<circle cx=\"10.5\" cy=\"20.5\" r=\"3\" fill=\"#000000\"/>";
         assert!(out.contains(needle), "missing exact element; got: {out}");
@@ -421,7 +462,7 @@ mod tests {
     fn rect_emits_corner_radius_when_positive() {
         let mut buf = SvgBuffer::new(vp(), None, false);
         let r = Rect { x: 0.0, y: 0.0, w: 10.0, h: 5.0 };
-        buf.rect(r, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0 }, Some(2.0));
+        buf.rect(r, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() }, Some(2.0));
         assert!(buf.as_str().contains("rx=\"2\""));
         assert!(buf.as_str().contains("ry=\"2\""));
     }
@@ -430,14 +471,14 @@ mod tests {
     fn rect_omits_corner_radius_when_zero() {
         let mut buf = SvgBuffer::new(vp(), None, false);
         let r = Rect { x: 0.0, y: 0.0, w: 10.0, h: 5.0 };
-        buf.rect(r, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0 }, Some(0.0));
+        buf.rect(r, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() }, Some(0.0));
         assert!(!buf.as_str().contains("rx="));
     }
 
     #[test]
     fn translucent_color_uses_rgba() {
         let mut buf = SvgBuffer::new(vp(), None, false);
-        buf.circle(0.0, 0.0, 1.0, &FillStroke { fill: Some(from_rgba(255, 0, 0, 128)), stroke: None, stroke_width: 0.0 });
+        buf.circle(0.0, 0.0, 1.0, &FillStroke { fill: Some(from_rgba(255, 0, 0, 128)), stroke: None, stroke_width: 0.0, ..FillStroke::default() });
         assert!(buf.as_str().contains("rgba(255,0,0,0.502)"));
     }
 
@@ -445,8 +486,8 @@ mod tests {
     fn determinism_two_calls_byte_identical() {
         let mut a = SvgBuffer::new(vp(), Some(from_rgb(255,255,255)), false);
         let mut b = SvgBuffer::new(vp(), Some(from_rgb(255,255,255)), false);
-        a.circle(1.0, 2.0, 3.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0 });
-        b.circle(1.0, 2.0, 3.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0 });
+        a.circle(1.0, 2.0, 3.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() });
+        b.circle(1.0, 2.0, 3.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() });
         assert_eq!(a.finish(), b.finish());
     }
 
@@ -455,7 +496,7 @@ mod tests {
         let mut buf = SvgBuffer::new(vp(), None, false);
         buf.clip_open("c1", Rect { x: 0.0, y: 0.0, w: 50.0, h: 30.0 });
         buf.use_clip_open("c1");
-        buf.circle(0.0, 0.0, 1.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0 });
+        buf.circle(0.0, 0.0, 1.0, &FillStroke { fill: Some(from_rgb(0,0,0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() });
         buf.use_clip_close();
         let out = buf.finish();
         assert!(out.contains("<clipPath id=\"c1\">"));
@@ -510,7 +551,7 @@ mod tests {
         let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let mut svg = SvgBuffer::new(viewport, None, false);
         let ring = vec![(0.0_f64, 0.0_f64), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
-        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() };
         svg.polygon(&[ring], &style);
         let out = svg.finish();
         assert!(out.contains(r#"d="M 0 0 L 10 0 L 10 10 L 0 10 Z""#),
@@ -525,7 +566,7 @@ mod tests {
         let mut svg = SvgBuffer::new(viewport, None, false);
         let outer = vec![(0.0_f64, 0.0_f64), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
         let hole  = vec![(5.0_f64, 5.0_f64), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)];
-        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0 };
+        let style = FillStroke { fill: Some(from_rgb(0, 0, 0)), stroke: None, stroke_width: 0.0, ..FillStroke::default() };
         svg.polygon(&[outer, hole], &style);
         let out = svg.finish();
         assert!(out.contains("M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"),
@@ -535,7 +576,7 @@ mod tests {
     #[test]
     fn polygon_byte_identical_across_runs() {
         let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
-        let style = FillStroke { fill: Some(from_rgba(50, 50, 50, 128)), stroke: None, stroke_width: 0.0 };
+        let style = FillStroke { fill: Some(from_rgba(50, 50, 50, 128)), stroke: None, stroke_width: 0.0, ..FillStroke::default() };
         let make = || {
             let mut svg = SvgBuffer::new(viewport, None, false);
             svg.polygon(&[vec![(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]], &style);
@@ -553,6 +594,7 @@ mod tests {
             fill: Some(from_rgb(0, 0, 0)),
             stroke: None,
             stroke_width: 0.0,
+            ..FillStroke::default()
         };
         svg.beeswarm(&pts, 3.0, &style);
         let out = svg.finish();
@@ -570,6 +612,7 @@ mod tests {
             fill: Some(from_rgb(0, 0, 0)),
             stroke: None,
             stroke_width: 0.0,
+            ..FillStroke::default()
         };
         svg.beeswarm(&pts, 1.0, &style);
         let out = svg.finish();
@@ -586,6 +629,7 @@ mod tests {
             fill: Some(from_rgb(50, 50, 50)),
             stroke: None,
             stroke_width: 0.0,
+            ..FillStroke::default()
         };
         let make = || {
             let mut svg = SvgBuffer::new(viewport, None, false);

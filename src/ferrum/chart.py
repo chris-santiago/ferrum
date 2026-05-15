@@ -49,6 +49,11 @@ _RENDERER_HONORED_CHANNELS = (
     "href",
     "description",
     "url",
+    # Per-element stroke/angle channels wired to SVG attributes (Task 10).
+    "stroke_opacity",
+    "stroke_width",
+    "stroke_dash",
+    "angle",
 )
 # Channels that are silently accepted but produce no visual encoding in the
 # current static SVG renderer.  They are handled by special-case logic in
@@ -58,10 +63,9 @@ _SILENT_CHANNELS = frozenset((
     "fill",           # alias → color encoding
     "stroke",         # alias → color encoding or mark_style.stroke
     "fill_opacity",   # alias → opacity encoding
-    "stroke_opacity", # accepted, no visual effect in static SVG
-    "stroke_width",   # accepted, no visual effect in static SVG
-    "stroke_dash",    # accepted, no visual effect in static SVG
-    "angle",          # accepted, no visual effect in static SVG
+    # stroke_opacity, stroke_width, stroke_dash, angle are intentionally NOT
+    # listed here: they are wired through Rust mark renderers as per-element
+    # SVG attributes (Task 10 / Task 5 of the silent-drop remediation).
     "detail",         # injected into mark_style.detail
     "key",            # stored for future interactive/animated rendering
     "x_error",        # used through composite mark desugar (mark_errorbar)

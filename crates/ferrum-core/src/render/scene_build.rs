@@ -533,7 +533,7 @@ fn apply_polar_node_transform(
                     pts.push([nx, ny]);
                 }
                 // Left radial edge closes back to start (polygon auto-closes).
-                replacements.push((idx, SceneNode::Polygon { points: pts, style: fill_stroke }));
+                replacements.push((idx, SceneNode::Polygon { rings: vec![pts], style: fill_stroke }));
             }
             _ => {}
         }
@@ -562,6 +562,7 @@ fn build_polar_axes(
         width: theme.axis_line_width,
         dash: None,
         opacity: 1.0,
+        stroke_opacity: 1.0,
         stroke_cap: None,
         stroke_join: None,
     };
@@ -576,7 +577,7 @@ fn build_polar_axes(
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx + outer_r, y: cy },
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx - outer_r, y: cy },
             ],
-            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None },
+            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None, stroke_opacity: 1.0, angle: 0.0 },
             closed: true,
         });
     }

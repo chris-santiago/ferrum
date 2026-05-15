@@ -183,6 +183,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                     color: to_scene_color(lc),
                     width: 0.75,
                     opacity: ctx.mark_style.opacity * 0.5,
+                    stroke_opacity: 1.0,
                     dash: None,
                     stroke_cap: None,
                     stroke_join: None,

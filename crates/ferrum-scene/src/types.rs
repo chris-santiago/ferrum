@@ -164,7 +164,15 @@ pub struct FillStroke {
     pub stroke_width: f64,
     pub opacity: f64,
     pub stroke_dash: Option<Vec<f64>>,
+    /// Per-element stroke opacity in [0, 1]. Default 1.0 (fully opaque).
+    #[serde(default = "default_stroke_opacity", skip_serializing_if = "is_one_f64")]
+    pub stroke_opacity: f64,
+    /// Per-element rotation in degrees around the element's anchor point. Default 0.0.
+    #[serde(default, skip_serializing_if = "is_zero_angle")]
+    pub angle: f64,
 }
+
+fn is_zero_angle(v: &f64) -> bool { *v == 0.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrokeStyle {
@@ -174,7 +182,13 @@ pub struct StrokeStyle {
     pub dash: Option<Vec<f64>>,
     pub stroke_cap: Option<StrokeCap>,
     pub stroke_join: Option<StrokeJoin>,
+    /// Per-element stroke opacity in [0, 1]. Default 1.0.
+    #[serde(default = "default_stroke_opacity", skip_serializing_if = "is_one_f64")]
+    pub stroke_opacity: f64,
 }
+
+fn default_stroke_opacity() -> f64 { 1.0 }
+fn is_one_f64(v: &f64) -> bool { (*v - 1.0).abs() < f64::EPSILON }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

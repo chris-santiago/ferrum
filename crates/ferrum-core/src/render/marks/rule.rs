@@ -6,21 +6,58 @@
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
 
+/// Build a per-row stroke style for rule segments, applying encoding column values.
+fn rule_stroke_style(
+    ctx: &DrawCtx,
+    i: usize,
+    so_vals: &Option<Vec<Option<f64>>>,
+    sw_vals: &Option<Vec<Option<f64>>>,
+    sd_vals: &Option<Vec<Option<f64>>>,
+) -> ferrum_scene::StrokeStyle {
+    use crate::render::draw::to_scene_stroke;
+
+    let stroke_opacity = so_vals.as_ref()
+        .and_then(|v| v.get(i).copied().flatten())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let stroke_width = sw_vals.as_ref()
+        .and_then(|v| v.get(i).copied().flatten())
+        .filter(|v| *v >= 0.0 && v.is_finite())
+        .unwrap_or(ctx.mark_style.stroke_width);
+    let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
+        .and_then(|v| v.get(i).copied().flatten())
+        .filter(|v| v.is_finite())
+        .and_then(|idx| {
+            let idx = (idx.round() as i64).clamp(0, 3);
+            match idx {
+                1 => Some(vec![6.0, 3.0]),
+                2 => Some(vec![2.0, 3.0]),
+                3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+                _ => None,
+            }
+        });
+    let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
+    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
+    let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);
+    style.stroke_opacity = stroke_opacity;
+    style
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
+    use crate::render::draw::{MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
-    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
-    let stroke_style = to_scene_stroke(
-        stroke_color,
-        ctx.mark_style.stroke_width,
-        1.0,
-        ctx.mark_style.stroke_dash.as_deref(),
-        None,
-        None,
-    );
+
+    // Per-row stroke channel vectors.
+    let so_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -61,7 +98,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py + y_offsets[i],
                     x2: px,
                     y2: py2 + y_offsets[i],
-                    style: stroke_style.clone(),
+                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
                 });
                 indices.push(i);
             }
@@ -93,7 +130,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py,
                     x2: px2 + x_offsets[i],
                     y2: py,
-                    style: stroke_style.clone(),
+                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
                 });
                 indices.push(i);
             }
@@ -125,7 +162,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                         y1: py,
                         x2: panel.x + panel.w,
                         y2: py,
-                        style: stroke_style.clone(),
+                        style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
                     });
                     indices.push(i);
                 }
@@ -152,7 +189,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 y1: panel.y,
                 x2: px,
                 y2: panel.y + panel.h,
-                style: stroke_style.clone(),
+                style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
             });
             indices.push(i);
         }

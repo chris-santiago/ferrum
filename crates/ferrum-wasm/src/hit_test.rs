@@ -624,6 +624,7 @@ mod bug_hunt_tests {
             color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
             width: 1.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
             dash: None,
             stroke_cap: None,
             stroke_join: None,
