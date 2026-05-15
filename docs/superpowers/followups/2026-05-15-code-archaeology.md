@@ -54,34 +54,38 @@
 
 ### Channels accepted, never rendered (static SVG)
 
-| Channel | Location | Notes |
-|---|---|---|
-| `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` | `src/ferrum/chart.py:52–70` | Listed in `_SILENT_CHANNELS`; no SVG output, no alias path |
-| `Description` / `Key` | `src/ferrum/chart.py:4670` | Explicit `TODO(G1)` — stored in `_description` but never serialized to `ChartSpec`; SVG `<desc>` element never emitted |
-| `Theta` / `Radius` | `src/ferrum/encoding/positional.py:290–329` | `CoordPolar` shipped in Phase 11 but these docstrings still say it raises `NotImplementedError` (stale) |
-| `Href`, `Description` (encoding channels) | `src/ferrum/encoding/text.py` | Only `type` is honored; all other kwargs silently warn-once'd and dropped |
-| `fill_opacity` (via StrokeOpacity alias) | `src/ferrum/chart.py:198–211` | When `stroke=field` is mapped while `color=` is already set, the stroke encoding falls through a `pass` branch with no warning |
+| Channel | Status |
+|---|---|
+| `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` | ✅ Promoted to `_RENDERER_HONORED_CHANNELS` — SVG attribute emission wired in `point.rs`, `bar.rs`, `line.rs`, `rule.rs`; WASM GPU instances wired via `FillStroke`. Commits `26f20b3`, `e387017`, `a8d8da8` |
+| `Description` / `Key` | Open — TODO(G1) still present; `ChartSpec` has no `description` field |
+| `Theta` / `Radius` | Stale docstrings (say `NotImplementedError` but `CoordPolar` shipped Phase 11) |
+| `Href`, `Description` (encoding channels) | Open — only `type` honored |
+| `fill_opacity` (via StrokeOpacity alias) | Open — `pass` branch, no warning |
 
 ### 5 `EncodingSpec` fields deserialized, never read by Rust renderer
 
-`axis`, `sort`, `stack`, `impute`, `format_type`
-
-These are accepted end-to-end (Python API → serialized to Rust `EncodingSpec`) but the Rust renderer silently ignores them at layout/render time. Reference: `docs/superpowers/specs/2026-05-12-pipeline-audit-findings.md` D7–D11.
+| Field | Status |
+|---|---|
+| `sort` | ✅ Wired — string and list ordering in `scale_resolve.rs`. Commit `f87ba9a` |
+| `stack` | ✅ Wired — Stack strategy selection in `position.rs`. Commit `f87ba9a` |
+| `axis` | ✅ Wired — dict properties flow through `AxisLayout` → `marks/axis.rs`. Commit `f87ba9a` |
+| `format_type` | ✅ Wired — formatter branch selection in `render/format.rs`. Commit `f87ba9a` |
+| `impute` | ✅ Wired — new `Impute` transform, registered in pipeline. Commit `f87ba9a` |
 
 ### Features that raise `ValueError` at runtime
 
-| Feature | Location | Notes |
-|---|---|---|
-| `mark_histogram(multiple="stack"/"fill"/"dodge")` | `src/ferrum/marks/statistical.py:240` | Only `"layer"` works; others raise immediately |
-| `mark_density(multiple="dodge")` | `src/ferrum/marks/statistical.py:81` | Raises `ValueError` with "not yet implemented" |
-| `mark_ribbon(interpolate=...)` | `src/ferrum/marks/composite.py:373` | Accepted but no-op; only linear interpolation available |
-| `lmplot(truncate=False)` / `regplot(truncate=False)` | `src/ferrum/plots/regression.py:534` | Raises `ValueError`; Rust `SmoothSpec.x_range` (WI-7) not implemented |
-| `Chart(data=None)` with per-layer data | `src/ferrum/_coerce.py:60` | Raises `ValueError` with stale "Phase 8a" message |
-| `Layer(data=...)` via `Chart.layer()` | `src/ferrum/chart.py:3904` | Raises; only `+` operator supports layers with independent data |
-| `mark_hex(stroke=..., stroke_width=...)` | `src/ferrum/marks/heavy_stat.py:538` | Non-default values raise `ValueError` |
-| `mark_function(clip=False)` | `src/ferrum/marks/heavy_stat.py:769` | Accepted but documented as no-op |
+| Feature | Status |
+|---|---|
+| `mark_histogram(multiple="stack"/"fill"/"dodge")` | ✅ Fixed — routes through Stack/Dodge `PositionAdjustment`. Commit `f87ba9a` |
+| `mark_density(multiple="dodge")` | ✅ Fixed — Dodge wired in density desugar. Commit `f87ba9a` |
+| `mark_ribbon(interpolate=...)` | Open — still no-op, only linear available |
+| `lmplot(truncate=False)` / `regplot(truncate=False)` | ✅ Fixed — `x_range` on `SmoothSpec`/`RobustSpec` wired; ValueError removed. Commit `f87ba9a` |
+| `Chart(data=None)` with per-layer data | ✅ Fixed — deferred to `to_spec()` time; stale "Phase 8a" message updated. Commit `f87ba9a` |
+| `Layer(data=...)` via `Chart.layer()` | ✅ Fixed — `Chart.layer()` now accepts `Layer` with `data=`. Commit `f87ba9a` |
+| `mark_hex(stroke=..., stroke_width=...)` | Open — still raises |
+| `mark_function(clip=False)` | Open — still no-op |
 
-> **2026-05-15 update:** `mark_raster(blend="additive")` was removed from this table — docstring cleanup confirmed it is fully implemented (renders with `mix-blend-mode:screen` in SVG via `svg_walk.rs`). The original archaeology finding was a stale-comment false positive. Similarly, `mark_swarm(dodge=...)` is fully wired through `apply_dodged()` in `transform/swarm.rs`.
+> **2026-05-15:** `mark_raster(blend="additive")` SVG was already implemented (`mix-blend-mode:screen`); WASM GPU additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` was already wired. Legend kwargs passthrough wired `f87ba9a`. Archaeology false positives resolved by docstring cleanup `c606f72`.
 
 ### `VisualBase.score()` not overridden in 14 visualizer subclasses
 
