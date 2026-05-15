@@ -1,10 +1,10 @@
-# Silent-Drop Remediation — WASM Stroke/Angle Channels Implementation Plan
+# Silent-Drop Remediation — WASM Channels & Blend Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
 ## 1. Objective
 
-Wire `stroke_opacity`, `stroke_width`, `stroke_dash`, and `angle` as per-row field-driven encoding channels in the WASM interactive renderer for Circle and Rect mark kinds.
+Wire `stroke_opacity`, `stroke_width`, `stroke_dash`, and `angle` as per-row field-driven encoding channels in the WASM interactive renderer for Circle and Rect mark kinds; and wire `mark_raster(blend="additive")` GPU additive compositing.
 
 ## 2. Spec references
 
@@ -22,15 +22,17 @@ Wire `stroke_opacity`, `stroke_width`, `stroke_dash`, and `angle` as per-row fie
 | Modify | `crates/ferrum-core/src/render/marks/point.rs` | emit stroke/angle column values into `MarkBatch` per-row data |
 | Modify | `crates/ferrum-core/src/render/marks/bar.rs` (and rect.rs) | same for Rect/Bar |
 | Modify | `crates/ferrum-core/src/render/scale_resolve.rs` | resolve `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` channels to columns |
-| Test | `crates/ferrum-wasm/src/` (inline tests) | assert new instance fields populated from column data |
+| Modify | `crates/ferrum-wasm/src/render_pipeline.rs` (or equivalent) | second pipeline state for additive blend; select per-batch |
+| Test | `crates/ferrum-wasm/src/` (inline tests) | assert instance fields populated; assert correct blend state selected |
 
 ## 4. Constraints
 
-- These are **data-driven constants per row**, not selection-conditional encodings — use the instance-buffer path, not `conditional.rs` (spec §8).
-- `stroke_dash` maps to a **palette index** (`u8`), not a raw dash array. Define 4–8 patterns; the exact palette is an open question (spec §11) — choose something reasonable and document it as the canonical set.
-- `angle` rotates the instance around its anchor point in screen space (degrees).
-- `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` remain **silent in the static SVG renderer** — this plan is WASM-only (spec §3 non-goals).
-- Move `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` out of `_SILENT_CHANNELS` only after the WASM path is fully wired; they remain in `_SILENT_CHANNELS` for the SVG renderer.
+- Stroke/angle channels are **data-driven constants per row**, not selection-conditional encodings — use the instance-buffer path, not `conditional.rs` (spec §8).
+- `stroke_dash` palette is exactly the four entries in spec §6 (solid, dashed 6/3, dotted 2/3, dash-dot 6/3/2/3); integer column values clamp to nearest index. SVG and WASM must use the same palette (spec §7).
+- `angle` rotates around the instance anchor in screen-space degrees.
+- `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` are removed from `_SILENT_CHANNELS` only after **both** SVG (static plan Task 10) and WASM (this plan Task 5) are wired — coordinate with static SVG plan.
+- `blend="additive"` WASM uses a second `wgpu::RenderPipeline` with additive blend state — not a post-process pass and not a fragment shader hack (spec §8).
+- SVG blend path (`mix-blend-mode:screen`) already works; do not touch it.
 - Before any commit touching `*.rs`: dispatch `rust-review-lite`.
 
 ## 5. Tasks
@@ -59,19 +61,25 @@ Wire `stroke_opacity`, `stroke_width`, `stroke_dash`, and `angle` as per-row fie
 - [ ] Verify: `source ~/.cargo/env && cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings`
 
 ### Task 5: Remove channels from _SILENT_CHANNELS
-- [ ] Remove `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` from `_SILENT_CHANNELS` in `src/ferrum/chart.py`
-- [ ] Update any warn_once calls or comments referencing these channels
-- [ ] Write a Python smoke test: `Chart(df).mark_point().encode(stroke_opacity="val").show_svg()` does not warn (SVG renderer still ignores the channel visually, but no UserWarning is emitted)
+- [ ] Coordinate with static SVG plan Task 10 — remove `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` from `_SILENT_CHANNELS` only after both SVG and WASM paths are wired
+- [ ] Write Python smoke test: `Chart(df).mark_point().encode(stroke_opacity="val").show_svg()` does not emit a `UserWarning`
 - [ ] Verify: `uv run pytest tests/ -k "stroke" -v`
+
+### Task 6: blend="additive" WASM GPU compositing
+- [ ] Create a second `wgpu::RenderPipeline` with additive blend state (`src + dst`) alongside the existing alpha pipeline (spec §4, §5, §8)
+- [ ] Per-batch pipeline selection: raster batches with `blend_mode == Additive` use the additive pipeline; all others use alpha
+- [ ] Write failing Rust unit test: assert the correct `wgpu::BlendState` is selected for an additive-blend raster batch vs. a default batch
+- [ ] Implement; make test pass
+- [ ] Verify: `source ~/.cargo/env && cargo test -p ferrum-wasm --lib`
 
 ## 6. Acceptance checks
 
 - `source ~/.cargo/env && cargo test -p ferrum-wasm --lib` — all pass
 - `source ~/.cargo/env && cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings` — pre-existing `toggle_point` warning only; no new warnings
-- WASM instance fields populated: unit test asserts `circle_instance.stroke_opacity == col_value` for each row
-- Python: `Chart(df).mark_point().encode(stroke_opacity="val")` does not emit a UserWarning
+- Unit test asserts `circle_instance.stroke_opacity == col_value` for each row
+- Unit test asserts additive blend state selected for `blend=additive` raster batch
+- Python: `Chart(df).mark_point().encode(stroke_opacity="val").show_svg()` does not emit a `UserWarning` (after Task 5)
 
 ## 7. Open questions
 
-- **`stroke_dash` palette definition** — choose and document 4–8 patterns (e.g. solid, dashed 6/3, dotted 2/3, dash-dot 6/3/2/3); the exact values are implementation choices not mandated by the spec.
-- **SVG stroke channels** — when/if the SVG renderer gains per-element attribute injection, these channels would be unsilenced there too. That work is explicitly out of scope here.
+- None — `stroke_dash` palette is now specified in spec §6. The four-entry palette may be expanded to 8 without a spec revision (spec §11).

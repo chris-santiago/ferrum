@@ -1,117 +1,146 @@
 # Silent-Drop Remediation Design Spec
 
-**Date:** 2026-05-15
-**Scope:** Groups 2–4 from the 2026-05-15 code archaeology report — encoding fields never read by Rust, mark kwargs that raise at runtime, and stroke encoding channels unrendered in both backends. Group 1 (11 silent mark-kwargs) is handled separately under TDD.
+**Date:** 2026-05-15 (revised same day — scope expanded)
+**Scope:** Groups 2–4 from the 2026-05-15 code archaeology report — encoding fields never read by Rust, mark kwargs that raise at runtime, and encoding channels unrendered in SVG and WASM. Group 1 (mark-kwargs) handled separately.
 
 ---
 
 ## 1. Scope
 
-Complete the deferred API surface for: (a) five `EncodingSpec` fields (`sort`, `stack`, `axis`, `format_type`, `impute`) that are accepted and serialized but silently ignored by the Rust renderer; (b) three mark desugar paths (`histogram multiple=`, `density multiple=`, `lmplot truncate=False`) that raise `ValueError` instead of rendering; (c) two data-routing gaps (`Chart(data=None)`, `Layer(data=...)` via `.layer()`); and (d) four stroke/angle encoding channels (`stroke_opacity`, `stroke_width`, `stroke_dash`, `angle`) that are silent in both SVG and WASM renderers. Items are ordered static-SVG first, interactive-WASM second.
+Complete the deferred API surface for: (a) five `EncodingSpec` fields (`sort`, `stack`, `axis`, `format_type`, `impute`) that are accepted and serialized but silently ignored by Rust; (b) legend kwargs beyond `disabled`; (c) three mark desugar paths (`histogram multiple=`, `density multiple=`, `lmplot truncate=False`) that raise instead of rendering; (d) two data-routing gaps (`Chart(data=None)`, `Layer(data=...)` via `.layer()`); (e) four stroke/angle encoding channels unrendered in both SVG and WASM; and (f) `mark_raster(blend="additive")` WASM GPU path. Items are ordered static-SVG first, interactive-WASM second.
 
 ---
 
 ## 2. Goals
 
 **Static SVG**
-- `X("col", sort="descending")` / `sort="ascending"` / `sort="-field"` produces correctly ordered axis ticks and data in the rendered SVG.
-- `X("col", stack="zero")` / `stack="normalize"` / `stack="center"` produces stacked bar/area charts; these are the only accepted values.
-- `axis={"title": "...", "ticks": False, "grid": False, "label_angle": -45}` — a subset of axis display properties — flows through to the rendered axis.
-- `format_type="number"` / `"time"` on X/Y encodings controls tick-label formatter selection.
-- `mark_histogram(multiple="stack")` / `"fill"` / `"dodge"` routes through the existing Stack/Dodge position-adjustment transforms.
-- `mark_density(multiple="dodge")` routes through the existing Dodge position-adjustment transform.
-- `lmplot(truncate=False)` / `regplot(truncate=False)` extends the fit line to the plot boundaries rather than clipping at the observed data extent.
-- `Chart(data=None)` with per-layer `data=` is accepted and routes each layer through its own data source.
-- `Layer(data=df)` passed to `Chart.layer()` is accepted; it is equivalent to the existing `+` operator path.
+- `X("col", sort="descending")` / `sort="ascending"` / `sort=[...]` (explicit list) produces correctly ordered axis ticks and data.
+- `Y("val", stack="normalize")` / `"center"` / `"zero"` produces stacked bar/area charts.
+- `axis={"title": ..., "ticks": False, "label_angle": -45, ...}` dict properties flow through to the rendered axis.
+- `format_type="number"` / `"time"` controls tick-label formatter selection.
+- `Y("val", impute={"method": "value", "value": 0})` fills missing values before rendering.
+- `Color("col", legend={"orient": "bottom", "title": "...", "format": ".2f", ...})` — the documented legend property set affects legend rendering.
+- `mark_histogram(multiple="stack"/"fill"/"dodge")` and `mark_density(multiple="dodge")` route through Stack/Dodge transforms.
+- `lmplot(truncate=False)` / `regplot(truncate=False)` extends the fit line to the plot-axis boundary.
+- `Chart(data=None)` with per-layer `data=` and `Layer(data=df)` via `.layer()` are both accepted.
+- `encode(stroke_width="col")`, `encode(stroke_opacity="col")`, `encode(stroke_dash="col")`, `encode(angle="col")` apply per-row values as SVG element attributes on all mark kinds that support them.
 
 **Interactive WASM**
-- `stroke_opacity=`, `stroke_width=`, `stroke_dash=`, and `angle=` field-driven encodings are applied per data row in the WASM renderer for Circle and Rect mark kinds.
+- The four stroke/angle channels are also applied per-row in the WASM GPU renderer.
+- `mark_raster(blend="additive")` uses GPU additive compositing (src + dst) in the WASM renderer.
 
 ---
 
 ## 3. Non-goals
 
-- `impute=` on encodings — data imputation requires a new Rust transform and is deferred.
-- `mark_raster(blend="additive")` **SVG** — already implemented via `mix-blend-mode:screen` in `svg_walk.rs`; no action needed. The non-goal is the **WASM GPU pixel-blending path** specifically, which requires additive compositing in the fragment shader and is a separate effort.
-- Full `Axis(...)` Python value class — only dict-passthrough of the named axis properties listed in §6 is in scope.
-- Legend kwarg passthrough beyond `disabled` — separate effort.
-- SVG rendering of `stroke_dash`/`stroke_opacity`/`stroke_width`/`angle` channels — only WASM.
+- Full `Axis(...)` Python value class — dict passthrough only (see §6).
 
 ---
 
 ## 4. System behavior
 
-**`sort=`** Ordinal and nominal X/Y scales resolve their domain order after consulting `EncodingSpec.sort`. Values: `"ascending"`, `"descending"`, `"-field"` (sort descending by the encoded field), `"x"` / `"-x"` / `"y"` / `"-y"` (sort by another encoding's field). Quantitative scales ignore `sort=`.
+**`sort=`** Ordinal/nominal X/Y scales consult `EncodingSpec.sort` to order their domain. String values: `"ascending"`, `"descending"`, a field name (sort by another field's values), `"-field"` (descending by field). List value: explicit domain order — `["b", "a", "c"]` forces that category sequence. Quantitative scales ignore `sort=`.
 
-**`stack=`** A non-`None` `stack=` on an encoding inserts the Stack position-adjustment transform with the named strategy before the mark renderer runs. `"normalize"` normalises each stack group to [0, 1]; `"center"` centres stacks around zero; `"zero"` (default stacked behavior) starts from zero. The mark's desugar layer is responsible for asserting `stack=` is only valid for bar and area marks.
+**`stack=`** Inserts the Stack position-adjustment transform with the named strategy. `"zero"` starts from zero; `"normalize"` normalises each group to [0, 1]; `"center"` centres around zero. Valid only on bar and area marks — other marks raise `ValueError` at desugar time.
 
-**`axis=`** A dict of axis display properties forwarded to the Rust axis layout engine. Only the properties listed in §6 are honoured; all others are silently accepted but have no effect (pre-existing behavior).
+**`axis=`** Dict of display properties forwarded to the Rust axis layout engine. Only the keys listed in §6 are honoured; all others are silently accepted with no effect.
 
-**`format_type=`** Selects the tick-label formatter family. `"number"` → numeric formatter; `"time"` → temporal formatter. If unset, the formatter is inferred from the field's data type as today.
+**`format_type=`** Selects the tick-label formatter family: `"number"` → numeric; `"time"` → temporal. If unset, inferred from the field's data type.
 
-**`histogram(multiple=)`** `"layer"` (default, existing) overlaps; `"stack"` inserts Stack on the y-axis after binning; `"fill"` inserts Stack with `normalize`; `"dodge"` inserts Dodge on the x-axis after binning.
+**`impute=`** Dict with `method` key and optional `value` key. Before the mark renderer runs, missing values in the encoded column are filled according to the method: `"value"` (constant `value`), `"mean"`, `"median"`, `"max"`, `"min"`. Operates on the column named by `field=` on the encoding. Primary use case: filling gaps in time-series lines.
 
-**`density(multiple=)`** `"layer"` (default) overlaps; `"dodge"` inserts Dodge on the x-axis after KDE.
+**Legend kwargs** `Color("col", legend={...})` — a dict of display properties forwarded to the Rust legend renderer. Accepted keys listed in §6. Keys outside that set are silently accepted with no effect.
 
-**`lmplot/regplot(truncate=False)`** The Smooth/Robust transform accepts an optional `x_range: Option<[f64; 2]>` specifying the x-domain over which the fit line is evaluated. When `truncate=False`, `x_range` is set to the plot's x-scale domain (i.e. the axis extent), not the observed data range.
+**`histogram(multiple=)` / `density(multiple=)`** `"layer"` (default) overlaps; `"stack"` inserts Stack on the count/density y-axis; `"fill"` inserts Stack with `normalize`; `"dodge"` inserts Dodge on the bin x-axis. Python desugar responsibility.
 
-**`Chart(data=None)` / `Layer(data=df)` via `.layer()`** When `Chart(data=None)` is constructed, the chart-level batch is empty; each layer must supply its own `data=`. `Chart.layer()` is extended to accept `Layer` instances that carry a `data=` attribute. Both paths produce the same internal `_Layer` representation as the `+` operator today.
+**`lmplot/regplot(truncate=False)`** `SmoothSpec`/`RobustSpec` accept `x_range: Option<[f64; 2]>`. When `truncate=False`, Python desugar sets `x_range` to the chart's x-scale domain. The Rust transform evaluates the fit line over that range instead of `[xs.min(), xs.max()]`.
 
-**WASM stroke/angle channels** `stroke_opacity`, `stroke_width`, `stroke_dash`, and `angle` field-driven values are packed into the per-instance GPU buffers for Circle and Rect. `stroke_dash` maps to a dash-pattern index selecting from a small fixed palette (solid, dashed, dotted, dash-dot). `angle` rotates the instance around its anchor point.
+**`Chart(data=None)` / `Layer(data=df)` via `.layer()`** `Chart(data=None)` is accepted; per-layer `data=` requirement is enforced at `to_spec()` time. `Chart.layer()` accepts `Layer` objects with `data=` attributes; produces the same internal representation as the `+` operator.
+
+**Stroke/angle channels — SVG** `stroke_width`, `stroke_opacity`, `stroke_dash`, and `angle` field-driven encodings emit per-element SVG attributes (`stroke-width`, `stroke-opacity`, `stroke-dasharray`, `transform="rotate(N)"`) on the marks that support them. `stroke_dash` maps to a `stroke-dasharray` value from a fixed palette (see §6). `angle` is in degrees, applied as a rotation around the mark's anchor point.
+
+**Stroke/angle channels — WASM** The same four channels are packed into per-instance GPU buffers for Circle and Rect mark kinds. `stroke_dash` uses a palette index (same palette as SVG). `angle` rotates around the instance anchor.
+
+**`blend="additive"` WASM** The WASM render pipeline selects an additive blend state (`src + dst`, no alpha attenuation) for raster mark batches with `blend=additive`. SVG path already works via `mix-blend-mode:screen`.
 
 ---
 
 ## 5. Architecture
 
-**Static SVG — sort, stack, axis, format_type, histogram/density multiple**
+**`sort=`** Resolved in `scale_resolve.rs` ordinal domain builder: string values map to sort comparators; list values set the domain directly. `EncodingSpec.sort` is already deserialized.
 
-`sort=` and `stack=` are resolved in `scale_resolve.rs` and `position.rs` respectively. The Rust `EncodingSpec` fields `sort` and `stack` are already deserialized; the renderers simply need to read them. `axis=` properties flow from `EncodingSpec.axis` through the `AxisLayout` struct to `marks/axis.rs`. `format_type=` selects the formatter branch in `render/format.rs`.
+**`stack=`** Read in `position.rs`; `EncodingSpec.stack` already deserialized. Stack strategy enum maps directly to existing `StackStrategy` variants.
 
-Histogram/density `multiple=` is a Python desugar responsibility: the desugar layer constructs a `PositionAdjustment::Stack` or `::Dodge` spec and sets it on the layer's `position` field. The Rust position-adjustment pipeline already handles these.
+**`axis=`, `format_type=`** `axis=` dict threaded from `EncodingSpec.axis` through `AxisLayout` to `marks/axis.rs`. `format_type=` selects the formatter branch in `render/format.rs`.
 
-**Static SVG — lmplot truncate=False**
+**`impute=`** New `Impute` Rust transform added to `crates/ferrum-core/src/transform/`. Inserted into the transform pipeline when `EncodingSpec.impute` is present, before mark rendering. `EncodingSpec.impute` is already deserialized as an opaque value; the pipeline detects and deserializes it to `ImputeSpec`.
 
-`SmoothSpec` and `RobustSpec` gain an `x_range: Option<[f64; 2]>` field. The Python desugar sets this when `truncate=False` by reading the chart's x-scale domain. The Rust transform evaluates the fit line over `x_range` instead of `[xs.min(), xs.max()]`.
+**Legend kwargs** `LegendSpec` in `crates/ferrum-core/src/spec/` gains fields for the documented property set. The legend layout/render path in `marks/legend.rs` reads them.
 
-**Static SVG — data routing**
+**Histogram/density `multiple=`** Python desugar constructs `PositionAdjustment::Stack` or `::Dodge` and sets it on the layer's `position` field. Rust pipeline unchanged.
 
-`Chart(data=None)` validation in `_coerce.py` is relaxed: when `data` is `None`, the per-layer `data=` requirement is enforced at `to_spec()` time (each layer must have a source). `Chart.layer()` is extended to accept `Layer` objects; the existing `__add__` path is the reference implementation.
+**`lmplot truncate=False`** `SmoothSpec`/`RobustSpec` gain `x_range: Option<[f64; 2]>`. Python sets it from the x-scale domain when `truncate=False`. Rust transform uses it as the evaluation domain.
 
-**Interactive WASM — stroke/angle channels**
+**Data routing** `_coerce.py` relaxes `Chart(data=None)` to a deferred check. `Chart.layer()` extended to accept `Layer` with `data=`; mirrors `__add__` path.
 
-`CircleInstance` and `RectInstance` in `scene_load.rs` gain four new fields: `stroke_opacity: f32`, `stroke_width: f32`, `stroke_dash: u8` (palette index), `angle: f32`. The `scene_load.rs` batch-building path reads the encoded columns and populates these fields. The WebGPU vertex shader and render pipeline are updated to consume the new per-instance attributes.
+**SVG stroke/angle channels** Mark renderers (`point.rs`, `bar.rs`, `line.rs`, `rule.rs`, etc.) read `stroke_width`/`stroke_opacity`/`stroke_dash`/`angle` columns from the batch. Per-element SVG attributes emitted inline. These channels are removed from `_SILENT_CHANNELS` when the SVG path is wired (they remain silent for mark kinds that don't support them, e.g. area fill).
+
+**WASM stroke/angle + blend** `CircleInstance`/`RectInstance` gain four fields; `scene_load.rs` batch-builder populates them. WebGPU vertex shader consumes them. For `blend="additive"`, the render pipeline has a second pipeline state for additive blend; selected per-batch via `batch.blend_mode`.
 
 ---
 
 ## 6. Canonical interfaces / data contracts
 
-**`axis=` accepted properties (dict keys)**
-
+**`axis=` accepted keys**
 ```
 title: str | None
-ticks: bool          # show/hide tick marks
-tick_count: int      # target number of ticks
-grid: bool           # show/hide gridlines
-labels: bool         # show/hide tick labels
-label_angle: float   # tick label rotation in degrees
-orient: "top"|"bottom"|"left"|"right"
+ticks: bool
+tick_count: int
+grid: bool
+labels: bool
+label_angle: float
+orient: "top" | "bottom" | "left" | "right"
 ```
 
-All other keys are accepted without error and have no effect.
-
-**`SmoothSpec` / `RobustSpec` addition**
-
-```rust
-pub x_range: Option<[f64; 2]>,   // if Some, evaluate fit over this domain
+**`legend=` accepted keys**
+```
+title: str | None
+orient: "left" | "right" | "top" | "bottom" | "top-left" | "top-right" | "bottom-left" | "bottom-right" | "none"
+direction: "vertical" | "horizontal"
+type: "symbol" | "gradient"
+tick_count: int
+values: list            # explicit tick values
+format: str             # tick label format string
+label_font_size: float
+columns: int            # multi-column legend
+gradient_length: float
+gradient_thickness: float
 ```
 
-**`stack=` accepted values**
-
-`"zero"`, `"normalize"`, `"center"`, `None` (no stacking). Any other value is a `ValueError` at desugar time.
+**`ImputeSpec`**
+```
+method: "value" | "mean" | "median" | "max" | "min"
+value: float | None     # required when method == "value"
+```
 
 **`sort=` accepted values**
+`"ascending"`, `"descending"`, field name string, `"-field"` (descending by field), or a list of domain values. Any other value is `ValueError`.
 
-`"ascending"`, `"descending"`, a field name string, or `None`. The `"-"` prefix inverts order. Passing a list (custom domain order) is out of scope.
+**`SmoothSpec` / `RobustSpec` addition**
+```rust
+pub x_range: Option<[f64; 2]>,
+```
+
+**`stroke_dash` palette** (applies to both SVG `stroke-dasharray` and WASM palette index)
+```
+0 → solid        (no dash)
+1 → dashed       "6,3"
+2 → dotted       "2,3"
+3 → dash-dot     "6,3,2,3"
+```
+Integer column values map to palette indices; out-of-range values clamp to nearest.
+
+**`stack=` accepted values** `"zero"`, `"normalize"`, `"center"`, `None`. Any other value is `ValueError` at desugar time.
 
 ---
 
@@ -119,51 +148,66 @@ pub x_range: Option<[f64; 2]>,   // if Some, evaluate fit over this domain
 
 - No silent drops after this work: every accepted kwarg either produces a visual effect or raises `ValueError` with an actionable message.
 - `stack=` on a non-bar/non-area mark raises `ValueError` at desugar time.
-- `lmplot(truncate=False)` does not extrapolate beyond the x-scale domain — it clips at the axis boundary, not arbitrarily far.
-- WASM stroke/angle channels are data-driven only (field-mapped); constant overrides remain in `mark_style` (pre-existing).
-- `Chart(data=None)` raises `ValueError` at `to_spec()` time — not at construction time — if any layer lacks a data source.
+- `impute=` with `method="value"` and no `value` key raises `ValueError`.
+- `lmplot(truncate=False)` clips at the x-scale domain boundary — never extrapolates past it.
+- `Chart(data=None)` raises `ValueError` at `to_spec()` time if any layer lacks a data source.
+- WASM and SVG `stroke_dash` share the same four-entry palette so cross-renderer output is consistent.
+- Stroke/angle channels remain in `_SILENT_CHANNELS` for mark kinds that don't emit a per-element stroke (e.g. area fill) — the silence is intentional, not a gap.
 
 ---
 
 ## 8. Key decisions and tradeoffs
 
-**`sort=` resolved at scale time, not layout time.** Domain ordering is a scale property. Resolving it in `scale_resolve.rs` means axes and marks both see the sorted domain without duplicating logic.
+**`sort=` resolved at scale time, not layout time.** Domain ordering is a scale property; both axes and marks see the sorted domain without duplicating logic.
 
-**`stack=`/`multiple=` desugar is Python's responsibility, not Rust's.** The Rust position-adjustment pipeline is already correct. Python's desugar layer constructs the right `PositionAdjustment` spec. This avoids adding histogram-specific logic to the Rust core.
+**`impute=` is a pre-render transform, not a Python-side fill.** Imputation logic belongs in the Rust pipeline so the filled batch is used consistently by all layers and transforms that read the same field.
 
-**`x_range` on Smooth/Robust, not a chart-level clip.** The fit line domain is a transform property. A chart-level clip would also clip the scatter layer, which is wrong.
+**`stack=`/`multiple=` desugar is Python's responsibility.** Rust position-adjustment pipeline is already correct; Python constructs the right spec.
 
-**WASM stroke channels as per-instance GPU attributes, not conditional encodings.** Conditional encodings change values in response to interaction. Stroke channels are data-driven constants per row. They use the existing instance-buffer path, not the conditional-encoding path.
+**Legend kwargs as dict passthrough, not a Python `Legend(...)` class.** Same rationale as `axis=` — reversible, lower maintenance surface.
 
-**`stroke_dash` as palette index, not raw SVG dash array.** GPU instanced rendering does not support per-instance arbitrary dash arrays efficiently. A fixed palette (4–8 patterns) covers all practical use cases.
+**Stroke/angle channels emit per-element SVG attributes, not inline `style=`.** Explicit attributes (`stroke-width="N"`) are more composable with CSS and more inspectable than an inline style string.
 
-**`axis=` as dict passthrough, not a Python `Axis(...)` class.** A full value class is non-trivial to maintain in sync with the Rust layout engine. Dict passthrough with a documented allowed-key list is sufficient and reversible.
+**`stroke_dash` shared palette for SVG and WASM.** Cross-renderer consistency is more important than per-renderer flexibility. Four patterns cover practical use cases.
+
+**`blend="additive"` WASM uses a second render pipeline state, not a post-process pass.** WebGPU additive blending is a render-pipeline property, not a fragment shader operation. Creating a second pipeline state is the canonical GPU approach.
+
+**`x_range` on Smooth/Robust, not a chart-level clip.** A chart-level clip would also clip the scatter layer.
 
 ---
 
 ## 9. Acceptance criteria
 
-- `Chart(df).mark_bar().encode(x=X("cat", sort="descending"), y="val").show_svg()` — bars appear right-to-left in descending category order.
-- `Chart(df).mark_bar().encode(x="cat", y=Y("val", stack="normalize"), color="grp").show_svg()` — bars fill 0–1 per category.
-- `Chart(df).mark_bar().encode(x=X("cat", axis={"label_angle": -45})).show_svg()` — tick labels are rotated.
-- `mark_histogram(multiple="dodge")` produces side-by-side bins; `multiple="stack"` produces stacked bins.
-- `lmplot(df, x="x", y="y", truncate=False).show_svg()` — fit line extends to the axis edge, not just to `x.min()`/`x.max()`.
-- `Chart(data=None).layer(Layer(data=df1, mark="point", x="a", y="b"), Layer(data=df2, mark="line", x="a", y="b")).show_svg()` — both layers render from their respective sources.
-- WASM: encoding `stroke_opacity` to a numeric field produces per-row varying opacity on Circle/Rect marks in the interactive renderer.
+- `X("cat", sort=["b", "a", "c"])` → SVG axis ticks appear in that exact order.
+- `Y("val", stack="normalize")` on a grouped bar chart → each bar group fills 0–1.
+- `X("date", axis={"label_angle": -45})` → tick labels have `transform="rotate(-45)"`.
+- `Y("val", format_type="number")` on a date-typed field → ticks formatted as numbers.
+- `Y("y", impute={"method": "value", "value": 0})` on a sparse time series → no gaps in the rendered line.
+- `Color("col", legend={"orient": "bottom", "direction": "horizontal"})` → legend appears at bottom with horizontal layout.
+- `mark_histogram(multiple="dodge")` → bins are side-by-side; `multiple="stack"` → bins are stacked.
+- `lmplot(truncate=False)` → fit-line path extends to the x-axis boundary.
+- `Chart(data=None).layer(Layer(data=df1, ...), Layer(data=df2, ...))` → both layers render.
+- `encode(stroke_width="col")` on a line chart → each segment has a distinct `stroke-width` attribute in SVG.
+- `encode(stroke_dash="col")` with integer values 0–3 → elements use the corresponding `stroke-dasharray` values.
+- WASM: `encode(stroke_opacity="col")` → `CircleInstance.stroke_opacity` populated per-row.
+- WASM: `mark_raster(blend="additive")` → additive blend state selected in the render pipeline.
 
 ---
 
 ## 10. Validation strategy
 
-Static SVG items: Python integration tests calling `show_svg()` and asserting SVG structure (sorted domain in axis tick text nodes, normalized bar heights, rotated label transforms, side-by-side bin positions).
+Static SVG: Python integration tests calling `show_svg()` asserting SVG structure — tick order, bar heights, attribute presence/values.
 
-WASM stroke channels: Rust unit tests asserting `CircleInstance.stroke_opacity` is populated from the column values; a WebGPU render test (if the test harness supports it) or a visual snapshot test.
+`impute=`: assert no `null`/`NaN` elements appear in the rendered path after imputation.
 
-`lmplot(truncate=False)`: assert the fit-line `<path>` in the SVG extends to the x-scale domain endpoints.
+Legend kwargs: assert rendered legend `<g>` transform or text attributes match the specified properties.
+
+WASM stroke/angle: Rust unit tests asserting `CircleInstance` / `RectInstance` fields populated from column values.
+
+WASM blend: Rust unit test asserting the correct `wgpu::BlendState` is selected for an additive-blend raster batch.
 
 ---
 
 ## 11. Open questions
 
-- **`sort=` with list value (custom domain order):** Vega-Lite supports `sort=["a", "b", "c"]`. Deferred — the accepted-value contract above must raise `ValueError` for list values with an actionable message pointing to this deferral.
-- **WASM `stroke_dash` palette definition:** The exact 4–8 dash patterns need to be chosen and documented in the implementation. The spec does not mandate specific patterns.
+- **`stroke_dash` palette:** The four entries in §6 are proposed. If the implementation finds these insufficient, the palette may be expanded to 8 without a spec revision — the contract is the index-to-pattern mapping, not the count.
