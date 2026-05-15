@@ -24,14 +24,15 @@ fn shape_from_str(s: &str) -> ShapeKind {
 /// `ShapeKind::Cross` produces two `Line` nodes while all other shapes
 /// produce exactly one node.
 ///
-/// `stroke_opacity` and `angle` flow directly from encoding columns into
-/// the emitted `FillStroke` style — no scale transform.
+/// `stroke_opacity`, `fill_opacity`, and `angle` flow directly from encoding
+/// columns into the emitted `FillStroke` style — no scale transform.
 struct ShapeStyle {
     fill: Option<crate::render::color::Color>,
     stroke: Option<crate::render::color::Color>,
     stroke_width: f64,
     opacity: f64,
     stroke_opacity: f64,
+    fill_opacity: f64,
     stroke_dash_idx: Option<f64>,
     angle: f64,
 }
@@ -43,7 +44,7 @@ fn emit_shape_nodes(
     r: f64,
     style: ShapeStyle,
 ) -> Vec<ferrum_scene::SceneNode> {
-    let ShapeStyle { fill, stroke, stroke_width, opacity, stroke_opacity, stroke_dash_idx, angle } = style;
+    let ShapeStyle { fill, stroke, stroke_width, opacity, stroke_opacity, fill_opacity, stroke_dash_idx, angle } = style;
     use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
@@ -446,6 +447,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -544,6 +546,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -607,6 +610,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -664,6 +668,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -739,6 +744,7 @@ mod tests {
             title: None,
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 

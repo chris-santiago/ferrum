@@ -43,6 +43,7 @@ mod tests {
                                 opacity: 1.0,
                                 stroke_dash: None,
                                 stroke_opacity: 1.0,
+                                fill_opacity: 1.0,
                                 angle: 0.0,
                             },
                         },
@@ -58,6 +59,7 @@ mod tests {
                                 opacity: 0.8,
                                 stroke_dash: None,
                                 stroke_opacity: 1.0,
+                                fill_opacity: 1.0,
                                 angle: 0.0,
                             },
                             corner_radius: 2.0,
@@ -79,6 +81,7 @@ mod tests {
             decorations: vec![],
             selections: vec![],
             interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         let json = serde_json::to_string(&scene).expect("serialize");

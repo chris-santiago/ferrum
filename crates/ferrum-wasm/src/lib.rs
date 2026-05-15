@@ -246,9 +246,8 @@ impl WasmRenderer {
     pub fn on_wheel(&mut self, panel_id: u32, delta_y: f32, cx: f32, cy: f32) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
-        // Polar and Geo panels have no affine-transform-compatible coordinate space.
-        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. })) {
-            return Ok("[]".to_string());
+        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
+            return Ok(build_text_json_from(&loaded.data.text_elements));
         }
         let scale_mode = match coord {
             Some(ferrum_scene::CoordKind::Fixed { .. }) => ScaleMode::Uniform,
@@ -263,7 +262,11 @@ impl WasmRenderer {
     /// Returns updated text-element JSON.
     #[wasm_bindgen(js_name = "onPan")]
     pub fn on_pan(&mut self, panel_id: u32, dx: f32, dy: f32) -> Result<String, JsValue> {
-        let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
+        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
+            return Ok(build_text_json_from(&loaded.data.text_elements));
+        }
         self.zoom.on_pan(panel_id as usize, dx as f64, dy as f64);
         self.upload_transform_and_render(panel_id as usize)
     }

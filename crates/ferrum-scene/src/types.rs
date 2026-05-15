@@ -15,6 +15,10 @@ pub struct SceneGraph {
     pub decorations: Vec<SceneNode>,
     pub selections: Vec<SelectionSpec>,
     pub interaction: InteractionConfig,
+    /// Chart-level accessibility description emitted as `<desc>` in the root SVG.
+    /// `None` means no `<desc>` element is emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_description: Option<String>,
 }
 
 // ── 3.2 Panel ───────────────────────────────────────────────────────
@@ -167,6 +171,11 @@ pub struct FillStroke {
     /// Per-element stroke opacity in [0, 1]. Default 1.0 (fully opaque).
     #[serde(default = "default_stroke_opacity", skip_serializing_if = "is_one_f64")]
     pub stroke_opacity: f64,
+    /// Per-element fill opacity in [0, 1]. Default 1.0 (fully opaque).
+    /// Emitted as SVG `fill-opacity` — distinct from `opacity` which bakes
+    /// into the fill RGBA alpha. Both can coexist independently.
+    #[serde(default = "default_fill_opacity", skip_serializing_if = "is_one_f64")]
+    pub fill_opacity: f64,
     /// Per-element rotation in degrees around the element's anchor point. Default 0.0.
     #[serde(default, skip_serializing_if = "is_zero_angle")]
     pub angle: f64,
@@ -188,6 +197,7 @@ pub struct StrokeStyle {
 }
 
 fn default_stroke_opacity() -> f64 { 1.0 }
+fn default_fill_opacity() -> f64 { 1.0 }
 fn is_one_f64(v: &f64) -> bool { (*v - 1.0).abs() < f64::EPSILON }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

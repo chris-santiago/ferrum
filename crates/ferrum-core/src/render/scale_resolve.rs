@@ -1232,6 +1232,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -1318,6 +1319,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let theme = ThemeInputs::default();
         let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1373,6 +1375,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -1398,6 +1401,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -1423,6 +1427,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -1509,6 +1514,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1565,6 +1571,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1621,6 +1628,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =
@@ -1663,6 +1671,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let theme = ThemeInputs::default();
         let (scales, _) =

@@ -378,6 +378,7 @@ pub fn to_scene_fill_stroke(
         opacity,
         stroke_dash: stroke_dash.map(|d| d.to_vec()),
         stroke_opacity: 1.0,
+        fill_opacity: 1.0,
         angle: 0.0,
     }
 }

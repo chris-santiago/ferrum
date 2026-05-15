@@ -503,6 +503,10 @@ pub struct Encoding {
     // angle: per-row rotation in degrees around the mark anchor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<EncodingSpec>,
+    // fill_opacity: per-row fill opacity in [0, 1]. Emitted as SVG `fill-opacity`
+    // attribute — distinct from `opacity` which bakes into the fill RGBA alpha.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_opacity: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -577,6 +581,7 @@ impl Encoding {
         inherit(&mut self.stroke_opacity, &parent.stroke_opacity);
         inherit(&mut self.stroke_dash, &parent.stroke_dash);
         inherit(&mut self.angle, &parent.angle);
+        inherit(&mut self.fill_opacity, &parent.fill_opacity);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -596,7 +601,7 @@ impl Encoding {
             };
         }
         ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
-            stroke_width, stroke_opacity, stroke_dash, angle);
+            stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity);
     }
 }
 

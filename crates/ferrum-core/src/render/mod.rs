@@ -389,6 +389,7 @@ mod orchestration_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -486,6 +487,7 @@ mod orchestration_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec,
@@ -615,6 +617,7 @@ mod png_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -649,6 +652,7 @@ mod png_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -729,6 +733,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -780,6 +785,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -815,6 +821,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -849,6 +856,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -883,6 +891,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -926,6 +935,7 @@ mod golden_tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),

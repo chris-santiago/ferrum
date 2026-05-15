@@ -6,6 +6,8 @@ Covers:
 - merge_scene_graphs _offset_nodes using correct "type" tag
 - Single-field Tooltip backward compat
 - interaction_config includes selections array for JS click handler
+- Polar/Geo coord kind guards for zoom/pan (labels must not vanish)
+- Hex and geoshape scene JSON well-formedness
 """
 
 from __future__ import annotations
@@ -597,3 +599,105 @@ def test_zoom_cursor_stays_fixed_under_wheel():
         rx, ry = _fwd_zoom(t, *cursor)
         assert abs(rx - cursor[0]) < 1e-6, f"cursor x moved after delta={delta}"
         assert abs(ry - cursor[1]) < 1e-6, f"cursor y moved after delta={delta}"
+
+
+# ── Polar/Geo coord kind guards (zoom/pan must not clear labels) ──────────
+
+def test_polar_coord_kind_blocks_zoom_domain_extraction():
+    """Polar scene coord must NOT have x_domain/y_domain — the JS debounced
+    handler checks `if (!xs || !ys) return` to skip the Python round-trip.
+    If a polar chart accidentally exposes domains, the zoom handler will
+    inject a CoordCartesian and destroy the polar layout."""
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N")
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    coord = scene["panels"][0]["coord"]
+    assert coord["kind"] == "polar"
+    assert coord.get("x_domain") is None, "polar coord must not expose x_domain"
+    assert coord.get("y_domain") is None, "polar coord must not expose y_domain"
+
+
+def test_geo_coord_kind_present_in_scene():
+    """Geo scene coord must be kind='geo' so the WASM on_wheel/on_pan
+    guards can skip affine transforms for geographic projections."""
+    bare_polygon = {
+        "type": "Polygon",
+        "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
+    }
+    chart = (fm.Chart(bare_polygon).mark_geoshape()
+             .encode(color="__geometry__:N")
+             .coord(fm.CoordGeo(projection="equirectangular"))
+             .properties(width=400, height=300))
+    scene = _render(chart)
+    coord = scene["panels"][0]["coord"]
+    assert coord["kind"] == "geo", "geo chart must have coord.kind == 'geo'"
+    assert coord.get("x_domain") is None, "geo coord must not expose x_domain"
+    assert coord.get("y_domain") is None, "geo coord must not expose y_domain"
+
+
+def test_polar_scene_has_text_nodes_for_labels():
+    """Regression: polar pie chart must have text nodes (wedge labels or legend)
+    that WASM must preserve on wheel/pan events instead of clearing."""
+    df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
+    chart = (fm.Chart(df).mark_arc()
+             .encode(x="val:Q", color="cat:N")
+             .coord(fm.CoordPolar(theta="x"))
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    all_text = []
+    for node in scene.get("legend", []):
+        if node.get("type") == "text":
+            all_text.append(node["content"])
+    for node in scene.get("title", []):
+        if node.get("type") == "text":
+            all_text.append(node["content"])
+    assert len(all_text) > 0, (
+        "polar chart must have text nodes (legend/title) that zoom guard preserves"
+    )
+
+
+# ── Hexbin and geoshape scene JSON well-formedness ────────────────────────
+
+def test_hexbin_scene_json_has_polygon_nodes():
+    """Regression: hexbin interactive scene must contain polygon nodes."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
+    chart = (fm.Chart(df).mark_hex(aggregate="count")
+             .encode(x="x:Q", y="y:Q")
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    batch = scene["panels"][0]["marks"][0]
+    assert batch["kind"] == "polygon", "hex mark must produce polygon batch"
+    assert len(batch["nodes"]) > 0, "hex must have polygon nodes"
+    node = batch["nodes"][0]
+    assert node["type"] == "polygon"
+    assert len(node["rings"]) >= 1, "polygon must have at least one ring"
+    assert len(node["rings"][0]) >= 3, "polygon ring must have ≥3 points"
+
+
+def test_geoshape_scene_json_has_polygon_nodes():
+    """Regression: geoshape interactive scene must produce polygon nodes."""
+    bare_polygon = {
+        "type": "Polygon",
+        "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
+    }
+    chart = (fm.Chart(bare_polygon).mark_geoshape()
+             .encode(color="__geometry__:N")
+             .coord(fm.CoordGeo(projection="equirectangular"))
+             .properties(width=400, height=300))
+    scene = _render(chart)
+    batch = scene["panels"][0]["marks"][0]
+    assert batch["kind"] == "polygon", "geoshape must produce polygon batch"
+    assert len(batch["nodes"]) >= 1
+    node = batch["nodes"][0]
+    assert node["type"] == "polygon"
+    ring = node["rings"][0]
+    assert len(ring) >= 4, "projected polygon ring must have ≥4 points"
+    for pt in ring:
+        assert 0 <= pt[0] <= 500 and 0 <= pt[1] <= 400, (
+            f"projected polygon point {pt} must be in pixel space"
+        )

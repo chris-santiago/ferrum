@@ -57,10 +57,12 @@
 | Channel | Status |
 |---|---|
 | `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle` | ✅ Promoted to `_RENDERER_HONORED_CHANNELS` — SVG attribute emission wired in `point.rs`, `bar.rs`, `line.rs`, `rule.rs`; WASM GPU instances wired via `FillStroke`. Commits `26f20b3`, `e387017`, `a8d8da8` |
-| `Description` / `Key` | Open — TODO(G1) still present; `ChartSpec` has no `description` field |
-| `Theta` / `Radius` | Stale docstrings (say `NotImplementedError` but `CoordPolar` shipped Phase 11) |
-| `Href`, `Description` (encoding channels) | Open — only `type` honored |
-| `fill_opacity` (via StrokeOpacity alias) | Open — `pass` branch, no warning |
+| `Description` / `Key` (chart-level) | Open — TODO(G1) still present; `Chart.properties(description=)` stores `_description` but never serializes to `ChartSpec`; no `<desc>` emitted in root SVG |
+| `Theta` / `Radius` | ✅ Docstrings updated — `CoordPolar` shipped Phase 11 (fixed in Stale Documentation section) |
+| `Href` (encoding channel) | ✅ Already working — `_RENDERER_HONORED_CHANNELS` → `EncodingSpec` → `MetadataColumns` → `svg_walk.rs` wraps each mark in `<a href="...">`. Verified: 3 `<a>` tags for 3-row DataFrame |
+| `Description` (encoding channel) | ✅ Already working — same path → `svg_walk.rs` emits `<desc>` per mark. Verified: 3 `<desc>` tags for 3-row DataFrame |
+| `Key` | Intentionally silent — stored for future interactive/animated rendering (`_SILENT_CHANNELS`); not a static SVG gap |
+| `fill_opacity` | Partial — alias to `opacity` works when `opacity` is absent (per-row alpha via `rgba()` fill). When both `fill_opacity` and `opacity` are present, `fill_opacity` is silently dropped. True `fill-opacity` SVG attribute not emitted separately. |
 
 ### 5 `EncodingSpec` fields deserialized, never read by Rust renderer
 

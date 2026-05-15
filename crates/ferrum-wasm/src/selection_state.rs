@@ -278,6 +278,7 @@ fn toggle_points(sel: &mut SelectionState, indices: &[usize]) {
     }
 }
 
+#[allow(dead_code)]
 fn toggle_point(sel: &mut SelectionState, data_idx: usize) {
     match sel {
         SelectionState::Point { indices, .. } => {

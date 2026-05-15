@@ -18,6 +18,12 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
     let bg = scene.background.map(|c| from_rgba(c.r, c.g, c.b, c.a));
     let mut svg = SvgBuffer::new(viewport, bg, embed_fonts);
 
+    // Chart-level accessibility description — emitted as the first child of
+    // <svg> so screen readers encounter it before any visual content.
+    if let Some(ref desc) = scene.chart_description {
+        svg.desc_elem(desc);
+    }
+
     // Chart title (before panels, matching old render_svg order)
     for node in &scene.title {
         emit_node(&mut svg, node);
@@ -269,6 +275,7 @@ fn to_svg_fill_stroke_with_anchor(s: &FsFillStroke, anchor_x: f64, anchor_y: f64
         stroke: s.stroke.map(|c| from_rgba(c.r, c.g, c.b, c.a)),
         stroke_width: s.stroke_width,
         stroke_opacity: s.stroke_opacity,
+        fill_opacity: s.fill_opacity,
         stroke_dash: s.stroke_dash.clone(),
         angle: s.angle,
         angle_cx: anchor_x,

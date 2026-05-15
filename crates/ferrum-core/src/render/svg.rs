@@ -18,6 +18,9 @@ pub struct FillStroke {
     pub stroke_width: f64,
     /// Per-element stroke opacity in [0, 1]. Omit attribute when == 1.0.
     pub stroke_opacity: f64,
+    /// Per-element fill opacity in [0, 1]. Emitted as `fill-opacity` SVG attribute.
+    /// Omit attribute when == 1.0. Distinct from `opacity` which bakes into fill RGBA alpha.
+    pub fill_opacity: f64,
     /// Per-element stroke dash pattern. None = solid.
     pub stroke_dash: Option<Vec<f64>>,
     /// Rotation in degrees around (`angle_cx`, `angle_cy`). Omit when 0.0.
@@ -35,6 +38,7 @@ impl Default for FillStroke {
             stroke: None,
             stroke_width: 0.0,
             stroke_opacity: 1.0,
+            fill_opacity: 1.0,
             stroke_dash: None,
             angle: 0.0,
             angle_cx: 0.0,
@@ -347,6 +351,9 @@ fn push_fill_stroke(buf: &mut String, s: &FillStroke) {
     match s.fill {
         Some(c) => push_attr(buf, "fill", &fmt_svg(c)),
         None => push_attr(buf, "fill", "none"),
+    }
+    if s.fill_opacity < 1.0 {
+        push_attr(buf, "fill-opacity", &fmt_f(s.fill_opacity));
     }
     if let Some(stroke) = s.stroke {
         push_attr(buf, "stroke", &fmt_svg(stroke));

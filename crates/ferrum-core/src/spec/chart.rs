@@ -89,6 +89,11 @@ pub struct ChartSpec {
     pub selections: Vec<ferrum_scene::SelectionSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditionals: Vec<ferrum_scene::ConditionalEncoding>,
+    /// Chart-level accessibility description. When `Some`, emitted as `<desc>`
+    /// in the root SVG element. Distinct from the per-mark `description`
+    /// encoding channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_description: Option<String>,
 }
 
 #[pymethods]
@@ -118,6 +123,8 @@ impl ChartSpec {
         stroke_width = None,                                      // Task 10: per-element stroke width
         stroke_dash = None,                                       // Task 10: per-element dash palette index
         angle = None,                                             // Task 10: per-element rotation degrees
+        fill_opacity = None,                                      // per-element fill-opacity SVG attribute
+        chart_description = None,                                 // G1: chart-level accessibility desc
     ))]
     fn new(
         mark: &str,
@@ -153,6 +160,8 @@ impl ChartSpec {
         stroke_width: Option<&Bound<'_, PyAny>>,
         stroke_dash: Option<&Bound<'_, PyAny>>,
         angle: Option<&Bound<'_, PyAny>>,
+        fill_opacity: Option<&Bound<'_, PyAny>>,
+        chart_description: Option<String>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -179,6 +188,7 @@ impl ChartSpec {
         let stroke_width = stroke_width.map(coerce_encoding).transpose()?;
         let stroke_dash = stroke_dash.map(coerce_encoding).transpose()?;
         let angle = angle.map(coerce_encoding).transpose()?;
+        let fill_opacity = fill_opacity.map(coerce_encoding).transpose()?;
 
         let data = match data {
             None => DataRef::default(),
@@ -271,7 +281,7 @@ impl ChartSpec {
             data,
             mark,
             encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
-                stroke_width, stroke_opacity, stroke_dash, angle },
+                stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity },
             transforms,
             facet,
             layers,
@@ -283,6 +293,7 @@ impl ChartSpec {
             axis_y,
             selections,
             conditionals,
+            chart_description,
         })
     }
 
@@ -546,6 +557,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         }
     }
 
@@ -635,6 +647,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -666,6 +679,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -698,6 +712,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");

@@ -4728,10 +4728,8 @@ class Chart:
             kw["axis_x"] = resolved._axis_x
         if resolved._axis_y is not None:
             kw["axis_y"] = resolved._axis_y
-        # TODO(G1): `_description` is stored but not serialized — ChartSpec in
-        # crates/ferrum-core/src/spec/chart.rs has no `description` field yet.
-        # When added, wire it here as `kw["description"] = resolved._description`
-        # so the renderer can emit a `<desc>` element inside the root `<svg>`.
+        if resolved._description:
+            kw["chart_description"] = resolved._description
         if resolved._selections:
             kw["selections"] = json.dumps(
                 [s.to_spec_dict() for s in resolved._selections]

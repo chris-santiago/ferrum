@@ -87,6 +87,7 @@ impl StrokeChannels {
             opacity,
             stroke_dash: effective_dash,
             stroke_opacity,
+            fill_opacity: 1.0,
             angle,
         };
         (fs, corner_radius)
@@ -521,6 +522,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("bin_start", DataType::Float64, false),
@@ -558,6 +560,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -591,6 +594,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("v", DataType::Float64, false),
@@ -626,6 +630,7 @@ mod tests {
             coord: None, mark_style: None, position: None, title: None,
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x0", DataType::Float64, false),
@@ -663,6 +668,7 @@ mod tests {
         title: None,
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
