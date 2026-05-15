@@ -65,7 +65,8 @@
 ### Task 3 — Update JS zoom handler to use WASM bindings
 
 **Files:**
-- Modify: `src/ferrum/_interactive.py` — edit `_build_anywidget_esm()` only
+- Modify: `src/ferrum/_wasm/ferrum-anywidget.js` — wheel event listener inside `_reload()`
+  (JS was extracted from `_interactive.py` to this real source file after the plan was written)
 
 - [ ] In `_render()`, after `renderer = await WasmRenderer.create(canvas)`, add: `let _zoomDebounceId = null;`
 
@@ -101,77 +102,18 @@ Note: the debounce still sends `zoom_state` for charts that opted in to recomput
 
 ---
 
-### Task 4 — Regression tests
+### Task 4 — Regression tests ✅ ALREADY DONE
 
-**Files:**
-- Create: `tests/test_interactive_zoom.py`
+**Skipped:** 14 regression tests covering tooltip, zoom domain, selection, arc nodes, and
+`merge_scene_graphs` offsets were committed in `tests/test_interactive_regression.py` as
+`test(interactive): 14 regression tests for tooltip, zoom domain, selection, arc`
+(commit `4411bbc`). No new test file needed.
 
-- [ ] Add tests verifying:
-  1. Multi-field `Tooltip('x','y','label')` produces non-null `tooltips` in scene JSON with 3 fields per mark.
-  2. Auto-scaled Cartesian chart has non-null `coord.x_domain` in scene JSON (computed domain injection).
-  3. `merge_scene_graphs` with non-zero offset actually shifts circle node `cx`/`cy` values.
-  4. `ChartSpec` with `tooltip_fields='[{"field":"x"}]'` round-trips through JSON without error.
+After completing Task 3, verify the existing suite still passes:
 
-```python
-import json
-import polars as pl
-import ferrum as fm
-from ferrum._core import render_interactive
+- [ ] Run `uv run pytest tests/test_interactive_regression.py -v` — all 14 pass.
 
-def _scene(chart):
-    spec, data, viewport, theme = chart._render_inputs()
-    return json.loads(render_interactive(spec, data, viewport=viewport, theme=theme))
-
-def test_multi_field_tooltip_produces_tooltip_content():
-    df = pl.DataFrame({'x': [1.0, 2.0], 'y': [3.0, 4.0], 'label': ['a', 'b']})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x='x:Q', y='y:Q', tooltip=fm.Tooltip('x', 'y', 'label'))
-             .properties(width=300, height=200))
-    scene = _scene(chart)
-    batch = scene['panels'][0]['marks'][0]
-    assert batch['tooltips'] is not None
-    assert len(batch['tooltips'][0]['fields']) == 3
-    field_names = {f['name'] for f in batch['tooltips'][0]['fields']}
-    assert field_names == {'x', 'y', 'label'}
-
-def test_auto_scaled_chart_has_computed_coord_domain():
-    df = pl.DataFrame({'x': [1.0, 2.0, 3.0], 'y': [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x='x:Q', y='y:Q')
-             .properties(width=300, height=200))
-    scene = _scene(chart)
-    coord = scene['panels'][0]['coord']
-    assert coord.get('x_domain') is not None
-    assert coord.get('y_domain') is not None
-    xlo, xhi = coord['x_domain']
-    assert xlo < 1.0 and xhi > 3.0  # padded beyond data range
-
-def test_merge_scene_graphs_offsets_circle_nodes():
-    from ferrum._interactive import merge_scene_graphs
-    df = pl.DataFrame({'x': [1.0], 'y': [2.0]})
-    chart = fm.Chart(df).mark_point().encode(x='x:Q', y='y:Q').properties(width=200, height=200)
-    spec, data, viewport, theme = chart._render_inputs()
-    scene_json = render_interactive(spec, data, viewport=viewport, theme=theme)
-    merged = json.loads(merge_scene_graphs([scene_json, scene_json], [{'x_offset': 0, 'y_offset': 0}, {'x_offset': 300, 'y_offset': 0}]))
-    p0_cx = merged['panels'][0]['marks'][0]['nodes'][0]['cx']
-    p1_cx = merged['panels'][1]['marks'][0]['nodes'][0]['cx']
-    assert abs(p1_cx - p0_cx - 300) < 1.0
-
-def test_single_field_tooltip_still_works():
-    df = pl.DataFrame({'x': [1.0, 2.0], 'y': [3.0, 4.0]})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x='x:Q', y='y:Q', tooltip=fm.Tooltip('x'))
-             .properties(width=300, height=200))
-    scene = _scene(chart)
-    batch = scene['panels'][0]['marks'][0]
-    assert batch['tooltips'] is not None
-    assert len(batch['tooltips'][0]['fields']) == 1
-    assert batch['tooltips'][0]['fields'][0]['name'] == 'x'
-```
-
-- [ ] Run `uv run pytest tests/test_interactive_zoom.py -v` — all 4 pass.
-
-- [ ] Commit: `test(interactive): regression tests for tooltip, zoom domain, merge_scene_graphs`
+- [ ] No commit needed for this task.
 
 ---
 

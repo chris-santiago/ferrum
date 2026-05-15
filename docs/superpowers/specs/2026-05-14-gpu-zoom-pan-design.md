@@ -54,7 +54,7 @@ All three return the same text-element JSON that `loadScene` already returns, so
 
 ### GPU uniform layout — extended
 
-The existing `[f32; 4]` uniform (width, height, 0, 0) expands to `[f32; 8]`:
+The existing `[f32; 4]` uniform (width, height, 0, 0) expands to `[f32; 16]`:
 
 ```
 [canvas_w, canvas_h, sx, sy, tx, ty, clip_x, clip_y,
