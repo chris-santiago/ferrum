@@ -606,3 +606,211 @@ fn build_polar_axes(
 
     nodes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Rect;
+    use ferrum_scene::{Color, FillStroke, SceneNode, StrokeStyle, TextAnchor, TextBaseline, FontWeight, TextStyle};
+
+    /// A minimal plot area: 200×200 starting at (10, 10).
+    fn test_plot_area() -> Rect {
+        Rect { x: 10.0, y: 10.0, w: 200.0, h: 200.0 }
+    }
+
+    fn dummy_stroke() -> StrokeStyle {
+        StrokeStyle {
+            color: Color::rgb(0, 0, 0),
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+        }
+    }
+
+    fn dummy_fill() -> FillStroke {
+        FillStroke {
+            fill: Some(Color::rgb(100, 100, 100)),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+        }
+    }
+
+    fn dummy_text_style() -> TextStyle {
+        TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color::rgb(0, 0, 0),
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        }
+    }
+
+    // ── F14 regression tests ─────────────────────────────────────────
+
+    /// Line endpoints must be remapped by the polar transform.
+    #[test]
+    fn polar_transform_remaps_line_endpoints() {
+        let plot_area = test_plot_area();
+        // Place the line at the centre of the plot area in Cartesian pixel
+        // space — guaranteed to land inside the area.
+        let cx = plot_area.x + plot_area.w / 2.0;
+        let cy = plot_area.y + plot_area.h / 2.0;
+        let (orig_x1, orig_y1) = (cx - 20.0, cy - 10.0);
+        let (orig_x2, orig_y2) = (cx + 20.0, cy + 10.0);
+
+        let mut nodes = vec![SceneNode::Line {
+            x1: orig_x1,
+            y1: orig_y1,
+            x2: orig_x2,
+            y2: orig_y2,
+            style: dummy_stroke(),
+        }];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Line { x1, y1, x2, y2, .. } => {
+                // Values must have changed from the original Cartesian coords.
+                assert!(
+                    (*x1 - orig_x1).abs() > 1e-9 || (*y1 - orig_y1).abs() > 1e-9,
+                    "expected (x1,y1) to change after polar remap, got ({x1},{y1})"
+                );
+                assert!(
+                    (*x2 - orig_x2).abs() > 1e-9 || (*y2 - orig_y2).abs() > 1e-9,
+                    "expected (x2,y2) to change after polar remap, got ({x2},{y2})"
+                );
+                // The remapped coords must fall within a plausible range around
+                // the polar centre (within outer_radius of the plot-area centre).
+                let outer_r = plot_area.w.min(plot_area.h) / 2.0;
+                let pcx = plot_area.x + plot_area.w / 2.0;
+                let pcy = plot_area.y + plot_area.h / 2.0;
+                let dist1 = ((x1 - pcx).powi(2) + (y1 - pcy).powi(2)).sqrt();
+                let dist2 = ((x2 - pcx).powi(2) + (y2 - pcy).powi(2)).sqrt();
+                assert!(
+                    dist1 <= outer_r + 1e-6,
+                    "remapped (x1,y1)=({x1},{y1}) is further from polar centre than outer_r={outer_r}"
+                );
+                assert!(
+                    dist2 <= outer_r + 1e-6,
+                    "remapped (x2,y2)=({x2},{y2}) is further from polar centre than outer_r={outer_r}"
+                );
+            }
+            other => panic!("expected SceneNode::Line after transform, got {other:?}"),
+        }
+    }
+
+    /// Text anchor point must be remapped by the polar transform.
+    #[test]
+    fn polar_transform_remaps_text_anchor() {
+        let plot_area = test_plot_area();
+        let orig_x = plot_area.x + plot_area.w * 0.3;
+        let orig_y = plot_area.y + plot_area.h * 0.7;
+
+        let mut nodes = vec![SceneNode::Text {
+            x: orig_x,
+            y: orig_y,
+            content: "hello".to_string(),
+            style: dummy_text_style(),
+        }];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Text { x, y, content, .. } => {
+                // Content must be preserved.
+                assert_eq!(content, "hello");
+                // Anchor coords must have been remapped.
+                assert!(
+                    (*x - orig_x).abs() > 1e-9 || (*y - orig_y).abs() > 1e-9,
+                    "expected text anchor to change after polar remap, got ({x},{y})"
+                );
+                // Plausibility: within outer_radius of the plot-area centre.
+                let outer_r = plot_area.w.min(plot_area.h) / 2.0;
+                let pcx = plot_area.x + plot_area.w / 2.0;
+                let pcy = plot_area.y + plot_area.h / 2.0;
+                let dist = ((x - pcx).powi(2) + (y - pcy).powi(2)).sqrt();
+                assert!(
+                    dist <= outer_r + 1e-6,
+                    "remapped text ({x},{y}) is further from polar centre than outer_r={outer_r}"
+                );
+            }
+            other => panic!("expected SceneNode::Text after transform, got {other:?}"),
+        }
+    }
+
+    /// A Rect node must become a Polygon with one ring of 27 points.
+    ///
+    /// Point count: bottom arc (RECT_ARC_SEGMENTS+1 = 13) + right radial (1)
+    /// + top arc reversed (RECT_ARC_SEGMENTS+1 = 13) = 27.
+    #[test]
+    fn polar_transform_converts_rect_to_polygon_with_expected_ring() {
+        let plot_area = test_plot_area();
+        // A rect occupying the middle quarter of the plot area.
+        let rx = plot_area.x + plot_area.w * 0.25;
+        let ry = plot_area.y + plot_area.h * 0.25;
+        let rw = plot_area.w * 0.5;
+        let rh = plot_area.h * 0.5;
+
+        let mut nodes = vec![SceneNode::Rect {
+            x: rx,
+            y: ry,
+            w: rw,
+            h: rh,
+            style: dummy_fill(),
+            corner_radius: 0.0,
+        }];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Polygon { rings, .. } => {
+                assert_eq!(rings.len(), 1, "expected exactly one ring, got {}", rings.len());
+                // RECT_ARC_SEGMENTS = 12  →  (12+1) + 1 + (12+1) = 27 points
+                let expected_pts = 27;
+                assert_eq!(
+                    rings[0].len(),
+                    expected_pts,
+                    "expected {expected_pts} ring points, got {}",
+                    rings[0].len()
+                );
+            }
+            other => panic!("expected SceneNode::Polygon after Rect transform, got {other:?}"),
+        }
+    }
+
+    /// Regression guard: Circle (cx,cy) must still be remapped after the refactor
+    /// that added Line/Text/Rect support.
+    #[test]
+    fn polar_transform_still_remaps_circle_cx_cy() {
+        let plot_area = test_plot_area();
+        let orig_cx = plot_area.x + plot_area.w * 0.6;
+        let orig_cy = plot_area.y + plot_area.h * 0.4;
+
+        let mut nodes = vec![SceneNode::Circle {
+            cx: orig_cx,
+            cy: orig_cy,
+            r: 5.0,
+            style: dummy_fill(),
+        }];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Circle { cx, cy, r, .. } => {
+                assert_eq!(*r, 5.0, "circle radius must be unchanged");
+                assert!(
+                    (*cx - orig_cx).abs() > 1e-9 || (*cy - orig_cy).abs() > 1e-9,
+                    "expected circle centre to change after polar remap, got ({cx},{cy})"
+                );
+            }
+            other => panic!("expected SceneNode::Circle after transform, got {other:?}"),
+        }
+    }
+}

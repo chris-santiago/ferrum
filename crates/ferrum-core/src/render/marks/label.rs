@@ -202,3 +202,148 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         descriptions: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    use crate::render::draw::{resolve_mark_style, MarkStyle};
+    use crate::render::scale_resolve::resolve_scales;
+    use crate::spec::chart::ChartSpec;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// Build a minimal two-point label spec + batch wired to x/y columns.
+    fn two_point_spec_and_batch() -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Label,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 80.0])),
+                Arc::new(Float64Array::from(vec![20.0, 70.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    // ── F3 regression tests ──────────────────────────────────────────
+
+    /// When leader_line = Some(true), the output must contain at least one
+    /// SceneNode::Line per label (the leader line from data point to label).
+    #[test]
+    fn leader_line_emitted_when_flag_is_true() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+
+        // Build a MarkStyle with leader_line = Some(true).
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        mark_style.leader_line = Some(true);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+
+        let line_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
+        assert!(
+            line_count >= 1,
+            "expected at least one SceneNode::Line leader line when leader_line=true, got {line_count} lines in {:?}",
+            result.nodes.iter().map(std::mem::discriminant).collect::<Vec<_>>()
+        );
+    }
+
+    /// When leader_line = None (default), the output must contain no
+    /// SceneNode::Line nodes — only Text nodes are emitted.
+    #[test]
+    fn no_leader_line_when_flag_is_none() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+
+        // Default resolve — leader_line stays None.
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        assert!(
+            mark_style.leader_line.is_none(),
+            "resolve_mark_style should leave leader_line as None by default"
+        );
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+
+        let line_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
+        assert_eq!(
+            line_count,
+            0,
+            "expected zero SceneNode::Line nodes when leader_line=None (default), got {line_count}"
+        );
+
+        // Must still emit Text nodes for the two data points.
+        let text_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
+        assert_eq!(text_count, 2, "expected 2 Text nodes for 2-row batch, got {text_count}");
+    }
+}

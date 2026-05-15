@@ -660,4 +660,131 @@ mod tests {
             );
         }
     }
+
+    // --- Regression tests for the single-observation / all-equal-values fix ---
+    //
+    // Before the fix, `apply_with_context` skipped groups with `vals.len() < 2`.
+    // This caused `scale_resolve` to raise `EmptyDomain` because no rows were
+    // emitted for degenerate groups, leaving `violin_y` empty. The fix:
+    //   1. Changed the guard from `vals.len() < 2` to `vals.is_empty()`.
+    //   2. Added a `lo >= hi` branch that emits 4 degenerate polygon vertices
+    //      at `(violin_x=0.0, violin_y=lo)` instead of skipping the group.
+
+    /// A group with exactly one observation must produce non-zero output rows
+    /// and populate `violin_y` with finite values.
+    ///
+    /// Fails with old `vals.len() < 2` guard because the single-element group
+    /// would be skipped, resulting in zero output rows.
+    #[test]
+    fn violin_single_element_group_emits_rows() {
+        pyo3::Python::initialize();
+        let b = batch("v", vec![42.0]);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        // Must produce non-zero rows (old `< 2` guard would have produced 0).
+        assert!(
+            out.num_rows() > 0,
+            "single-element group must produce non-zero output rows; got 0"
+        );
+
+        // `violin_y` must contain at least one finite value.
+        let ys = col_f64(&out, "violin_y");
+        assert!(
+            ys.iter().any(|y| y.is_finite()),
+            "violin_y must contain at least one finite value; got {:?}",
+            ys
+        );
+    }
+
+    /// A group where all values are identical (lo == hi) must produce output
+    /// rows whose `violin_y` values all equal the single observed value.
+    ///
+    /// Fails if the `lo >= hi` degenerate branch is absent, because KDE over
+    /// a zero-width domain would be skipped or produce NaN density, and the
+    /// group would be dropped.
+    #[test]
+    fn violin_all_equal_values_emits_degenerate_polygon() {
+        pyo3::Python::initialize();
+        let lo = 7.5_f64;
+        let b = batch("v", vec![lo; 5]);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        // Must produce output rows.
+        assert!(
+            out.num_rows() > 0,
+            "all-equal-values group must produce output rows; got 0"
+        );
+
+        // All `violin_y` values must equal lo (the single observed value).
+        let ys = col_f64(&out, "violin_y");
+        for (i, &y) in ys.iter().enumerate() {
+            assert!(
+                (y - lo).abs() < 1e-12,
+                "violin_y[{i}] should be {lo} for degenerate group; got {y}"
+            );
+        }
+    }
+
+    /// A batch with one normal multi-observation group and one single-observation
+    /// group must produce output rows for both groups.  The result must contain
+    /// two distinct `group_id` values, proving the single-observation group was
+    /// not silently dropped.
+    ///
+    /// Fails with old `vals.len() < 2` guard because the single-observation
+    /// group ("b") would be skipped and only group_id=0 would appear.
+    #[test]
+    fn violin_mixed_groups_both_appear_in_output() {
+        pyo3::Python::initialize();
+        // Group "a": 50 observations spread over [0, 49].
+        // Group "b": exactly 1 observation.
+        let mut vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        vals.push(99.0);
+        let mut grps: Vec<&str> = vec!["a"; 50];
+        grps.push("b");
+
+        let b = batch_value_group(vals, grps);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        // There must be rows in the output.
+        assert!(out.num_rows() > 0, "output must be non-empty");
+
+        // Both groups must appear: two distinct group_id values.
+        let gids = col_u32(&out, "group_id");
+        let distinct: std::collections::BTreeSet<u32> = gids.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "expected 2 distinct group_ids (one per group); got {:?}",
+            distinct
+        );
+        assert!(distinct.contains(&0), "group_id 0 must be present");
+        assert!(distinct.contains(&1), "group_id 1 must be present");
+    }
 }
