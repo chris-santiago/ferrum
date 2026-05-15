@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
@@ -588,10 +589,158 @@ class Chart:
                 new._encoding["y2"] = Y2(remap["y2"], type="Q")
         return new
 
+    # ---- Auto-raster policy ----
+
+    # Mark types eligible for automatic raster substitution.
+    _AUTO_RASTER_ELIGIBLE_MARKS = frozenset(
+        ["point", "bar", "rect", "tick", "rule", "segment"]
+    )
+
+    def _apply_auto_raster(self) -> "Chart":
+        """Return *self* unchanged, or a substituted chart with ``mark_raster``.
+
+        Called between ``_resolve_pending()`` and ``to_spec()`` inside
+        ``_render_inputs()``.  When the mark count exceeds
+        ``RenderConfig.raster_threshold`` and the mark type is eligible,
+        the chart is transparently replaced with a ``mark_raster`` equivalent
+        so the SVG stays compact.
+
+        The substitution **will not fire** when:
+
+        - ``raster_threshold`` is ``None`` (auto-raster disabled).
+        - The mark count is below the threshold.
+        - The mark type is not a per-element type (line, area, hex, raster,
+          image, etc. are excluded).
+        - The chart was produced by a composite/statistical mark (histogram,
+          density, hex, etc.) where the row count does not reflect the
+          actual SVG element count.
+        - The chart has an active ``color`` encoding (rasterising would
+          silently discard categorical information).
+        - Both ``x`` and ``y`` quantitative encodings are not present.
+
+        When the chart is over-threshold but ineligible, a guidance warning
+        is emitted suggesting ``mark_raster()`` or ``raster_threshold=None``.
+        """
+        from ferrum.render_config import RenderConfig
+
+        cfg = self._render_config or RenderConfig()
+
+        # Disabled?
+        if cfg.raster_threshold is None:
+            return self
+
+        threshold = cfg.raster_threshold
+        behavior = cfg.raster_behavior
+
+        # Count marks -- row count of the resolved data.
+        if self._data is None:
+            return self
+        mark_count = len(self._data)
+        if mark_count < threshold:
+            return self
+
+        # Check mark type eligibility.
+        mark = self._mark
+        if mark not in self._AUTO_RASTER_ELIGIBLE_MARKS:
+            return self
+
+        # Composite/statistical marks (histogram, density, hex, raster, smooth,
+        # boxplot, etc.) produce aggregate output -- the raw row count does not
+        # reflect the actual SVG element count. Skip auto-raster for these.
+        if self._composite_kind is not None:
+            return self
+
+        # Check for active color encoding -- do NOT auto-raster.
+        if "color" in self._encoding:
+            warnings.warn(
+                f"Chart has {mark_count:,} marks which may produce large output. "
+                f"Use `.mark_raster()` for efficient rendering, or set "
+                f"`raster_threshold=None` to suppress this warning.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return self
+
+        # Check x and y are both present and quantitative.
+        x_enc = self._encoding.get("x")
+        y_enc = self._encoding.get("y")
+        if x_enc is None or y_enc is None:
+            warnings.warn(
+                f"Chart has {mark_count:,} marks which may produce large output. "
+                f"Use `.mark_raster()` for efficient rendering, or set "
+                f"`raster_threshold=None` to suppress this warning.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return self
+
+        # Determine if both are quantitative.
+        def _is_quantitative(enc) -> bool:
+            if isinstance(enc, ChannelBase):
+                t = enc._kwargs.get("type")
+                return t in ("Q", "quantitative")
+            # Raw string shorthand -- check for :Q suffix.
+            if isinstance(enc, str) and ":Q" in enc:
+                return True
+            return False
+
+        if not _is_quantitative(x_enc) or not _is_quantitative(y_enc):
+            warnings.warn(
+                f"Chart has {mark_count:,} marks which may produce large output. "
+                f"Use `.mark_raster()` for efficient rendering, or set "
+                f"`raster_threshold=None` to suppress this warning.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return self
+
+        # Error mode -- raise instead of substituting.
+        if behavior == "error":
+            raise ValueError(
+                f"Auto-raster: {mark_count:,} marks exceed threshold "
+                f"{threshold:,}. Set raster_threshold=None to disable."
+            )
+
+        # Perform the substitution via mark_raster.
+        x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
+        y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
+
+        substituted = self._clone()
+        # Apply mark_raster by going through the composite mark path.
+        # This sets _pending_stat_mark which will be resolved by to_spec().
+        from ferrum.marks.heavy_stat import desugar_raster
+
+        substituted._pending_stat_mark = _PendingMark(
+            "raster",
+            {
+                "aggregate": cfg.raster_aggregate,
+                "cmap": cfg.raster_cmap,
+                "resolution": "screen",
+                "blend": "alpha",
+                "min_count": None,
+                "log_scale": False,
+            },
+            desugar_raster,
+            prior_mark=None,
+        )
+        substituted._mark = "image"  # placeholder for raster
+        substituted._composite_kind = "raster"
+
+        if behavior == "warn":
+            warnings.warn(
+                f"Auto-raster: substituted mark_raster for {mark} "
+                f"({mark_count:,} marks > threshold {threshold:,}). "
+                f"Set raster_threshold=None to disable.",
+                UserWarning,
+                stacklevel=4,
+            )
+
+        return substituted
+
     # ---- Marks (primitives) ----
 
     def _set_mark(self, name: str, **kwargs: Any) -> "Chart":
-        # Phase 9c — pull `position=` out of kwargs and validate eligibility
+        # Phase 9c -- pull `position=` out of kwargs and validate eligibility
         # before constructing the MarkBase (which would reject unknown kwargs).
         position = kwargs.pop("position", None)
         if position is not None:
@@ -4797,19 +4946,32 @@ class Chart:
     def _render_inputs(self) -> tuple:
         # Shared render plumbing for show_svg / show_png: spec, data, viewport, theme.
         # Use the resolved chart's _data (not self._data) so that any dtype casts
-        # applied in _resolve_pending (e.g. swarm value column → Float64) take effect.
+        # applied in _resolve_pending (e.g. swarm value column -> Float64) take effect.
         resolved = self._resolve_pending()
-        spec = self.to_spec()
-        data = to_arrow_table(resolved._data)
-        viewport = (self._width or 600.0, self._height or 400.0)
-        theme_dict = self._theme.to_theme_inputs_dict() if self._theme else {}
+        # Auto-raster policy: if mark count exceeds the threshold, substitute
+        # mark_raster for the per-element mark.  _apply_auto_raster returns self
+        # unchanged when the policy does not fire.
+        chart = resolved._apply_auto_raster()
+        spec = chart.to_spec()
+        data = to_arrow_table(chart._data)
+        viewport = (chart._width or 600.0, chart._height or 400.0)
+        theme_dict = chart._theme.to_theme_inputs_dict() if chart._theme else {}
         return spec, data, viewport, theme_dict
 
     def show_svg(self) -> str:
         """Render the chart to an SVG string.
 
         Calls the Rust ``render_svg`` engine with the chart's spec, data, viewport,
-        and theme.  The returned string is a complete ``<svg>…</svg>`` document.
+        and theme.  The returned string is a complete ``<svg>...</svg>`` document.
+
+        When the mark count exceeds the auto-raster threshold (default
+        500,000), per-element marks (``point``, ``bar``, ``rect``, ``tick``,
+        ``rule``, ``segment``) are transparently replaced with a rasterised
+        pixel-aggregation layer so the SVG stays compact.  A ``UserWarning``
+        is emitted when this substitution occurs.  To disable auto-raster
+        and force per-element SVG regardless of data size, pass
+        ``render_config=fm.RenderConfig(raster_threshold=None)`` via
+        ``.properties()``.
 
         Returns
         -------
@@ -4868,11 +5030,17 @@ class Chart:
         Delegates to ``ferrum.display.save_chart``.  The file format is
         inferred from the file extension when ``format`` is not given.
 
+        The auto-raster policy applies to ``save()`` just as it does to
+        ``show_svg()`` and ``show()``: when the mark count exceeds the
+        threshold, per-element marks are replaced with a rasterised layer.
+        To disable, pass ``render_config=fm.RenderConfig(raster_threshold=None)``
+        via ``.properties()``.
+
         Parameters
         ----------
         path : str or pathlib.Path
             Destination file path.  Extension determines the default format:
-            ``.svg`` → SVG, ``.png`` → PNG, ``.html`` → HTML, ``.json`` → JSON.
+            ``.svg`` -> SVG, ``.png`` -> PNG, ``.html`` -> HTML, ``.json`` -> JSON.
         format : {"svg", "png", "html", "json"} or None, optional
             Explicit format override.  ``None`` (default) infers from ``path``.
         embed_wasm : bool
@@ -4899,6 +5067,12 @@ class Chart:
         ``_repr_svg_``.  Outside of a notebook, the SVG is written to a
         temporary file and opened in the system browser via
         ``ferrum.display.show_chart``.
+
+        The auto-raster policy applies here: when the mark count exceeds the
+        threshold, per-element marks are transparently replaced with a
+        rasterised layer.  To disable, pass
+        ``render_config=fm.RenderConfig(raster_threshold=None)`` via
+        ``.properties()``.
 
         Returns
         -------
