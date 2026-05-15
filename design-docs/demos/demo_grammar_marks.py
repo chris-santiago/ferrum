@@ -478,6 +478,25 @@ def build_mark_rect():
     )
 
 
+def build_mark_errorband():
+    return (
+        fm.Chart(df_box)
+        .mark_errorband(extent="ci", borders=True)
+        .encode(x=fm.X("group", title="Group"), y=fm.Y("value", title="Value"))
+        .properties(title="mark_errorband() — CI Error Band", width=W, height=H)
+        .theme(THEME)
+    )
+
+
+def build_mark_function():
+    return (
+        fm.Chart(None)
+        .mark_function(np.sin, domain=[0, 4 * np.pi], n=300)
+        .properties(title="mark_function() — sin(x) curve", width=W, height=H)
+        .theme(THEME)
+    )
+
+
 # ── Compositions & Overlays ──────────────────────────────────────────────────
 
 
@@ -803,6 +822,18 @@ GRAMMAR_MARKS = [
         "mark_rect() — Heatmap Grid",
         build_mark_rect,
         "fm.Chart(df).mark_rect().encode(x='x', y='y', color='value')",
+    ),
+    (
+        "mark_errorband",
+        "mark_errorband() — CI Error Band",
+        build_mark_errorband,
+        "fm.Chart(df).mark_errorband(extent='ci', borders=True).encode(x='group', y='value')",
+    ),
+    (
+        "mark_function",
+        "mark_function() — sin(x) curve",
+        build_mark_function,
+        "fm.Chart(None).mark_function(np.sin, domain=[0, 4*np.pi], n=300)",
     ),
 ]
 
