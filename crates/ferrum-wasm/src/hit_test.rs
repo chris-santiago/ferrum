@@ -431,6 +431,133 @@ mod bug_hunt_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zoom_pan::{Affine2, ZoomPanState};
+    use ferrum_scene::{
+        CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+    };
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn default_style() -> FillStroke {
+        FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+        }
+    }
+
+    fn circle_node(cx: f64, cy: f64, r: f64) -> SceneNode {
+        SceneNode::Circle { cx, cy, r, style: default_style() }
+    }
+
+    /// Build a single-panel scene with one circle at (cx, cy, r).
+    /// The plot_area is large enough to contain the circle.
+    fn single_circle_panel(cx: f64, cy: f64, r: f64) -> Vec<Panel> {
+        vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![circle_node(cx, cy, r)],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: ferrum_scene::BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }]
+    }
+
+    fn identity_zoom() -> ZoomPanState {
+        let config = ferrum_scene::InteractionConfig::default();
+        ZoomPanState::new(1, &config)
+    }
+
+    fn zoom_with(sx: f64, sy: f64, tx: f64, ty: f64) -> ZoomPanState {
+        let config = ferrum_scene::InteractionConfig::default();
+        let mut z = ZoomPanState::new(1, &config);
+        z.transforms[0] = Affine2 { sx, sy, tx, ty };
+        z
+    }
+
+    // ── inverse-transform hit-test tests ─────────────────────────────────────
+
+    #[test]
+    fn hit_test_identity_zoom_finds_circle() {
+        // Baseline: identity transform — click at circle center hits.
+        let panels = single_circle_panel(100.0, 100.0, 10.0);
+        let zoom = identity_zoom();
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom).is_some());
+        assert!(hit_test(&panels, 200.0, 200.0, &zoom).is_none());
+    }
+
+    #[test]
+    fn hit_test_zoom_2x_click_at_visual_position_hits() {
+        // Circle at (100, 100). After 2× zoom (sx=2, sy=2, tx=0, ty=0) the
+        // circle visually appears at (200, 200). Clicking at (200, 200) must hit.
+        let panels = single_circle_panel(100.0, 100.0, 10.0);
+        let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
+        let result = hit_test(&panels, 200.0, 200.0, &zoom);
+        assert!(result.is_some(), "click at zoomed visual position must hit");
+    }
+
+    #[test]
+    fn hit_test_zoom_2x_click_at_original_position_misses() {
+        // Same setup: after zoom the circle moved to (200, 200).
+        // Clicking at (100, 100) — the OLD position — must miss.
+        let panels = single_circle_panel(100.0, 100.0, 10.0);
+        let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
+        let result = hit_test(&panels, 100.0, 100.0, &zoom);
+        // Inverse maps (100,100) → (50,50), which is not within radius 10 of (100,100).
+        assert!(result.is_none(), "click at pre-zoom position must miss after zoom");
+    }
+
+    #[test]
+    fn hit_test_pan_only_click_at_panned_position_hits() {
+        // Circle at (100, 100). Pan right by 50 px (tx=50, sy/sx unchanged).
+        // Visual position = (150, 100). Click at (150, 100) must hit.
+        let panels = single_circle_panel(100.0, 100.0, 10.0);
+        let zoom = zoom_with(1.0, 1.0, 50.0, 0.0);
+        assert!(hit_test(&panels, 150.0, 100.0, &zoom).is_some());
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom).is_none());
+    }
+
+    #[test]
+    fn hit_test_zoom_returns_correct_data_index() {
+        // Verify that data_idx is threaded through correctly after zoom.
+        let panels = single_circle_panel(100.0, 100.0, 10.0);
+        let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
+        let result = hit_test(&panels, 200.0, 200.0, &zoom).expect("must hit");
+        assert_eq!(result.data_idx, Some(0));
+    }
+
+    #[test]
+    fn hit_test_zoom_out_half_click_at_visual_position_hits() {
+        // Zoom out 0.5× — circle at (100,100) visually appears at (50,50).
+        // Clicking at (50,50) must hit.
+        let panels = single_circle_panel(100.0, 100.0, 5.0);
+        let zoom = zoom_with(0.5, 0.5, 0.0, 0.0);
+        // Inverse: (50,50) → (100,100) → within r=5 ✓
+        assert!(hit_test(&panels, 50.0, 50.0, &zoom).is_some());
+        // Clicking at original (100,100) → inverse → (200,200) → miss
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom).is_none());
+    }
 
     #[test]
     fn circle_hit_inside() {
