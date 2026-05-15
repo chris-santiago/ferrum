@@ -66,26 +66,26 @@
 
 | Field | Status |
 |---|---|
-| `sort` | ✅ Wired — string and list ordering in `scale_resolve.rs`. Commit `f87ba9a` |
-| `stack` | ✅ Wired — Stack strategy selection in `position.rs`. Commit `f87ba9a` |
-| `axis` | ✅ Wired — dict properties flow through `AxisLayout` → `marks/axis.rs`. Commit `f87ba9a` |
-| `format_type` | ✅ Wired — formatter branch selection in `render/format.rs`. Commit `f87ba9a` |
-| `impute` | ✅ Wired — new `Impute` transform, registered in pipeline. Commit `f87ba9a` |
+| `sort` | ✅ Confirmed — SVG tick order verified in `test_silent_drop_verification.py` |
+| `stack` | ⚠️ **Partial** — `Y(stack=...)` is accepted and serialized but `apply_position` is never called when `layer.position is None` even if `encoding.y.stack` is set (`scene_build.rs:155` short-circuits). Primitive `mark_bar(stack=)` produces identical SVG to unstacked. |
+| `axis` | ✅ Confirmed — `label_angle`, `ticks`, `labels`, `title` verified in SVG output |
+| `format_type` | ✅ Confirmed — tick label format verified in SVG output |
+| `impute` | ✅ Confirmed — missing rows filled; polyline point count verified |
 
 ### Features that raise `ValueError` at runtime
 
 | Feature | Status |
 |---|---|
-| `mark_histogram(multiple="stack"/"fill"/"dodge")` | ✅ Fixed — routes through Stack/Dodge `PositionAdjustment`. Commit `f87ba9a` |
-| `mark_density(multiple="dodge")` | ✅ Fixed — Dodge wired in density desugar. Commit `f87ba9a` |
-| `mark_ribbon(interpolate=...)` | Open — still no-op, only linear available |
-| `lmplot(truncate=False)` / `regplot(truncate=False)` | ✅ Fixed — `x_range` on `SmoothSpec`/`RobustSpec` wired; ValueError removed. Commit `f87ba9a` |
-| `Chart(data=None)` with per-layer data | ✅ Fixed — deferred to `to_spec()` time; stale "Phase 8a" message updated. Commit `f87ba9a` |
-| `Layer(data=...)` via `Chart.layer()` | ✅ Fixed — `Chart.layer()` now accepts `Layer` with `data=`. Commit `f87ba9a` |
+| `mark_histogram(multiple="stack"/"fill"/"dodge")` | ⚠️ **Partial** — `dodge` ✅, `fill` ✅; `stack` only works when per-group bin edges happen to align. `desugar_histogram` doesn't pass `shared_extent=True` to `Bin` for the stack case, so groups with different bin edges produce no stacking effect. |
+| `mark_density(multiple="dodge")` | ✅ Confirmed — verified in SVG output |
+| `mark_ribbon(interpolate=...)` | Open — still no-op |
+| `lmplot(truncate=False)` / `regplot(truncate=False)` | ⚠️ **Partial** — no longer raises; `x_range` is computed in `lmplot()` but never forwarded to `mark_smooth()` call sites (lines 578–609 of `regression.py`). Fit line does not extend beyond observed data range. |
+| `Chart(data=None)` with per-layer data | ✅ Confirmed — both layers render; verified in SVG output |
+| `Layer(data=...)` via `Chart.layer()` | ✅ Confirmed — verified in SVG output |
 | `mark_hex(stroke=..., stroke_width=...)` | Open — still raises |
 | `mark_function(clip=False)` | Open — still no-op |
 
-> **2026-05-15:** `mark_raster(blend="additive")` SVG was already implemented (`mix-blend-mode:screen`); WASM GPU additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` was already wired. Legend kwargs passthrough wired `f87ba9a`. Archaeology false positives resolved by docstring cleanup `c606f72`.
+> **2026-05-15:** `mark_raster(blend="additive")` SVG already implemented; WASM additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` already wired. Legend kwargs (`orient`, `title`, etc.) confirmed working via behavioral tests. `stack=` and `truncate=False` are partial — see gaps above. Verified by `tests/test_silent_drop_verification.py`.
 
 ### `VisualBase.score()` not overridden in 14 visualizer subclasses
 
