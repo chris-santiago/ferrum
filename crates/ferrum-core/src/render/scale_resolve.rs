@@ -410,6 +410,45 @@ pub fn resolve_scales_with_outputs(
         ));
     }
 
+    // Tick mark supports single-axis rug mode: only x or only y is encoded.
+    // Synthesize a dummy unit scale for the absent axis so the tick builder
+    // can access its present scale without scale_resolve erroring.
+    if matches!(spec.mark, crate::spec::mark::Mark::Tick) {
+        let has_x = spec.encoding.x.is_some();
+        let has_y = spec.encoding.y.is_some();
+        if has_x && !has_y {
+            let x_enc = spec.encoding.x.as_ref().unwrap();
+            let x2_enc = spec.encoding.x2.as_ref();
+            let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
+            let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
+            ));
+            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            if let Some(w) = color_warn { warnings.push(w); }
+            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
+            if let Some(w) = shape_warn { warnings.push(w); }
+            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
+        }
+        if !has_x && has_y {
+            let y_enc = spec.encoding.y.as_ref().unwrap();
+            let y2_enc = spec.encoding.y2.as_ref();
+            let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
+            let y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+            let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
+            ));
+            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            if let Some(w) = color_warn { warnings.push(w); }
+            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
+            if let Some(w) = shape_warn { warnings.push(w); }
+            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
+        }
+    }
+
     let x_enc = spec
         .encoding
         .x

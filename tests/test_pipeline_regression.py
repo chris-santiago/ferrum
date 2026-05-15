@@ -1255,3 +1255,81 @@ class TestRound3Fixes:
         assert "Sample Quantiles" in svg, (
             "Expected 'Sample Quantiles' axis label in QQ plot SVG"
         )
+
+
+class TestTickRug:
+    """Regression tests for mark_tick() single-axis rug mode (x-rug and y-rug).
+
+    Both were broken before the fix: resolve_scales required both x and y
+    encodings unconditionally. The x-rug path in tick.rs also had an early
+    return when x_field was None that killed the y-rug case entirely.
+    """
+
+    def _rug_lines(self, svg: str):
+        """Extract (x1, y1, x2, y2) tuples from all SVG <line> elements."""
+        import re
+        lines = []
+        for m in re.finditer(r'<line([^/]+)/>', svg):
+            attrs = dict(re.findall(r'(\w+)="([^"]+)"', m.group(1)))
+            try:
+                lines.append((
+                    float(attrs["x1"]), float(attrs["y1"]),
+                    float(attrs["x2"]), float(attrs["y2"]),
+                ))
+            except (KeyError, ValueError):
+                pass
+        return lines
+
+    def test_x_rug_renders_without_error(self):
+        """mark_tick().encode(x=...) must render without ValueError."""
+        df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        svg = fm.Chart(df).mark_tick().encode(x="val").show_svg()
+        assert "<svg" in svg
+
+    def test_x_rug_produces_vertical_tick_lines(self):
+        """x-rug ticks must be short vertical lines going UP from the plot baseline."""
+        df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        svg = fm.Chart(df).mark_tick().encode(x="val").show_svg()
+        lines = self._rug_lines(svg)
+        # x-rug ticks: vertical (x1≈x2), short dy, going UP (y2<y1 means into plot area).
+        # X-axis tick marks go DOWN (y2>y1, outside plot) — excluded by y1>y2 filter.
+        rug = [l for l in lines if abs(l[0] - l[2]) < 0.5 and 4 < (l[1] - l[3]) < 30]
+        assert len(rug) == 5, f"Expected 5 x-rug tick lines, got {len(rug)}: {rug}"
+
+    def test_y_rug_renders_without_error(self):
+        """mark_tick().encode(y=...) must render without ValueError."""
+        df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        assert "<svg" in svg
+
+    def test_y_rug_produces_horizontal_tick_lines(self):
+        """y-rug ticks must be short horizontal lines extending INTO the plot area."""
+        df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        lines = self._rug_lines(svg)
+        # y-rug ticks: horizontal (y1≈y2), short dx, and going RIGHT (x2>x1 means into plot).
+        # Y-axis tick marks go LEFT (x2<x1) — excluded by x2>x1 filter.
+        rug = [l for l in lines if abs(l[1] - l[3]) < 0.5 and 1 < (l[2] - l[0]) < 30]
+        assert len(rug) == 5, f"Expected 5 y-rug tick lines, got {len(rug)}: {rug}"
+
+    def test_y_rug_ticks_at_left_axis_edge(self):
+        """y-rug tick lines must start at the left axis boundary and go right."""
+        df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        lines = self._rug_lines(svg)
+        rug = [l for l in lines if abs(l[1] - l[3]) < 0.5 and 1 < (l[2] - l[0]) < 30]
+        assert len(rug) == 5
+        x1_vals = {round(l[0], 1) for l in rug}
+        assert len(x1_vals) == 1, f"All y-rug ticks should share the same x1; got {x1_vals}"
+        x1 = x1_vals.pop()
+        assert all(l[2] > x1 for l in rug), "y-rug ticks must extend into the plot area"
+
+    def test_both_axes_encoded_still_works(self):
+        """mark_tick().encode(x=..., y=...) (strip plot) must still work after the fix."""
+        df = pl.DataFrame({
+            "cat": ["a", "b", "a", "b", "a"],
+            "val": [1.0, 2.0, 1.5, 2.5, 1.2],
+        })
+        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
+        assert "<svg" in svg
+        assert "<line" in svg

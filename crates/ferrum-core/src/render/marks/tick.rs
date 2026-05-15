@@ -1,8 +1,8 @@
-//! mark_tick: three modes —
-//!   quantitative x → rug-style vertical segment at panel bottom (original);
-//!   ordinal x + quantitative y → horizontal tick at y position (boxplot median,
-//!   Phase 10c-pre);
-//!   ordinal y + quantitative x → vertical tick at x position (strip plot).
+//! mark_tick: four modes —
+//!   quantitative x only → x-rug: vertical ticks at panel baseline;
+//!   quantitative y only → y-rug: horizontal ticks at left axis edge;
+//!   ordinal x + quantitative y → horizontal tick at data y position (boxplot median);
+//!   ordinal y + quantitative x → vertical tick at data x position (strip plot).
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
@@ -13,19 +13,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
-    let xf = match x_field(ctx, spec) {
-        Some(f) => f,
-        None => return MarkBuildResult {
-            kind: MarkBatchKind::Tick,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        },
-    };
-    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // Common setup shared by all four tick modes.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
     let stroke_style = to_scene_stroke(
         stroke_color,
@@ -35,12 +25,45 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         None,
         None,
     );
-
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
-
     let mut nodes = Vec::new();
     let mut indices = Vec::new();
+
+    let xf_opt = x_field(ctx, spec);
+
+    // Quantitative y only → y-rug: horizontal ticks at left axis edge.
+    if xf_opt.is_none() {
+        if let Some(yf) = y_field(ctx, spec) {
+            let tick_len = ctx.theme.tick_size * 2.0;
+            let ys = match col_as_f64(ctx.batch, yf) {
+                Ok(v) => v,
+                Err(_) => return MarkBuildResult {
+                    kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                    tooltips: None, hrefs: None, descriptions: None,
+                },
+            };
+            let baseline_x = panel.x;
+            for i in 0..ys.len() {
+                let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+                let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+                let py = py + y_offsets[i];
+                let bx = baseline_x + x_offsets[i];
+                nodes.push(SceneNode::Line {
+                    x1: bx, y1: py,
+                    x2: bx + tick_len, y2: py,
+                    style: stroke_style.clone(),
+                });
+                indices.push(i);
+            }
+        }
+        return MarkBuildResult {
+            kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
+            tooltips, hrefs, descriptions,
+        };
+    }
+
+    let xf = xf_opt.unwrap();
 
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
