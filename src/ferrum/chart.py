@@ -3759,6 +3759,10 @@ class Chart:
             prefer ``dy = -8`` (above the point).
         font_size : float, optional
             Label font size in points (default 11).
+        leader_line : bool, optional
+            When ``True``, a thin line is drawn from each data point to its
+            placed label position.  Useful when labels are placed far from
+            their source points.  Default ``False``.
         **kwargs
             Additional mark style overrides (``fill``, ``opacity``,
             ``font_weight``, etc.).
@@ -3767,6 +3771,7 @@ class Chart:
         --------
         >>> fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label")
         >>> fm.Chart(df).mark_label(dx=5, dy=-12).encode(x="x:Q", y="y:Q", text="label")
+        >>> fm.Chart(df).mark_label(leader_line=True).encode(x="x:Q", y="y:Q", text="label")
         """
         return self._set_mark("label", **kwargs)
 

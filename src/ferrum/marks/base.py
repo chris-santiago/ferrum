@@ -154,6 +154,8 @@ class MarkBase:
             "line",
             # S10: borders on area/errorband
             "borders",
+            # S11: leader_line (label)
+            "leader_line",
         ):
             if k in self._kwargs:
                 out[k] = self._kwargs[k]

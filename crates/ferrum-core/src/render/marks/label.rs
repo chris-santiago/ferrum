@@ -65,8 +65,8 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
 /// `font_size * 1.2` for height — fast, approximate, and good enough for the
 /// greedy heuristic.
 ///
-/// When `mark_style.line = true` (not yet a real field) a thin leader line
-/// would be drawn; the flag is left false pending a dedicated style key.
+/// When `mark_style.leader_line = Some(true)` a thin `SceneNode::Line` is
+/// drawn from the data point `(px, py)` to the placed label position.
 pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let xf = match ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) {
         Some(f) => f,
@@ -101,7 +101,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
     let color = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
-    let draw_leader = false;
+    let draw_leader = ctx.mark_style.leader_line.unwrap_or(false);
 
     let n = ctx.batch.num_rows();
     let mut nodes: Vec<SceneNode> = Vec::with_capacity(n);
@@ -174,8 +174,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
         if draw_leader {
             let lc = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity * 0.5);
-            nodes.push(SceneNode::Polyline {
-                points: vec![(px, py), (px + dx * 0.8, py + dy * 0.8)],
+            nodes.push(SceneNode::Line {
+                x1: px,
+                y1: py,
+                x2: px + dx * 0.8,
+                y2: py + dy * 0.8,
                 style: StrokeStyle {
                     color: to_scene_color(lc),
                     width: 0.75,

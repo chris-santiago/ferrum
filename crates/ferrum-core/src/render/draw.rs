@@ -70,6 +70,8 @@ pub struct MarkStyle {
     // ── mark_image URL-tile sizing ───
     pub width: Option<f64>,
     pub height: Option<f64>,
+    // ── S11: leader_line (label) ─────
+    pub leader_line: Option<bool>,
 }
 
 impl MarkStyle {
@@ -107,6 +109,7 @@ impl MarkStyle {
             borders: None,
             width: None,
             height: None,
+            leader_line: None,
         }
     }
 }
@@ -233,6 +236,8 @@ pub fn resolve_mark_style(
     // mark_image URL-tile sizing
     if let Some(w) = o.width { style.width = Some(w); }
     if let Some(h) = o.height { style.height = Some(h); }
+    // S11: leader_line (label)
+    if let Some(ll) = o.leader_line { style.leader_line = Some(ll); }
 
     style
 }

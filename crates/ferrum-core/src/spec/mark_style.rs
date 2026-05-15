@@ -82,6 +82,11 @@ pub struct MarkKwargsSpec {
     /// When true, draw border lines on both top and bottom edges of an area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borders: Option<bool>,
+    // ── S11: leader_line (label) ─────────────────────────────────────────────
+    /// When true, draw a thin leader line from each data point (px, py) to the
+    /// placed label position. Default false (None = no leader line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_line: Option<bool>,
     // ── mark_image URL-tile sizing ───────────────────────────────────────────
     /// Constant tile width in pixels for mark_image URL tiles. Overridden
     /// per-row by a `width` column in the data. Defaults to 32.0.
