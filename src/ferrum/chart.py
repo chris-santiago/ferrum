@@ -48,6 +48,7 @@ _RENDERER_HONORED_CHANNELS = (
     "tooltip",
     "href",
     "description",
+    "url",
 )
 # Channels that are silently accepted but produce no visual encoding in the
 # current static SVG renderer.  They are handled by special-case logic in
@@ -127,6 +128,7 @@ def _channel_class_map() -> dict:
         Href,
         Description,
         Key,
+        Url,
         Facet,
         FacetRow,
         FacetCol,
@@ -161,6 +163,7 @@ def _channel_class_map() -> dict:
         "href": Href,
         "description": Description,
         "key": Key,
+        "url": Url,
         "facet": Facet,
         "facet_row": FacetRow,
         "facet_col": FacetCol,
@@ -3732,26 +3735,38 @@ class Chart:
         return self._set_mark("geoshape", **kwargs)
 
     def mark_label(self, **kwargs):
-        """Render positioned text labels near data points.
+        """Render positioned text labels near data points with collision avoidance.
 
-        Each row in the dataset becomes one text label placed at (x, y) +
-        optional (dx, dy) offset.  Use the ``text`` encoding channel to
-        specify label content; omitting it formats the x value.
+        Each row in the dataset becomes one text label.  By default the
+        renderer uses a greedy collision-avoidance algorithm: for each label
+        in row order it tries a ranked list of candidate offsets (above, below,
+        right, left, diagonals) and picks the first placement whose estimated
+        bounding box overlaps no previously-placed label.  When every candidate
+        overlaps something, the least-bad placement is chosen.
+
+        When **both** ``dx`` and ``dy`` are supplied explicitly, collision
+        avoidance is bypassed and those fixed offsets are applied to every
+        label (manual positioning path).
 
         Parameters
         ----------
         dx : float, optional
-            Horizontal offset from the data position (pixels, default 0).
+            Fixed horizontal offset in pixels.  Must be combined with ``dy``
+            to bypass collision avoidance.
         dy : float, optional
-            Vertical offset from the data position (pixels, default -8).
+            Fixed vertical offset in pixels.  Must be combined with ``dx``
+            to bypass collision avoidance.  Default when auto-placing is to
+            prefer ``dy = -8`` (above the point).
         font_size : float, optional
-            Label font size in points.
+            Label font size in points (default 11).
         **kwargs
-            Additional mark style overrides.
+            Additional mark style overrides (``fill``, ``opacity``,
+            ``font_weight``, etc.).
 
         Examples
         --------
-        >>> fm.Chart(df).mark_label(dy=-10).encode(x="x", y="y", text="label")
+        >>> fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label")
+        >>> fm.Chart(df).mark_label(dx=5, dy=-12).encode(x="x:Q", y="y:Q", text="label")
         """
         return self._set_mark("label", **kwargs)
 
@@ -4396,9 +4411,20 @@ class Chart:
                     if not field:
                         continue
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
+                    # Note: to_encoding_spec_dict() emits the data-type under
+                    # "type_" (Python convention to avoid shadowing the builtin),
+                    # but the Rust serde wire format uses "type" (no underscore).
+                    # Also normalize shorthand ("Q", "N", "O", "T") to the full
+                    # lowercase form that serde deserializes; the PyO3 path does
+                    # this via DataType::from_str, but serde only knows "quantitative"
+                    # etc.
+                    _TYPE_EXPAND = {
+                        "Q": "quantitative", "N": "nominal",
+                        "O": "ordinal",      "T": "temporal",
+                    }
                     enc_json_dict: dict = {"field": field}
-                    if d.get("type"):
-                        enc_json_dict["type"] = d["type"]
+                    if raw_type := d.get("type_"):
+                        enc_json_dict["type"] = _TYPE_EXPAND.get(raw_type, raw_type)
                     for opt_key in (
                         "title",
                         "aggregate",

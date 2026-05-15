@@ -24,7 +24,7 @@ _DOC_ALLOWLIST: set[str] = {
     "Theta", "Radius",
     "Color", "Fill", "Stroke", "Opacity", "FillOpacity", "StrokeOpacity",
     "StrokeWidth", "StrokeDash", "Size", "Shape", "Angle",
-    "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key",
+    "Text", "Detail", "Tooltip", "TooltipField", "Href", "Description", "Key", "Url",
     "Facet", "FacetRow", "FacetCol",
     # Task 5 — composition / layer / repeat
     "HConcatChart", "VConcatChart", "JointChart", "RepeatChart", "ClusterMapChart",

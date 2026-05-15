@@ -430,6 +430,48 @@ class TestLayerSerialization:
         # Boxplot emits at least a rect and a rule, so multiple elements.
         assert "<rect" in svg or "<line" in svg
 
+    def test_build_layers_list_forwards_encoding_type(self):
+        """B2 fix: _build_layers_list must carry the 'type' key into each layer's
+        encoding JSON dict.
+
+        to_encoding_spec_dict() emits the data-type under 'type_' (Python
+        convention to avoid shadowing the builtin), but _build_layers_list was
+        reading d.get('type') — silently dropping the type for every composite-
+        mark layer encoding that carries a ChannelBase with a typed kwarg.
+
+        The fix: read d.get('type_') and emit it as 'type' in the JSON dict.
+        """
+        import polars as pl
+        from ferrum._layer import _Layer, MarkDesugarResult, _PendingMark
+        from ferrum.encoding import Y
+
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        # Create a chart that goes through the layers path.  The Y channel
+        # carries an explicit type so we can assert it reaches the layer dict.
+        chart = fm.Chart(df)
+
+        def desugar_typed_layer(x_field, y_field, **_kw):
+            return MarkDesugarResult(layers=[
+                _Layer(
+                    mark="line",
+                    encoding={"x": x_field, "y": Y(y_field, type="quantitative")},
+                )
+            ])
+
+        chart._pending_stat_mark = _PendingMark(
+            "__typed_test__", {}, desugar_typed_layer
+        )
+        resolved = chart.encode(x="x", y="y")._resolve_pending()
+        layers_list = resolved._build_layers_list()
+
+        assert layers_list, "Expected at least one layer dict"
+        y_enc = layers_list[0]["encoding"].get("y")
+        assert y_enc is not None, "Expected 'y' key in first layer encoding dict"
+        assert y_enc.get("type") == "quantitative", (
+            f"Expected encoding type 'quantitative' in layer JSON dict, "
+            f"got: {y_enc!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Encoding title inheritance (roc_chart)
