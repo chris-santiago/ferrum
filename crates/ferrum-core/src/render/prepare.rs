@@ -930,6 +930,7 @@ mod tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
             }),

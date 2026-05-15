@@ -789,6 +789,7 @@ mod tests {
         let mut s = minimal_chart_spec();
         s.facet = Some(FacetSpec {
             field: "species".into(),
+            row: None,
             mode: FacetMode::Wrap { ncols },
             spacing: None,
         });
@@ -848,6 +849,7 @@ mod tests {
         let mut spec = minimal_chart_spec();
         spec.facet = Some(FacetSpec {
             field: "species".into(),
+            row: None,
             mode: FacetMode::Grid { nrows: 1, ncols: 2 },
             spacing: None,
         });

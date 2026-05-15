@@ -910,6 +910,7 @@ mod tests {
             y2: Some(EncodingSpec { field: "by2".into(), ..Default::default() }),
             text: Some(EncodingSpec { field: "bt".into(), ..Default::default() }),
             tooltip: Some(EncodingSpec { field: "btt".into(), ..Default::default() }),
+            tooltip_fields: None,
             href: Some(EncodingSpec { field: "bh".into(), ..Default::default() }),
             description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
             key: Some(EncodingSpec { field: "bk".into(), ..Default::default() }),

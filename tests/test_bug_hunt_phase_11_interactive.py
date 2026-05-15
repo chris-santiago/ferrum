@@ -126,14 +126,15 @@ def test_merge_scene_graphs_panel_plot_area_offset_applied():
 # ── _offset_nodes: node-type coverage ────────────────────────────────────────
 
 def test_offset_nodes_circle():
-    nodes = [{"op": "circle", "cx": 10.0, "cy": 20.0}]
+    # SceneNode uses "type" key, not "op" (which is PathCmd's key)
+    nodes = [{"type": "circle", "cx": 10.0, "cy": 20.0}]
     _offset_nodes(nodes, 5.0, 3.0)
     assert nodes[0]["cx"] == pytest.approx(15.0)
     assert nodes[0]["cy"] == pytest.approx(23.0)
 
 
 def test_offset_nodes_line():
-    nodes = [{"op": "line", "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 100.0}]
+    nodes = [{"type": "line", "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 100.0}]
     _offset_nodes(nodes, 10.0, 20.0)
     assert nodes[0]["x1"] == pytest.approx(10.0)
     assert nodes[0]["y1"] == pytest.approx(20.0)
@@ -142,22 +143,22 @@ def test_offset_nodes_line():
 
 
 def test_offset_nodes_polyline():
-    nodes = [{"op": "polyline", "points": [[1.0, 2.0], [3.0, 4.0]]}]
+    nodes = [{"type": "polyline", "points": [[1.0, 2.0], [3.0, 4.0]]}]
     _offset_nodes(nodes, 10.0, 5.0)
     assert nodes[0]["points"][0] == [pytest.approx(11.0), pytest.approx(7.0)]
     assert nodes[0]["points"][1] == [pytest.approx(13.0), pytest.approx(9.0)]
 
 
 def test_offset_nodes_polygon():
-    nodes = [{"op": "polygon", "points": [[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]]}]
+    nodes = [{"type": "polygon", "points": [[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]]}]
     _offset_nodes(nodes, 100.0, 200.0)
     assert nodes[0]["points"][0] == [pytest.approx(100.0), pytest.approx(200.0)]
     assert nodes[0]["points"][2] == [pytest.approx(105.0), pytest.approx(210.0)]
 
 
 def test_offset_nodes_unknown_op_is_ignored():
-    """Nodes with unrecognised op types must not raise and must be left unchanged."""
-    nodes = [{"op": "arc", "x": 10.0, "y": 20.0}]
+    """Nodes with unrecognised type values must not raise and must be left unchanged."""
+    nodes = [{"type": "arc", "x": 10.0, "y": 20.0}]
     _offset_nodes(nodes, 50.0, 50.0)  # must not raise
     assert nodes[0]["x"] == pytest.approx(10.0)
     assert nodes[0]["y"] == pytest.approx(20.0)
@@ -167,10 +168,10 @@ def test_offset_nodes_nested_group_propagates():
     """Group children must receive the same dx/dy as siblings."""
     nodes = [
         {
-            "op": "group",
+            "type": "group",
             "children": [
-                {"op": "circle", "cx": 5.0, "cy": 5.0},
-                {"op": "rect", "x": 10.0, "y": 10.0},
+                {"type": "circle", "cx": 5.0, "cy": 5.0},
+                {"type": "rect", "x": 10.0, "y": 10.0},
             ],
         }
     ]
@@ -183,7 +184,7 @@ def test_offset_nodes_nested_group_propagates():
 
 
 def test_offset_nodes_zero_offset_is_noop():
-    nodes = [{"op": "circle", "cx": 42.0, "cy": 99.0}]
+    nodes = [{"type": "circle", "cx": 42.0, "cy": 99.0}]
     _offset_nodes(nodes, 0.0, 0.0)
     assert nodes[0]["cx"] == pytest.approx(42.0)
     assert nodes[0]["cy"] == pytest.approx(99.0)
@@ -304,9 +305,12 @@ def test_extract_interaction_config_invalid_json_returns_empty_object():
 
 
 def test_extract_interaction_config_missing_key_returns_empty_object():
+    # selections key is always present (JS reads it); interaction config keys absent
     result = InteractiveChart._extract_interaction_config(json.dumps({"width": 100}))
     d = json.loads(result)
-    assert d == {}
+    assert d.get("selections") == []
+    assert "zoom" not in d
+    assert "pan" not in d
 
 
 def test_extract_interaction_config_with_interaction_key():
@@ -404,7 +408,7 @@ def test_merge_scene_graphs_legend_and_title_accumulated():
 def test_merge_scene_graphs_marks_nodes_offset():
     """Mark nodes inside panels from later scenes must have their coords offset."""
     mark_batch = {
-        "nodes": [{"op": "circle", "cx": 10.0, "cy": 10.0}],
+        "nodes": [{"type": "circle", "cx": 10.0, "cy": 10.0}],
     }
     s1 = _make_scene(panels=[_make_panel(0)])
     s2 = _make_scene(panels=[_make_panel(0, marks=[mark_batch])])

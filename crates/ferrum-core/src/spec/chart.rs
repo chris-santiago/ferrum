@@ -697,6 +697,7 @@ mod tests {
         let mut spec = minimal_scatter();
         spec.facet = Some(FacetSpec {
             field: "species".into(),
+            row: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
         });

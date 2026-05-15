@@ -467,6 +467,7 @@ mod orchestration_tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),
@@ -902,6 +903,7 @@ mod golden_tests {
             transforms: Vec::new(),
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
+                row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
             }),

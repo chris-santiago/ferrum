@@ -4318,14 +4318,17 @@ class Chart:
         if f.mode_kind == "wrap":
             ncols = f.ncols or 1  # u32 required; default 1
             return {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
-        # grid: Rust FacetSpec has a single `field`. Use col as primary, row for nrows.
+        # grid: col is the primary (column) field; row is the secondary (row) field.
         field = f.col if f.col is not None else (f.field or "")
         nrows = f.nrows or 1
         ncols = f.ncols or 1
-        return {
+        d: dict = {
             "field": field,
             "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
         }
+        if f.row is not None:
+            d["row"] = f.row
+        return d
 
     # ---- Properties ----
 
@@ -4622,6 +4625,12 @@ class Chart:
         from ferrum._core import render_svg
 
         spec, data, viewport, theme_dict = self._render_inputs()
+        if data.num_rows == 0:
+            w, h = viewport
+            return (
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
+                f"<!-- empty dataset --></svg>"
+            )
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
     def show_png(self) -> bytes:

@@ -89,6 +89,12 @@ mod tests {
         coeffs[0] + p2*coeffs[1] + p4*coeffs[2] + p6*coeffs[3]
     }
 
+    fn ne_poly_deriv(coeffs: &[f64], phi: f64) -> f64 {
+        let p3 = phi * phi * phi;
+        let p5 = p3 * phi * phi;
+        2.0*phi*coeffs[1] + 4.0*p3*coeffs[2] + 6.0*p5*coeffs[3]
+    }
+
     fn natural_earth_fwd(lon: f64, lat: f64) -> (f64, f64) {
         let lam = to_rad(lon);
         let phi = to_rad(lat);
@@ -99,7 +105,8 @@ mod tests {
         let mut phi = y;
         for _ in 0..20 {
             let fy = phi * ne_poly(&NE_B, phi);
-            let dfy = ne_poly(&NE_B, phi);
+            // Product rule: d/dphi[phi * ne_poly(NE_B, phi)] = ne_poly + phi * ne_poly'
+            let dfy = ne_poly(&NE_B, phi) + phi * ne_poly_deriv(&NE_B, phi);
             let delta = (fy - y) / dfy.max(1e-12);
             phi -= delta;
             if delta.abs() < 1e-12 { break; }

@@ -702,6 +702,23 @@ fn numeric_domain_union(
             field: field.to_string(),
         });
     }
+    // Degenerate domain: a single row or all-equal values produce mn == mx.
+    // A zero-span domain collapses every data point to the same pixel, which
+    // causes `to_pixel_f64` to return NaN (0/0 in the linear formula) and the
+    // mark renderer silently drops every row. Expand to a symmetric band so the
+    // mark renders at the centre of the plot area. Guard fires only here because
+    // `numeric_domain_union` is called exclusively from the auto-inferred
+    // (no explicit ScaleSpec) path in `build_axis_scale`; explicit domains go
+    // through `build_from_scale_spec` → `resolve_continuous_domain_and_range`.
+    if mn == mx {
+        if mn == 0.0 {
+            mn = -1.0;
+            mx = 1.0;
+        } else {
+            mn -= 0.5;
+            mx += 0.5;
+        }
+    }
     Ok((mn, mx))
 }
 

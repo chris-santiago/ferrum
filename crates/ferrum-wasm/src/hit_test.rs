@@ -246,8 +246,9 @@ fn dist_to_segment(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 
 }
 
 fn point_in_polygon(px: f64, py: f64, vertices: &[[f64; 2]]) -> bool {
-    let mut inside = false;
     let n = vertices.len();
+    if n == 0 { return false; }
+    let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
         let (xi, yi) = (vertices[i][0], vertices[i][1]);

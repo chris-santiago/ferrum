@@ -203,8 +203,9 @@ mod tests {
         a[0] = -a_n;
         a[1] = -a_nm1;
         if n > 4 {
+            let eps_sqrt = eps.max(0.0).sqrt();
             for i in 2..n - 2 {
-                a[i] = m[i] / eps.sqrt();
+                a[i] = if eps_sqrt > 0.0 { m[i] / eps_sqrt } else { 0.0 };
             }
         }
 

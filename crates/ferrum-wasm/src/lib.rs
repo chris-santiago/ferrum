@@ -1,29 +1,46 @@
 #![deny(clippy::unwrap_used)]
 
+// Pure-logic modules: compile on all targets (host tests use these).
 pub mod conditional;
 pub mod error;
-pub mod gpu;
 pub mod hit_test;
-pub mod pipelines;
-pub mod render;
 pub mod scene_load;
 pub mod selection_state;
 pub mod tessellate;
 pub mod transition;
 pub mod zoom_pan;
 
+// GPU / wasm-bindgen modules: only compile when targeting wasm32.
+#[cfg(target_arch = "wasm32")]
+pub mod gpu;
+#[cfg(target_arch = "wasm32")]
+pub mod pipelines;
+#[cfg(target_arch = "wasm32")]
+pub mod render;
+
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use web_sys::HtmlCanvasElement;
 
+#[cfg(target_arch = "wasm32")]
 use crate::conditional::resolve_conditionals;
+#[cfg(target_arch = "wasm32")]
 use crate::error::WasmRenderError;
+#[cfg(target_arch = "wasm32")]
 use crate::gpu::GpuContext;
+#[cfg(target_arch = "wasm32")]
 use crate::pipelines::RenderPipelines;
+#[cfg(target_arch = "wasm32")]
 use crate::render::GpuBuffers;
+#[cfg(target_arch = "wasm32")]
 use crate::scene_load::SceneData;
+#[cfg(target_arch = "wasm32")]
 use crate::selection_state::InteractionState;
+#[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct WasmRenderer {
     gpu: GpuContext,
@@ -34,18 +51,21 @@ pub struct WasmRenderer {
     interaction_state: InteractionState,
 }
 
+#[cfg(target_arch = "wasm32")]
 struct ActiveTransition {
     old_data: SceneData,
     new_data: SceneData,
     new_scene: ferrum_scene::SceneGraph,
 }
 
+#[cfg(target_arch = "wasm32")]
 struct LoadedScene {
     data: SceneData,
     buffers: GpuBuffers,
     scene: ferrum_scene::SceneGraph,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl WasmRenderer {
     #[wasm_bindgen(js_name = "create")]
@@ -219,6 +239,7 @@ impl WasmRenderer {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn build_text_json(data: &SceneData) -> String {
     let elements: Vec<serde_json::Value> = data
         .text_elements

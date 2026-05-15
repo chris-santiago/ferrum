@@ -202,9 +202,14 @@ class InteractiveChart:
 
 
 def _render_scene_json(chart: "Chart") -> str:
+    import json as _json
+
     from ferrum._core import render_interactive
 
     spec, data, viewport, theme_dict = chart._render_inputs()
+    if data.num_rows == 0:
+        w, h = viewport
+        return _json.dumps({"panels": [], "width": w, "height": h})
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
 
 
