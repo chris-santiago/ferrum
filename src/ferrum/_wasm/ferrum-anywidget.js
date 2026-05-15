@@ -235,29 +235,47 @@ export async function render({ model, el }) {
       }
 
       if (_state) {
-        // ── Scroll zoom (Python round-trip) ───────────────────────────
-        // TODO Phase 12: replace with WASM-side GPU affine transform
-        //   via renderer.onWheel() — eliminates the ~200ms round-trip.
+        // ── Scroll zoom — GPU affine transform via WASM onWheel ──────
+        // When the GPU renderer is available, wheel events apply a per-panel
+        // affine transform entirely on the GPU (≤16 ms, no Python round-trip).
+        // A 400 ms debounced round-trip fires for mark_function/mark_raster
+        // charts that need data-space recomputation; all other mark types skip it.
+        let _zoomDebounceId = null;
         _state.canvas.addEventListener('wheel', e => {
           e.preventDefault();
           if (!_state) return;
-          const sc = _state.scene;
-          const p = sc.panels && sc.panels[0];
-          if (!p) return;
-          const factor = 1 - e.deltaY * 0.001;
-          const xs = p.coord && p.coord.x_domain;
-          const ys = p.coord && p.coord.y_domain;
-          if (!xs || !ys) return;
-          const xSpan = xs[1] - xs[0], ySpan = ys[1] - ys[0];
-          const xc = xs[0] + xSpan / 2, yc = ys[0] + ySpan / 2;
-          const nxSpan = xSpan / factor, nySpan = ySpan / factor;
-          const zs = JSON.stringify({ '0': {
-            x_domain: [xc - nxSpan / 2, xc + nxSpan / 2],
-            y_domain: [yc - nySpan / 2, yc + nySpan / 2],
-          }});
-          model.set('zoom_state', zs);
-          model.save_changes();
+          const r = _state.canvas.getBoundingClientRect();
+          if (_state.renderer) {
+            try {
+              const textJson = _state.renderer.onWheel(
+                0, e.deltaY, e.clientX - r.left, e.clientY - r.top);
+              _placeText(ov, JSON.parse(textJson));
+            } catch (err) { /* GPU not ready */ }
+          }
+          // Debounced Python round-trip (for mark_function/mark_raster recompute).
+          clearTimeout(_zoomDebounceId);
+          _zoomDebounceId = setTimeout(() => {
+            if (!_state) return;
+            const sc = _state.scene;
+            const p = sc.panels && sc.panels[0];
+            if (!p || !p.coord) return;
+            const xs = p.coord.x_domain, ys = p.coord.y_domain;
+            if (!xs || !ys) return;
+            model.set('zoom_state', JSON.stringify({ '0': {
+              x_domain: xs, y_domain: ys,
+            }}));
+            model.save_changes();
+          }, 400);
         }, { passive: false });
+
+        // ── Double-click: reset zoom to identity ─────────────────────
+        _state.canvas.addEventListener('dblclick', () => {
+          if (!_state || !_state.renderer) return;
+          try {
+            const textJson = _state.renderer.resetZoom(0);
+            _placeText(ov, JSON.parse(textJson));
+          } catch (err) { /* ignore */ }
+        });
       }
     } catch (e) {
       console.error('[ferrum] widget reload failed:', e);
