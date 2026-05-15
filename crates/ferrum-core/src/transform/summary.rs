@@ -283,6 +283,14 @@ use crate::transform::core::TransformSpec;
 ///     deterministic output across platforms.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_point().encode(
+/// ...     x="cut", y="mean_price",
+/// ...     transform=fm.Summary("price", fn_="mean", groupby=["cut"]),
+/// ... )
 #[pyclass(eq, module = "ferrum._core", name = "Summary")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySummary(pub(crate) TransformSpec);

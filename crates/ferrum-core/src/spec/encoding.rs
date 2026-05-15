@@ -208,6 +208,11 @@ pub struct LegendSpec {
 /// Users typically work with the higher-level encoding channel classes
 /// from ``ferrum.encoding`` (``X``, ``Y``, ``Color``, ...);
 /// ``EncodingSpec`` is the internal IR that ``Chart.encode(...)`` builds.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> enc = fm.EncodingSpec(x="sepal_length", y="sepal_width", color="species")
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EncodingSpec {

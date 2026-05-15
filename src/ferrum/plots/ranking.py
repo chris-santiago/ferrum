@@ -208,6 +208,11 @@ def rank1d_chart(
     -------
     Chart
         Ranked bar chart.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.rank1d_chart(model, X_train, algorithm="shapiro")
     """
     import ferrum
 
@@ -282,6 +287,11 @@ def rank2d_chart(
     -------
     Chart
         Pairwise correlation heatmap.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.rank2d_chart(model, X_train, algorithm="pearson")
     """
     import ferrum
 

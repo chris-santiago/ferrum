@@ -300,6 +300,11 @@ use pyo3::prelude::*;
 ///     flag points outside the IQR itself.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_boxplot().encode(x="cut", y="price")
 #[pyclass(eq, module = "ferrum._core", name = "Outliers")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyOutliers(pub(crate) crate::transform::core::TransformSpec);

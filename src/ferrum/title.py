@@ -34,6 +34,12 @@ class Title:
         Subtitle font size; defaults to ``font_size * 0.85``.
     subtitle_color : str, optional
         Subtitle color; defaults to the theme's ``label_color``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> title = fm.Title("My Chart", subtitle="subtitle text", anchor="start")
+    >>> fm.Chart(df).mark_point().encode(x="x", y="y").properties(title=title)
     """
 
     text: str

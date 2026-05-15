@@ -338,6 +338,18 @@ use crate::transform::core::TransformSpec;
 ///     Single group-key column; bins computed independently per group.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_histogram(bin_count=10).encode(x="mpg")
+///
+/// Direct construction:
+///
+/// >>> fm.Chart(df).mark_bar().encode(
+/// ...     x=fm.X("mpg_bin_start"), y="count",
+/// ...     transform=fm.Bin("mpg", bin_count=10),
+/// ... )
 #[pyclass(eq, module = "ferrum._core", name = "Bin")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBin(pub(crate) TransformSpec);

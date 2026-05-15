@@ -52,6 +52,12 @@ use super::{render_png as render_png_internal, render_svg as render_svg_internal
 /// (CLAUDE.md "byte-deterministic randomness"). Render warnings (e.g.
 /// unsupported encoding combinations) are forwarded to Python's
 /// ``warnings.warn``.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+/// >>> svg = fm.render_svg(chart.to_spec(), df, viewport=(400, 300))
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
 pub fn render_svg(
@@ -114,6 +120,12 @@ pub fn render_svg(
 /// is byte-deterministic for the same inputs (seeded ``ChaCha8Rng`` for
 /// stochastic transforms). Render warnings are forwarded to Python's
 /// ``warnings.warn``.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+/// >>> png_bytes = fm.render_png(chart.to_spec(), df, viewport=(400, 300))
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
 pub fn render_png<'py>(
@@ -578,6 +590,11 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 /// Used internally by ``HConcatChart`` to combine column-concatenated
 /// charts. The returned SVG preserves each panel's coordinate system via
 /// nested ``<g transform="translate(...)">`` elements.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_horizontal")]
 #[pyo3(signature = (svgs, *, spacing = 10.0, align = "top"))]
@@ -630,6 +647,11 @@ pub fn compose_svg_horizontal_py(
 /// Used internally by ``VConcatChart`` to combine row-concatenated charts.
 /// The returned SVG preserves each panel's coordinate system via nested
 /// ``<g transform="translate(...)">`` elements.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_vertical")]
 #[pyo3(signature = (svgs, *, spacing = 10.0, align = "left"))]
@@ -700,6 +722,14 @@ pub fn compose_svg_vertical_py(
 /// `Chart.encode(x=fr.X(field, scale=...))` with a shared scale spec at
 /// composition time, or `JointChart`/`ClusterMapChart`'s `axis(show=False)`
 /// suppression for marginal/dendrogram cells.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> combined = fm.compose_svg_grid(
+/// ...     [svg_a, svg_b, svg_c, svg_d], rows=2, cols=2,
+/// ...     row_ratios=[1.0, 1.0], col_ratios=[1.0, 1.0], spacing=8,
+/// ... )
 #[pyfunction]
 #[pyo3(name = "compose_svg_grid")]
 #[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0))]

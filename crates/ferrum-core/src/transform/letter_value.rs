@@ -366,6 +366,11 @@ use crate::transform::core::TransformSpec;
 ///     Tukey fence multiplier for labelling outliers. Must be ≥ 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_boxen().encode(x="cut", y="price")
 #[pyclass(eq, module = "ferrum._core", name = "LetterValue")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLetterValue(pub(crate) TransformSpec);

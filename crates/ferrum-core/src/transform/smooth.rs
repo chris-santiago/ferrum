@@ -789,6 +789,15 @@ use crate::transform::core::TransformSpec;
 ///     When ``"residuals"``, the ``y`` column contains ``y_obs - y_hat``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_smooth(method="lm", ci=0.95).encode(x="x", y="y")
+///
+/// LOESS curve with custom bandwidth:
+///
+/// >>> fm.Chart(df).mark_smooth(method="loess", bandwidth=0.4).encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Smooth")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySmooth(pub(crate) TransformSpec);

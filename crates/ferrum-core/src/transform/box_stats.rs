@@ -319,6 +319,11 @@ impl WhiskerExtentArg {
 ///     whiskers to the data minimum and maximum.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_boxplot().encode(x="cut", y="price")
 #[pyclass(eq, module = "ferrum._core", name = "BoxStats")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBoxStats(pub(crate) crate::transform::core::TransformSpec);

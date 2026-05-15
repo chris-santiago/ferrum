@@ -48,6 +48,12 @@ use crate::spec::encoding::EncodingSpec;
 /// ``ChartSpec`` is the contract between Python and Rust. Python's
 /// ``Chart`` class builds a ``ChartSpec`` lazily and renders via
 /// ``ferrum._core.render_svg``.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> spec = fm.ChartSpec(mark="point", x="x", y="y")
+/// >>> spec.to_json()
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChartSpec {

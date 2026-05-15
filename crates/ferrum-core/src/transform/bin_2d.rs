@@ -349,6 +349,11 @@ use crate::transform::core::TransformSpec;
 ///     Append a running total column.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_heatmap(bin_count=20).encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Bin2D")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBin2D(pub(crate) TransformSpec);

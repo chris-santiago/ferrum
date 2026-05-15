@@ -179,6 +179,14 @@ use crate::transform::core::TransformSpec;
 ///     Name of the new column that holds the original values.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_line().encode(
+/// ...     x="variable", y="value", color="id",
+/// ...     transform=fm.Unpivot(["score_a", "score_b"], variable="variable", value="value"),
+/// ... )
 #[pyclass(eq, module = "ferrum._core", name = "Unpivot")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyUnpivot(pub(crate) TransformSpec);

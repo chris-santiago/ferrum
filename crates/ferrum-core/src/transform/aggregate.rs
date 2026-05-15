@@ -228,6 +228,12 @@ use crate::transform::core::TransformSpec;
 ///     Aggregation function to apply.
 /// as_ : str
 ///     Name of the output column produced by this operation.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> op = fm.AggregateOp("price", "mean", "mean_price")
+/// >>> agg = fm.Aggregate([op], groupby=["cut"])
 #[pyclass(eq, module = "ferrum._core", name = "AggregateOp")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregateOp(pub(crate) AggregateOp);
@@ -277,6 +283,14 @@ impl PyAggregateOp {
 /// name : str, optional
 ///     Named output label used by ``Reorder(from_=...)`` to look up this
 ///     transform's output. Ignored when no sibling references it.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> op = fm.AggregateOp("price", "mean", "mean_price")
+/// >>> agg = fm.Aggregate([op], groupby=["cut"])
+/// >>> fm.Chart(df).mark_bar().encode(x="cut", y="mean_price",
+/// ...     transform=agg)
 #[pyclass(eq, module = "ferrum._core", name = "Aggregate")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregate(pub(crate) TransformSpec);

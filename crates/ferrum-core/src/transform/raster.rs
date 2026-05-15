@@ -429,6 +429,11 @@ use crate::transform::core::TransformSpec;
 ///     to the pixel range, compressing high-density outliers.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_heatmap().encode(x="x", y="y", color="value")
 #[pyclass(eq, module = "ferrum._core", name = "Raster")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRaster(pub(crate) TransformSpec);

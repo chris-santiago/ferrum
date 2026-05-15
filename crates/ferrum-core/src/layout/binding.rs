@@ -61,6 +61,13 @@ use super::{compute_layout as compute_layout_internal, ThemeInputs, Viewport};
 /// Phase 6 always uses ``HeuristicMetrics`` for text measurement. Phase 8
 /// will map ``ferrum.Theme`` into ``ThemeInputs`` and pass it here; until
 /// then, theme inputs use safe defaults.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+/// >>> layout = fm.compute_layout(chart.to_spec(), viewport=(400, 300),
+/// ...     x_tick_labels=[], y_tick_labels=[])
 #[pyfunction]
 #[pyo3(signature = (
     spec,

@@ -602,6 +602,11 @@ fn parse_link(s: &str) -> PyResult<GlmLink> {
 ///     finite and > 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_smooth(method="glm").encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Glm")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyGlm(pub(crate) TransformSpec);

@@ -390,6 +390,11 @@ use crate::transform::core::TransformSpec;
 ///     byte-deterministic output across platforms.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_qqplot().encode(x="residuals")
 #[pyclass(eq, module = "ferrum._core", name = "QQ")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyQq(pub(crate) TransformSpec);

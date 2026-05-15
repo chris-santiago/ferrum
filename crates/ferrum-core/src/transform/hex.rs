@@ -383,6 +383,11 @@ use crate::transform::core::TransformSpec;
 ///     Column to aggregate when ``aggregate`` is ``"mean"`` or ``"sum"``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_hexbin(bins=20).encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Hex")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyHex(pub(crate) TransformSpec);

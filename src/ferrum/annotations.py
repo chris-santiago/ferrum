@@ -342,12 +342,30 @@ def _apply_metric_label(
 
 @dataclass(frozen=True)
 class AUCLabel:
-    """Auto-placed AUC annotation for ROC charts — spec §3.11.
+    """Auto-placed AUC annotation for ROC charts.
 
     ``chart + AUCLabel()`` reads the surrounding chart's line data
     (``x`` = FPR, ``y`` = TPR), computes trapezoidal AUC per series
     (grouped by ``color`` when present), and emits one text annotation
     per series at the line endpoint.
+
+    Parameters
+    ----------
+    position : {"end", "corner"}, default "end"
+        Where to place the label.  ``"end"`` puts it at the rightmost
+        point of each series curve; ``"corner"`` anchors it near the
+        top-right of the plot area.
+    format : str, default ".3f"
+        Python format spec applied to the AUC value (e.g. ``".2f"`` for
+        two decimal places).
+    prefix : str, default "AUC = "
+        Text prepended to the formatted metric value.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.roc_chart(model, X_test, y_test)
+    >>> annotated = chart + fm.AUCLabel()
     """
 
     position: Literal["end", "corner"] = "end"
@@ -364,8 +382,26 @@ class AUCLabel:
 class APLabel:
     """Auto-placed Average Precision annotation for PR charts.
 
-    Sibling of :class:`AUCLabel` for precision-recall curves. ``x`` is
-    treated as recall and ``y`` as precision.
+    Sibling of :class:`AUCLabel` for precision-recall curves.  ``x`` is
+    treated as recall and ``y`` as precision.  Computes step-function
+    area under the curve per series.
+
+    Parameters
+    ----------
+    position : {"end", "corner"}, default "end"
+        Where to place the label.  ``"end"`` puts it at the rightmost
+        point of each series curve; ``"corner"`` anchors it near the
+        top-right of the plot area.
+    format : str, default ".3f"
+        Python format spec applied to the AP value.
+    prefix : str, default "AP = "
+        Text prepended to the formatted metric value.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.pr_chart(model, X_test, y_test)
+    >>> annotated = chart + fm.APLabel()
     """
 
     position: Literal["end", "corner"] = "end"
@@ -383,7 +419,24 @@ class BrierLabel:
     """Auto-placed Brier-score annotation for calibration charts.
 
     ``x`` is treated as predicted probability and ``y`` as observed rate
-    per bin. Multi-series charts emit one Brier per series.
+    per bin.  Multi-series charts emit one Brier score per series.  Lower
+    scores indicate better calibration.
+
+    Parameters
+    ----------
+    position : {"end", "corner"}, default "corner"
+        Where to place the label.  ``"corner"`` anchors it near the
+        top-right of the plot area; ``"end"`` puts it at the last bin.
+    format : str, default ".3f"
+        Python format spec applied to the Brier score value.
+    prefix : str, default "Brier = "
+        Text prepended to the formatted metric value.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.calibration_chart(model, X_test, y_test)
+    >>> annotated = chart + fm.BrierLabel()
     """
 
     position: Literal["end", "corner"] = "corner"
@@ -398,7 +451,34 @@ class BrierLabel:
 
 @dataclass(frozen=True)
 class OutlierLabel:
-    """Auto-labeled high-leverage / high-residual points — spec §3.11."""
+    """Auto-label high-leverage or high-residual points on a scatter chart.
+
+    ``chart + OutlierLabel()`` scans the chart's ``y`` column for values
+    whose z-score exceeds ``threshold``, then overlays text labels at those
+    points.  The label text is taken from ``label_field`` when supplied,
+    otherwise from the ``field`` column, otherwise from the ``y`` value.
+
+    Parameters
+    ----------
+    threshold : float, default 3.0
+        Z-score threshold above which a point is considered an outlier and
+        labelled.
+    field : str, optional
+        Column to compute z-scores from.  Defaults to the chart's ``y``
+        encoding field.
+    label_field : str, optional
+        Column whose value is used as the text label.  Defaults to ``field``
+        when omitted.
+    max_labels : int, default 10
+        Maximum number of labels to emit.  Points are ranked by absolute
+        z-score and only the top ``max_labels`` are labelled.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> chart = fm.residuals_chart(model, X_test, y_test)
+    >>> annotated = chart + fm.OutlierLabel(threshold=2.5, max_labels=5)
+    """
 
     threshold: float = 3.0
     field: Optional[str] = None
@@ -508,10 +588,47 @@ def annotate_arrow(
     label_side: str = "start",
     stroke: Optional[str] = None,
 ) -> Chart:
-    """Arrow from ``(x1, y1)`` to ``(x2, y2)`` with optional text label.
+    """Draw an arrow from ``(x1, y1)`` to ``(x2, y2)`` with an optional text label.
 
-    Composes a ``mark_segment`` with optional ``annotate_text`` at the
-    ``label_side`` endpoint.
+    Composes a ``mark_segment`` (the arrow shaft) with an optional
+    ``annotate_text`` placed at the ``label_side`` endpoint.
+
+    Parameters
+    ----------
+    x1 : float
+        Horizontal data coordinate of the arrow start.
+    y1 : float
+        Vertical data coordinate of the arrow start.
+    x2 : float
+        Horizontal data coordinate of the arrow end (tip).
+    y2 : float
+        Vertical data coordinate of the arrow end (tip).
+    label : str, optional
+        Text to display alongside the arrow.  When omitted, no text is
+        rendered.
+    label_side : {"start", "end"}, default "start"
+        Which end of the arrow to place the label.  ``"start"`` anchors
+        the text at ``(x1, y1)``; ``"end"`` places it at ``(x2, y2)``.
+    stroke : str, optional
+        Hex colour string for the arrow line (e.g. ``"#ff0000"``).
+        Inherits the theme's foreground colour when omitted.
+
+    Returns
+    -------
+    Chart
+        Layered chart containing the arrow segment and, when *label* is
+        provided, the annotation text.
+
+    Examples
+    --------
+    Simple unlabelled arrow:
+
+    >>> import ferrum as fm
+    >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9)
+
+    Arrow with a label at the tip:
+
+    >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9, label="threshold", label_side="end")
     """
     # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
     # not yet accept it; emit a plain segment for now.

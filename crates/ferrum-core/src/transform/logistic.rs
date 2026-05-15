@@ -337,6 +337,11 @@ use crate::transform::core::TransformSpec;
 ///     finite and > 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_smooth(method="logistic").encode(x="x", y="binary_y")
 #[pyclass(eq, module = "ferrum._core", name = "Logistic")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLogistic(pub(crate) TransformSpec);

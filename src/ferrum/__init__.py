@@ -214,6 +214,13 @@ def hconcat(*charts, spacing=10.0):
     Returns
     -------
     HConcatChart
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> left = fm.Chart(df).mark_point().encode(x="x", y="y")
+    >>> right = fm.Chart(df).mark_bar().encode(x="category", y="count")
+    >>> fm.hconcat(left, right)
     """
     from ferrum.composition import HConcatChart
 
@@ -233,6 +240,13 @@ def vconcat(*charts, spacing=10.0):
     Returns
     -------
     VConcatChart
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> top = fm.Chart(df).mark_point().encode(x="x", y="y")
+    >>> bottom = fm.Chart(df).mark_line().encode(x="time", y="value")
+    >>> fm.vconcat(top, bottom)
     """
     from ferrum.composition import VConcatChart
 

@@ -24,7 +24,16 @@ MarkStr = Literal[
     "ribbon",
 ]
 
-def process_batch(data: Any) -> Any: ...
+def process_batch(data: Any) -> Any:
+    """
+    Convert a Python record batch through the ferrum transform pipeline.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> result = fm.process_batch(record_batch)
+    """
+    ...
 
 class EncodingSpec:
     field: str
@@ -509,7 +518,16 @@ def compute_layout(
     legend_entries: list[tuple[str, str]] | None = None,
     legend_orient: str = "right",
     label_angle: float | None = None,
-) -> dict: ...
+) -> dict:
+    """
+    Compute the layout plan (panel sizes, margins) for a chart spec.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> layout = fm.compute_layout(chart_spec_json, viewport_json)
+    """
+    ...
 def render_svg(
     spec: ChartSpec,
     data: Any,
@@ -517,7 +535,16 @@ def render_svg(
     viewport: tuple[float, float],
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
-) -> str: ...
+) -> str:
+    """
+    Render a chart spec to an SVG string.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> svg = fm.render_svg(chart_spec_json, layout_json, data_batch)
+    """
+    ...
 def render_png(
     spec: ChartSpec,
     data: Any,
@@ -525,7 +552,16 @@ def render_png(
     viewport: tuple[float, float],
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
-) -> bytes: ...
+) -> bytes:
+    """
+    Render a chart spec to PNG bytes.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> png_bytes = fm.render_png(chart_spec_json, layout_json, data_batch)
+    """
+    ...
 
 # ---------- SVG compositor (Phase 8a Task 11) ----------
 
@@ -534,13 +570,31 @@ def compose_svg_horizontal(
     *,
     spacing: float = 10.0,
     align: Literal["top", "center", "bottom"] = "top",
-) -> str: ...
+) -> str:
+    """
+    Lay out SVG panels side-by-side.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
+    """
+    ...
 def compose_svg_vertical(
     svgs: list[str],
     *,
     spacing: float = 10.0,
     align: Literal["left", "center", "right"] = "left",
-) -> str: ...
+) -> str:
+    """
+    Stack SVG panels top-to-bottom.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
+    """
+    ...
 def compose_svg_grid(
     cells: list[str | None],
     *,
@@ -551,7 +605,16 @@ def compose_svg_grid(
     spacing: float = 10.0,
     share_x: list[list[int]] = ...,
     share_y: list[list[int]] = ...,
-) -> str: ...
+) -> str:
+    """
+    Arrange SVG panels in a grid.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> combined = fm.compose_svg_grid([[svg1, svg2], [svg3, svg4]], spacing=10)
+    """
+    ...
 
 # ---------- Continuous color schemes (Phase 8b Task 37) ----------
 

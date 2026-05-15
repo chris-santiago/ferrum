@@ -122,6 +122,14 @@ use crate::transform::core::TransformSpec;
 ///     directly into ``Reorder``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_bar().encode(
+/// ...     x=fm.X("cut", sort=fm.Reorder(field="price", fn_="mean")),
+/// ...     y="price",
+/// ... )
 #[pyclass(eq, module = "ferrum._core", name = "Reorder")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyReorder(pub(crate) TransformSpec);

@@ -178,6 +178,14 @@ use pyo3::exceptions::PyValueError;
 /// --------
 /// ferrum.continuous_palette : Named colormap lookup.
 /// ferrum.Gradient : Custom gradient construction.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> scheme = fm.ContinuousScheme("viridis")
+/// >>> fm.Chart(df).mark_point().encode(
+/// ...     x="x", y="y", color=fm.Color("value", scheme=scheme)
+/// ... )
 #[pyclass(name = "ContinuousScheme", module = "ferrum._core")]
 #[derive(Debug, Clone)]
 pub struct PyContinuousScheme(pub ContinuousScheme);

@@ -68,6 +68,11 @@ use crate::transform::core::TransformSpec;
 /// name : str, optional
 ///     Named output label so a sibling layer can target this transform's
 ///     output via ``Layer.data_source``.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_smooth().encode(x="x", y="y") + fm.ReferenceLine(y=0)
 #[pyclass(eq, module = "ferrum._core", name = "ReferenceLine")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyReferenceLine(pub(crate) TransformSpec);

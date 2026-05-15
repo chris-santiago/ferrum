@@ -616,6 +616,11 @@ use crate::transform::core::TransformSpec;
 ///     distances. Mutually exclusive with ``z_score``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_dendrogram().encode(x="sample", y="gene", color="expression")
 #[pyclass(eq, module = "ferrum._core", name = "Linkage")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLinkage(pub(crate) TransformSpec);

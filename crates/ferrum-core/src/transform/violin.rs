@@ -374,6 +374,11 @@ use pyo3::prelude::*;
 ///     Must be > 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_violin().encode(x="cut", y="price")
 #[pyclass(eq, module = "ferrum._core", name = "Violin")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);

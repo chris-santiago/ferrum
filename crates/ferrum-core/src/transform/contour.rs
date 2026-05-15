@@ -506,6 +506,11 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
 ///     fully specified and the field has no effect on output.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_contour().encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Contour")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyContour(pub(crate) TransformSpec);

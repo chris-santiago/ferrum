@@ -63,6 +63,13 @@ pub(crate) fn rename_column(
 /// pyarrow take the zero-copy C Data Interface fast-path; other DataFrame
 /// libraries (pandas, modin, cuDF) should be coerced to Arrow via
 /// ``narwhals`` before calling this function.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+/// >>> result = fm.process_batch(df)
 #[pyfunction]
 pub(crate) fn process_batch(reader: PyRecordBatchReader) -> PyResult<PyRecordBatchReader> {
     let reader = reader.into_reader()?;

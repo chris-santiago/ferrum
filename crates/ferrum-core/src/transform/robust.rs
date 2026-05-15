@@ -436,6 +436,11 @@ use crate::transform::core::TransformSpec;
 ///     instead of the fitted values.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_smooth(method="robust").encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Robust")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRobust(pub(crate) TransformSpec);

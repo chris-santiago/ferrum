@@ -247,6 +247,11 @@ use crate::transform::core::TransformSpec;
 ///     and satisfy ``xmin < xmax``, ``ymin < ymax``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_contour().encode(x="x", y="y")
 #[pyclass(eq, module = "ferrum._core", name = "Kde2D")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde2D(pub(crate) TransformSpec);

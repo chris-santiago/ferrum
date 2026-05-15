@@ -318,6 +318,11 @@ use pyo3::prelude::*;
 ///     Bootstrap resamples when ``method="ci"``. Ignored for other methods.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_errorbar().encode(x="cut", y="price")
 #[pyclass(eq, module = "ferrum._core", name = "ErrorExtent")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyErrorExtent(pub(crate) crate::transform::core::TransformSpec);

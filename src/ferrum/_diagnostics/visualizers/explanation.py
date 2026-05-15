@@ -317,6 +317,13 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
 
     Parameters mirror :class:`SHAPBeeswarmVisualizer`; see that class
     for the full parameter list.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import GradientBoostingClassifier
+    >>> viz = fm.SHAPBarVisualizer(GradientBoostingClassifier().fit(X_train, y_train))
+    >>> chart = viz.chart(X_test, y_test)
     """
 
     def __init__(

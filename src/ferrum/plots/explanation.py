@@ -642,22 +642,27 @@ def shap_beeswarm_chart(
 
     See :func:`shap_chart` for the shared parameter docstring
     (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
-    ``background``, ``per_class``, ``random_state``, ``theme``) -- this
+    ``background``, ``per_class``, ``random_state``, ``theme``) — this
     function is the dedicated sibling for ``kind="beeswarm"``.
 
-    Parameters specific to beeswarm
-    -------------------------------
+    Parameters
+    ----------
     zero_line : bool, default True
         Overlay a dashed vertical reference rule at ``shap_value = 0``
         so the sign of each feature's contribution is immediately
-        legible. Automatically skipped on the multi-panel
-        ``per_class`` path (each facet would need its own sentinel
-        column). Pass ``False`` to suppress.
+        legible.  Automatically skipped on the multi-panel ``per_class``
+        path.  Pass ``False`` to suppress.
 
     Returns
     -------
     Chart
         SHAP beeswarm chart.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import GradientBoostingClassifier
+    >>> fm.shap_beeswarm_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_beeswarm_chart_from_source(
@@ -697,13 +702,21 @@ def shap_bar_chart(
     class. ``per_class=False`` (default) renders a single panel using
     the first class.
 
-    See :func:`shap_chart` for shared parameter docstring (this function
-    is the dedicated sibling for ``kind="bar"``).
+    See :func:`shap_chart` for the full shared parameter docstring
+    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    ``background``, ``per_class``, ``random_state``, ``theme``) — this
+    function is the dedicated sibling for ``kind="bar"``.
 
     Returns
     -------
     Chart
-        SHAP bar chart.
+        SHAP bar chart (features × mean |SHAP|).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import GradientBoostingClassifier
+    >>> fm.shap_bar_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_bar_chart_from_source(
@@ -744,14 +757,29 @@ def shap_waterfall_chart(
     ``per_class=False`` (default) renders a single panel using the first
     class.
 
-    See :func:`shap_chart` for shared parameter docstring (this function
-    is the dedicated sibling for ``kind="waterfall"``).  ``sample_idx``
-    is required.
+    See :func:`shap_chart` for the full shared parameter docstring
+    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    ``background``, ``per_class``, ``random_state``, ``theme``) — this
+    function is the dedicated sibling for ``kind="waterfall"``.
+
+    Parameters
+    ----------
+    sample_idx : int
+        Row index (0-based) of the sample to explain.  Required.
 
     Returns
     -------
     Chart
         SHAP waterfall chart for the sample at ``sample_idx``.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> from sklearn.ensemble import GradientBoostingClassifier
+    >>> fm.shap_waterfall_chart(
+    ...     GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test,
+    ...     sample_idx=0,
+    ... )
     """
     source = _resolve_source(model_or_source, X, y, random_state=random_state)
     return _shap_waterfall_chart_from_source(

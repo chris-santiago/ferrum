@@ -308,6 +308,18 @@ use crate::transform::core::TransformSpec;
 ///     group. Output schema gains the group column as the 3rd field.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_density().encode(x="val")
+///
+/// Direct construction (custom bandwidth):
+///
+/// >>> fm.Chart(df).mark_area().encode(
+/// ...     x="x_kde", y="density",
+/// ...     transform=fm.Kde("val", bandwidth=0.3),
+/// ... )
 #[pyclass(eq, module = "ferrum._core", name = "Kde")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde(pub(crate) TransformSpec);

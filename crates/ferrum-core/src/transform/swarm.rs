@@ -483,6 +483,11 @@ use crate::transform::core::TransformSpec;
 ///     Which side of the category centre to place displaced points.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+///
+/// Examples
+/// --------
+/// >>> import ferrum as fm
+/// >>> fm.Chart(df).mark_swarm().encode(x="val", y="category")
 #[pyclass(eq, module = "ferrum._core", name = "Swarm")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySwarm(pub(crate) TransformSpec);
