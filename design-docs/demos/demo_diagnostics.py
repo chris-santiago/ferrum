@@ -442,6 +442,16 @@ def build_class_prediction_error_chart():
     )
 
 
+def build_silhouette_chart():
+    src = fm.ModelSource(km, X_iris)
+    return (
+        fm.Chart(src.silhouette())
+        .mark_silhouette()
+        .properties(title="mark_silhouette() — Rousseeuw silhouette plot", width=W, height=H)
+        .theme(THEME)
+    )
+
+
 def build_cluster_diagnostics():
     return fm.cluster_diagnostics(X_iris, ks=range(2, 7), scoring="both", theme=THEME)
 
@@ -587,6 +597,12 @@ DIAGNOSTIC_CHARTS = [
         "intercluster_distance_chart()",
         build_intercluster_distance_chart,
         "fm.intercluster_distance_chart(km, X)",
+    ),
+    (
+        "silhouette_chart",
+        "mark_silhouette() — Rousseeuw silhouette plot",
+        build_silhouette_chart,
+        "fm.Chart(src.silhouette()).mark_silhouette()",
     ),
     (
         "decision_boundary_chart",
