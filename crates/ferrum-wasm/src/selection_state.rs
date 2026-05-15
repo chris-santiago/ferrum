@@ -60,21 +60,28 @@ impl InteractionState {
         for spec in specs {
             match spec {
                 SelectionSpec::Point {
-                    name, toggle, ..
+                    name, toggle, fields, ..
                 } => {
                     let sel = self.selections.entry(name.clone()).or_insert(SelectionState::Empty);
                     match &hit {
                         Some(h) => {
                             if let Some(data_idx) = h.data_idx {
+                                // When the spec declares field constraints, expand the
+                                // selection to ALL marks sharing the same field values.
+                                let indices = if let Some(field_names) = fields {
+                                    collect_matching_indices(panels, h, field_names, data_idx)
+                                } else {
+                                    vec![data_idx]
+                                };
                                 let is_toggle = matches!(
                                     toggle,
                                     ferrum_scene::EventExpr::ShiftKey
                                 );
                                 if is_toggle {
-                                    toggle_point(sel, data_idx);
+                                    toggle_points(sel, &indices);
                                 } else {
                                     *sel = SelectionState::Point {
-                                        indices: vec![data_idx],
+                                        indices,
                                         field_values: Vec::new(),
                                     };
                                 }
@@ -169,6 +176,103 @@ impl InteractionState {
             map.insert(name.clone(), val);
         }
         serde_json::Value::Object(map).to_string()
+    }
+}
+
+/// Scan all marks in a panel for rows whose tooltip field values match those
+/// of the clicked mark.  Returns the set of data indices to select.
+///
+/// Falls back to `vec![clicked_data_idx]` when tooltip data is unavailable
+/// or the field is not present in any tooltip.
+fn collect_matching_indices(
+    panels: &[ferrum_scene::Panel],
+    hit: &crate::hit_test::HitResult,
+    field_names: &[String],
+    clicked_data_idx: usize,
+) -> Vec<usize> {
+    let Some(panel) = panels.get(hit.panel_id) else {
+        return vec![clicked_data_idx];
+    };
+
+    // Get the field values for the clicked mark from its tooltip.
+    let hit_batch = panel.marks.get(hit.batch_idx);
+    let clicked_values: Vec<(&str, &str)> = hit_batch
+        .and_then(|b| b.tooltips.as_ref())
+        .and_then(|tips| tips.get(hit.node_idx))
+        .map(|tip| {
+            field_names.iter()
+                .filter_map(|fname| {
+                    tip.fields.iter()
+                        .find(|f| &f.name == fname)
+                        .map(|f| (fname.as_str(), f.value.as_str()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if clicked_values.is_empty() {
+        return vec![clicked_data_idx];
+    }
+
+    // Scan all mark batches in the panel; collect data indices whose tooltip
+    // fields match every (field_name, field_value) pair from the clicked mark.
+    let mut matching: Vec<usize> = Vec::new();
+    for batch in &panel.marks {
+        let Some(tooltips) = batch.tooltips.as_ref() else { continue; };
+        let data_indices = batch.data_indices.as_deref();
+        for (node_idx, tooltip) in tooltips.iter().enumerate() {
+            let all_match = clicked_values.iter().all(|(fname, fval)| {
+                tooltip.fields.iter().any(|f| f.name == *fname && f.value == *fval)
+            });
+            if all_match {
+                let data_idx = data_indices
+                    .and_then(|di| di.get(node_idx))
+                    .copied()
+                    .unwrap_or(node_idx);
+                if !matching.contains(&data_idx) {
+                    matching.push(data_idx);
+                }
+            }
+        }
+    }
+
+    if matching.is_empty() { vec![clicked_data_idx] } else { matching }
+}
+
+/// Toggle a set of indices: if all are already selected, deselect them;
+/// otherwise add all missing ones.
+fn toggle_points(sel: &mut SelectionState, indices: &[usize]) {
+    let already_all = match sel {
+        SelectionState::Point { indices: existing, .. } => {
+            indices.iter().all(|i| existing.contains(i))
+        }
+        _ => false,
+    };
+    if already_all {
+        // Deselect — remove all from set.
+        if let SelectionState::Point { indices: existing, .. } = sel {
+            existing.retain(|i| !indices.contains(i));
+            if existing.is_empty() {
+                *sel = SelectionState::Empty;
+            }
+        }
+    } else {
+        // Add missing.
+        match sel {
+            SelectionState::Point { indices: existing, .. } => {
+                for &idx in indices {
+                    if !existing.contains(&idx) {
+                        existing.push(idx);
+                    }
+                }
+            }
+            _ => {
+                *sel = SelectionState::Point {
+                    indices: indices.to_vec(),
+                    field_values: Vec::new(),
+                };
+            }
+        }
     }
 }
 
