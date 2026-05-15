@@ -309,12 +309,8 @@ def build_residuals_chart():
 
 
 def build_prediction_error_chart():
-    src = fm.ModelSource(reg, X_reg, y_reg)
-    return (
-        fm.Chart(src.predictions())
-        .mark_prediction_error()
-        .properties(title="prediction_error_chart()", width=W, height=H)
-        .theme(THEME)
+    return fm.prediction_error_chart(reg, X_reg, y_reg, theme=THEME).properties(
+        title="prediction_error_chart()", width=W, height=H
     )
 
 
@@ -443,12 +439,8 @@ def build_class_prediction_error_chart():
 
 
 def build_silhouette_chart():
-    src = fm.ModelSource(km, X_iris)
-    return (
-        fm.Chart(src.silhouette())
-        .mark_silhouette()
-        .properties(title="mark_silhouette() — Rousseeuw silhouette plot", width=W, height=H)
-        .theme(THEME)
+    return fm.silhouette_chart(km, X_iris, theme=THEME).properties(
+        title="silhouette_chart()", width=W, height=H
     )
 
 
@@ -459,6 +451,36 @@ def build_cluster_diagnostics():
 def build_pdp_chart():
     return fm.pdp_chart(clf_rf, X_iris, y_iris, features=[0, 1], theme=THEME).properties(
         title="pdp_chart() — Partial Dependence", width=W, height=H
+    )
+
+
+def build_cooks_distance_chart():
+    return fm.cooks_distance_chart(reg, X_reg, y_reg, threshold="auto", theme=THEME).properties(
+        title="cooks_distance_chart()", width=W, height=H
+    )
+
+
+def build_classification_report_chart():
+    return fm.classification_report_chart(clf_bc, X_bc, y_bc, theme=THEME).properties(
+        title="classification_report_chart()", width=480, height=400
+    )
+
+
+def build_class_balance_chart():
+    return fm.class_balance_chart(y_iris, theme=THEME).properties(
+        title="class_balance_chart()", width=W, height=H
+    )
+
+
+def build_manifold_chart():
+    return fm.manifold_chart(km, X_iris, method="pca", theme=THEME).properties(
+        title="manifold_chart(method='pca')", width=W, height=H
+    )
+
+
+def build_elbow_chart():
+    return fm.elbow_chart(KMeans, X_iris, ks=range(2, 9), random_state=42, theme=THEME).properties(
+        title="elbow_chart()", width=W, height=H
     )
 
 
@@ -545,7 +567,7 @@ DIAGNOSTIC_CHARTS = [
         "prediction_error_chart",
         "prediction_error_chart()",
         build_prediction_error_chart,
-        "fm.Chart(src.predictions()).mark_prediction_error()",
+        "fm.prediction_error_chart(reg, X, y)",
     ),
     (
         "learning_curve_chart",
@@ -600,9 +622,9 @@ DIAGNOSTIC_CHARTS = [
     ),
     (
         "silhouette_chart",
-        "mark_silhouette() — Rousseeuw silhouette plot",
+        "silhouette_chart()",
         build_silhouette_chart,
-        "fm.Chart(src.silhouette()).mark_silhouette()",
+        "fm.silhouette_chart(km, X)",
     ),
     (
         "decision_boundary_chart",
@@ -636,6 +658,36 @@ DIAGNOSTIC_CHARTS = [
         "class_prediction_error_chart()",
         build_class_prediction_error_chart,
         "fm.class_prediction_error_chart(clf, X, y)",
+    ),
+    (
+        "cooks_distance_chart",
+        "cooks_distance_chart()",
+        build_cooks_distance_chart,
+        "fm.cooks_distance_chart(reg, X, y, threshold='auto')",
+    ),
+    (
+        "classification_report_chart",
+        "classification_report_chart()",
+        build_classification_report_chart,
+        "fm.classification_report_chart(clf, X, y)",
+    ),
+    (
+        "class_balance_chart",
+        "class_balance_chart()",
+        build_class_balance_chart,
+        "fm.class_balance_chart(y)",
+    ),
+    (
+        "manifold_chart",
+        "manifold_chart(method='pca')",
+        build_manifold_chart,
+        "fm.manifold_chart(km, X, method='pca')",
+    ),
+    (
+        "elbow_chart",
+        "elbow_chart()",
+        build_elbow_chart,
+        "fm.elbow_chart(KMeans, X, ks=range(2, 9))",
     ),
     (
         "cluster_diagnostics",
