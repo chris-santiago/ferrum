@@ -1,78 +1,4 @@
-use std::collections::HashMap;
-
-use ferrum_scene::{MarkBatch, Panel};
-
 use crate::scene_load::{CircleInstance, RectInstance};
-
-pub struct Transition {
-    pub old_circles: Vec<CircleInstance>,
-    pub new_circles: Vec<CircleInstance>,
-    pub old_rects: Vec<RectInstance>,
-    pub new_rects: Vec<RectInstance>,
-}
-
-pub fn diff_scenes(
-    old_panels: &[Panel],
-    new_panels: &[Panel],
-    old_circles: &[CircleInstance],
-    new_circles: &[CircleInstance],
-    old_rects: &[RectInstance],
-    new_rects: &[RectInstance],
-) -> Transition {
-    let mut result_old_c = old_circles.to_vec();
-    let result_new_c = new_circles.to_vec();
-    let mut result_old_r = old_rects.to_vec();
-    let result_new_r = new_rects.to_vec();
-
-    let mut old_c_off = 0usize;
-    let mut new_c_off = 0usize;
-    let mut old_r_off = 0usize;
-    let mut new_r_off = 0usize;
-
-    for (old_p, new_p) in old_panels.iter().zip(new_panels.iter()) {
-        for (old_b, new_b) in old_p.marks.iter().zip(new_p.marks.iter()) {
-            let (old_nc, old_nr) = count_instances(old_b);
-            let (new_nc, new_nr) = count_instances(new_b);
-
-            if let (Some(old_keys), Some(new_keys)) = (&old_b.keys, &new_b.keys) {
-                let new_key_map: HashMap<&str, usize> = new_keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| (k.as_str(), i))
-                    .collect();
-
-                for (old_idx, old_key) in old_keys.iter().enumerate() {
-                    if let Some(&new_idx) = new_key_map.get(old_key.as_str()) {
-                        match_circle_pair(
-                            &mut result_old_c,
-                            old_c_off + old_idx,
-                            &result_new_c,
-                            new_c_off + new_idx,
-                        );
-                        match_rect_pair(
-                            &mut result_old_r,
-                            old_r_off + old_idx,
-                            &result_new_r,
-                            new_r_off + new_idx,
-                        );
-                    }
-                }
-            }
-
-            old_c_off += old_nc;
-            new_c_off += new_nc;
-            old_r_off += old_nr;
-            new_r_off += new_nr;
-        }
-    }
-
-    Transition {
-        old_circles: result_old_c,
-        new_circles: result_new_c,
-        old_rects: result_old_r,
-        new_rects: result_new_r,
-    }
-}
 
 pub fn lerp_circles(
     old: &[CircleInstance],
@@ -135,38 +61,6 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         a[2] + (b[2] - a[2]) * t,
         a[3] + (b[3] - a[3]) * t,
     ]
-}
-
-fn count_instances(batch: &MarkBatch) -> (usize, usize) {
-    let mut nc = 0usize;
-    let mut nr = 0usize;
-    for node in &batch.nodes {
-        match node {
-            ferrum_scene::SceneNode::Circle { .. } => nc += 1,
-            ferrum_scene::SceneNode::Rect { .. } => nr += 1,
-            _ => {}
-        }
-    }
-    (nc, nr)
-}
-
-fn match_circle_pair(
-    _old: &mut [CircleInstance],
-    _old_idx: usize,
-    _new: &[CircleInstance],
-    _new_idx: usize,
-) {
-    // Key matching establishes correspondence — the actual lerp happens
-    // in lerp_circles using aligned arrays. No per-pair action needed.
-}
-
-fn match_rect_pair(
-    _old: &mut [RectInstance],
-    _old_idx: usize,
-    _new: &[RectInstance],
-    _new_idx: usize,
-) {
-    // Same as match_circle_pair.
 }
 
 #[cfg(test)]

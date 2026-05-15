@@ -225,9 +225,9 @@ def _resolve_encoding_value(enc: Any) -> dict:
         return {"kind": "opacity", "value": 1.0}
     from ferrum.encoding.appearance import Color, Opacity, Size
     if isinstance(enc, Color):
-        return {"kind": "field", "name": enc._field}
+        return {"kind": "field", "name": enc.field}
     if isinstance(enc, Opacity):
-        return {"kind": "field", "name": enc._field}
+        return {"kind": "field", "name": enc.field}
     if isinstance(enc, Size):
-        return {"kind": "field", "name": enc._field}
+        return {"kind": "field", "name": enc.field}
     return {"kind": "opacity", "value": 1.0}

@@ -89,22 +89,25 @@ impl WasmRenderer {
         Ok(())
     }
 
-    /// Begin a GPU-interpolated transition between two scene JSON strings.
+    /// Begin a GPU-interpolated transition from the currently loaded scene to a
+    /// new scene JSON string.
     ///
     /// Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
     /// to drive the animation.  ``start_transition`` does not start the loop —
     /// the JavaScript caller owns the timing.
+    ///
+    /// Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
     #[wasm_bindgen(js_name = "startTransition")]
     pub fn start_transition(
         &mut self,
-        old_scene_json: &str,
         new_scene_json: &str,
     ) -> Result<(), JsValue> {
-        let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
-            .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
+        let Some(loaded) = &self.loaded else {
+            return Ok(());
+        };
+        let old_data = loaded.data.clone();
         let new_scene: ferrum_scene::SceneGraph = serde_json::from_str(new_scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
-        let old_data = scene_load::load_scene(&old_scene);
         let new_data = scene_load::load_scene(&new_scene);
         self.transition = Some(ActiveTransition { old_data, new_data });
         Ok(())

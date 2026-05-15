@@ -43,9 +43,12 @@ pub enum CoordKind {
         direction: PolarDirection,
         #[serde(default)]
         inner_radius: f64,
-        /// None means "fill the panel" — resolved to `outer_radius_px` in `to_scene_coord`.
+        /// `None` means "fill the panel" — resolved to `outer_radius_px` in `to_scene_coord`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outer_radius: Option<f64>,
+        /// Angular gap between adjacent slices in radians (default 0).
+        #[serde(default)]
+        pad_angle: f64,
     },
     Geo {
         #[serde(default = "default_geo_projection")]
@@ -98,7 +101,7 @@ pub fn to_scene_coord(coord: &CoordKind, outer_radius_px: f64) -> ferrum_scene::
                 clip: *clip,
             }
         }
-        CoordKind::Polar { theta, start_angle, direction, inner_radius, outer_radius } => {
+        CoordKind::Polar { theta, start_angle, direction, inner_radius, outer_radius, .. } => {
             ferrum_scene::CoordKind::Polar {
                 theta: *theta,
                 start_angle: *start_angle,
@@ -149,6 +152,7 @@ mod tests {
             direction: PolarDirection::Clockwise,
             inner_radius: 0.0,
             outer_radius: None,
+            pad_angle: 0.0,
         };
         let json = serde_json::to_string(&c).unwrap();
         let parsed: CoordKind = serde_json::from_str(&json).unwrap();
@@ -163,6 +167,7 @@ mod tests {
             direction: PolarDirection::Clockwise,
             inner_radius: 20.0,
             outer_radius: Some(100.0),
+            pad_angle: 0.0,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("outer_radius"));

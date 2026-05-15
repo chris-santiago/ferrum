@@ -12,9 +12,9 @@ use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 /// becomes one wedge whose angular sweep is proportional to its value in
 /// the theta-mapped encoding field.
 pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
-    let (theta_ch, start_angle, inner_radius, outer_radius_opt) = match &ctx.spec.coord {
-        Some(SpecCoord::Polar { theta, start_angle, inner_radius, outer_radius, .. }) => {
-            (*theta, *start_angle, *inner_radius, *outer_radius)
+    let (theta_ch, start_angle, inner_radius, outer_radius_opt, pad_angle) = match &ctx.spec.coord {
+        Some(SpecCoord::Polar { theta, start_angle, inner_radius, outer_radius, pad_angle, .. }) => {
+            (*theta, *start_angle, *inner_radius, *outer_radius, *pad_angle)
         }
         _ => return MarkBuildResult::empty(MarkBatchKind::Arc),
     };
@@ -66,9 +66,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             _ => continue,
         };
         let sweep = (v / total) * tau;
-        let angle_start = cum_angle;
-        let angle_end = cum_angle + sweep;
-        cum_angle = angle_end;
+        let angle_start = cum_angle + pad_angle / 2.0;
+        let angle_end = cum_angle + sweep - pad_angle / 2.0;
+        cum_angle += sweep;
+        // Skip degenerate slices that collapse to zero or negative sweep after padding.
+        if angle_end <= angle_start { continue; }
 
         // Resolve per-slice fill from color scale, fall back to mark_style.fill.
         let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {

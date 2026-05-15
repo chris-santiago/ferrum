@@ -137,7 +137,7 @@ pub fn build_scene(
         if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
             let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
             let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
-            let outer_r = (panel.plot_area.w.min(panel.plot_area.h)) / 2.0;
+            let outer_r = polar_outer_radius(&panel.plot_area);
             axes_nodes.extend(build_polar_axes(cx, cy, outer_r, &scales, theme));
         }
 
@@ -189,8 +189,7 @@ pub fn build_scene(
             if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
                 && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
             {
-                let pa = &panel.plot_area;
-                apply_polar_node_transform(&mut result.nodes, pa.x, pa.y, pa.w, pa.h);
+                apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
             }
 
             let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
@@ -203,18 +202,8 @@ pub fn build_scene(
                 descriptions: result.descriptions,
                 keys,
                 blend: layer.blend.unwrap_or(BlendMode::Normal),
-                stroke_cap: mark_style.stroke_cap.as_deref().and_then(|s| match s {
-                    "round" => Some(ferrum_scene::StrokeCap::Round),
-                    "square" => Some(ferrum_scene::StrokeCap::Square),
-                    "butt" => Some(ferrum_scene::StrokeCap::Butt),
-                    _ => None,
-                }),
-                stroke_join: mark_style.stroke_join.as_deref().and_then(|s| match s {
-                    "round" => Some(ferrum_scene::StrokeJoin::Round),
-                    "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
-                    "miter" => Some(ferrum_scene::StrokeJoin::Miter),
-                    _ => None,
-                }),
+                stroke_cap: mark_style.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
+                stroke_join: mark_style.stroke_join.as_deref().and_then(draw::parse_stroke_join),
             });
         }
 
@@ -242,7 +231,7 @@ pub fn build_scene(
 
         // Convert spec-side CoordKind to scene-side CoordKind.
         // outer_radius_px defaults to half the smaller plot dimension for polar.
-        let outer_radius_px = (panel.plot_area.w.min(panel.plot_area.h)) / 2.0;
+        let outer_radius_px = polar_outer_radius(&panel.plot_area);
         let scene_coord = spec.coord.as_ref()
             .map(|c| to_scene_coord(c, outer_radius_px))
             .unwrap_or(CoordKind::Cartesian {
@@ -418,6 +407,11 @@ pub fn build_tick_levels(
     }
 }
 
+/// Compute the outer radius for polar coordinates: half the smaller dimension.
+fn polar_outer_radius(plot_area: &crate::layout::Rect) -> f64 {
+    plot_area.w.min(plot_area.h) / 2.0
+}
+
 /// Transform Circle and Polyline SceneNodes from Cartesian pixel coordinates
 /// to polar pixel coordinates. Used for mark_point and mark_line under CoordPolar.
 ///
@@ -425,12 +419,16 @@ pub fn build_tick_levels(
 /// cy → r (plot height mapped to outer_radius, y-inverted because SVG y grows down).
 fn apply_polar_node_transform(
     nodes: &mut [SceneNode],
-    plot_x: f64, plot_y: f64, plot_w: f64, plot_h: f64,
+    plot_area: &crate::layout::Rect,
 ) {
     use std::f64::consts::TAU;
+    let plot_x = plot_area.x;
+    let plot_y = plot_area.y;
+    let plot_w = plot_area.w;
+    let plot_h = plot_area.h;
     let center_x = plot_x + plot_w / 2.0;
     let center_y = plot_y + plot_h / 2.0;
-    let outer_r = plot_w.min(plot_h) / 2.0;
+    let outer_r = polar_outer_radius(plot_area);
     for node in nodes.iter_mut() {
         match node {
             SceneNode::Circle { ref mut cx, ref mut cy, .. } => {

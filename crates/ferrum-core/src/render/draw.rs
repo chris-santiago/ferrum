@@ -402,6 +402,24 @@ pub fn to_scene_text_style(
     }
 }
 
+pub(crate) fn parse_stroke_cap(s: &str) -> Option<ferrum_scene::StrokeCap> {
+    match s {
+        "round" => Some(ferrum_scene::StrokeCap::Round),
+        "square" => Some(ferrum_scene::StrokeCap::Square),
+        "butt" => Some(ferrum_scene::StrokeCap::Butt),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
+    match s {
+        "round" => Some(ferrum_scene::StrokeJoin::Round),
+        "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
+        "miter" => Some(ferrum_scene::StrokeJoin::Miter),
+        _ => None,
+    }
+}
+
 pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> MarkBuildResult {
     use crate::spec::mark::for_each_mark;
     macro_rules! arm {

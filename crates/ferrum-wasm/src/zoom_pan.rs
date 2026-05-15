@@ -1,5 +1,12 @@
 use ferrum_scene::InteractionConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleMode {
+    #[allow(dead_code)]
+    Independent,
+    Uniform,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Affine2 {
     pub sx: f64,
@@ -53,15 +60,15 @@ impl ZoomPanState {
         delta: f64,
         cursor_x: f64,
         cursor_y: f64,
-        coord_fixed: bool,
+        scale_mode: ScaleMode,
     ) {
         let Some(t) = self.transforms.get_mut(panel_id) else {
             return;
         };
         let factor = 1.0 + delta * 0.001;
         let new_sx = (t.sx * factor).clamp(self.zoom_range.0, self.zoom_range.1);
-        // CoordFixed panels use uniform (square-pixel) scaling: sy always equals sx.
-        let new_sy = if coord_fixed { new_sx } else {
+        // Uniform scaling: sy always equals sx (CoordFixed / square-pixel panels).
+        let new_sy = if scale_mode == ScaleMode::Uniform { new_sx } else {
             (t.sy * factor).clamp(self.zoom_range.0, self.zoom_range.1)
         };
 
@@ -123,7 +130,7 @@ mod tests {
     fn zoom_increases_scale() {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
-        state.on_wheel(0, 500.0, 100.0, 100.0, false);
+        state.on_wheel(0, 500.0, 100.0, 100.0, ScaleMode::Independent);
         assert!(state.transforms[0].sx > 1.0);
     }
 
@@ -140,7 +147,7 @@ mod tests {
     fn double_click_resets() {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
-        state.on_wheel(0, 1000.0, 50.0, 50.0, false);
+        state.on_wheel(0, 1000.0, 50.0, 50.0, ScaleMode::Independent);
         state.reset(0);
         assert!((state.transforms[0].sx - 1.0).abs() < 1e-10);
         assert!((state.transforms[0].tx).abs() < 1e-10);
@@ -165,7 +172,7 @@ mod tests {
         let config = InteractionConfig::default();
         let mut state = ZoomPanState::new(1, &config);
         for _ in 0..100 {
-            state.on_wheel(0, 5000.0, 0.0, 0.0, false);
+            state.on_wheel(0, 5000.0, 0.0, 0.0, ScaleMode::Independent);
         }
         assert!(state.transforms[0].sx <= 50.0);
     }
@@ -185,7 +192,7 @@ mod tests {
         // Initial sx/sy are different: simulate a non-square zoom then fix it.
         state.transforms[0].sx = 1.5;
         state.transforms[0].sy = 2.0;
-        state.on_wheel(0, 100.0, 50.0, 50.0, true);
+        state.on_wheel(0, 100.0, 50.0, 50.0, ScaleMode::Uniform);
         let t = &state.transforms[0];
         assert!((t.sx - t.sy).abs() < 1e-10, "sx={} sy={} must be equal for CoordFixed", t.sx, t.sy);
     }

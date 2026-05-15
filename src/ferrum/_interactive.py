@@ -146,7 +146,7 @@ def _build_anywidget_esm() -> str:
         "    if(_state&&prev){\n"
         "      // Animate transition from previous scene\n"
         "      try{\n"
-        "        _state.renderer.startTransition(prev,s);\n"
+        "        _state.renderer.startTransition(s);\n"
         "        const dur=300;\n"
         "        const t0=performance.now();\n"
         "        function _step(){\n"

@@ -186,6 +186,11 @@ def _geojson_to_arrow(data: dict) -> "pyarrow.Table":
         geom_strings.append(json.dumps(geom) if geom is not None else "null")
         rows.append(props)
 
-    tbl = pa.Table.from_pylist(rows)
     geom_col = pa.array(geom_strings, type=pa.string())
+    if rows and all(not r for r in rows):
+        # All features have empty properties — build a schema-less table with
+        # the correct row count so the geometry column can be appended.
+        tbl = pa.table({"__geometry__": geom_col})
+        return tbl
+    tbl = pa.Table.from_pylist(rows)
     return tbl.append_column("__geometry__", geom_col)

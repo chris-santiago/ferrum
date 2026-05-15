@@ -206,3 +206,6 @@ crates/ferrum-wasm/pkg/
 # Inputs (skill, panel scripts, rubric, judge_prompt, RESUME) stay tracked.
 .claude/skills/gallery-audit/output/
 /gallery
+
+# Jupyter notebooks
+notebooks/

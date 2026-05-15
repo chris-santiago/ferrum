@@ -136,28 +136,51 @@ class CoordPolar:
         Starting angle in radians (default ``0`` = 12 o'clock).
     direction : {1, -1}
         ``1`` for clockwise, ``-1`` for counter-clockwise.
+    inner_radius : float
+        Inner radius in pixels.  ``0`` (default) gives a filled pie slice;
+        any positive value creates a donut with a hole of that radius.
+    outer_radius : float or None
+        Outer radius in pixels.  ``None`` (default) fills to half the
+        smaller panel dimension.
+    pad_angle : float
+        Angular gap between adjacent slices in radians (default ``0``).
 
     Examples
     --------
-    >>> fm.Chart(df).mark_arc().encode(
-    ...     x="category", color="category", size="value"
-    ... ).coord(fm.CoordPolar(theta="x"))
+    Pie chart::
+
+        fm.Chart(df).mark_arc().encode(x="value", color="category").coord(
+            fm.CoordPolar(theta="x")
+        )
+
+    Donut with 60 px hole::
+
+        fm.Chart(df).mark_arc().encode(x="value", color="category").coord(
+            fm.CoordPolar(theta="x", inner_radius=60)
+        )
     """
 
     theta: Literal["x", "y"] = "x"
     start: float = 0.0
     direction: Literal[1, -1] = 1
+    inner_radius: float = 0.0
+    outer_radius: float | None = None
+    pad_angle: float = 0.0
 
     def _to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         direction_str = "clockwise" if self.direction == 1 else "counter_clockwise"
-        return {
+        d: dict = {
             "kind": "polar",
             "theta": self.theta,
             "start_angle": self.start,
             "direction": direction_str,
-            "inner_radius": 0.0,
+            "inner_radius": float(self.inner_radius),
+            "pad_angle": float(self.pad_angle),
         }
+        if self.outer_radius is not None:
+            d["outer_radius"] = float(self.outer_radius)
+        return d
 
 
 @dataclass(frozen=True)
