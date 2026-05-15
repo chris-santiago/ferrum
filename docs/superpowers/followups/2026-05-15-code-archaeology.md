@@ -89,9 +89,9 @@
 
 ### `VisualBase.score()` not overridden in 14 visualizer subclasses
 
-`src/ferrum/_diagnostics/visualizers/base.py:124` — the base method always raises `NotImplementedError`. The following subclasses do **not** override it:
-
-`LearningCurveVisualizer`, `ValidationCurveVisualizer`, `CVScoresVisualizer`, `AlphaSelectionVisualizer`, `SilhouetteVisualizer`, `ElbowVisualizer`, `DecisionBoundaryVisualizer`, `PartialDependenceVisualizer`, `SHAPVisualizer`, `Rank1DVisualizer`, `Rank2DVisualizer`, `RadVizVisualizer`, `ManifoldVisualizer`, `ClassBalanceVisualizer`
+✅ **Resolved `8232d62`** — Two-track fix with 20 TDD tests:
+- **Group A** (`LearningCurveVisualizer`, `ValidationCurveVisualizer`, `CVScoresVisualizer`, `AlphaSelectionVisualizer`): `score(X, y)` implemented as `estimator.score(X, y)`, matching the `ResidualsVisualizer` reference pattern.
+- **Group B** (remaining 10): `FerrumVisualizer.score()` base changed from `raise NotImplementedError` to `return 0.0` — no-op with a docstring explaining why. These visualizers describe data structure or model internals; test-set scoring is not semantically meaningful for them.
 
 ---
 
