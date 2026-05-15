@@ -1,6 +1,6 @@
 # Ferrum — Project Instructions
 
-Ferrum is a Rust-backed Python statistical visualization library. The Python layer is the declaration API; the Rust layer (`crates/ferrum-core`, compiled to `ferrum._core`) is the computation engine. Data moves between them once, over Arrow IPC.
+Ferrum is a Rust-backed Python statistical visualization library. The Python layer is the declaration API; the Rust layer (`crates/ferrum-core`, compiled to `ferrum._core`) is the computation engine. Data moves between them once, over the Arrow C Data Interface (CDI).
 
 ---
 
@@ -54,17 +54,16 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 ---
 
-## Implementation philosophy (Phase 9 and beyond)
+## Implementation philosophy (Phase 12 and beyond)
 
 **Do the work now. Do it the right way. Enable a better end-user experience now.**
 
 - Do NOT propose "defer X to a later phase / follow-up ticket" as a scope-reduction strategy.
 - If a `ferrum-spec.md` parameter is hard to ship completely, ship it completely (with whatever Rust transform, mark, encoding, or position-adjustment subsystem it needs) — not a warn-fallback or `NotImplementedError`.
-- Use sub-phase decomposition (e.g. 9a / 9b / 9c / 9d) to manage build order, not to drop scope.
+- Use sub-phase decomposition to manage build order, not to drop scope.
 - "Implement everything fully" is the default. No Warn-fallbacks. **NotImplementedErrors ARE NOT ACCEPTABLE.**
-- Review `PHASE_9_PLUS_MARKS` in `src/ferrum/marks/deferred.py` at each new phase — pull marks into scope if they're needed by `ferrum-spec.md` §3.14 figure-level functions or any other in-phase contract.
 
-This rule governs Phase 9 forward; it does not retroactively reopen closed phases.
+This rule governs Phase 12 forward; it does not retroactively reopen closed phases (1–11 are done).
 
 ---
 
@@ -108,7 +107,7 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 
 - **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
 - **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
-- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see "Composite marks desugar Python-side" below).
+- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/ARCHITECTURE.md` "Composite marks" section).
 - **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
@@ -210,19 +209,14 @@ See **`design-docs/ARCHITECTURE.md`** for the full record (transport layer, spec
   - **Spec**: `design-docs/DOCS_SITE_PLAN.md` (in worktree, not main branch)
   - **Zensical config**: `zensical.toml` (in worktree root)
 
-  **Status (paused 2026-05-11):**
-  - Phase 1 scaffold landed: Zensical at repo root (`zensical.toml`), docs source at `docs/site/`, `docs_dir = "docs/site"` set so the legacy
-  `docs/superpowers/` tree stays out of scope. mkdocstrings + mkdocstrings-python wired with NumPy docstring style.
-  - 6 source-independent pages authored: Home, Get Started/{Install, Why Ferrum}, Concepts/{One chart model, Stats in the pipeline, Performance & scale}.
-  - Remaining stubs are blocked on either (a) source-backed code examples — First plot, the six Guide pages — or (b) unmerged Phase 10 surface (Model
-  diagnostics, Model outputs as data, Interactive rendering, two gallery examples, the yellowbrick + scikit-plot comparisons).
-  
-  **Resume path after Phase 10 merges to main:**
+  **Status (paused 2026-05-11, unblocked 2026-05-15):**
+  - Scaffold + 6 source-independent pages landed on the worktree branch.
+  - Previously-blocked pages (source-backed examples, model diagnostics, interactive rendering, gallery comparisons) are now unblocked — Phases 10 and 11 are done and on `main`.
+
+  **Resume path:**
   1. From the docs worktree: `git fetch && git rebase origin/main`.
-  2. Expect conflicts in `pyproject.toml` (dev deps list — usually auto-mergeable), `uv.lock` (resolve by `git checkout --theirs uv.lock && uv sync`), and
-  `.gitignore` (additive). No other overlap.
-  3. Run `uv run zensical build --clean` to verify (~5–9s) and check the new `griffe` warning count from Phase 10 visualizers.
-  4. Author the unblocked pages against the now-real surface.
-  
-  **Do not** delete the worktree or branch — both docs commits live in `.git/` and survive worktree removal, but the convention is to leave both in place
-  until the work merges.
+  2. Expect conflicts in `pyproject.toml` (dev deps — usually auto-mergeable), `uv.lock` (resolve with `git checkout --theirs uv.lock && uv sync`), and `.gitignore` (additive).
+  3. Run `uv run zensical build --clean` to verify and check the `griffe` warning count from Phase 10/11 visualizers.
+  4. Author the previously-blocked pages against the now-real API surface.
+
+  **Do not** delete the worktree or branch until the docs work merges to `main`.
