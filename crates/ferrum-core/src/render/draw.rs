@@ -67,6 +67,9 @@ pub struct MarkStyle {
     pub line_border: Option<bool>,
     // ── S10: borders (area) ──────────
     pub borders: Option<bool>,
+    // ── mark_image URL-tile sizing ───
+    pub width: Option<f64>,
+    pub height: Option<f64>,
 }
 
 impl MarkStyle {
@@ -102,6 +105,8 @@ impl MarkStyle {
             band_size: None,
             line_border: None,
             borders: None,
+            width: None,
+            height: None,
         }
     }
 }
@@ -225,6 +230,9 @@ pub fn resolve_mark_style(
     if let Some(lb) = o.line { style.line_border = Some(lb); }
     // S10: borders on area
     if let Some(b) = o.borders { style.borders = Some(b); }
+    // mark_image URL-tile sizing
+    if let Some(w) = o.width { style.width = Some(w); }
+    if let Some(h) = o.height { style.height = Some(h); }
 
     style
 }

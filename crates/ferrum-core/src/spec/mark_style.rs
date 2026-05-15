@@ -82,6 +82,15 @@ pub struct MarkKwargsSpec {
     /// When true, draw border lines on both top and bottom edges of an area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub borders: Option<bool>,
+    // ── mark_image URL-tile sizing ───────────────────────────────────────────
+    /// Constant tile width in pixels for mark_image URL tiles. Overridden
+    /// per-row by a `width` column in the data. Defaults to 32.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// Constant tile height in pixels for mark_image URL tiles. Overridden
+    /// per-row by a `height` column in the data. Defaults to 32.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
 }
 
 #[cfg(test)]

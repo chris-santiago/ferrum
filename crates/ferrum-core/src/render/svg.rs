@@ -225,6 +225,16 @@ impl SvgBuffer {
         ));
     }
 
+    /// Embed an image using a pre-formed data URL string (e.g. from mark_image URL tiles).
+    /// `data_url` must be a complete `data:<mime>;base64,<payload>` string — it is
+    /// embedded verbatim as the `href` attribute without re-encoding.
+    pub fn image_data_url(&mut self, x: f64, y: f64, w: f64, h: f64, data_url: &str) {
+        self.buf.push_str(&format!(
+            r#"<image x="{}" y="{}" width="{}" height="{}" href="{}"/>"#,
+            fmt_f(x), fmt_f(y), fmt_f(w), fmt_f(h), data_url
+        ));
+    }
+
     /// Emit a closed filled/stroked polygon as `<path d="M ... Z" fill-rule="evenodd"/>`.
     /// `paths`: each inner `Vec<(f64, f64)>` is one ring; multiple rings → first is outer,
     /// rest are holes. `fill-rule="evenodd"` handles winding automatically.

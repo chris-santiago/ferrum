@@ -33,6 +33,7 @@ from ferrum.encoding.text import (
     Href,
     Description,
     Key,
+    Url,
 )
 from ferrum.encoding.facet import Facet, FacetRow, FacetCol
 
@@ -65,6 +66,7 @@ __all__ = [
     "Href",
     "Description",
     "Key",
+    "Url",
     "Facet",
     "FacetRow",
     "FacetCol",

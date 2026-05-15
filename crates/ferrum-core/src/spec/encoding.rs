@@ -484,6 +484,10 @@ pub struct Encoding {
     // across data updates so the WASM renderer can lerp between old/new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<EncodingSpec>,
+    // mark_image URL-tile path: each row holds a base64 data URL
+    // (data:image/png;base64,… or data:image/jpeg;base64,…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -553,6 +557,7 @@ impl Encoding {
         inherit(&mut self.href, &parent.href);
         inherit(&mut self.description, &parent.description);
         inherit(&mut self.key, &parent.key);
+        inherit(&mut self.url, &parent.url);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -571,7 +576,7 @@ impl Encoding {
                 $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
             };
         }
-        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key);
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url);
     }
 }
 
@@ -919,6 +924,7 @@ mod tests {
             href: Some(EncodingSpec { field: "bh".into(), ..Default::default() }),
             description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
             key: Some(EncodingSpec { field: "bk".into(), ..Default::default() }),
+            url: None,
         };
         // Overlay only tooltip, href, description (the three that were missed
         // by the old inline merge).

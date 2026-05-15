@@ -195,7 +195,9 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
                 ImageData::Inline { bytes, .. } => {
                     svg.image(*x, *y, *w, *h, bytes);
                 }
-                ImageData::Url { .. } => {}
+                ImageData::Url { url } => {
+                    svg.image_data_url(*x, *y, *w, *h, url);
+                }
             }
         }
         SceneNode::Polyline { points, style } => {

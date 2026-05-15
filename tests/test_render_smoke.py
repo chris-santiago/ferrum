@@ -16,6 +16,7 @@ document the expected failure and alert when they become implemented.
 """
 from __future__ import annotations
 
+import base64
 import pytest
 import polars as pl
 import ferrum as fm
@@ -74,6 +75,19 @@ _GRID = pl.DataFrame({
 
 # 1-row edge case
 _SINGLE = _Q2[:1]
+
+# 3-row image URL-tile dataset — minimal valid 1×1 PNG as base64 data URLs
+_1x1_PNG_BYTES = bytes([
+    137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,2,0,0,0,
+    144,119,83,222,0,0,0,12,73,68,65,84,8,215,99,248,207,192,0,0,0,2,0,1,
+    227,33,188,51,0,0,0,0,73,69,78,68,174,66,96,130,
+])
+_1x1_PNG_B64 = base64.b64encode(_1x1_PNG_BYTES).decode()
+_IMG_DF = pl.DataFrame({
+    "x": [1.0, 3.0, 5.0],
+    "y": [2.0, 4.0, 2.0],
+    "url": [f"data:image/png;base64,{_1x1_PNG_B64}"] * 3,
+})
 
 # ---------------------------------------------------------------------------
 # Case registry
@@ -236,12 +250,11 @@ _case("function/parabola",   lambda: fm.Chart(None).mark_function(lambda x: x **
 # ---------------------------------------------------------------------------
 _case("arc/theta",     lambda: fm.Chart(_NQ).mark_arc().encode(x="cat:N"),
       xfail=True, reason="mark_arc not yet implemented (deferred)")
-_case("label/xy",      lambda: fm.Chart(_TEXT_DF).mark_label().encode(x="x:Q", y="y:Q", text="label"),
-      xfail=True, reason="mark_label not yet implemented (deferred)")
+_case("label/xy",      lambda: fm.Chart(_TEXT_DF).mark_label().encode(x="x:Q", y="y:Q", text="label"))
 _case("geoshape/basic", lambda: fm.Chart({}).mark_geoshape(),
       xfail=True, reason="mark_geoshape not yet implemented (deferred)")
-_case("image/basic",   lambda: fm.Chart(_Q2).mark_image().encode(x="x:Q", y="y:Q"),
-      xfail=True, reason="mark_image not yet implemented (deferred)")
+_case("image/basic",   lambda: fm.Chart(_Q2).mark_image().encode(x="x:Q", y="y:Q"))
+_case("image/url_tiles", lambda: fm.Chart(_IMG_DF).mark_image().encode(x="x:Q", y="y:Q", url="url"))
 
 # ---------------------------------------------------------------------------
 # Facet — regression for encode(facet_col/row=...) being silently dropped

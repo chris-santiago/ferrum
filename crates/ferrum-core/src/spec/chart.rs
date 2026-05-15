@@ -113,6 +113,7 @@ impl ChartSpec {
         key = None,                                               // Phase 11c (transition key)
         selections = None,                                        // Phase 11c (JSON)
         conditionals = None,                                      // Phase 11c (JSON)
+        url = None,                                               // mark_image URL-tile path
     ))]
     fn new(
         mark: &str,
@@ -143,6 +144,7 @@ impl ChartSpec {
         key: Option<&Bound<'_, PyAny>>,
         selections: Option<&str>,
         conditionals: Option<&str>,
+        url: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mark = Mark::from_str(mark)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -159,6 +161,7 @@ impl ChartSpec {
         let tooltip = tooltip.map(coerce_encoding).transpose()?;
         let href = href.map(coerce_encoding).transpose()?;
         let description = description.map(coerce_encoding).transpose()?;
+        let url = url.map(coerce_encoding).transpose()?;
         let tooltip_fields: Option<Vec<crate::spec::encoding::EncodingSpec>> = tooltip_fields
             .map(|s| serde_json::from_str(s)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("tooltip_fields JSON: {e}"))))
@@ -255,7 +258,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url },
             transforms,
             facet,
             layers,

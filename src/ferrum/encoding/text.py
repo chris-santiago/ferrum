@@ -235,3 +235,29 @@ class Key(ChannelBase):
     _channel_name = "key"
     _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type"])
+
+
+class Url(ChannelBase):
+    """Image URL channel — maps a field to a base64 data URL for ``mark_image`` tiles.
+
+    Each row provides a ``data:image/...;base64,<payload>`` URL that is
+    placed as an image tile at the position given by the ``x`` and ``y``
+    encodings.  Used exclusively with :meth:`~ferrum.Chart.mark_image`.
+
+    Parameters
+    ----------
+    field : str
+        Column name containing the base64 data URL for each tile.
+    type_ : {"Q", "N", "O", "T"}, optional
+        Data type.  Inferred from the column dtype when omitted (typically
+        ``"N"`` for string columns).
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).mark_image().encode(x="x:Q", y="y:Q", url=fm.Url("data_url"))
+    """
+
+    _channel_name = "url"
+    _renders_in_phase_8a = True
+    _honored_kwargs = frozenset(["type"])
