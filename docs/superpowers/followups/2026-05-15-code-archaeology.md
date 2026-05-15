@@ -108,8 +108,8 @@
 | `ferrum.config` namespace (`set_max_rows()`, `set_renderer()`, `set_default_width/height()`, `set_raster_threshold()`, `set_raster_behavior()`, `set_default_backend()`, `set_font_paths()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `Axis(...)` value class | `ferrum-spec.md §3.7` | Not publicly constructable; `axis=` kwarg accepted but stored as opaque dict and ignored by Rust renderer |
 | `Legend(...)` kwargs | `ferrum-spec.md §3.7` | ✅ All 11 kwargs confirmed: `orient`, `title`, `format`, `columns` (`10c1931`) + `tickCount`, `labelFontSize`, `gradientLength`, `gradientThickness`, `direction`, `values`, `type` (wired through `LegendOverrides` in layout). 14 regression tests. |
-| Auto-raster policy (`raster_threshold`, `raster_behavior`, `raster_aggregate`, `raster_cmap`) | `ferrum-spec.md §3.16/3.18` | Documented, not implemented |
-| `RenderConfig` Python class (public) | `ferrum-spec.md §3.16` | No public `RenderConfig` class exists; `embed_fonts=False` is untestable |
+| Auto-raster policy (`raster_threshold`, `raster_behavior`, `raster_aggregate`, `raster_cmap`) | `ferrum-spec.md §3.16/3.18` | ✅ Implemented `5effc0d` — `_apply_auto_raster()` in `chart.py` substitutes `mark_raster` when mark count exceeds threshold (default 500k). Eligible marks: point, bar, rect, tick, rule, segment. Skips composite marks, color-encoded charts. `RenderConfig` dataclass controls policy. 9 acceptance tests. |
+| `RenderConfig` Python class (public) | `ferrum-spec.md §3.16` | ✅ Implemented `5effc0d` — `fm.RenderConfig(raster_threshold=, raster_behavior=, raster_aggregate=, raster_cmap=)` exposed via `__init__.py`, accepted by `Chart.properties(render_config=)`. |
 | `ferrum.Grid` utility class | `ferrum-spec.md §3.19` | Absent from source |
 | `ferrum.WindowTransform` | `ferrum-spec.md §3.19` | Absent from source |
 | Full palette library (cyclical schemes, tealblues, brewer extended sequential) | `ferrum-spec.md §3.13` | Rejected at validation time |
