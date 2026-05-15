@@ -11,7 +11,7 @@ struct ImageGpu {
 }
 
 pub struct GpuBuffers {
-    _uniform_buffer: wgpu::Buffer,
+    uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     quad_vertex_buffer: wgpu::Buffer,
     circle_instance_buffer: Option<wgpu::Buffer>,
@@ -22,6 +22,47 @@ pub struct GpuBuffers {
     mesh_index_buffer: Option<wgpu::Buffer>,
     mesh_index_count: u32,
     image_draws: Vec<ImageGpu>,
+}
+
+/// Uniform data uploaded to the GPU once per panel draw.
+///
+/// Layout (64 bytes / 16 × f32):
+///   [0..1]  canvas width, height
+///   [2..5]  affine transform: sx, sy, tx, ty (identity = 1,1,0,0)
+///   [6..9]  clip rect in canvas pixels: x, y, w, h (full canvas = 0,0,w,h)
+///   [10..15] padding
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Uniforms {
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+    pub sx: f32,
+    pub sy: f32,
+    pub tx: f32,
+    pub ty: f32,
+    pub clip_x: f32,
+    pub clip_y: f32,
+    pub clip_w: f32,
+    pub clip_h: f32,
+    pub _pad: [f32; 6],
+}
+
+impl Uniforms {
+    pub fn identity(canvas_w: f32, canvas_h: f32) -> Self {
+        Self {
+            canvas_w,
+            canvas_h,
+            sx: 1.0,
+            sy: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+            clip_x: 0.0,
+            clip_y: 0.0,
+            clip_w: canvas_w,
+            clip_h: canvas_h,
+            _pad: [0.0; 6],
+        }
+    }
 }
 
 const QUAD_VERTICES: [[f32; 2]; 4] = [
@@ -37,11 +78,11 @@ impl GpuBuffers {
         pipelines: &RenderPipelines,
         scene: &SceneData,
     ) -> Self {
-        let viewport: [f32; 4] = [scene.width, scene.height, 0.0, 0.0];
+        let uniforms = Uniforms::identity(scene.width, scene.height);
         let uniform_buffer =
             gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("uniforms"),
-                contents: bytemuck::cast_slice(&viewport),
+                contents: bytemuck::bytes_of(&uniforms),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
         let uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -105,7 +146,7 @@ impl GpuBuffers {
             .collect();
 
         Self {
-            _uniform_buffer: uniform_buffer,
+            uniform_buffer,
             uniform_bind_group,
             quad_vertex_buffer,
             circle_instance_buffer,
@@ -117,6 +158,13 @@ impl GpuBuffers {
             mesh_index_count: scene.mesh_buffers.indices.len() as u32,
             image_draws,
         }
+    }
+}
+
+impl GpuBuffers {
+    /// Upload a new uniform block and re-render the frame.
+    pub fn upload_uniforms(&self, gpu: &GpuContext, uniforms: &Uniforms) {
+        gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
     }
 }
 

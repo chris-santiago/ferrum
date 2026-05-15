@@ -1,6 +1,15 @@
 struct Uniforms {
-    viewport: vec2<f32>,
-    _pad: vec2<f32>,
+    canvas_w: f32,
+    canvas_h: f32,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+    _pad: array<f32, 6>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -28,10 +37,12 @@ struct VertexOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let extent = in.radius + in.stroke_width + 1.0;
-    let px = in.center + in.quad_pos * extent;
+    let px_local = in.center + in.quad_pos * extent;
+    // Apply per-panel affine transform: scale around origin then translate.
+    let px = vec2<f32>(px_local.x * u.sx + u.tx, px_local.y * u.sy + u.ty);
     let ndc = vec2<f32>(
-        px.x / u.viewport.x * 2.0 - 1.0,
-        1.0 - px.y / u.viewport.y * 2.0,
+        px.x / u.canvas_w * 2.0 - 1.0,
+        1.0 - px.y / u.canvas_h * 2.0,
     );
     out.clip_pos = vec4<f32>(ndc, 0.0, 1.0);
     out.local_pos = in.quad_pos * extent;

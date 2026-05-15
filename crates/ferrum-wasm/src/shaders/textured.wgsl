@@ -1,6 +1,15 @@
 struct Uniforms {
-    viewport: vec2<f32>,
-    _pad: vec2<f32>,
+    canvas_w: f32,
+    canvas_h: f32,
+    sx: f32,
+    sy: f32,
+    tx: f32,
+    ty: f32,
+    clip_x: f32,
+    clip_y: f32,
+    clip_w: f32,
+    clip_h: f32,
+    _pad: array<f32, 6>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -17,9 +26,11 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+    // Apply per-panel affine transform.
+    let px = vec2<f32>(in.position.x * u.sx + u.tx, in.position.y * u.sy + u.ty);
     let ndc = vec2<f32>(
-        in.position.x / u.viewport.x * 2.0 - 1.0,
-        1.0 - in.position.y / u.viewport.y * 2.0,
+        px.x / u.canvas_w * 2.0 - 1.0,
+        1.0 - px.y / u.canvas_h * 2.0,
     );
     out.clip_pos = vec4<f32>(ndc, 0.0, 1.0);
     out.tex_coord = in.tex_coord;
