@@ -133,14 +133,16 @@
 
 ## Stale Documentation / Comments
 
-| Location | Issue |
+✅ **All resolved** — `5f5948f` (code fixes) + `f87ba9a` (`_coerce.py` Phase 8a message).
+
+| Location | Status |
 |---|---|
-| `src/ferrum/encoding/positional.py:292–293` | `Theta` / `Radius` docstrings say `CoordPolar` raises `NotImplementedError` — Phase 11 shipped `CoordPolar`; stale |
-| `src/ferrum/_coerce.py:60` | Error message references "Phase 8a" — project is post-Phase 11 |
-| `crates/ferrum-core/src/render/marks/text.rs:1` | Module header says "Phase 10c-pre extends the Phase 7 stub" — stale label, implementation is complete |
-| `crates/ferrum-core/src/transform/contour.rs:505` | Doc comment says `smooth` parameter is "accepted but currently reserved; has no effect" — actually implemented as a 3×3 Gaussian kernel pass |
-| `crates/ferrum-core/src/render/format.rs:1` | Module comment says per-axis `FormatSpec` "deferred to Phase 8" — Phase 8 is long done but the deferral was never resolved |
-| `crates/ferrum-core/src/layout/binding.rs:2–4` | Comment says `ThemeInputs` wiring "Phase 8 will map ferrum.Theme into ThemeInputs" — never implemented; always uses `ThemeInputs::default()` |
+| `src/ferrum/encoding/positional.py:292–293` | ✅ Fixed — `Theta`/`Radius` docstrings updated to describe `CoordPolar` as shipped |
+| `src/ferrum/_coerce.py:60` | ✅ Fixed earlier (`f87ba9a`) — "Phase 8a" removed |
+| `crates/ferrum-core/src/render/marks/text.rs:1` | ✅ Fixed — phase stub references removed |
+| `crates/ferrum-core/src/transform/contour.rs:505` | ✅ Fixed — doc now describes the 3×3 Gaussian kernel implementation |
+| `crates/ferrum-core/src/render/format.rs:1` | ✅ Fixed — updated to describe current format wiring |
+| `crates/ferrum-core/src/layout/binding.rs:2–4` | ✅ Fixed — updated to accurately describe `ThemeInputs` usage |
 
 ---
 
