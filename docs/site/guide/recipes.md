@@ -260,6 +260,37 @@ assert report.show_svg().startswith("<svg")
 
 The `|` operator places charts side by side; `&` stacks vertically. The result is a single SVG with three panels — same grammar, same theme, one `.save()` call.
 
+## Comparing two models side by side
+
+Diagnostic chart output is a regular `Chart` — add titles, apply themes, and compose with `|`:
+
+```python
+import ferrum as fm
+import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+raw = load_iris()
+rng = np.random.default_rng(42)
+X_noisy = raw.data + rng.normal(0, 1.5, raw.data.shape)
+X_train, X_test, y_train, y_test = train_test_split(
+    X_noisy, raw.target, test_size=0.3, random_state=42
+)
+rf = RandomForestClassifier(n_estimators=50, random_state=42).fit(X_train, y_train)
+lr = LogisticRegression(max_iter=500, random_state=42).fit(X_train, y_train)
+
+roc_rf = fm.roc_chart(rf, X_test, y_test).properties(title="Random Forest")
+roc_lr = fm.roc_chart(lr, X_test, y_test).properties(title="Logistic Regression")
+chart = (roc_rf | roc_lr).theme(fm.themes.publication)
+assert chart.show_svg().startswith("<svg")
+```
+
+![Two-model ROC comparison](img/recipes_10.png)
+
+`.properties(title=...)` adds a title to each panel. `.theme()` applies to the entire composed view. The same pattern works for any diagnostic helper — swap `roc_chart` for `calibration_chart`, `pr_chart`, or `confusion_matrix_chart`.
+
 ## Where to go next
 
 - [Marks & encodings](marks-encodings.md) for the full mark and encoding reference.
