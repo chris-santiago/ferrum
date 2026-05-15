@@ -50,9 +50,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     } else {
         return empty();
     };
-    let ys = match col_as_f64(ctx.batch, yf) {
-        Ok(v) => v,
-        Err(_) => return empty(),
+    // Pre-resolve per-row y pixel positions (numeric or ordinal — mirrors xpx so
+    // CoordFlip works when the categorical axis is swapped onto y).
+    let ypx: Vec<Option<f64>> = if let Ok(v) = col_as_f64(ctx.batch, yf) {
+        v.into_iter()
+            .map(|opt| opt.and_then(|y| ctx.scales.y.to_pixel_f64(y)))
+            .collect()
+    } else if let Ok(v) = col_as_str(ctx.batch, yf) {
+        v.into_iter()
+            .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
+            .collect()
+    } else {
+        return empty();
     };
 
     // --- Group rows by detail column (or single group if unset) ---
@@ -158,11 +167,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .iter()
             .filter_map(|&i| {
                 let cx = xpx.get(i).copied().flatten()?;
-                let yv = ys[i]?;
-                if !yv.is_finite() {
-                    return None;
-                }
-                let cy = ctx.scales.y.to_pixel_f64(yv)?;
+                let cy = ypx.get(i).copied().flatten()?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);
                 Some((cx + xo, cy + yo))

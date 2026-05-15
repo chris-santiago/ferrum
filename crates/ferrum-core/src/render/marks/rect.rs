@@ -31,7 +31,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     );
     if both_ranges && both_quant {
         build_quantitative_range(ctx)
-    } else if ctx.spec.encoding.y2.is_some() {
+    } else if ctx.spec.encoding.y2.is_some() || ctx.spec.encoding.x2.is_some() {
+        // y2.is_some(): normal orientation (ordinal x + quantitative y/y2).
+        // x2.is_some() without y2: CoordFlip case (ordinal y + quantitative x/x2).
         build_ordinal_range(ctx)
     } else {
         build_heatmap(ctx)
@@ -153,24 +155,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return empty_result(),
-    };
 
-    let n_categories = match &ctx.scales.x {
-        ScaleKind::Ordinal(_) => {
-            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-            count_distinct(&xs_probe).max(1)
-        }
-        _ => return empty_result(),
-    };
-    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
-    if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
+    // Detect orientation: normal (x-ordinal + y2) vs. CoordFlip (y-ordinal + x2).
+    let x_is_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
+    let y_is_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
     let panel = ctx.panel.plot_area;
-    let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
 
     let cfield = color_field(ctx, spec);
     let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
@@ -184,43 +174,114 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let mut nodes = Vec::new();
     let mut indices = Vec::new();
 
-    for i in 0..xs.len() {
-        let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
-        let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
-        let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-        let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
-        let cx = cx + x_offsets[i];
-        let rect_top = py.min(py2) + y_offsets[i];
-        let rect_h = (py - py2).abs().max(1.0);
-
-        let fill = match (&ctx.scales.color, &color_strings) {
-            (Some(scale @ ColorScale::Categorical { .. }), Some(values)) => {
-                match values[i].as_deref() {
-                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    None => ctx.mark_style.fill,
-                }
-            }
-            _ => ctx.mark_style.fill,
+    if x_is_ordinal {
+        // Normal orientation: x is categorical band, y and y2 are quantitative extents.
+        let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
+            Some(f) => f, None => return empty_result(),
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        let n_categories = {
+            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+            count_distinct(&xs_probe).max(1)
+        };
+        let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+        let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+        let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
+        if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
+        let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
 
-        nodes.push(SceneNode::Rect {
-            x: cx - box_w / 2.0,
-            y: rect_top,
-            w: box_w,
-            h: rect_h,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
-            corner_radius: ctx.mark_style.corner_radius,
-        });
-        indices.push(i);
+        for i in 0..xs.len() {
+            let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+            let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let y2v = match y2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+            let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+            let py2 = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
+            let cx = cx + x_offsets[i];
+            let rect_top = py.min(py2) + y_offsets[i];
+            let rect_h = (py - py2).abs().max(1.0);
+
+            let fill = match (&ctx.scales.color, &color_strings) {
+                (Some(scale @ ColorScale::Categorical { .. }), Some(values)) => {
+                    match values[i].as_deref() {
+                        Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                        None => ctx.mark_style.fill,
+                    }
+                }
+                _ => ctx.mark_style.fill,
+            };
+            let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+            nodes.push(SceneNode::Rect {
+                x: cx - box_w / 2.0,
+                y: rect_top,
+                w: box_w,
+                h: rect_h,
+                style: to_scene_fill_stroke(
+                    Some(fill),
+                    ctx.mark_style.stroke,
+                    ctx.mark_style.stroke_width,
+                    ctx.mark_style.opacity,
+                    ctx.mark_style.stroke_dash.as_deref(),
+                ),
+                corner_radius: ctx.mark_style.corner_radius,
+            });
+            indices.push(i);
+        }
+    } else if y_is_ordinal {
+        // CoordFlip orientation: y is categorical band, x and x2 are quantitative extents.
+        let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
+            Some(f) => f, None => return empty_result(),
+        };
+        let n_categories = {
+            let ys_probe = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+            count_distinct(&ys_probe).max(1)
+        };
+        let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+        let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
+        if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
+        let box_h = (panel.h / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
+
+        for i in 0..ys.len() {
+            let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+            let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+            let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+            let px2 = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+            let cy = cy + y_offsets[i];
+            let rect_left = px.min(px2) + x_offsets[i];
+            let rect_w = (px - px2).abs().max(1.0);
+
+            let fill = match (&ctx.scales.color, &color_strings) {
+                (Some(scale @ ColorScale::Categorical { .. }), Some(values)) => {
+                    match values[i].as_deref() {
+                        Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
+                        None => ctx.mark_style.fill,
+                    }
+                }
+                _ => ctx.mark_style.fill,
+            };
+            let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+            nodes.push(SceneNode::Rect {
+                x: rect_left,
+                y: cy - box_h / 2.0,
+                w: rect_w,
+                h: box_h,
+                style: to_scene_fill_stroke(
+                    Some(fill),
+                    ctx.mark_style.stroke,
+                    ctx.mark_style.stroke_width,
+                    ctx.mark_style.opacity,
+                    ctx.mark_style.stroke_dash.as_deref(),
+                ),
+                corner_radius: ctx.mark_style.corner_radius,
+            });
+            indices.push(i);
+        }
+    } else {
+        return empty_result();
     }
 
     MarkBuildResult {

@@ -1483,3 +1483,134 @@ class TestMarkTextMultiline:
         assert dy_values == ["0", "1.2em", "1.2em"], (
             f"Expected dy sequence ['0','1.2em','1.2em']; got {dy_values}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug B3: CoordFlip drops elements for violin and boxplot composite marks
+# ---------------------------------------------------------------------------
+
+
+def _violin_df() -> pl.DataFrame:
+    """Small dataset for violin/boxplot tests (3 categories, 20 samples each)."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    cats = ["A"] * 20 + ["B"] * 20 + ["C"] * 20
+    vals = (
+        rng.normal(0, 1, 20).tolist()
+        + rng.normal(1, 1, 20).tolist()
+        + rng.normal(2, 1, 20).tolist()
+    )
+    return pl.DataFrame({"cat": cats, "val": vals})
+
+
+class TestCoordFlipViolin:
+    """CoordFlip must not silently drop violin polygon layers."""
+
+    def test_violin_normal_orientation_has_filled_paths(self):
+        """mark_violin() without CoordFlip produces filled <path> or <polygon> elements."""
+        svg = (
+            fm.Chart(_violin_df())
+            .mark_violin()
+            .encode(x="cat", y="val")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        path_count = svg.count("<path") + svg.count("<polygon")
+        assert path_count >= 1, (
+            f"Normal violin should have >=1 filled path/polygon; got {path_count}"
+        )
+
+    def test_violin_coord_flip_has_filled_paths(self):
+        """mark_violin().coord(CoordFlip()) produces filled <path> or <polygon> elements."""
+        svg = (
+            fm.Chart(_violin_df())
+            .mark_violin()
+            .encode(x="cat", y="val")
+            .coord(fm.CoordFlip())
+            .show_svg()
+        )
+        assert "<svg" in svg
+        path_count = svg.count("<path") + svg.count("<polygon")
+        assert path_count >= 1, (
+            f"Flipped violin should have >=1 filled path/polygon; got {path_count}\n"
+            f"SVG snippet:\n{svg[:3000]}"
+        )
+
+    def test_violin_coord_flip_element_count_matches_normal(self):
+        """Flipped violin must not drop elements relative to normal orientation."""
+        svg_normal = (
+            fm.Chart(_violin_df())
+            .mark_violin()
+            .encode(x="cat", y="val")
+            .show_svg()
+        )
+        svg_flipped = (
+            fm.Chart(_violin_df())
+            .mark_violin()
+            .encode(x="cat", y="val")
+            .coord(fm.CoordFlip())
+            .show_svg()
+        )
+        normal_paths = svg_normal.count("<path") + svg_normal.count("<polygon")
+        flipped_paths = svg_flipped.count("<path") + svg_flipped.count("<polygon")
+        # Flipped chart should have at least as many paths as normal orientation.
+        assert flipped_paths >= normal_paths, (
+            f"CoordFlip violin dropped paths: normal={normal_paths}, flipped={flipped_paths}"
+        )
+
+
+class TestCoordFlipBoxplot:
+    """CoordFlip must not silently drop boxplot rect layers."""
+
+    def test_boxplot_normal_orientation_has_data_rects(self):
+        """mark_boxplot() without CoordFlip produces >=2 <rect> elements."""
+        svg = (
+            fm.Chart(_violin_df())
+            .mark_boxplot()
+            .encode(x="cat", y="val")
+            .show_svg()
+        )
+        assert "<svg" in svg
+        rect_count = svg.count("<rect")
+        assert rect_count >= 2, (
+            f"Normal boxplot should have >=2 rects (one IQR box per category); "
+            f"got {rect_count}"
+        )
+
+    def test_boxplot_coord_flip_has_data_rects(self):
+        """mark_boxplot().coord(CoordFlip()) produces >=2 <rect> elements."""
+        svg = (
+            fm.Chart(_violin_df())
+            .mark_boxplot()
+            .encode(x="cat", y="val")
+            .coord(fm.CoordFlip())
+            .show_svg()
+        )
+        assert "<svg" in svg
+        rect_count = svg.count("<rect")
+        assert rect_count >= 2, (
+            f"Flipped boxplot should have >=2 rects (one IQR box per category); "
+            f"got {rect_count}\nSVG snippet:\n{svg[:3000]}"
+        )
+
+    def test_boxplot_coord_flip_rect_count_matches_normal(self):
+        """Flipped boxplot must not drop rect elements relative to normal orientation."""
+        svg_normal = (
+            fm.Chart(_violin_df())
+            .mark_boxplot()
+            .encode(x="cat", y="val")
+            .show_svg()
+        )
+        svg_flipped = (
+            fm.Chart(_violin_df())
+            .mark_boxplot()
+            .encode(x="cat", y="val")
+            .coord(fm.CoordFlip())
+            .show_svg()
+        )
+        normal_rects = svg_normal.count("<rect")
+        flipped_rects = svg_flipped.count("<rect")
+        assert flipped_rects >= normal_rects, (
+            f"CoordFlip boxplot dropped rects: normal={normal_rects}, "
+            f"flipped={flipped_rects}"
+        )
