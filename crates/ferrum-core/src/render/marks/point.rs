@@ -64,6 +64,7 @@ fn emit_shape_nodes(
         ShapeKind::Circle => {
             let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
             style.stroke_opacity = stroke_opacity;
+            style.fill_opacity = fill_opacity;
             style.angle = angle;
             vec![SceneNode::Circle { cx, cy, r, style }]
         }
@@ -71,6 +72,7 @@ fn emit_shape_nodes(
             let s = r * 1.6;
             let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
             style.stroke_opacity = stroke_opacity;
+            style.fill_opacity = fill_opacity;
             style.angle = angle;
             vec![SceneNode::Rect {
                 x: cx - s / 2.0,
@@ -109,6 +111,7 @@ fn emit_shape_nodes(
             let d = r * 1.4;
             let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
             style.stroke_opacity = stroke_opacity;
+            style.fill_opacity = fill_opacity;
             style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
@@ -126,6 +129,7 @@ fn emit_shape_nodes(
             let h = r * 1.4;
             let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
             style.stroke_opacity = stroke_opacity;
+            style.fill_opacity = fill_opacity;
             style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
@@ -142,6 +146,7 @@ fn emit_shape_nodes(
             let h = r * 1.4;
             let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
             style.stroke_opacity = stroke_opacity;
+            style.fill_opacity = fill_opacity;
             style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
@@ -247,6 +252,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
@@ -391,6 +400,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
 
+        let row_fill_opacity = fill_opacity_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+
         let shape_nodes = emit_shape_nodes(
             shape_kind, cx, cy, radius,
             ShapeStyle {
@@ -399,6 +415,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 stroke_width: row_stroke_width,
                 opacity: row_opacity,
                 stroke_opacity: row_stroke_opacity,
+                fill_opacity: row_fill_opacity,
                 stroke_dash_idx: row_stroke_dash,
                 angle: row_angle,
             },

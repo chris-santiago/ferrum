@@ -679,6 +679,72 @@ def test_hexbin_scene_json_has_polygon_nodes():
     assert len(node["rings"][0]) >= 3, "polygon ring must have ≥3 points"
 
 
+def test_hexbin_polygons_inside_plot_area():
+    """Regression: every hex polygon centroid must fall within the plot_area clip
+    rect. If hex coordinates are computed in data space but not transformed to
+    pixel space, they'll be near-zero and outside the plot area — which the WASM
+    tessellator will render as invisible (clipped or off-canvas)."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({"x": rng.normal(0, 2, 2000).tolist(), "y": rng.normal(0, 2, 2000).tolist()})
+    chart = (fm.Chart(df).mark_hex(aggregate="count")
+             .encode(x="x:Q", y="y:Q")
+             .properties(width=450, height=400))
+    scene = _render(chart)
+    clip = scene["panels"][0]["clip"]
+    cx, cy, cw, ch = clip["x"], clip["y"], clip["w"], clip["h"]
+    nodes = scene["panels"][0]["marks"][0]["nodes"]
+    assert len(nodes) >= 10, f"expected ≥10 hex bins; got {len(nodes)}"
+    outside = 0
+    for node in nodes:
+        ring = node["rings"][0]
+        centroid_x = sum(p[0] for p in ring) / len(ring)
+        centroid_y = sum(p[1] for p in ring) / len(ring)
+        if not (cx - 20 <= centroid_x <= cx + cw + 20 and cy - 20 <= centroid_y <= cy + ch + 20):
+            outside += 1
+    assert outside == 0, (
+        f"{outside}/{len(nodes)} hex polygon centroids outside plot area "
+        f"[{cx:.0f},{cy:.0f},{cx+cw:.0f},{cy+ch:.0f}]"
+    )
+
+
+def test_hexbin_polygons_have_nonzero_area():
+    """Regression: hex polygons must have non-degenerate area. A polygon whose
+    vertices all collapse to a single point (area ≈ 0) will tessellate to zero
+    triangles in the WASM renderer, producing invisible geometry."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
+    chart = (fm.Chart(df).mark_hex(aggregate="count")
+             .encode(x="x:Q", y="y:Q")
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    nodes = scene["panels"][0]["marks"][0]["nodes"]
+    for i, node in enumerate(nodes):
+        ring = node["rings"][0]
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        area = abs(sum(xs[j] * ys[(j+1) % len(xs)] - xs[(j+1) % len(xs)] * ys[j]
+                       for j in range(len(xs)))) / 2.0
+        assert area > 1.0, f"hex polygon {i} has degenerate area={area:.4f}"
+
+
+def test_hexbin_polygons_have_fill_color():
+    """Regression: hex polygons must have a non-null fill so the WASM tessellator
+    actually emits triangles. A polygon with fill=null renders as invisible."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
+    chart = (fm.Chart(df).mark_hex(aggregate="count")
+             .encode(x="x:Q", y="y:Q")
+             .properties(width=300, height=300))
+    scene = _render(chart)
+    nodes = scene["panels"][0]["marks"][0]["nodes"]
+    for i, node in enumerate(nodes):
+        fill = node["style"].get("fill")
+        assert fill is not None, f"hex polygon {i} has null fill — will be invisible in WASM"
+
+
 def test_geoshape_scene_json_has_polygon_nodes():
     """Regression: geoshape interactive scene must produce polygon nodes."""
     bare_polygon = {
@@ -697,6 +763,26 @@ def test_geoshape_scene_json_has_polygon_nodes():
     assert node["type"] == "polygon"
     ring = node["rings"][0]
     assert len(ring) >= 4, "projected polygon ring must have ≥4 points"
+
+
+def test_geoshape_polygon_inside_plot_area():
+    """Regression: geoshape projected polygon must be within the plot area."""
+    bare_polygon = {
+        "type": "Polygon",
+        "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
+    }
+    chart = (fm.Chart(bare_polygon).mark_geoshape()
+             .encode(color="__geometry__:N")
+             .coord(fm.CoordGeo(projection="equirectangular"))
+             .properties(width=400, height=300))
+    scene = _render(chart)
+    clip = scene["panels"][0]["clip"]
+    cx, cy, cw, ch = clip["x"], clip["y"], clip["w"], clip["h"]
+    ring = scene["panels"][0]["marks"][0]["nodes"][0]["rings"][0]
+    for pt in ring:
+        assert cx - 5 <= pt[0] <= cx + cw + 5 and cy - 5 <= pt[1] <= cy + ch + 5, (
+            f"geoshape point {pt} outside plot area [{cx:.0f},{cy:.0f},{cx+cw:.0f},{cy+ch:.0f}]"
+        )
     for pt in ring:
         assert 0 <= pt[0] <= 500 and 0 <= pt[1] <= 400, (
             f"projected polygon point {pt} must be in pixel space"

@@ -141,6 +141,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         opacity: ctx.mark_style.opacity,
         stroke_dash: None,
         stroke_opacity: 1.0,
+        fill_opacity: 1.0,
         angle: 0.0,
     };
 

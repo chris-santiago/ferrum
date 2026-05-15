@@ -17,12 +17,13 @@ struct BarBaseStyle<'a> {
     corner_radius: f64,
 }
 
-/// Per-row stroke encoding column vectors loaded from a batch.
+/// Per-row stroke and fill encoding column vectors loaded from a batch.
 struct StrokeChannels {
     opacity: Option<Vec<Option<f64>>>,
     width: Option<Vec<Option<f64>>>,
     dash: Option<Vec<Option<f64>>>,
     angle: Option<Vec<Option<f64>>>,
+    fill_opacity: Option<Vec<Option<f64>>>,
 }
 
 impl StrokeChannels {
@@ -35,6 +36,8 @@ impl StrokeChannels {
             dash: ctx.spec.encoding.stroke_dash.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             angle: ctx.spec.encoding.angle.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            fill_opacity: ctx.spec.encoding.fill_opacity.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
         }
     }
@@ -80,6 +83,12 @@ impl StrokeChannels {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
 
+        let fill_opacity = self.fill_opacity.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
         let fs = ferrum_scene::FillStroke {
             fill,
             stroke,
@@ -87,7 +96,7 @@ impl StrokeChannels {
             opacity,
             stroke_dash: effective_dash,
             stroke_opacity,
-            fill_opacity: 1.0,
+            fill_opacity,
             angle,
         };
         (fs, corner_radius)

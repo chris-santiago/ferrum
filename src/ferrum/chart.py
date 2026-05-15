@@ -54,6 +54,9 @@ _RENDERER_HONORED_CHANNELS = (
     "stroke_width",
     "stroke_dash",
     "angle",
+    # Per-element fill-opacity SVG attribute (distinct from opacity which bakes
+    # into RGBA alpha on the fill color).
+    "fill_opacity",
 )
 # Channels that are silently accepted but produce no visual encoding in the
 # current static SVG renderer.  They are handled by special-case logic in
@@ -62,10 +65,8 @@ _RENDERER_HONORED_CHANNELS = (
 _SILENT_CHANNELS = frozenset((
     "fill",           # alias → color encoding
     "stroke",         # alias → color encoding or mark_style.stroke
-    "fill_opacity",   # alias → opacity encoding
-    # stroke_opacity, stroke_width, stroke_dash, angle are intentionally NOT
-    # listed here: they are wired through Rust mark renderers as per-element
-    # SVG attributes (Task 10 / Task 5 of the silent-drop remediation).
+    # fill_opacity is intentionally NOT listed here: it is wired through Rust
+    # mark renderers as a per-element SVG fill-opacity attribute.
     "detail",         # injected into mark_style.detail
     "key",            # stored for future interactive/animated rendering
     "x_error",        # used through composite mark desugar (mark_errorbar)
@@ -190,9 +191,13 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     1. ``fill`` → ``color`` when ``color`` is not already present.
     2. ``stroke`` → ``color`` when ``color`` is not already present;
        when ``color`` IS present, the stroke encoding is silently dropped.
-    3. ``fill_opacity`` → ``opacity`` when ``opacity`` is not already present.
-    4. ``detail`` → ``mk["detail"]`` via ``setdefault`` (always, regardless
+    3. ``detail`` → ``mk["detail"]`` via ``setdefault`` (always, regardless
        of other channels).
+
+    Note: ``fill_opacity`` is no longer aliased to ``opacity``. It is a
+    first-class renderer-honored channel that emits a per-element SVG
+    ``fill-opacity`` attribute, separate from ``opacity`` (which bakes
+    into the fill RGBA alpha).
 
     Returns the (possibly-modified) ``(enc, mk)`` pair.
     """
@@ -216,10 +221,6 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
             # while color is already mapped, the stroke encoding is silently
             # stored but produces no visual effect.
             pass
-
-    # FillOpacity → opacity
-    if "fill_opacity" in enc and "opacity" not in enc:
-        enc["opacity"] = enc["fill_opacity"]
 
     # Detail → mark_style.detail
     if "detail" in enc:
