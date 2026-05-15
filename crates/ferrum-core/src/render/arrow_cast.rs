@@ -28,11 +28,9 @@ use super::RenderError;
 /// True for Arrow dtypes that should route as continuous/quantitative when
 /// inferring an encoding type from data alone.
 ///
-/// Used by F16 to widen color-channel type inference; today's narrow
-/// `Float64|UInt64` check is preserved at the existing call site so this
-/// helper is currently unused by scale_resolve. Once F16 lands, the
-/// narrow check there switches to this predicate.
-#[allow(dead_code)]
+/// Used by `scale_resolve::build_color_scale` to validate that a column
+/// marked quantitative or temporal is actually a numeric dtype, replacing
+/// the pre-F16 narrow `Float64|UInt64` check.
 pub(crate) fn is_numeric(dtype: &DataType) -> bool {
     matches!(
         dtype,

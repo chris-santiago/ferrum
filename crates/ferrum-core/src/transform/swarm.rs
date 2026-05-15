@@ -17,7 +17,8 @@
 //!
 //! `d = point_size + spacing`, converted from pixels to data-space along the
 //! value axis using `panel_pixel_size` from the TransformContext. Without context,
-//! falls back to `radius_data = 1.0` and emits a one-time warning.
+//! falls back to `radius_data = 1.0`; callers must supply panel_pixel_size for
+//! accurate point placement.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -26,12 +27,9 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
-
-static WARNED_DEFAULT_RADIUS: AtomicBool = AtomicBool::new(false);
 
 fn default_point_size() -> f64 {
     5.0
@@ -249,12 +247,10 @@ pub(crate) fn apply_with_context(
             }
         }
         _ => {
-            if !WARNED_DEFAULT_RADIUS.swap(true, AtomicOrdering::Relaxed) {
-                eprintln!(
-                    "ferrum: Swarm transform has no pixel context; \
-                     using default radius. Point placement may be inaccurate."
-                );
-            }
+            // No pixel context available (e.g. headless / test render without
+            // a panel size). Fall back to radius_data = 1.0 so placement still
+            // runs; callers that need accurate geometry must supply panel_pixel_size
+            // via TransformContext.
             1.0
         }
     };
