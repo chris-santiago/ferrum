@@ -121,6 +121,18 @@ impl ScaleKind {
         }
     }
 
+    /// Return the data-space domain `(lo, hi)` for continuous scales.
+    /// Returns `None` for ordinal scales (no numeric domain).
+    pub(crate) fn data_domain(&self) -> Option<(f64, f64)> {
+        match self {
+            ScaleKind::Ordinal(_) => None,
+            _ => {
+                let [lo, hi] = dispatch_continuous!(self, domain_pair);
+                Some((lo, hi))
+            }
+        }
+    }
+
     /// Pixel-range used when constructing this scale (lo, hi).
     pub fn pixel_range(&self) -> (f64, f64) {
         let r = dispatch_all!(self, range_pair);

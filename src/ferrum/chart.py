@@ -4464,7 +4464,23 @@ class Chart:
             if axis in enc:
                 ch = enc[axis]
                 if ch.field is None:
-                    continue  # Tooltip(*fields) etc. with no single field
+                    # Multi-field Tooltip(*fields) — serialize as tooltip_fields JSON list.
+                    if axis == "tooltip" and hasattr(ch, "_field_list") and ch._field_list:
+                        tf_list = []
+                        for f in ch._field_list:
+                            if isinstance(f, str):
+                                tf_list.append({"field": f})
+                            elif hasattr(f, "field") and f.field:
+                                entry: dict = {"field": f.field}
+                                d_f = f.to_encoding_spec_dict()
+                                if d_f.get("format"):
+                                    entry["format"] = d_f["format"]
+                                if d_f.get("title"):
+                                    entry["title"] = d_f["title"]
+                                tf_list.append(entry)
+                        if tf_list:
+                            kw["tooltip_fields"] = json.dumps(tf_list)
+                    continue
                 # Phase 9: skip channels whose field is an unresolved Repeat
                 # placeholder. RepeatChart.expand() materializes concrete charts
                 # before render; the bare template's spec just omits placeholder

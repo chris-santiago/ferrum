@@ -441,7 +441,7 @@ def merge_scene_graphs(
 def _offset_nodes(nodes: list, dx: float, dy: float) -> None:
     """Shift SceneNode positions by (dx, dy) in-place."""
     for node in nodes:
-        op = node.get("op")
+        op = node.get("type")  # SceneNode uses "type" tag; PathCmd uses "op"
         if op == "circle":
             node["cx"] = node.get("cx", 0) + dx
             node["cy"] = node.get("cy", 0) + dy

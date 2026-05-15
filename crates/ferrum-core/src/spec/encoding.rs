@@ -466,6 +466,9 @@ pub struct Encoding {
     // Phase 10 gallery-defaults: tooltip field emitted as SVG <title> on each mark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<EncodingSpec>,
+    // Multi-field tooltip support: when set, takes precedence over `tooltip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip_fields: Option<Vec<EncodingSpec>>,
     // Phase 10 gallery-defaults: href field wraps marks in SVG <a xlink:href=...>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<EncodingSpec>,
@@ -539,6 +542,9 @@ impl Encoding {
         inherit(&mut self.y2, &parent.y2);
         inherit(&mut self.text, &parent.text);
         inherit(&mut self.tooltip, &parent.tooltip);
+        if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
+            self.tooltip_fields = parent.tooltip_fields.clone();
+        }
         inherit(&mut self.href, &parent.href);
         inherit(&mut self.description, &parent.description);
         inherit(&mut self.key, &parent.key);
@@ -560,7 +566,7 @@ impl Encoding {
                 $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
             };
         }
-        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description, key);
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key);
     }
 }
 

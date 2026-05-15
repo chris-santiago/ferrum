@@ -94,6 +94,7 @@ impl ChartSpec {
         x2 = None, y2 = None,                                 // NEW Phase 8b Task 22 (ribbon)
         text = None,                                          // Phase 10c (mark_text label channel)
         tooltip = None, href = None, description = None,      // Phase 10 gallery-defaults
+        tooltip_fields = None,                                // Phase 11a multi-field tooltip
         data = None, transforms = None,
         layers = None,                                        // from Task 1
         coord = None,                                         // from Task 4 (11d: accepts str or dict)
@@ -121,6 +122,7 @@ impl ChartSpec {
         tooltip: Option<&Bound<'_, PyAny>>,
         href: Option<&Bound<'_, PyAny>>,
         description: Option<&Bound<'_, PyAny>>,
+        tooltip_fields: Option<&str>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
         layers: Option<&Bound<'_, PyAny>>,
@@ -150,6 +152,10 @@ impl ChartSpec {
         let tooltip = tooltip.map(coerce_encoding).transpose()?;
         let href = href.map(coerce_encoding).transpose()?;
         let description = description.map(coerce_encoding).transpose()?;
+        let tooltip_fields: Option<Vec<crate::spec::encoding::EncodingSpec>> = tooltip_fields
+            .map(|s| serde_json::from_str(s)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("tooltip_fields JSON: {e}"))))
+            .transpose()?;
         let key = key.map(coerce_encoding).transpose()?;
 
         let data = match data {
@@ -237,7 +243,7 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, href, description, key },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key },
             transforms,
             facet,
             layers,

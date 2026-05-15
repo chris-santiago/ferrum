@@ -228,7 +228,7 @@ pub(crate) use super::arrow_cast::{col_as_f64, col_as_str};
 /// Constructed once per draw call; individual mark renderers call
 /// `open_metadata`/`close_metadata` around each mark element.
 pub struct MetadataColumns {
-    pub tooltip: Option<Vec<Option<String>>>,
+    pub tooltip_cols: Vec<(String, Vec<Option<String>>)>,
     pub href: Option<Vec<Option<String>>>,
     pub description: Option<Vec<Option<String>>>,
 }
@@ -238,17 +238,35 @@ impl MetadataColumns {
     /// corresponding encoding is present. Falls back to f64 → string
     /// conversion when the column is numeric.
     pub fn from_ctx(ctx: &DrawCtx) -> Self {
-        let tooltip = ctx.spec.encoding.tooltip.as_ref().and_then(|e| {
-            col_as_str(ctx.batch, &e.field)
+        // Collect tooltip columns: use tooltip_fields if present, fall back to single tooltip.
+        let tooltip_specs: Vec<&crate::spec::encoding::EncodingSpec> =
+            if let Some(fields) = ctx.spec.encoding.tooltip_fields.as_ref() {
+                fields.iter().collect()
+            } else if let Some(t) = ctx.spec.encoding.tooltip.as_ref() {
+                vec![t]
+            } else {
+                vec![]
+            };
+
+        let read_col = |field: &str| -> Option<Vec<Option<String>>> {
+            col_as_str(ctx.batch, field)
                 .ok()
                 .or_else(|| {
-                    col_as_f64(ctx.batch, &e.field).ok().map(|vals| {
+                    col_as_f64(ctx.batch, field).ok().map(|vals| {
                         vals.into_iter()
-                            .map(|v| v.map(|f| format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()))
+                            .map(|v| v.map(|f| {
+                                format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()
+                            }))
                             .collect()
                     })
                 })
-        });
+        };
+
+        let tooltip_cols: Vec<(String, Vec<Option<String>>)> = tooltip_specs
+            .iter()
+            .filter_map(|e| read_col(&e.field).map(|col| (e.field.clone(), col)))
+            .collect();
+
         let href = ctx.spec.encoding.href.as_ref().and_then(|e| {
             col_as_str(ctx.batch, &e.field).ok()
         });
@@ -263,7 +281,7 @@ impl MetadataColumns {
                     })
                 })
         });
-        MetadataColumns { tooltip, href, description }
+        MetadataColumns { tooltip_cols, href, description }
     }
 
 }
@@ -298,24 +316,26 @@ impl MarkBuildResult {
 impl MetadataColumns {
     pub fn build_metadata(
         &self,
-        ctx: &DrawCtx,
+        _ctx: &DrawCtx,
     ) -> (Option<Vec<FsTooltipContent>>, Option<Vec<Option<String>>>, Option<Vec<Option<String>>>) {
-        let tooltip_field_name = ctx.spec.encoding.tooltip
-            .as_ref()
-            .map(|e| e.field.as_str())
-            .unwrap_or("value");
-        let tooltips = self.tooltip.as_ref().map(|col| {
-            col.iter()
-                .map(|opt| FsTooltipContent {
-                    fields: vec![FsTooltipField {
-                        name: tooltip_field_name.to_string(),
-                        value: opt.clone().unwrap_or_default(),
-                    }],
-                })
-                .collect()
-        });
-        let hrefs = self.href.as_ref().map(|col| col.clone());
-        let descriptions = self.description.as_ref().map(|col| col.clone());
+        let tooltips = if self.tooltip_cols.is_empty() {
+            None
+        } else {
+            // Use the first col's length as the row count; all cols should have the same length.
+            let n = self.tooltip_cols.first().map(|(_, c)| c.len()).unwrap_or(0);
+            Some((0..n).map(|i| {
+                FsTooltipContent {
+                    fields: self.tooltip_cols.iter()
+                        .map(|(name, col)| FsTooltipField {
+                            name: name.clone(),
+                            value: col.get(i).and_then(|v| v.clone()).unwrap_or_default(),
+                        })
+                        .collect(),
+                }
+            }).collect())
+        };
+        let hrefs = self.href.clone();
+        let descriptions = self.description.clone();
         (tooltips, hrefs, descriptions)
     }
 }

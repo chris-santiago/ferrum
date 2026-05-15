@@ -241,6 +241,22 @@ pub fn build_scene(
                 clip: true,
             });
 
+        // Inject computed axis domains into the scene coord so the JS zoom handler
+        // can read the actual displayed domain even for auto-scaled charts.
+        let scene_coord = match scene_coord {
+            CoordKind::Cartesian { x_domain: None, y_domain: None, expand, clip } => {
+                let x_dom = scales.x.data_domain();
+                let y_dom = scales.y.data_domain();
+                CoordKind::Cartesian { x_domain: x_dom, y_domain: y_dom, expand, clip }
+            }
+            CoordKind::Fixed { x_domain: None, y_domain: None, ratio, expand, clip } => {
+                let x_dom = scales.x.data_domain();
+                let y_dom = scales.y.data_domain();
+                CoordKind::Fixed { x_domain: x_dom, y_domain: y_dom, ratio, expand, clip }
+            }
+            other => other,
+        };
+
         panels.push(Panel {
             id: panel_idx,
             plot_area,
