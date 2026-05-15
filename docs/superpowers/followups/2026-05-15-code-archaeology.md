@@ -106,17 +106,17 @@
 | `ferrum.color` namespace (`palette()`, `to_hex()`, `diverging_palette()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `ferrum.config` namespace (`set_max_rows()`, `set_renderer()`, `set_default_width/height()`, `set_raster_threshold()`, `set_raster_behavior()`, `set_default_backend()`, `set_font_paths()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `Axis(...)` value class | `ferrum-spec.md §3.7` | Not publicly constructable; `axis=` kwarg accepted but stored as opaque dict and ignored by Rust renderer |
-| `Legend(...)` kwargs beyond `disabled` | `ferrum-spec.md §3.7` | ✅ `orient`, `title`, `format`, `columns` confirmed working (`10c1931`). Remaining kwargs (`values`, `tick_count`, `label_font_size`, `gradient_length`, `gradient_thickness`, `direction`, `type`) untested — may or may not be wired through the opaque `extra` map |
+| `Legend(...)` kwargs | `ferrum-spec.md §3.7` | ✅ All 11 kwargs confirmed: `orient`, `title`, `format`, `columns` (`10c1931`) + `tickCount`, `labelFontSize`, `gradientLength`, `gradientThickness`, `direction`, `values`, `type` (wired through `LegendOverrides` in layout). 14 regression tests. |
 | Auto-raster policy (`raster_threshold`, `raster_behavior`, `raster_aggregate`, `raster_cmap`) | `ferrum-spec.md §3.16/3.18` | Documented, not implemented |
 | `RenderConfig` Python class (public) | `ferrum-spec.md §3.16` | No public `RenderConfig` class exists; `embed_fonts=False` is untestable |
 | `ferrum.Grid` utility class | `ferrum-spec.md §3.19` | Absent from source |
 | `ferrum.WindowTransform` | `ferrum-spec.md §3.19` | Absent from source |
 | Full palette library (cyclical schemes, tealblues, brewer extended sequential) | `ferrum-spec.md §3.13` | Rejected at validation time |
-| `mark_text` multiline via `<tspan>` | `docs/superpowers/followups/2026-05-12-mark-text-multiline-tspan.md` | `\n` in text collapses to single space in SVG; `marks/text.rs` does not split on `\n` |
+| `mark_text` multiline via `<tspan>` | `docs/superpowers/followups/2026-05-12-mark-text-multiline-tspan.md` | ✅ Fixed — `SvgBuffer::text()` in `svg.rs` splits `\n` into `<tspan>` elements with `dy="1.2em"` line spacing. Single-line text unchanged. 6 regression tests + 4 Rust unit tests. |
 | Sixel terminal rendering | `ferrum-spec.md §3.16` | **Intentionally dropped (2026-05-15)** — niche format, inconsistent across terminal emulators, audience is Jupyter/browser-first |
 | `SceneNode::Raw` support in WASM renderer | `crates/ferrum-wasm/src/scene_load.rs:181` | Silently skipped with `console.warn` only |
 | `share_x` / `share_y` enforcement in grid compositor | `crates/ferrum-core/src/render/grid_compose.rs:4` | Accepted, silently ignored — alignment left to caller |
-| Axis tick-label formatting via `format=` on X/Y | `crates/ferrum-core/src/render/format.rs:1` | `format=` only honored for `mark_text`, not axis ticks |
+| Axis tick-label formatting via `format=` on X/Y | `crates/ferrum-core/src/render/format.rs:1` | ✅ Fixed `fee904d` — `apply_tick_format` rewritten with D3-subset parser: `f`, `e`, `g`, `%`, `,`, `d`, `s` (SI prefix) format specs all honored. Rust unit tests + Python behavioral tests. |
 | `compare=` routing in `gain_chart`, `lift_chart`, `discrimination_threshold_chart` | `docs/superpowers/followups/2026-05-12-schwabish-audit-remaining.md` | Only `roc_chart`, `pr_chart`, `calibration_chart` route the explicit-kwarg `compare=` form |
 
 ---
@@ -164,9 +164,9 @@
 ### Medium (spec-documented but silently dropped)
 8. ~~Wire the 11 silent-drop mark kwargs through `MarkKwargsSpec`~~ — ✅ resolved (10/11 already wired; 1 boxplot `width=` alias added `82a1496`)
 9. ~~Implement `Description` → `<desc>` SVG element (TODO(G1))~~ — ✅ fixed `6e45ddd` (chart_description on ChartSpec + SceneGraph)
-10. Implement `mark_text` multiline via `<tspan>` splitting on `\n`
-11. Wire `format=` on X/Y encodings to axis tick-label formatters
-12. Wire `Axis(...)` and `Legend(...)` full kwarg sets into Rust renderer
+10. ~~Implement `mark_text` multiline via `<tspan>` splitting on `\n`~~ — ✅ fixed in `svg.rs` (tspan with `dy="1.2em"`)
+11. ~~Wire `format=` on X/Y encodings to axis tick-label formatters~~ — ✅ fixed `fee904d` (D3-subset format parser)
+12. ~~Wire `Axis(...)` and `Legend(...)` full kwarg sets~~ — ✅ Legend fully wired (11 kwargs). `Axis(...)` value class intentionally out of scope; encoding-level axis kwargs already work.
 
 ### Low (missing namespaces / Phase 12 scope)
 13. ~~Scaffold `ferrum.data`~~ — dropped (users use sklearn/seaborn). Scaffold `ferrum.color`, `ferrum.config` namespaces

@@ -889,14 +889,13 @@ struct ParsedFmt {
 /// Parse a D3-subset format string into a `ParsedFmt`.
 fn parse_d3_fmt(fmt: &str) -> ParsedFmt {
     let mut s = fmt;
-    let thousands = if s.starts_with(',') {
-        s = &s[1..];
+    let thousands = if let Some(rest) = s.strip_prefix(',') {
+        s = rest;
         true
     } else {
         false
     };
-    let (precision, s) = if s.starts_with('.') {
-        let rest = &s[1..];
+    let (precision, s) = if let Some(rest) = s.strip_prefix('.') {
         let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
         let prec: Option<usize> = if end > 0 { rest[..end].parse().ok() } else { None };
         (prec, &rest[end..])

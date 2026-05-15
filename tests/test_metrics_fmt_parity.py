@@ -48,10 +48,18 @@ def _rust_metrics_text(seed: int = 0) -> str:
                           inject_metrics=True, output="fitted"))
     )
     svg = (line_layer + text_layer).show_svg()
-    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg, re.DOTALL)
-    metric = [t for t in texts if "R" in t and "RMSE" in t and "MAE" in t]
-    assert metric, "Rust path did not emit a metric-text element"
-    return metric[0]
+    # With multiline tspan support, metric text may be split across <tspan>
+    # elements. Extract both plain <text>content</text> and <text><tspan>...
+    # </tspan></text> forms, joining tspan lines with \n.
+    metrics = []
+    for m in re.finditer(r"<text[^>]*>(.*?)</text>", svg, re.DOTALL):
+        inner = m.group(1)
+        tspan_lines = re.findall(r"<tspan[^>]*>([^<]+)</tspan>", inner)
+        text = "\n".join(tspan_lines) if tspan_lines else inner
+        if "R" in text and "RMSE" in text and "MAE" in text:
+            metrics.append(text)
+    assert metrics, "Rust path did not emit a metric-text element"
+    return metrics[0]
 
 
 def _python_metrics_text(seed: int = 0) -> str:
