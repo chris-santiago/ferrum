@@ -225,13 +225,36 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     return enc, mk
 
 
+class _NamedTransform:
+    """Pairs a PyO3 transform object with an explicit name for chart-level serialization.
+
+    When a single-mark chart's transforms are promoted to chart level during
+    ``+`` composition, we need them to be *named* in the Rust pipeline so that
+    ``FINAL_OUTPUT_KEY`` remains the original input batch (named transforms do
+    not advance the unnamed chain).  The corresponding ``_Layer`` sets
+    ``data_source`` to the same name so it reads the correct output.
+    """
+    __slots__ = ("transform", "name")
+
+    def __init__(self, transform: object, name: str) -> None:
+        self.transform = transform
+        self.name = name
+
+    def _inner_eq(self, other: object) -> bool:
+        inner = other.transform if isinstance(other, _NamedTransform) else other
+        return bool(self.transform == inner)
+
+
 def _expand_layers(c: "Chart") -> tuple[list, list]:
     """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
 
     Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
     ``None``) — splat their layers as-is and carry their top-level transforms
-    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list
-    with the chart's own mark/encoding/etc.
+    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list.
+
+    Transforms are returned as plain PyO3 objects.  The named-transform path
+    (routing a layer's output to a specific ``data_source``) is handled in
+    ``__add__`` when the LHS chart has no transforms and the RHS does.
     """
     if c._layers is not None:
         return list(c._layers), list(c._transforms or [])
@@ -249,16 +272,19 @@ def _expand_layers(c: "Chart") -> tuple[list, list]:
 def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
     # Merge RHS top-level transforms into the combined chart's top-level
     # pipeline.  Deduplicate by identity first (fast), then by value equality
-    # (PyO3 transform classes implement __eq__ via #[pyclass(eq, ...)]).
+    # (PyO3 transform classes implement __eq__ via #[pyclass(eq, ...)];
+    # _NamedTransform defers to its inner transform for equality checks).
     # Value deduplication prevents the same logical transform from running
-    # twice when both sides of + use an identical transform object (e.g. the
-    # same Smooth(inject_metrics=True) on a line layer and a text layer).
+    # twice when both sides of + use an identical transform object.
     existing = list(new._transforms or [])
     existing_ids = {id(t) for t in existing}
     for t in rhs_top_xforms:
         if id(t) in existing_ids:
             continue
-        if any(t == e for e in existing):
+        # Value dedup: unwrap _NamedTransform for the equality check.
+        inner_t = t.transform if isinstance(t, _NamedTransform) else t
+        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e)
+               for e in existing):
             continue
         existing.append(t)
         existing_ids.add(id(t))
@@ -3973,8 +3999,26 @@ class Chart:
             new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
         lhs_layers, _ = _expand_layers(lhs)  # lhs top xforms already in `new` via _clone()
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+
+        # Named-transform routing: when the LHS contributes no chart-level
+        # transforms (new._transforms is empty after clone) but the RHS does,
+        # wrap the RHS transforms as _NamedTransform so the Rust pipeline
+        # publishes them under a named key without advancing FINAL_OUTPUT_KEY.
+        # Layers without data_source then continue to read the original input
+        # batch (the LHS scatter points), while the RHS layers read their
+        # named output (the smooth curve / fit).  When the LHS already has
+        # transforms we keep the existing behaviour: both sides share the same
+        # pipeline tail via FINAL_OUTPUT_KEY.
+        if not new._transforms and rhs_top_xforms:
+            auto_name = f"_auto_{id(rhs_top_xforms[-1]) & 0xFFFFFFFF:08x}"
+            named_xforms = [_NamedTransform(t, auto_name) for t in rhs_top_xforms]
+            from dataclasses import replace as _dc_replace
+            rhs_layers = [_dc_replace(l, data_source=auto_name) for l in rhs_layers]
+            _merge_top_transforms(new, named_xforms)
+        else:
+            _merge_top_transforms(new, rhs_top_xforms)
+
         new._layers = lhs_layers + rhs_layers
-        _merge_top_transforms(new, rhs_top_xforms)
         _warn_on_layer_conflicts(lhs, rhs)
         return new
 
@@ -4290,6 +4334,27 @@ class Chart:
         parsed = json.loads(dummy.to_json())
         return parsed.get("transforms", [])
 
+    @staticmethod
+    def _transforms_to_json_list_named(transforms: list) -> list:
+        """Like ``_transforms_to_json_list`` but handles ``_NamedTransform`` wrappers.
+
+        For each ``_NamedTransform``, serializes the inner transform and injects
+        the ``name`` field.  Plain PyO3 transform objects are serialized as-is.
+        Mixing named and unnamed in one list is valid — unnamed transforms chain,
+        named transforms fan-out without advancing ``FINAL_OUTPUT_KEY``.
+        """
+        if not transforms:
+            return []
+        from ferrum import ChartSpec
+
+        plain = [t.transform if isinstance(t, _NamedTransform) else t for t in transforms]
+        dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=plain)
+        json_list = json.loads(dummy.to_json()).get("transforms", [])
+        for i, t in enumerate(transforms):
+            if isinstance(t, _NamedTransform) and i < len(json_list):
+                json_list[i]["name"] = t.name
+        return json_list
+
     def _build_layers_list(self) -> list:
         """Convert internal _layers to a list of JSON-serializable dicts for Rust.
 
@@ -4552,7 +4617,14 @@ class Chart:
                 field = d.pop("field")
                 kw[axis] = EncodingSpec(field, **d)
         if resolved._transforms:
-            kw["transforms"] = list(resolved._transforms)
+            # If any transform is a _NamedTransform, serialize everything via
+            # JSON so we can inject the name field that the Rust pipeline needs
+            # to route this layer's output without advancing FINAL_OUTPUT_KEY.
+            if any(isinstance(t, _NamedTransform) for t in resolved._transforms):
+                xform_json = Chart._transforms_to_json_list_named(resolved._transforms)
+                kw["transforms_json"] = json.dumps(xform_json)
+            else:
+                kw["transforms"] = list(resolved._transforms)
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:

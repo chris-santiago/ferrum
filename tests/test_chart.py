@@ -208,6 +208,90 @@ def test_layered_smooth_renders_paths():
     )
 
 
+# ---- BUG-5b: scatter layer reads smooth output instead of original data ----
+
+def test_layered_smooth_scatter_count_matches_original_data():
+    """Scatter circle count must equal the original row count, not the smooth grid size.
+
+    The Smooth transform outputs 200 evenly-spaced grid points by default.
+    When points + smooth is composed, the scatter layer must read from the
+    original data (60 rows), not from FINAL_OUTPUT_KEY after the smooth runs.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    n = 60
+    df = pl.DataFrame({
+        "x": np.linspace(1.0, 10.0, n),
+        "y": np.linspace(2.0, 12.0, n) + rng.normal(0, 0.8, n),
+    })
+    points = Chart(df).mark_point().encode(x="x", y="y")
+    trend  = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
+    svg    = (points + trend).show_svg()
+    circle_count = svg.count("<circle")
+    assert circle_count == n, (
+        f"Expected {n} scatter circles (original row count), got {circle_count}.\n"
+        f"Scatter layer is reading smooth-curve output instead of original data."
+    )
+
+
+def test_layered_smooth_real_column_names_do_not_crash():
+    """Composing scatter + smooth with non-x/y column names must not raise.
+
+    Previously, the smooth transform replaced FINAL_OUTPUT_KEY with a batch
+    whose columns are 'x', 'y', 'ci_lower', 'ci_upper'.  The scatter encoding
+    referenced 'sepal_length' / 'petal_length', which don't exist in that
+    output — causing a ValueError at render time.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    n = 50
+    df = pl.DataFrame({
+        "sepal_length": np.linspace(4.0, 8.0, n),
+        "petal_length": np.linspace(1.0, 7.0, n) + rng.normal(0, 0.3, n),
+    })
+    points = Chart(df).mark_point().encode(x="sepal_length", y="petal_length")
+    trend  = Chart(df).mark_smooth(method="lm").encode(x="sepal_length", y="petal_length")
+    svg    = (points + trend).show_svg()  # must not raise
+    assert svg.count("<circle") == n, (
+        f"Expected {n} scatter circles, got {svg.count('<circle')}."
+    )
+    assert svg.count("<polyline") > 0, "Expected at least one smooth trend line."
+
+
+def test_layered_smooth_grouped_by_color_correct_counts():
+    """With color grouping, scatter count = total rows; line count = number of groups.
+
+    150 rows across 3 species → 150 scatter circles + 3 smooth polylines.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    n_per_group = 50
+    df = pl.DataFrame({
+        "x": np.tile(np.linspace(1.0, 10.0, n_per_group), 3),
+        "y": np.concatenate([
+            np.linspace(1.0, 10.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
+            np.linspace(2.0, 14.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
+            np.linspace(0.5, 6.0,  n_per_group) + rng.normal(0, 0.5, n_per_group),
+        ]),
+        "species": ["setosa"] * n_per_group + ["versicolor"] * n_per_group + ["virginica"] * n_per_group,
+    })
+    total = n_per_group * 3
+    points = Chart(df).mark_point().encode(x="x", y="y", color="species:N")
+    # groupby must be set explicitly on mark_smooth for per-species fitting.
+    trend  = Chart(df).mark_smooth(method="lm", groupby="species").encode(x="x", y="y", color="species:N")
+    svg    = (points + trend).show_svg()
+    # The SVG also contains 3 legend circles (one per group), so total
+    # circles = data circles + legend circles.
+    n_groups = 3
+    assert svg.count("<circle")   == total + n_groups, (
+        f"Expected {total + n_groups} circles ({total} data + {n_groups} legend), "
+        f"got {svg.count('<circle')}."
+    )
+    assert svg.count("<polyline") == n_groups, (
+        f"Expected {n_groups} smooth lines (one per species), got {svg.count('<polyline')}."
+    )
+
+
 # ---- BUG-4: mark_shap_waterfall(sample_idx=-1) sentinel regression ----
 
 def test_mark_shap_waterfall_default_raises_immediately():

@@ -101,7 +101,7 @@ impl ChartSpec {
         text = None,                                          // Phase 10c (mark_text label channel)
         tooltip = None, href = None, description = None,      // Phase 10 gallery-defaults
         tooltip_fields = None,                                // Phase 11a multi-field tooltip
-        data = None, transforms = None,
+        data = None, transforms = None, transforms_json = None,
         layers = None,                                        // from Task 1
         coord = None,                                         // from Task 4 (11d: accepts str or dict)
         facet = None,                                         // NEW here
@@ -131,6 +131,7 @@ impl ChartSpec {
         tooltip_fields: Option<&str>,
         data: Option<&str>,
         transforms: Option<&Bound<'_, PyAny>>,
+        transforms_json: Option<&str>,
         layers: Option<&Bound<'_, PyAny>>,
         coord: Option<&Bound<'_, PyAny>>,
         facet: Option<&Bound<'_, PyAny>>,
@@ -172,9 +173,14 @@ impl ChartSpec {
             Some(name) => DataRef::Named { name: name.to_string() },
         };
 
-        let transforms = match transforms {
-            None => Vec::new(),
-            Some(obj) => coerce_transforms(obj)?,
+        let transforms = match (transforms, transforms_json) {
+            (Some(_), Some(_)) => return Err(PyValueError::new_err(
+                "provide transforms or transforms_json, not both",
+            )),
+            (Some(obj), None) => coerce_transforms(obj)?,
+            (None, Some(json)) => serde_json::from_str(json)
+                .map_err(|e| PyValueError::new_err(format!("transforms_json: {e}")))?,
+            (None, None) => Vec::new(),
         };
 
         let layers = match layers {
