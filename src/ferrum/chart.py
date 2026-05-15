@@ -239,22 +239,30 @@ def _expand_layers(c: "Chart") -> tuple[list, list]:
         _Layer(
             mark=c._mark,
             encoding=dict(c._encoding),
-            transforms=list(c._transforms),
+            transforms=[],
             mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
             position=c._position,
         )
-    ], []
+    ], list(c._transforms or [])
 
 
 def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
-    # Merge RHS top-level transforms (e.g. composite-mark expansion produced
-    # them) into the combined chart's top-level pipeline, deduping by identity
-    # to avoid re-running a transform shared across layers.
-    existing_ids = {id(t) for t in (new._transforms or [])}
+    # Merge RHS top-level transforms into the combined chart's top-level
+    # pipeline.  Deduplicate by identity first (fast), then by value equality
+    # (PyO3 transform classes implement __eq__ via #[pyclass(eq, ...)]).
+    # Value deduplication prevents the same logical transform from running
+    # twice when both sides of + use an identical transform object (e.g. the
+    # same Smooth(inject_metrics=True) on a line layer and a text layer).
+    existing = list(new._transforms or [])
+    existing_ids = {id(t) for t in existing}
     for t in rhs_top_xforms:
-        if id(t) not in existing_ids:
-            new._transforms = list(new._transforms or []) + [t]
-            existing_ids.add(id(t))
+        if id(t) in existing_ids:
+            continue
+        if any(t == e for e in existing):
+            continue
+        existing.append(t)
+        existing_ids.add(id(t))
+    new._transforms = existing
 
 
 def _warn_on_layer_conflicts(lhs: "Chart", rhs: "Chart") -> None:

@@ -182,6 +182,32 @@ def test_add_differing_columns_null_pad_merges():
     assert unified["a"][2:].null_count() == 2
 
 
+# ---- BUG-5: mark_smooth transforms lost when layered via + ----
+
+def test_layered_smooth_renders_paths():
+    """points + smooth via + must render <path> elements for the trend line.
+
+    Regression: _expand_layers placed single-mark transforms into _Layer.transforms
+    instead of top-level transforms.  The Rust renderer only executes spec.transforms
+    (chart-level); layer.transforms is stored but never executed, so the Smooth
+    output batch was never produced and zero <path> elements appeared in the SVG.
+    """
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        "y": [2.1, 3.9, 6.0, 8.2, 10.1, 12.0, 13.8, 16.1, 18.0, 20.2],
+    })
+    points = Chart(df).mark_point().encode(x="x", y="y")
+    trend = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
+    chart = points + trend
+    svg = chart.show_svg()
+    # ferrum renders line marks as <polyline>, not <path>.
+    line_count = svg.count("<polyline")
+    assert line_count > 0, (
+        f"Expected at least one <polyline> element for the smooth trend line, got 0.\n"
+        f"The Smooth transform on the trend layer was silently dropped."
+    )
+
+
 # ---- BUG-4: mark_shap_waterfall(sample_idx=-1) sentinel regression ----
 
 def test_mark_shap_waterfall_default_raises_immediately():
