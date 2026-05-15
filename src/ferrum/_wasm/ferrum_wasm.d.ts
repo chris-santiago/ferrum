@@ -7,6 +7,11 @@ export class WasmRenderer {
     [Symbol.dispose](): void;
     static create(canvas: HTMLCanvasElement): Promise<WasmRenderer>;
     /**
+     * `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
+     * tooltip data is available for this batch/instance.
+     */
+    getTooltip(panel_id: number, batch_idx: number, node_idx: number): string;
+    /**
      * Hit-test a click at canvas pixel (x, y), update selection state, apply
      * conditional encodings (dim non-selected marks), re-render frame, and
      * return the new selection state as a JSON string.
@@ -15,6 +20,13 @@ export class WasmRenderer {
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      */
     handleClick(x: number, y: number): string;
+    /**
+     * Return tooltip JSON for a specific mark instance.
+     *
+     * `panel_id` and `batch_idx` identify the packed batch; `node_idx` is
+     * the index of the mark within that batch.  Returns a JSON object
+     */
+    hitTestAt(x: number, y: number): string;
     loadScene(scene_json: string, packed_data: Uint8Array): string;
     /**
      * Apply a pan delta on the given panel and re-render via GPU affine transform.
@@ -64,7 +76,9 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
     readonly wasmrenderer_create: (a: any) => any;
+    readonly wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

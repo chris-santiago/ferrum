@@ -26,6 +26,26 @@ export class WasmRenderer {
         return ret;
     }
     /**
+     * `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
+     * tooltip data is available for this batch/instance.
+     * @param {number} panel_id
+     * @param {number} batch_idx
+     * @param {number} node_idx
+     * @returns {string}
+     */
+    getTooltip(panel_id, batch_idx, node_idx) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmrenderer_getTooltip(this.__wbg_ptr, panel_id, batch_idx, node_idx);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Hit-test a click at canvas pixel (x, y), update selection state, apply
      * conditional encodings (dim non-selected marks), re-render frame, and
      * return the new selection state as a JSON string.
@@ -52,6 +72,27 @@ export class WasmRenderer {
             return getStringFromWasm0(ptr1, len1);
         } finally {
             wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * Return tooltip JSON for a specific mark instance.
+     *
+     * `panel_id` and `batch_idx` identify the packed batch; `node_idx` is
+     * the index of the mark within that batch.  Returns a JSON object
+     * @param {number} x
+     * @param {number} y
+     * @returns {string}
+     */
+    hitTestAt(x, y) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmrenderer_hitTestAt(this.__wbg_ptr, x, y);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
     /**
@@ -1222,7 +1263,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 173, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 174, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02);
             return ret;
         },

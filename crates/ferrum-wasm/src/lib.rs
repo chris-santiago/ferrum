@@ -171,6 +171,7 @@ impl WasmRenderer {
                 background: tr.new_data.background,
                 width: tr.new_data.width,
                 height: tr.new_data.height,
+                packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -227,6 +228,7 @@ impl WasmRenderer {
             background: loaded.data.background,
             width: loaded.data.width,
             height: loaded.data.height,
+            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
         };
         let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
         render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
@@ -292,6 +294,41 @@ impl WasmRenderer {
             .surface
             .configure(&self.gpu.device, &self.gpu.config);
         let _ = self.render_frame_js();
+    }
+
+    /// Return tooltip JSON for a specific mark instance.
+    ///
+    /// `panel_id` and `batch_idx` identify the packed batch; `node_idx` is
+    /// the index of the mark within that batch.  Returns a JSON object
+    #[wasm_bindgen(js_name = "hitTestAt")]
+    pub fn hit_test_at(&self, x: f32, y: f32) -> String {
+        let Some(loaded) = &self.loaded else { return "{}".to_string(); };
+        match hit_test::hit_test_nearest(
+            &loaded.scene.panels, x as f64, y as f64, &self.zoom,
+        ) {
+            Some(hr) => format!(
+                "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
+                hr.panel_id, hr.batch_idx, hr.node_idx
+            ),
+            None => "{}".to_string(),
+        }
+    }
+
+    /// `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
+    /// tooltip data is available for this batch/instance.
+    #[wasm_bindgen(js_name = "getTooltip")]
+    pub fn get_tooltip(&self, panel_id: u32, batch_idx: u32, node_idx: u32) -> String {
+        let Some(loaded) = &self.loaded else {
+            return "{}".to_string();
+        };
+        let key = (panel_id, batch_idx);
+        let Some(meta) = loaded.data.packed_batch_meta.get(&key) else {
+            return "{}".to_string();
+        };
+        let Some(ref tooltip_bytes) = meta.tooltip_bytes else {
+            return "{}".to_string();
+        };
+        scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize)
     }
 }
 

@@ -143,12 +143,28 @@ async function _render(container, sceneJson, model) {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     // Tooltip hover: inverse-transform mouse into original mark space before hit-testing.
     const [hx, hy] = _invZoom(mx, my);
+    let tooltipData = null;
+    // Try JS hit-test first (non-packed batches with nodes).
     const hh = _hitTest(marks, hx, hy);
     if (hh && hh.batch.tooltips && hh.batch.tooltips[hh.idx]) {
-      const t = hh.batch.tooltips[hh.idx];
+      tooltipData = hh.batch.tooltips[hh.idx];
+    }
+    // Fallback: WASM hit-test + getTooltip for packed batches (empty nodes).
+    if (!tooltipData && renderer) {
+      try {
+        const hitJson = renderer.hitTestAt(mx, my);
+        const hit = JSON.parse(hitJson);
+        if (hit.panel != null && hit.batch != null && hit.idx != null) {
+          const tJson = renderer.getTooltip(hit.panel, hit.batch, hit.idx);
+          const parsed = JSON.parse(tJson);
+          if (parsed.fields && parsed.fields.length > 0) tooltipData = parsed;
+        }
+      } catch (err) { /* WASM not ready or no tooltip data */ }
+    }
+    if (tooltipData) {
       tip.replaceChildren();
       const tbl = document.createElement('table');
-      for (const f of t.fields) {
+      for (const f of tooltipData.fields) {
         const tr = document.createElement('tr');
         const k = document.createElement('td');
         k.textContent = f.name; k.style.fontWeight = 'bold'; k.style.paddingRight = '6px';

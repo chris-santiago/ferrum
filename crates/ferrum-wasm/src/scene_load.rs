@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ferrum_scene::*;
 use lyon::tessellation::VertexBuffers;
 
@@ -80,6 +82,9 @@ pub struct SceneData {
     pub background: Option<[f32; 4]>,
     pub width: f32,
     pub height: f32,
+    /// Per-batch metadata from the packed binary sidecar, keyed by
+    /// `(panel_idx, batch_idx)`.
+    pub packed_batch_meta: HashMap<(u32, u32), PackedBatchMeta>,
 }
 
 #[derive(Clone)]
@@ -101,6 +106,17 @@ pub struct ImageQuad {
     pub img_height: u32,
 }
 
+/// Per-batch metadata extracted from the packed binary sidecar.
+///
+/// Stored in `SceneData::packed_batch_meta` keyed by `(panel_idx, batch_idx)`.
+/// Enables lazy tooltip decoding: the raw bytes are kept until `getTooltip` is
+/// called, avoiding upfront string-table parsing for every batch.
+#[derive(Clone, Debug)]
+pub struct PackedBatchMeta {
+    pub data_indices: Option<Vec<u32>>,
+    pub tooltip_bytes: Option<Vec<u8>>,
+}
+
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
     load_scene_with_packed(scene, &[])
 }
@@ -111,9 +127,10 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let mut mesh = VertexBuffers::new();
     let mut images = Vec::new();
     let mut texts = Vec::new();
+    let mut batch_meta = HashMap::new();
 
     // Unpack binary instance data (passed as raw bytes, not base64).
-    unpack_binary_instances(packed_data, &mut circles, &mut rects);
+    unpack_binary_instances(packed_data, &mut circles, &mut rects, &mut batch_meta);
 
     let background = scene.background.as_ref().map(|c| {
         [
@@ -154,34 +171,56 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         background,
         width: scene.width as f32,
         height: scene.height as f32,
+        packed_batch_meta: batch_meta,
     }
+}
+
+/// Flag: tooltips string table follows instance data (+ optional data_indices).
+const HAS_TOOLTIPS: u32 = 0x1;
+/// Flag: `count × u32` data-index array follows instance data.
+const HAS_DATA_INDICES: u32 = 0x2;
+
+/// Read a little-endian `u32` from `data[offset..offset+4]`.
+///
+/// The caller must guarantee `offset + 4 <= data.len()`.
+#[inline]
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    let bytes: [u8; 4] = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
+    u32::from_le_bytes(bytes)
 }
 
 /// Unpack raw binary instance data into circle/rect buffers.
 ///
-/// Format: repeated `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32][data]`
-/// where kind=0 → CircleInstance, kind=1 → RectInstance.
+/// Format (v2, 20-byte header): repeated
+/// `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32][flags: u32]`
+/// followed by instance data, then optional data_indices and tooltip bytes
+/// based on `flags`.
+///
+/// kind=0 → CircleInstance, kind=1 → RectInstance.
 fn unpack_binary_instances(
     data: &[u8],
     circles: &mut Vec<CircleInstance>,
     rects: &mut Vec<RectInstance>,
+    meta: &mut HashMap<(u32, u32), PackedBatchMeta>,
 ) {
     let mut offset = 0;
-    while offset + 16 <= data.len() {
-        let _panel_idx = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
-        let _batch_idx = u32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap());
-        let kind = u32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap());
-        let count = u32::from_le_bytes(data[offset+12..offset+16].try_into().unwrap()) as usize;
-        offset += 16;
+    while offset + 20 <= data.len() {
+        let panel_idx = read_u32_le(data, offset);
+        let batch_idx = read_u32_le(data, offset + 4);
+        let kind = read_u32_le(data, offset + 8);
+        let count = read_u32_le(data, offset + 12) as usize;
+        let flags = read_u32_le(data, offset + 16);
+        offset += 20;
 
-        match kind {
+        // Read instance data.
+        let instance_byte_len = match kind {
             0 => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
                 if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
                     circles.extend_from_slice(instances);
                 }
-                offset += byte_len;
+                byte_len
             }
             1 => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
@@ -189,10 +228,61 @@ fn unpack_binary_instances(
                 if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
                     rects.extend_from_slice(instances);
                 }
-                offset += byte_len;
+                byte_len
             }
             _ => break,
-        }
+        };
+        offset += instance_byte_len;
+
+        // Read data_indices if flagged.
+        let data_indices = if flags & HAS_DATA_INDICES != 0 {
+            let indices_byte_len = count * 4;
+            if offset + indices_byte_len > data.len() { break; }
+            let indices: Vec<u32> = (0..count)
+                .map(|i| read_u32_le(data, offset + i * 4))
+                .collect();
+            offset += indices_byte_len;
+            Some(indices)
+        } else {
+            None
+        };
+
+        // Read tooltip bytes if flagged.
+        let tooltip_bytes = if flags & HAS_TOOLTIPS != 0 {
+            // Scan the string table to find its total length:
+            //   [num_fields: u32]
+            //   num_fields × [len: u32][bytes]     (field names)
+            //   count × num_fields × [len: u32][bytes]  (values)
+            let scan_start = offset;
+            if offset + 4 > data.len() { break; }
+            let num_fields = read_u32_le(data, offset) as usize;
+            offset += 4;
+
+            // Skip field names.
+            for _ in 0..num_fields {
+                if offset + 4 > data.len() { break; }
+                let slen = read_u32_le(data, offset) as usize;
+                offset += 4 + slen;
+                if offset > data.len() { break; }
+            }
+
+            // Skip row values: count rows × num_fields entries.
+            for _ in 0..count * num_fields {
+                if offset + 4 > data.len() { break; }
+                let slen = read_u32_le(data, offset) as usize;
+                offset += 4 + slen;
+                if offset > data.len() { break; }
+            }
+
+            Some(data[scan_start..offset].to_vec())
+        } else {
+            None
+        };
+
+        meta.insert(
+            (panel_idx, batch_idx),
+            PackedBatchMeta { data_indices, tooltip_bytes },
+        );
     }
 }
 
@@ -324,6 +414,84 @@ fn decode_image_quad(x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) -> Option
         img_width: info.width,
         img_height: info.height,
     })
+}
+
+/// Parse a tooltip string table and return a JSON string for one row.
+///
+/// The `tooltip_bytes` slice starts with `[num_fields: u32]`, followed by
+/// `num_fields` length-prefixed field name strings, then `total_rows ×
+/// num_fields` length-prefixed value strings (row-major).
+///
+/// Returns `{"fields":[{"name":"x","value":"1.23"},…]}` for the requested
+/// `row_idx`, or `"{}"` if the index is out of range or the data is malformed.
+pub fn parse_tooltip_json(tooltip_bytes: &[u8], row_idx: usize) -> String {
+    let mut offset = 0;
+
+    // Read num_fields.
+    if offset + 4 > tooltip_bytes.len() {
+        return "{}".to_string();
+    }
+    let num_fields = read_u32_le(tooltip_bytes, offset) as usize;
+    offset += 4;
+
+    if num_fields == 0 {
+        return "{}".to_string();
+    }
+
+    // Read field names.
+    let mut field_names = Vec::with_capacity(num_fields);
+    for _ in 0..num_fields {
+        if offset + 4 > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4;
+        if offset + slen > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+        let name = std::str::from_utf8(&tooltip_bytes[offset..offset + slen])
+            .unwrap_or("");
+        field_names.push(name);
+        offset += slen;
+    }
+
+    // Skip to row `row_idx`: each value entry is [len: u32][bytes].
+    for _ in 0..row_idx * num_fields {
+        if offset + 4 > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4 + slen;
+        if offset > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+    }
+
+    // Read this row's values.
+    let mut fields_json = Vec::with_capacity(num_fields);
+    for field_name in &field_names {
+        if offset + 4 > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4;
+        if offset + slen > tooltip_bytes.len() {
+            return "{}".to_string();
+        }
+        let value = std::str::from_utf8(&tooltip_bytes[offset..offset + slen])
+            .unwrap_or("");
+        offset += slen;
+
+        // Escape quotes in name/value for JSON safety.
+        let escaped_name = field_name.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
+        fields_json.push(format!(
+            r#"{{"name":"{}","value":"{}"}}"#,
+            escaped_name, escaped_value
+        ));
+    }
+
+    format!(r#"{{"fields":[{}]}}"#, fields_json.join(","))
 }
 
 /// Returns `true` when a mark batch should use the additive blend pipeline.
@@ -1490,26 +1658,52 @@ mod tests {
     // ── Binary packed instance round-trip ────────────────────────────
 
     fn build_packed_circle_stream(instances: &[CircleInstance]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes()); // kind=0 circle
-        buf.extend_from_slice(&(instances.len() as u32).to_le_bytes());
-        for inst in instances {
-            buf.extend_from_slice(bytemuck::bytes_of(inst));
-        }
-        buf
+        build_packed_circle_stream_ex(0, 0, instances, 0, &[])
     }
 
     fn build_packed_rect_stream(instances: &[RectInstance]) -> Vec<u8> {
+        build_packed_rect_stream_ex(0, 0, instances, 0, &[])
+    }
+
+    /// Build a packed circle stream with a 20-byte header and optional trailing data.
+    fn build_packed_circle_stream_ex(
+        panel_idx: u32,
+        batch_idx: u32,
+        instances: &[CircleInstance],
+        flags: u32,
+        trailing: &[u8],
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&1u32.to_le_bytes()); // kind=1 rect
+        buf.extend_from_slice(&panel_idx.to_le_bytes());
+        buf.extend_from_slice(&batch_idx.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // kind=0 circle
         buf.extend_from_slice(&(instances.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&flags.to_le_bytes());
         for inst in instances {
             buf.extend_from_slice(bytemuck::bytes_of(inst));
         }
+        buf.extend_from_slice(trailing);
+        buf
+    }
+
+    /// Build a packed rect stream with a 20-byte header and optional trailing data.
+    fn build_packed_rect_stream_ex(
+        panel_idx: u32,
+        batch_idx: u32,
+        instances: &[RectInstance],
+        flags: u32,
+        trailing: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&panel_idx.to_le_bytes());
+        buf.extend_from_slice(&batch_idx.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // kind=1 rect
+        buf.extend_from_slice(&(instances.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&flags.to_le_bytes());
+        for inst in instances {
+            buf.extend_from_slice(bytemuck::bytes_of(inst));
+        }
+        buf.extend_from_slice(trailing);
         buf
     }
 
@@ -1525,7 +1719,8 @@ mod tests {
         let packed = build_packed_circle_stream(&[inst]);
         let mut circles = Vec::new();
         let mut rects = Vec::new();
-        unpack_binary_instances(&packed, &mut circles, &mut rects);
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
         assert_eq!(circles.len(), 1);
         assert!(rects.is_empty());
         let c = &circles[0];
@@ -1533,6 +1728,10 @@ mod tests {
         assert!((c.radius - 5.0).abs() < 1e-6);
         assert!((c.opacity - 0.8).abs() < 1e-6);
         assert!((c.angle - 45.0).abs() < 1e-6);
+        // flags=0 → no data_indices, no tooltip_bytes
+        let m = meta.get(&(0, 0)).expect("meta entry should exist");
+        assert!(m.data_indices.is_none());
+        assert!(m.tooltip_bytes.is_none());
     }
 
     #[test]
@@ -1552,27 +1751,33 @@ mod tests {
         let packed = build_packed_rect_stream(&instances);
         let mut circles = Vec::new();
         let mut rects = Vec::new();
-        unpack_binary_instances(&packed, &mut circles, &mut rects);
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
         assert_eq!(rects.len(), 2);
         assert!(circles.is_empty());
         assert!((rects[0].position[0] - 10.0).abs() < 1e-6);
         assert!((rects[1].angle - 90.0).abs() < 1e-6);
+        let m = meta.get(&(0, 0)).expect("meta entry should exist");
+        assert!(m.data_indices.is_none());
+        assert!(m.tooltip_bytes.is_none());
     }
 
     #[test]
     fn binary_unpack_malformed_data_does_not_panic() {
         let mut circles = Vec::new();
         let mut rects = Vec::new();
-        // Truncated header
-        unpack_binary_instances(&[0u8; 8], &mut circles, &mut rects);
+        let mut meta = HashMap::new();
+        // Truncated header (less than 20 bytes)
+        unpack_binary_instances(&[0u8; 8], &mut circles, &mut rects, &mut meta);
         assert!(circles.is_empty());
         // Valid header but truncated instance data
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&100u32.to_le_bytes());
-        unpack_binary_instances(&buf, &mut circles, &mut rects);
+        buf.extend_from_slice(&0u32.to_le_bytes());  // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes());  // batch_idx
+        buf.extend_from_slice(&0u32.to_le_bytes());  // kind
+        buf.extend_from_slice(&100u32.to_le_bytes()); // count
+        buf.extend_from_slice(&0u32.to_le_bytes());  // flags
+        unpack_binary_instances(&buf, &mut circles, &mut rects, &mut meta);
         assert!(circles.is_empty());
     }
 
@@ -1616,5 +1821,199 @@ mod tests {
         assert!((data.circle_instances[0].fill_color[0] - 1.0).abs() < 1e-6);
         assert!((data.circle_instances[1].center[0] - 100.0).abs() < 1e-6);
         assert!((data.circle_instances[2].center[0] - 200.0).abs() < 1e-6);
+    }
+
+    // ── v2 header: data_indices and tooltips ─────────────────────────
+
+    /// Helper: build a tooltip string table byte slice.
+    fn build_tooltip_bytes(field_names: &[&str], rows: &[Vec<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+        for name in field_names {
+            let bytes = name.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+        for row in rows {
+            for val in row {
+                let bytes = val.as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(bytes);
+            }
+        }
+        buf
+    }
+
+    /// Helper: build data_indices trailing bytes.
+    fn build_data_indices_bytes(indices: &[u32]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for &idx in indices {
+            buf.extend_from_slice(&idx.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn binary_unpack_with_data_indices() {
+        let instances = vec![
+            CircleInstance {
+                center: [10.0, 20.0], radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            },
+            CircleInstance {
+                center: [30.0, 40.0], radius: 7.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            },
+        ];
+        let trailing = build_data_indices_bytes(&[42, 99]);
+        let packed = build_packed_circle_stream_ex(1, 2, &instances, HAS_DATA_INDICES, &trailing);
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 2);
+        let m = meta.get(&(1, 2)).expect("meta for (1,2) should exist");
+        let indices = m.data_indices.as_ref().expect("data_indices should be Some");
+        assert_eq!(indices, &[42, 99]);
+        assert!(m.tooltip_bytes.is_none());
+    }
+
+    #[test]
+    fn binary_unpack_with_tooltips() {
+        let instances = vec![
+            CircleInstance {
+                center: [10.0, 20.0], radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            },
+        ];
+        let tooltip_data = build_tooltip_bytes(
+            &["x", "y"],
+            &[vec!["1.23", "4.56"]],
+        );
+        let packed = build_packed_circle_stream_ex(0, 0, &instances, HAS_TOOLTIPS, &tooltip_data);
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 1);
+        let m = meta.get(&(0, 0)).expect("meta for (0,0) should exist");
+        assert!(m.data_indices.is_none());
+        let tb = m.tooltip_bytes.as_ref().expect("tooltip_bytes should be Some");
+        assert_eq!(tb, &tooltip_data, "tooltip bytes should match input");
+    }
+
+    #[test]
+    fn binary_unpack_with_data_indices_and_tooltips() {
+        let instances = vec![
+            CircleInstance {
+                center: [10.0, 20.0], radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            },
+            CircleInstance {
+                center: [30.0, 40.0], radius: 7.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            },
+        ];
+        let mut trailing = build_data_indices_bytes(&[10, 20]);
+        let tooltip_data = build_tooltip_bytes(
+            &["name", "value"],
+            &[vec!["alpha", "100"], vec!["beta", "200"]],
+        );
+        trailing.extend_from_slice(&tooltip_data);
+
+        let packed = build_packed_circle_stream_ex(
+            0, 0, &instances, HAS_DATA_INDICES | HAS_TOOLTIPS, &trailing,
+        );
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 2);
+        let m = meta.get(&(0, 0)).expect("meta should exist");
+        let indices = m.data_indices.as_ref().expect("data_indices");
+        assert_eq!(indices, &[10, 20]);
+        let tb = m.tooltip_bytes.as_ref().expect("tooltip_bytes");
+        assert_eq!(tb, &tooltip_data);
+    }
+
+    // ── parse_tooltip_json ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_tooltip_json_single_row() {
+        let bytes = build_tooltip_bytes(
+            &["x", "y"],
+            &[vec!["1.23", "4.56"]],
+        );
+        let json = parse_tooltip_json(&bytes, 0);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"x","value":"1.23"},{"name":"y","value":"4.56"}]}"#,
+        );
+    }
+
+    #[test]
+    fn parse_tooltip_json_second_row() {
+        let bytes = build_tooltip_bytes(
+            &["a", "b"],
+            &[vec!["10", "20"], vec!["30", "40"], vec!["50", "60"]],
+        );
+        let json = parse_tooltip_json(&bytes, 1);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"a","value":"30"},{"name":"b","value":"40"}]}"#,
+        );
+    }
+
+    #[test]
+    fn parse_tooltip_json_last_row() {
+        let bytes = build_tooltip_bytes(
+            &["col"],
+            &[vec!["first"], vec!["second"], vec!["third"]],
+        );
+        let json = parse_tooltip_json(&bytes, 2);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"col","value":"third"}]}"#,
+        );
+    }
+
+    #[test]
+    fn parse_tooltip_json_out_of_range_returns_empty() {
+        let bytes = build_tooltip_bytes(
+            &["x"],
+            &[vec!["1"]],
+        );
+        let json = parse_tooltip_json(&bytes, 5);
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn parse_tooltip_json_empty_bytes_returns_empty() {
+        let json = parse_tooltip_json(&[], 0);
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn parse_tooltip_json_escapes_quotes() {
+        let bytes = build_tooltip_bytes(
+            &["label"],
+            &[vec![r#"say "hello""#]],
+        );
+        let json = parse_tooltip_json(&bytes, 0);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"label","value":"say \"hello\""}]}"#,
+        );
     }
 }
