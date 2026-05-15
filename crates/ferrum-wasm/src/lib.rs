@@ -15,11 +15,13 @@ pub mod zoom_pan;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+use crate::conditional::resolve_conditionals;
 use crate::error::WasmRenderError;
 use crate::gpu::GpuContext;
 use crate::pipelines::RenderPipelines;
 use crate::render::GpuBuffers;
 use crate::scene_load::SceneData;
+use crate::selection_state::InteractionState;
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 
 #[wasm_bindgen]
@@ -28,16 +30,20 @@ pub struct WasmRenderer {
     pipelines: RenderPipelines,
     loaded: Option<LoadedScene>,
     transition: Option<ActiveTransition>,
+    selections: Vec<ferrum_scene::SelectionSpec>,
+    interaction_state: InteractionState,
 }
 
 struct ActiveTransition {
     old_data: SceneData,
     new_data: SceneData,
+    new_scene: ferrum_scene::SceneGraph,
 }
 
 struct LoadedScene {
     data: SceneData,
     buffers: GpuBuffers,
+    scene: ferrum_scene::SceneGraph,
 }
 
 #[wasm_bindgen]
@@ -52,6 +58,8 @@ impl WasmRenderer {
             pipelines,
             loaded: None,
             transition: None,
+            selections: Vec::new(),
+            interaction_state: InteractionState::new(&[]),
         })
     }
 
@@ -65,7 +73,9 @@ impl WasmRenderer {
         let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &data);
         let clear_color = data.background;
 
-        self.loaded = Some(LoadedScene { data, buffers });
+        self.selections = scene.selections.clone();
+        self.interaction_state = InteractionState::new(&self.selections);
+        self.loaded = Some(LoadedScene { data, buffers, scene });
 
         if let Some(ref loaded) = self.loaded {
             render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, clear_color)
@@ -109,7 +119,7 @@ impl WasmRenderer {
         let new_scene: ferrum_scene::SceneGraph = serde_json::from_str(new_scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
         let new_data = scene_load::load_scene(&new_scene);
-        self.transition = Some(ActiveTransition { old_data, new_data });
+        self.transition = Some(ActiveTransition { old_data, new_data, new_scene });
         Ok(())
     }
 
@@ -139,12 +149,64 @@ impl WasmRenderer {
                 .map_err(JsValue::from)?;
             if t >= 1.0 {
                 let final_data = tr.new_data.clone();
-                self.transition = None;
                 let final_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &final_data);
-                self.loaded = Some(LoadedScene { data: final_data, buffers: final_buffers });
+                let final_scene = tr.new_scene.clone();
+                self.transition = None;
+                self.loaded = Some(LoadedScene { data: final_data, buffers: final_buffers, scene: final_scene });
             }
         }
         Ok(())
+    }
+
+    /// Hit-test a click at canvas pixel (x, y), update selection state, apply
+    /// conditional encodings (dim non-selected marks), re-render frame, and
+    /// return the new selection state as a JSON string.
+    ///
+    /// The returned JSON is a map of `selection_name → {field_name: field_value}`.
+    /// The JS caller should forward this to `model.set('selection_state', ...)`.
+    #[wasm_bindgen(js_name = "handleClick")]
+    pub fn handle_click(&mut self, x: f32, y: f32) -> Result<String, JsValue> {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok("{}".to_string());
+        };
+
+        // Update selection state via Rust hit-test (authoritative — operates on actual scene data).
+        self.interaction_state.handle_click(
+            &loaded.scene.panels,
+            &self.selections,
+            x as f64,
+            y as f64,
+        );
+
+        // Apply conditional encodings to produce dimmed/highlighted instance colors.
+        let conditionals = &loaded.scene.interaction.conditionals;
+        let updates = resolve_conditionals(
+            &loaded.scene.panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data.circle_instances,
+            &loaded.data.rect_instances,
+        );
+
+        // Rebuild GPU buffers with updated colors and re-render.
+        let updated_data = SceneData {
+            circle_instances: updates.circle_instances,
+            rect_instances: updates.rect_instances,
+            mesh_buffers: loaded.data.mesh_buffers.clone(),
+            text_elements: loaded.data.text_elements.clone(),
+            image_quads: loaded.data.image_quads.clone(),
+            background: loaded.data.background,
+            width: loaded.data.width,
+            height: loaded.data.height,
+        };
+        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
+        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
+            .map_err(JsValue::from)?;
+        loaded.buffers = new_buffers;
+
+        // Serialize current selection state for Python sync.
+        let state_json = self.interaction_state.to_json();
+        Ok(state_json)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
