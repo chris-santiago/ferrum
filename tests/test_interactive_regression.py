@@ -355,11 +355,14 @@ def test_polar_chart_coord_kind_is_polar():
 # Fixed by clustering axis text by shared coordinate instead.
 # These tests prove the preconditions that the clustering approach relies on.
 
-def _scatter_scene(n: int = 5, width: int = 400, height: int = 300) -> dict:
-    """A simple quantitative scatter scene used across the tick_levels tests."""
+def _scatter_scene(width: int = 400, height: int = 300) -> dict:
+    """
+    A quantitative scatter with x in [100, 500] and y in [0.1, 0.5] so tick
+    labels on the two axes are guaranteed non-overlapping (no shared strings).
+    """
     df = pl.DataFrame({
-        "x": [float(i) for i in range(1, n + 1)],
-        "y": [float(i * i) for i in range(1, n + 1)],
+        "x": [100.0, 200.0, 300.0, 400.0, 500.0],
+        "y": [0.1, 0.2, 0.3, 0.4, 0.5],
     })
     return _render(
         fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=width, height=height)
@@ -387,40 +390,42 @@ def test_tick_levels_have_nonempty_ticks():
 
 def test_tick_level_labels_appear_in_axis_text_nodes():
     """
-    Tick label strings from tick_levels must appear as text-node content in
-    panel.axes.  The clustering algorithm identifies tick labels by content
-    match, so this is the core precondition for the zoom scale fix.
+    Tick label strings from the *initial* zoom level (level[1], count=8) must
+    appear as text-node content in panel.axes.  The clustering algorithm
+    identifies tick labels by content match, so this is the core precondition.
+    Only level[1] is checked because finer-grained levels (16, 32 ticks) may
+    not all be present in the initial scene render.
     """
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
 
-    # Collect all text node contents from panel.axes.
     axis_texts: set[str] = set()
     for node in scene["panels"][0]["axes"]:
         if node.get("type") == "text":
             axis_texts.add(node["content"])
 
-    x_labels = {t["label"] for lvl in ptl["x_levels"] for t in lvl["ticks"]}
-    y_labels = {t["label"] for lvl in ptl["y_levels"] for t in lvl["ticks"]}
+    # level[1] is the default 8-tick zoom level (zoom factor 0.5–2.0).
+    x_labels = {t["label"] for t in ptl["x_levels"][1]["ticks"]}
+    y_labels = {t["label"] for t in ptl["y_levels"][1]["ticks"]}
 
     assert x_labels & axis_texts == x_labels, (
-        f"x tick labels not found in axis text nodes: {x_labels - axis_texts}"
+        f"x tick labels (level 1) not found in axis text: {x_labels - axis_texts}"
     )
     assert y_labels & axis_texts == y_labels, (
-        f"y tick labels not found in axis text nodes: {y_labels - axis_texts}"
+        f"y tick labels (level 1) not found in axis text: {y_labels - axis_texts}"
     )
 
 
 def test_x_axis_tick_labels_share_y_coordinate():
     """
-    All x-axis tick labels must have the same canvas y coordinate.
-    This is the invariant the clustering approach exploits: group by
-    the most common y → that cluster is the x-axis row.
+    All x-axis tick labels (level[1]) must have the same canvas y coordinate.
+    This is the invariant the clustering approach exploits: group by the most
+    common y → that cluster is the x-axis row.
     """
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
 
-    x_labels = {t["label"] for lvl in ptl["x_levels"] for t in lvl["ticks"]}
+    x_labels = {t["label"] for t in ptl["x_levels"][1]["ticks"]}
     x_tick_nodes = [
         n for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in x_labels
@@ -435,12 +440,12 @@ def test_x_axis_tick_labels_share_y_coordinate():
 
 def test_y_axis_tick_labels_share_x_coordinate():
     """
-    All y-axis tick labels must have the same canvas x coordinate.
+    All y-axis tick labels (level[1]) must have the same canvas x coordinate.
     """
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
 
-    y_labels = {t["label"] for lvl in ptl["y_levels"] for t in lvl["ticks"]}
+    y_labels = {t["label"] for t in ptl["y_levels"][1]["ticks"]}
     y_tick_nodes = [
         n for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in y_labels
@@ -463,7 +468,6 @@ def test_tick_data_pixels_differ_from_axis_text_positions():
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
 
-    # Build a map from label → tick_data pixel for x-axis (level 1 = default).
     td_px = {t["label"]: t["pixel"] for t in ptl["x_levels"][1]["ticks"]}
     x_labels = set(td_px)
 
