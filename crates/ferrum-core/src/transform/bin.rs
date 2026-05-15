@@ -654,13 +654,12 @@ mod tests {
     #[test]
     fn test_bin_wrong_dtype_errors() {
         pyo3::Python::initialize();
-        use arrow::array::Int64Array;
         let schema = Arc::new(Schema::new(vec![
-            Field::new("x", DataType::Int64, false),
+            Field::new("x", DataType::Utf8, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+            vec![Arc::new(StringArray::from(vec!["a", "b", "c"]))],
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
@@ -675,7 +674,33 @@ mod tests {
         };
         let err = apply(&spec, &batch).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Float64") || msg.contains("dtype"), "err: {msg}");
+        assert!(msg.contains("numeric") || msg.contains("Utf8"), "err: {msg}");
+    }
+
+    #[test]
+    fn test_bin_int64_auto_casts_to_float64() {
+        pyo3::Python::initialize();
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
+        ).unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let result = apply(&spec, &batch);
+        assert!(result.is_ok(), "Int64 should auto-cast to Float64: {:?}", result.err());
     }
 
     #[test]

@@ -999,3 +999,83 @@ class TestFillOpacitySVG:
         assert "fill-opacity" in svg, (
             "Expected fill-opacity attribute on bar rects; got:\n" + svg[:2000]
         )
+
+    def test_line_fill_opacity_emits_attribute(self):
+        """encode(fill_opacity='fo') on line marks → fill-opacity on polyline/path."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [0.5, 0.5, 0.5],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_line()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "<svg" in svg, "Line chart should render"
+
+    def test_rule_fill_opacity_emits_attribute(self):
+        """encode(fill_opacity='fo') on rule marks → fill-opacity on rule lines."""
+        df = pl.DataFrame({
+            "y": [1.0, 2.0, 3.0],
+            "fo": [0.3, 0.6, 0.9],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_rule()
+            .encode(y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "<svg" in svg, "Rule chart should render"
+
+    def test_fill_opacity_clamps_to_valid_range(self):
+        """fill_opacity values outside [0,1] are clamped — no SVG error."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [-0.5, 1.5, 0.5],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        vals = re.findall(r'fill-opacity="([^"]+)"', svg)
+        float_vals = [float(v) for v in vals]
+        for v in float_vals:
+            assert 0.0 <= v <= 1.0, f"fill-opacity {v} out of [0,1]"
+
+    def test_fill_opacity_zero_emits_attribute(self):
+        """fill_opacity=0.0 → fill-opacity='0' emitted (fully transparent)."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0],
+            "y": [1.0, 4.0],
+            "fo": [0.0, 0.0],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        assert "fill-opacity" in svg, (
+            "fill-opacity=0.0 should be emitted; got:\n" + svg[:2000]
+        )
+
+    def test_fill_opacity_multilayer(self):
+        """fill_opacity works across multiple layers."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "fo": [0.3, 0.6, 0.9],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", fill_opacity="fo")
+            .show_svg()
+        )
+        vals = re.findall(r'fill-opacity="([^"]+)"', svg)
+        assert len(vals) >= 2, f"Expected multiple fill-opacity values; got {vals}"

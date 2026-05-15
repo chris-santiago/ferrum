@@ -1013,3 +1013,38 @@ class TestChartDescription:
         assert "<desc>" not in svg, (
             f"Expected no <desc> in SVG when description is not set; got:\n{svg[:500]}"
         )
+
+    def test_description_with_quotes(self):
+        """Description containing quotes is properly escaped."""
+        svg = self._base_chart().properties(
+            description='Chart with "quotes" & \'apostrophes\''
+        ).show_svg()
+        assert "<desc>" in svg
+        assert "&amp;" in svg
+
+    def test_description_empty_string_not_emitted(self):
+        """Empty string description → no <desc> emitted (falsy value)."""
+        svg = self._base_chart().properties(description="").show_svg()
+        assert "<desc>" not in svg, (
+            "Empty description should not emit <desc>"
+        )
+
+    def test_description_coexists_with_encoding_desc(self):
+        """Chart-level <desc> and per-mark encoding description <desc> can coexist."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0],
+            "y": [3.0, 4.0],
+            "d": ["point A", "point B"],
+        })
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", description=fm.Description("d"))
+            .properties(description="Chart-level description")
+            .show_svg()
+        )
+        assert "Chart-level description" in svg
+        desc_count = svg.count("<desc>")
+        assert desc_count >= 3, (
+            f"Expected chart-level + 2 per-mark <desc> tags; got {desc_count}"
+        )
