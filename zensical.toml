@@ -51,6 +51,7 @@ nav = [
     { "ferrum.encoding" = "api/encoding.md" },
     { "ferrum.plots" = "api/plots.md" },
     { "ferrum.themes" = "api/themes.md" },
+    { "ferrum.selection" = "api/selection.md" },
   ] },
   { Changelog = "changelog.md" },
 ]

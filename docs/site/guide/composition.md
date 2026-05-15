@@ -250,10 +250,17 @@ Compound views are themselves charts (in the structural sense): you can layer a 
 
 That recursive composition is what makes complex dashboards-as-static-images viable. A four-panel model report — one ROC curve, one calibration plot, one confusion matrix, one residuals plot — is `(roc | calibration) & (confusion | residuals)`. Same grammar, same theme, same `.save()`.
 
+## Low-level SVG composition
+
+The composition classes above produce their final SVG output using three low-level helpers: [`compose_svg_horizontal`][ferrum.compose_svg_horizontal], [`compose_svg_vertical`][ferrum.compose_svg_vertical], and [`compose_svg_grid`][ferrum.compose_svg_grid]. These are Rust-backed functions that stitch pre-rendered SVG strings into a single SVG document with configurable spacing and alignment.
+
+You rarely need them directly — the `|`, `&`, and class-based APIs handle layout automatically. They exist for advanced cases where you have pre-rendered SVG strings and want to combine them without going through the chart object model.
+
 ## Where to go next
 
 - [Marks & encodings](marks-encodings.md) for what goes into each chart before composition starts.
 - [Figure-level helpers](figure-helpers.md) for convenience entry points (`jointplot`, `pairplot`, `clustermap`) that wrap the composition operators.
 - [Themes](themes.md) for how to apply consistent styling across composed charts.
 - [Model diagnostics](model-diagnostics.md) for the canonical use case: composing multiple diagnostic plots into a model evaluation view.
+- [Interactive rendering](interactive.md) for how selections and linked views work across composed charts.
 - The [API Reference](../api/ferrum.md) for the full signatures of `HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`, and `ClusterMapChart`.

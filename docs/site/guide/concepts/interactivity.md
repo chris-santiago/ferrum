@@ -1,8 +1,5 @@
 # Interactivity is a renderer, not a rewrite
 
-!!! note "Status"
-    Interactive rendering is a Phase 11 commitment, not currently shipping. `Chart.interactive()` exists as a placeholder and raises `NotImplementedError` until the WASM/GPU renderer lands. The page below describes the design contract; treat it as the shape interactivity will take, not the surface you can call today. The current state is summarized in the [Roadmap](#roadmap) section at the bottom.
-
 Static and interactive charts should not be different species of object.
 
 Most Python visualization stacks force a hard boundary between the two. A scatter plot you authored in seaborn for an EDA notebook is not the same kind of artifact as a Plotly scatter plot in a dashboard, even though both are "the same chart" in any sense that matters to the user. The conventional way out of that fragmentation is to author the chart twice: once for static output, once for interactive. The cost is paid every time the question changes.
@@ -31,14 +28,14 @@ This is also why the interactive renderer is GPU-backed (and WASM-targeted). The
 
 ## What "interactive" covers
 
-When the interactive renderer lands, it will resolve four classes of behavior, all declared in the chart spec:
+The interactive renderer resolves four classes of behavior, all declared in the chart spec:
 
-- **Selections** — point, brush, interval, and value-binding selections. The chart says "this selection exists"; the renderer makes it respond to clicks and drags.
+- **Selections** — point, brush, interval, and value-binding selections. The chart says "this selection exists"; the renderer makes it respond to clicks and drags. See [`selection_point`][ferrum.selection_point] and [`selection_interval`][ferrum.selection_interval].
 - **Zoom and pan** — declared per-coordinate or per-encoding. The chart says which axes are zoomable; the renderer wires the gestures.
 - **Linked views** — a selection in one chart can drive an encoding in another when the two charts are composed. Compound views carry the linking; no separate "link API" is needed.
 - **Tooltips and hover** — the `Tooltip` encoding and `TooltipField` declarations are honored by both static and interactive renderers. In static output they become accessibility metadata; in interactive output they become the hover layer.
 
-What the interactive renderer is **not** trying to do: animation as a first-class encoding, real-time streaming data sources, or general-purpose dashboard layout. Those are outside the 1.0 scope.
+What the interactive renderer is **not** trying to do: animation as a first-class encoding, real-time streaming data sources, or general-purpose dashboard layout.
 
 ## What changes for the user, and what doesn't
 
@@ -46,20 +43,20 @@ A chart you wrote with the static renderer in mind keeps working when interactiv
 
 What does change is what you can express. Once interactivity is part of the renderer contract, you have a vocabulary for selections and linked views inside the chart spec itself. The shape of the spec gets richer; the shape of your code does not get more complicated.
 
-## Roadmap
+## Current status
 
 | Capability | Status |
 |---|---|
 | Chart spec accepts encodings, marks, scales, composition | ✓ Shipping |
-| `Chart.interactive()` method exists | ✓ Placeholder (raises `NotImplementedError`) |
+| `Chart.interactive()` returns interactive WASM view | ✓ Shipping |
 | Static SVG renderer | ✓ Shipping |
 | Static CPU raster renderer | ✓ Shipping |
-| Selection declarations in chart spec | Phase 11 |
-| WASM/GPU interactive renderer | Phase 11 |
-| Linked views via composition operators | Phase 11 |
-| Zoom / pan / brush / hover gestures | Phase 11 |
+| Selection declarations in chart spec | ✓ Shipping |
+| WASM/GPU interactive renderer | ✓ Shipping |
+| Linked views via composition operators | ✓ Shipping |
+| Zoom / pan / brush / hover gestures | ✓ Shipping |
 
-The design contract on this page is stable; the implementation behind it is the Phase 11 work. When Phase 11 lands, this page will lose the "Status" banner at the top and pick up worked examples in the [Interactive rendering](../interactive.md) Guide page.
+For worked examples and API details, see the [Interactive rendering](../interactive.md) guide.
 
 ## Where to go next
 

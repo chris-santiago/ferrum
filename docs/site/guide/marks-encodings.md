@@ -70,10 +70,10 @@ These channels carry information that does not directly map to position or appea
 |---|---|
 | `text` | Text content for `mark_text`. |
 | `detail` | Additional grouping that does not affect appearance — useful for keeping series separate without coloring them differently. |
-| `tooltip`, `tooltip_field` | Field shown on hover (Phase 11 interactive renderer). |
-| `href` | URL the mark links to (Phase 11). |
+| `tooltip`, `tooltip_field` | Field shown on hover. In interactive mode, renders as a tooltip overlay; in static output, becomes accessibility metadata. |
+| `href` | URL the mark links to. |
 | `description` | Accessibility description. |
-| `key` | Stable identity for interactive selections (Phase 11). |
+| `key` | Stable identity for interactive selections. |
 
 ### Faceting channels
 
