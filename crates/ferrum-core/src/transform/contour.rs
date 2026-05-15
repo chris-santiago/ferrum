@@ -502,8 +502,9 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
 ///     When False, emit isolines (line segments); when True, emit filled
 ///     isoband polygons between adjacent threshold levels.
 /// smooth : bool, default True
-///     Accepted but currently reserved; smoothing semantics are not yet
-///     fully specified and the field has no effect on output.
+///     When True, applies a 3x3 Gaussian kernel pass (center=4, edges=2,
+///     corners=1, /16) to interior density cells before contouring.
+///     Reduces jagged contour edges at the cost of slight blurring.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///

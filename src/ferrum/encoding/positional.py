@@ -316,8 +316,7 @@ class Theta(ChannelBase):
     -----
     Requires ``CoordPolar()`` on the chart to activate polar rendering;
     without it the channel is registered but the mark renders in Cartesian
-    space.  ``CoordPolar()`` is planned for Phase 11+ and raises
-    ``NotImplementedError`` in the current release.
+    space.
 
     Other kwargs are accepted but are reserved for future use (no-op today)
     — they trigger a one-time deprecation warning.
@@ -349,8 +348,7 @@ class Radius(ChannelBase):
     -----
     Requires ``CoordPolar()`` on the chart to activate polar rendering;
     without it the channel is registered but the mark renders in Cartesian
-    space.  ``CoordPolar()`` is planned for Phase 11+ and raises
-    ``NotImplementedError`` in the current release.
+    space.
 
     Other kwargs are accepted but are reserved for future use (no-op today)
     — they trigger a one-time deprecation warning.

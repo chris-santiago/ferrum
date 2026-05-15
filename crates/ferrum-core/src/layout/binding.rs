@@ -1,7 +1,8 @@
 //! PyO3 binding: `compute_layout(spec, viewport, axes, facet_groups, legend_entries)`
-//! returns a Python dict. ThemeInputs and TextMetrics are not yet exposed —
-//! Phase 6 always uses HeuristicMetrics + ThemeInputs::default(); Phase 8 will
-//! map ferrum.Theme into ThemeInputs.
+//! returns a Python dict. Uses HeuristicMetrics for text measurement and
+//! ThemeInputs::default() with `legend_orient` patched from the caller.
+//! The render pipeline receives the full theme from Python; this layout
+//! entry point does not yet accept the full theme dict.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -58,9 +59,10 @@ use super::{compute_layout as compute_layout_internal, ThemeInputs, Viewport};
 ///
 /// Notes
 /// -----
-/// Phase 6 always uses ``HeuristicMetrics`` for text measurement. Phase 8
-/// will map ``ferrum.Theme`` into ``ThemeInputs`` and pass it here; until
-/// then, theme inputs use safe defaults.
+/// Uses ``HeuristicMetrics`` for text measurement and ``ThemeInputs::default()``
+/// with ``legend_orient`` patched from the caller argument. The render pipeline
+/// receives the full Python-side theme; this layout entry point does not yet
+/// accept the full theme dict.
 ///
 /// Examples
 /// --------

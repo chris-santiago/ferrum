@@ -1,10 +1,9 @@
-//! mark_text: renders a text label at (scale_x(x), scale_y(y)). Phase 10c-pre
-//! extends the Phase 7 stub with:
-//!   - support for ordinal x / y axes (categorical positioning, mirroring mark_rect)
-//!   - a `text` encoding channel for explicit label content (Utf8 column)
+//! mark_text: renders a text label at (scale_x(x), scale_y(y)).
+//!   - Supports ordinal x / y axes (categorical positioning, mirroring mark_rect).
+//!   - A `text` encoding channel supplies explicit label content (Utf8 column).
 //!
-//! Backward-compat: when the text channel is absent and y is numeric, the
-//! label is `format_numeric(y)` (Phase 7 behavior).
+//! When the text channel is absent and y is numeric, the label falls back to
+//! `format_numeric(y)`.
 
 use crate::layout::TextAnchor;
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};

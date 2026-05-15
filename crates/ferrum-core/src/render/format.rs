@@ -1,5 +1,7 @@
-//! Tick label formatters: numeric, time, ordinal. Hardcoded defaults — no
-//! per-axis FormatSpec yet (deferred to Phase 8 per locked decision §11 row 8).
+//! Tick label formatters: numeric, time, ordinal. Per-axis format specs are
+//! applied via the encoding's `format` / `format_type` fields (threaded through
+//! `apply_tick_format` in `prepare.rs`). These formatters supply the defaults
+//! when no explicit format is specified.
 
 /// Format a numeric tick value:
 /// - Integer-valued in normal range: drop decimal ("0", "5", "100").
