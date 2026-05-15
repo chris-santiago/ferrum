@@ -150,19 +150,17 @@ pub fn build_scene(
                 continue;
             }
 
-            // Position adjustment
-            let adjusted_owned;
-            let layer_batch: &RecordBatch = if layer.position.is_some() {
-                adjusted_owned = position::apply_position(
-                    layer_batch,
-                    layer.position.as_ref(),
-                    &scales,
-                    &layer.encoding,
-                )?;
-                &adjusted_owned
-            } else {
-                layer_batch
-            };
+            // Position adjustment — always call apply_position; it is the
+            // single authority for all adjustments (explicit layer.position
+            // *and* encoding-level encoding.y.stack).  When neither is set
+            // it returns a cheap reference-counted clone and is a no-op.
+            let adjusted_owned = position::apply_position(
+                layer_batch,
+                layer.position.as_ref(),
+                &scales,
+                &layer.encoding,
+            )?;
+            let layer_batch: &RecordBatch = &adjusted_owned;
 
             // Synthetic ChartSpec for this layer
             let layer_spec = ChartSpec {
