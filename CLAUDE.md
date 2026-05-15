@@ -158,7 +158,7 @@ For the full surface comparison table, severity rubric (S1–S5), audit trail pa
 
 ## Key architectural decisions
 
-See **`design-docs/ARCHITECTURE.md`** for the full record (transport layer, spec serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.). Read it before making changes that cross subsystem boundaries or introduce new dependencies.
+See **`design-docs/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
 
 
 ## Docs site work in progress
