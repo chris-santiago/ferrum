@@ -584,6 +584,62 @@ class TestLegendKwargsSVGPosition:
             "legend={'title': 'My Legend'} should appear verbatim in SVG"
         )
 
+    def test_legend_format_changes_tick_labels(self):
+        """legend={'format': '.0%'} on a continuous color scale must change
+        the tick label text vs. default formatting."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "val": [0.1, 0.25, 0.5, 0.75, 0.9],
+        })
+        svg_default = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val"))
+            .show_svg()
+        )
+        svg_pct = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("val", legend={"format": ".0%"}))
+            .show_svg()
+        )
+        assert "<svg" in svg_pct
+        assert svg_default != svg_pct, (
+            "legend={'format': '.0%'} must produce different tick label text than "
+            "default formatting"
+        )
+        # A percent-formatted legend should contain a '%' sign in the tick labels
+        assert "%" in svg_pct, (
+            "legend={'format': '.0%'} should produce tick labels containing '%'"
+        )
+
+    def test_legend_columns_changes_layout(self):
+        """legend={'columns': 2} on a categorical color scale must change the
+        legend layout vs. default single-column layout."""
+        df = pl.DataFrame({
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "g": ["a", "b", "c", "d"],
+        })
+        svg_default = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", color="g")
+            .show_svg()
+        )
+        svg_2col = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y", color=fm.Color("g", legend={"columns": 2}))
+            .show_svg()
+        )
+        assert "<svg" in svg_2col
+        assert svg_default != svg_2col, (
+            "legend={'columns': 2} must produce a different legend layout than "
+            "the default single-column arrangement"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Task 7: histogram multiple= — bar x-positions differ for dodge/stack
