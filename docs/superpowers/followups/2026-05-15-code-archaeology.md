@@ -50,13 +50,7 @@
 
 ### 11 mark kwargs with no `MarkKwargsSpec` path
 
-These are in `_VALID_MARK_KWARGS` (accepted without error) but have no corresponding `MarkKwargsSpec` field or `to_mark_kwargs_dict()` path — the user's visual intent is silently dropped:
-
-`interpolate`, `stroke_cap`, `stroke_join`, `orient`, `filled`, `shape`, `limit`, `band_size`, `line` (area), `borders`, `width` (boxplot)
-
-Notable visible defects:
-- `mark_point(filled=False)` renders filled
-- Boxplot cap size and box width ignore `band_size`/`width`
+✅ **Resolved `82a1496`** — TDD investigation found 10 of 11 were already fully implemented (exist in `MarkKwargsSpec`, `to_mark_kwargs_dict()`, and Rust renderers with passing tests). Only `width=` on `mark_boxplot()` was genuinely missing; fixed as an alias to `size=`.
 
 ### Channels accepted, never rendered (static SVG)
 
