@@ -21,6 +21,10 @@ _log = logging.getLogger(__name__)
 
 _WASM_DIR = pathlib.Path(__file__).parent / "_wasm"
 
+# Module-level singleton: built once, reused across all InteractiveChart instances.
+_WIDGET_CLASS: Any = None
+_WIDGET_CLASS_UNAVAILABLE: bool = False
+
 
 def _build_anywidget_esm() -> str:
     """Build a self-contained anywidget ESM with inlined WASM.
@@ -81,9 +85,9 @@ def _build_anywidget_esm() -> str:
         "}\n"
         "\n"
         "async function _render(container,sceneJson){\n"
-        "  await _ensureWasm();\n"
         "  container.replaceChildren();\n"
         "  container.style.position='relative';\n"
+        "  // Parse scene first — needed for DOM layout and CPU-side hit testing.\n"
         "  const scene=JSON.parse(sceneJson);\n"
         "  const w=scene.width||640, h=scene.height||480;\n"
         "  const canvas=document.createElement('canvas');\n"
@@ -99,11 +103,9 @@ def _build_anywidget_esm() -> str:
         "  Object.assign(tip.style,{position:'absolute',pointerEvents:'none',\n"
         "    opacity:'0',transition:'opacity 0.1s ease'});\n"
         "  container.appendChild(tip);\n"
-        "  const renderer=await WasmRenderer.create(canvas);\n"
-        "  const textJson=renderer.loadScene(sceneJson);\n"
-        "  _placeText(ov,JSON.parse(textJson));\n"
+        "  // Attach event listeners BEFORE GPU init so tooltips and clicks work\n"
+        "  // even when the WebGPU/WebGL context limit is exceeded.\n"
         "  const marks=scene.panels?scene.panels.flatMap(p=>p.marks||[]):[];\n"
-        "  canvas.style.pointerEvents='auto';\n"
         "  canvas.addEventListener('mousemove',e=>{\n"
         "    const r=canvas.getBoundingClientRect();\n"
         "    const h=_hitTest(marks,e.clientX-r.left,e.clientY-r.top);\n"
@@ -131,6 +133,17 @@ def _build_anywidget_esm() -> str:
         "    if(h&&h.batch.hrefs&&h.batch.hrefs[h.idx])\n"
         "      window.open(h.batch.hrefs[h.idx],'_blank','noopener,noreferrer');\n"
         "  });\n"
+        "  // GPU init: may fail if WebGPU/WebGL context limit is exceeded.\n"
+        "  // Tooltip and click interactivity still works without a GPU context.\n"
+        "  let renderer=null;\n"
+        "  try{\n"
+        "    await _ensureWasm();\n"
+        "    renderer=await WasmRenderer.create(canvas);\n"
+        "    const textJson=renderer.loadScene(sceneJson);\n"
+        "    _placeText(ov,JSON.parse(textJson));\n"
+        "  }catch(e){\n"
+        "    console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.',e);\n"
+        "  }\n"
         "  return {canvas,renderer,scene};\n"
         "}\n"
         "\n"
@@ -140,45 +153,49 @@ def _build_anywidget_esm() -> str:
         "  let _state=null;\n"
         "  let _prevJson=null;\n"
         "  async function _reload(s){\n"
-        "    const prev=_prevJson;\n"
-        "    _prevJson=s;\n"
-        "    _state=await _render(container,s);\n"
-        "    if(_state&&prev){\n"
-        "      // Animate transition from previous scene\n"
-        "      try{\n"
-        "        _state.renderer.startTransition(s);\n"
-        "        const dur=300;\n"
-        "        const t0=performance.now();\n"
-        "        function _step(){\n"
-        "          const t=Math.min((performance.now()-t0)/dur,1.0);\n"
-        "          _state.renderer.tickTransition(t).catch(()=>{});\n"
-        "          if(t<1.0)requestAnimationFrame(_step);\n"
-        "        }\n"
-        "        requestAnimationFrame(_step);\n"
-        "      }catch(e){/* transition not supported — fall back to static render */}\n"
-        "    }\n"
-        "    if(_state){\n"
-        "      _state.canvas.addEventListener('wheel',e=>{\n"
-        "        e.preventDefault();\n"
-        "        if(!_state)return;\n"
-        "        const sc=_state.scene;\n"
-        "        const p=sc.panels&&sc.panels[0];\n"
-        "        if(!p)return;\n"
-        "        const factor=1-e.deltaY*0.001;\n"
-        "        const xs=p.coord&&p.coord.x_domain;\n"
-        "        const ys=p.coord&&p.coord.y_domain;\n"
-        "        if(!xs||!ys)return;\n"
-        "        const xSpan=(xs[1]-xs[0]);\n"
-        "        const ySpan=(ys[1]-ys[0]);\n"
-        "        const xc=xs[0]+xSpan/2, yc=ys[0]+ySpan/2;\n"
-        "        const nxSpan=xSpan/factor, nySpan=ySpan/factor;\n"
-        "        const zs=JSON.stringify({'0':{\n"
-        "          x_domain:[xc-nxSpan/2,xc+nxSpan/2],\n"
-        "          y_domain:[yc-nySpan/2,yc+nySpan/2]\n"
-        "        }});\n"
-        "        model.set('zoom_state',zs);\n"
-        "        model.save_changes();\n"
-        "      },{passive:false});\n"
+        "    try{\n"
+        "      const prev=_prevJson;\n"
+        "      _prevJson=s;\n"
+        "      _state=await _render(container,s);\n"
+        "      if(_state&&prev&&_state.renderer){\n"
+        "        // Animate transition from previous scene\n"
+        "        try{\n"
+        "          _state.renderer.startTransition(s);\n"
+        "          const dur=300;\n"
+        "          const t0=performance.now();\n"
+        "          function _step(){\n"
+        "            const t=Math.min((performance.now()-t0)/dur,1.0);\n"
+        "            _state.renderer.tickTransition(t).catch(()=>{});\n"
+        "            if(t<1.0)requestAnimationFrame(_step);\n"
+        "          }\n"
+        "          requestAnimationFrame(_step);\n"
+        "        }catch(e){/* transition not supported — fall back to static render */}\n"
+        "      }\n"
+        "      if(_state){\n"
+        "        _state.canvas.addEventListener('wheel',e=>{\n"
+        "          e.preventDefault();\n"
+        "          if(!_state)return;\n"
+        "          const sc=_state.scene;\n"
+        "          const p=sc.panels&&sc.panels[0];\n"
+        "          if(!p)return;\n"
+        "          const factor=1-e.deltaY*0.001;\n"
+        "          const xs=p.coord&&p.coord.x_domain;\n"
+        "          const ys=p.coord&&p.coord.y_domain;\n"
+        "          if(!xs||!ys)return;\n"
+        "          const xSpan=(xs[1]-xs[0]);\n"
+        "          const ySpan=(ys[1]-ys[0]);\n"
+        "          const xc=xs[0]+xSpan/2, yc=ys[0]+ySpan/2;\n"
+        "          const nxSpan=xSpan/factor, nySpan=ySpan/factor;\n"
+        "          const zs=JSON.stringify({'0':{\n"
+        "            x_domain:[xc-nxSpan/2,xc+nxSpan/2],\n"
+        "            y_domain:[yc-nySpan/2,yc+nySpan/2]\n"
+        "          }});\n"
+        "          model.set('zoom_state',zs);\n"
+        "          model.save_changes();\n"
+        "        },{passive:false});\n"
+        "      }\n"
+        "    }catch(e){\n"
+        "      console.error('[ferrum] widget reload failed:',e);\n"
         "    }\n"
         "  }\n"
         "  const s=model.get('scene_json');\n"
@@ -189,6 +206,41 @@ def _build_anywidget_esm() -> str:
         "  });\n"
         "}\n"
     ).replace("__B64__", wasm_b64)
+
+
+def _get_widget_class() -> Any:
+    """Return the singleton _FerrumWidget anywidget class, building it on first call.
+
+    The class (and its multi-MB inlined WASM ESM string) is created once per
+    Python process.  All InteractiveChart instances share the same class so
+    anywidget loads the JS module exactly once, preventing repeated WASM
+    base64 decoding and GPU context pressure from redundant module reloads.
+    """
+    global _WIDGET_CLASS, _WIDGET_CLASS_UNAVAILABLE
+    if _WIDGET_CLASS_UNAVAILABLE:
+        return None
+    if _WIDGET_CLASS is not None:
+        return _WIDGET_CLASS
+    try:
+        import anywidget
+        import traitlets
+
+        esm = _build_anywidget_esm()
+        css = (_WASM_DIR / "ferrum-interactive.css").read_text()
+
+        class _FerrumWidget(anywidget.AnyWidget):
+            _esm = esm
+            _css = css
+            scene_json = traitlets.Unicode("").tag(sync=True)
+            selection_state = traitlets.Dict({}).tag(sync=True)
+            interaction_config = traitlets.Unicode("{}").tag(sync=True)
+            zoom_state = traitlets.Unicode("{}").tag(sync=True)
+
+        _WIDGET_CLASS = _FerrumWidget
+        return _WIDGET_CLASS
+    except ImportError:
+        _WIDGET_CLASS_UNAVAILABLE = True
+        return None
 
 
 class InteractiveRenderError(RuntimeError):
@@ -219,27 +271,14 @@ class InteractiveChart:
         self._try_init_widget()
 
     def _try_init_widget(self) -> None:
-        try:
-            import anywidget
-            import traitlets
-
-            esm = _build_anywidget_esm()
-
-            class _FerrumWidget(anywidget.AnyWidget):
-                _esm = esm
-                _css = (_WASM_DIR / "ferrum-interactive.css").read_text()
-                scene_json = traitlets.Unicode("").tag(sync=True)
-                selection_state = traitlets.Dict({}).tag(sync=True)
-                interaction_config = traitlets.Unicode("{}").tag(sync=True)
-                zoom_state = traitlets.Unicode("{}").tag(sync=True)
-
-            w = _FerrumWidget()
-            w.scene_json = self._scene_json
-            w.interaction_config = self._extract_interaction_config(self._scene_json)
-            w.observe(self._on_zoom_change, names=["zoom_state"])
-            self._widget = w
-        except ImportError:
-            pass
+        cls = _get_widget_class()
+        if cls is None:
+            return
+        w = cls()
+        w.scene_json = self._scene_json
+        w.interaction_config = self._extract_interaction_config(self._scene_json)
+        w.observe(self._on_zoom_change, names=["zoom_state"])
+        self._widget = w
 
     def _on_zoom_change(self, change: Any) -> None:
         """Rebuild the scene with updated domain when the JS zoom state changes."""

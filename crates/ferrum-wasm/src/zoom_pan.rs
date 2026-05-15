@@ -115,6 +115,113 @@ fn tick_level_for_zoom(zoom: f64) -> usize {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_tests {
+    use super::*;
+
+    // ── ZoomPanState / Affine2: edge and boundary cases ───────────────────
+
+    #[test]
+    fn bug_hunt_on_wheel_out_of_bounds_panel_id_is_noop() {
+        // Calling on_wheel with a panel_id >= transforms.len() must not panic
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(2, &config);
+        state.on_wheel(99, 500.0, 100.0, 100.0, ScaleMode::Independent);
+        // transforms for valid panels must be unchanged
+        assert!((state.transforms[0].sx - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_on_pan_out_of_bounds_panel_id_is_noop() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.on_pan(99, 10.0, 20.0);
+        assert!((state.transforms[0].tx).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_reset_out_of_bounds_panel_id_is_noop() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.transforms[0].sx = 3.0;
+        state.reset(99);
+        // panel 0 should be unchanged
+        assert!((state.transforms[0].sx - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_negative_wheel_delta_zooms_out() {
+        // Negative delta should reduce scale (zoom out)
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.on_wheel(0, -500.0, 0.0, 0.0, ScaleMode::Independent);
+        assert!(state.transforms[0].sx < 1.0, "negative delta must zoom out");
+    }
+
+    #[test]
+    fn bug_hunt_zoom_clamps_to_min() {
+        // Repeated large negative deltas must clamp to zoom_range.0 (0.1)
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        for _ in 0..200 {
+            state.on_wheel(0, -5000.0, 0.0, 0.0, ScaleMode::Independent);
+        }
+        assert!(state.transforms[0].sx >= 0.1, "scale must not go below min");
+    }
+
+    #[test]
+    fn bug_hunt_inverse_apply_near_zero_scale_does_not_divide_by_zero() {
+        // When scale is effectively zero, inverse_apply must not panic or produce inf/nan
+        let t = Affine2 {
+            sx: 1e-15,
+            sy: 1e-15,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        // The guard is 1e-12; 1e-15 < 1e-12, so it should return (x, y) unchanged
+        let (rx, ry) = t.inverse_apply(5.0, 10.0);
+        assert!(rx.is_finite(), "inverse_apply must not produce inf/nan for near-zero scale");
+        assert!(ry.is_finite());
+    }
+
+    #[test]
+    fn bug_hunt_zoom_factor_returns_max_of_abs_sx_sy() {
+        let t = Affine2 { sx: -3.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        // zoom_factor should be max(|sx|, |sy|) = max(3.0, 2.0) = 3.0
+        assert!((t.zoom_factor() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_tick_level_exactly_at_breakpoint() {
+        // Values exactly at breakpoints should fall into the LOWER bucket (strict <)
+        assert_eq!(tick_level_for_zoom(0.5), 1, "0.5 is at the >=0.5 boundary");
+        assert_eq!(tick_level_for_zoom(2.0), 2, "2.0 is at the >=2.0 boundary");
+        assert_eq!(tick_level_for_zoom(4.0), 3, "4.0 is at the >=4.0 boundary");
+    }
+
+    #[test]
+    fn bug_hunt_current_tick_level_for_invalid_panel_returns_default() {
+        // out-of-bounds panel_id must not panic; fallback zoom is 1.0 → level 1
+        let config = InteractionConfig::default();
+        let state = ZoomPanState::new(1, &config);
+        let level = state.current_tick_level_idx(99);
+        assert_eq!(level, 1, "fallback zoom=1.0 maps to tick level 1");
+    }
+
+    #[test]
+    fn bug_hunt_zero_panel_count_is_safe() {
+        // ZoomPanState with 0 panels must be constructible and tolerate queries
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(0, &config);
+        state.on_wheel(0, 500.0, 100.0, 100.0, ScaleMode::Independent); // must not panic
+        state.on_pan(0, 10.0, 20.0); // must not panic
+        state.reset(0); // must not panic
+        let level = state.current_tick_level_idx(0);
+        assert_eq!(level, 1);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

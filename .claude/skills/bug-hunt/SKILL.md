@@ -94,7 +94,7 @@ Append a timestamped run section to `.claude/skills/bug-hunt/output/BUG_REPORT.m
 ### <subsystem-key>
 - Python tests added: N  |  Failures: N
 - Rust tests added:   N  |  Failures: N   (or "n/a")
-- Status: clean | BUGS FOUND
+- Status: ✅ clean | 🐛 BUGS FOUND
 
 <failure details if any — test name, language, error message>
 ```
@@ -103,20 +103,22 @@ Create the file if it does not exist. Never overwrite — always append.
 
 ### Step 7 — Print summary table
 
+Use ✅ for clean subsystems and 🐛 for subsystems with failures. Example:
+
 ```
-Subsystem             | Mode  | Py tests | Py fails | Rs tests | Rs fails | Status
-----------------------|-------|----------|----------|----------|----------|--------
-scale-stat            | Py+Rs | 12       | 2        | 8        | 1        | BUGS
-coerce-transport      | Py    | 8        | 0        | —        | —        | clean
-marks-rendering       | Py+Rs | 15       | 1        | 7        | 0        | BUGS
-composition-facet     | Py    | 10       | 0        | —        | —        | clean
-figure-api            | Py    | 14       | 3        | —        | —        | BUGS
-model-diagnostics     | Py    | 11       | 0        | —        | —        | clean
-phase-11-interactive  | Py+Rs | 9        | 1        | 6        | 2        | BUGS
-layout                | Rs    | —        | —        | 8        | 0        | clean
-draw                  | Rs    | —        | —        | 7        | 1        | BUGS
-projection            | Rs    | —        | —        | 9        | 0        | clean
-stats-transforms      | Rs    | —        | —        | 10       | 2        | BUGS
+| Subsystem            | Mode  | Py tests | Py fails | Rs tests | Rs fails | Status   |
+|----------------------|-------|----------|----------|----------|----------|----------|
+| scale-stat           | Py+Rs | 12       | 2        | 8        | 1        | 🐛 BUGS  |
+| coerce-transport     | Py    | 8        | 0        | —        | —        | ✅ clean |
+| marks-rendering      | Py+Rs | 15       | 1        | 7        | 0        | 🐛 BUGS  |
+| composition-facet    | Py    | 10       | 0        | —        | —        | ✅ clean |
+| figure-api           | Py    | 14       | 3        | —        | —        | 🐛 BUGS  |
+| model-diagnostics    | Py    | 11       | 0        | —        | —        | ✅ clean |
+| phase-11-interactive | Py+Rs | 9        | 1        | 6        | 2        | 🐛 BUGS  |
+| layout               | Rs    | —        | —        | 8        | 0        | ✅ clean |
+| draw                 | Rs    | —        | —        | 7        | 1        | 🐛 BUGS  |
+| projection           | Rs    | —        | —        | 9        | 0        | ✅ clean |
+| stats-transforms     | Rs    | —        | —        | 10       | 2        | 🐛 BUGS  |
 ```
 
 Then list every failing test with its error, grouped by subsystem. These are the bugs.

@@ -64,6 +64,120 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_tests {
+    use super::*;
+
+    fn make_circle(cx: f32, cy: f32, r: f32) -> CircleInstance {
+        CircleInstance {
+            center: [cx, cy],
+            radius: r,
+            fill_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    fn make_rect(x: f32, y: f32, w: f32, h: f32) -> RectInstance {
+        RectInstance {
+            position: [x, y],
+            size: [w, h],
+            corner_radius: 0.0,
+            fill_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_empty_slices_returns_empty() {
+        let result = lerp_circles(&[], &[], 0.5);
+        assert!(result.is_empty(), "lerp_circles on empty slices must return empty vec");
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_empty_slices_returns_empty() {
+        let result = lerp_rects(&[], &[], 0.5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_t_zero_returns_old() {
+        let old = vec![make_circle(0.0, 0.0, 10.0)];
+        let new = vec![make_circle(100.0, 200.0, 20.0)];
+        let result = lerp_circles(&old, &new, 0.0);
+        assert!((result[0].center[0] - 0.0).abs() < 0.001, "t=0 must return old center.x");
+        assert!((result[0].radius - 10.0).abs() < 0.001, "t=0 must return old radius");
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_t_one_returns_new() {
+        let old = vec![make_circle(0.0, 0.0, 10.0)];
+        let new = vec![make_circle(100.0, 200.0, 20.0)];
+        let result = lerp_circles(&old, &new, 1.0);
+        assert!((result[0].center[0] - 100.0).abs() < 0.001, "t=1 must return new center.x");
+        assert!((result[0].radius - 20.0).abs() < 0.001, "t=1 must return new radius");
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_t_zero_returns_old() {
+        let old = vec![make_rect(0.0, 0.0, 50.0, 30.0)];
+        let new = vec![make_rect(100.0, 100.0, 200.0, 150.0)];
+        let result = lerp_rects(&old, &new, 0.0);
+        assert!((result[0].position[0] - 0.0).abs() < 0.001);
+        assert!((result[0].size[0] - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_t_one_returns_new() {
+        let old = vec![make_rect(0.0, 0.0, 50.0, 30.0)];
+        let new = vec![make_rect(100.0, 100.0, 200.0, 150.0)];
+        let result = lerp_rects(&old, &new, 1.0);
+        assert!((result[0].position[0] - 100.0).abs() < 0.001);
+        assert!((result[0].size[0] - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_mismatched_lengths_truncates_to_shorter() {
+        // When old is longer than new, zip() truncates to min(old.len(), new.len())
+        let old = vec![make_circle(0.0, 0.0, 5.0), make_circle(100.0, 100.0, 10.0)];
+        let new = vec![make_circle(50.0, 50.0, 8.0)];
+        let result = lerp_circles(&old, &new, 0.5);
+        // Only 1 result — second old element is dropped by zip
+        assert_eq!(result.len(), 1, "mismatched lengths must truncate to shorter (zip behaviour)");
+    }
+
+    #[test]
+    fn bug_hunt_ease_in_out_is_monotone_over_uniform_samples() {
+        // ease_in_out_cubic must be monotonically non-decreasing on [0, 1]
+        let samples = 100;
+        let mut prev = 0.0f32;
+        for i in 0..=samples {
+            let t = i as f32 / samples as f32;
+            let v = ease_in_out_cubic(t);
+            assert!(
+                v >= prev - 1e-6,
+                "ease_in_out_cubic is not monotone at t={t}: prev={prev}, current={v}"
+            );
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn bug_hunt_ease_in_out_midpoint_continuity() {
+        // The function is defined piecewise at t=0.5; both branches must agree.
+        let left = ease_in_out_cubic(0.5 - 1e-6);
+        let right = ease_in_out_cubic(0.5 + 1e-6);
+        assert!(
+            (right - left).abs() < 0.001,
+            "ease_in_out_cubic discontinuity at 0.5: left={left}, right={right}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

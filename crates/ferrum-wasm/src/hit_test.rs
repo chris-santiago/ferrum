@@ -265,6 +265,157 @@ fn rect_contains(r: &ferrum_scene::Rect, x: f64, y: f64) -> bool {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_tests {
+    use super::*;
+
+    // ── hit_test_circles: boundary / edge cases ────────────────────────────
+
+    fn make_circle(cx: f64, cy: f64, r: f64) -> SceneNode {
+        SceneNode::Circle {
+            cx,
+            cy,
+            r,
+            style: ferrum_scene::FillStroke {
+                fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+            },
+        }
+    }
+
+    #[test]
+    fn bug_hunt_circle_hit_exactly_on_boundary() {
+        // Point exactly at radius distance must count as a hit (<=, not <)
+        let nodes = vec![make_circle(0.0, 0.0, 5.0)];
+        // Exactly at r=5: dx=5, dy=0, dx*dx+dy*dy = 25 == r*r = 25
+        assert!(hit_test_circles(&nodes, 5.0, 0.0).is_some());
+    }
+
+    #[test]
+    fn bug_hunt_circle_zero_radius_hit_only_at_center() {
+        // Zero-radius circle: only a hit at the exact center pixel
+        let nodes = vec![make_circle(10.0, 10.0, 0.0)];
+        assert!(hit_test_circles(&nodes, 10.0, 10.0).is_some());
+        assert!(hit_test_circles(&nodes, 10.001, 10.0).is_none());
+    }
+
+    #[test]
+    fn bug_hunt_rect_boundary_corners() {
+        // Rect corners must be included in the hit region
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+            },
+            corner_radius: 0.0,
+        }];
+        // All four corners
+        assert!(hit_test_rects(&nodes, 10.0, 20.0).is_some(), "top-left corner");
+        assert!(hit_test_rects(&nodes, 60.0, 20.0).is_some(), "top-right corner");
+        assert!(hit_test_rects(&nodes, 10.0, 50.0).is_some(), "bottom-left corner");
+        assert!(hit_test_rects(&nodes, 60.0, 50.0).is_some(), "bottom-right corner");
+    }
+
+    #[test]
+    fn bug_hunt_rect_just_outside_boundary_is_miss() {
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+            },
+            corner_radius: 0.0,
+        }];
+        assert!(hit_test_rects(&nodes, 9.999, 25.0).is_none(), "just left");
+        assert!(hit_test_rects(&nodes, 60.001, 25.0).is_none(), "just right");
+    }
+
+    #[test]
+    fn bug_hunt_segment_distance_degenerate_zero_length() {
+        // A zero-length segment: distance should be point-to-point
+        let d = dist_to_segment(5.0, 3.0, 5.0, 3.0, 5.0, 3.0);
+        assert!(d < 1e-10, "zero-length segment: dist should be 0, got {d}");
+    }
+
+    #[test]
+    fn bug_hunt_segment_distance_perpendicular_projection_off_end() {
+        // Point projects beyond the segment end — dist should be to the endpoint
+        let d = dist_to_segment(20.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        assert!((d - 10.0).abs() < 1e-6, "expected 10.0, got {d}");
+    }
+
+    #[test]
+    fn bug_hunt_polygon_point_on_edge_is_ambiguous_but_no_panic() {
+        // A point exactly on the polygon edge must not panic.
+        let square = vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ];
+        // This just checks it doesn't panic; edge behaviour is implementation-defined.
+        let _ = point_in_polygon(5.0, 0.0, &square);
+    }
+
+    #[test]
+    fn bug_hunt_polygon_empty_vertices_no_panic() {
+        // Empty polygon must not panic
+        let empty: Vec<[f64; 2]> = vec![];
+        let result = point_in_polygon(5.0, 5.0, &empty);
+        assert!(!result, "empty polygon must never contain a point");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_circles_last_in_list_wins() {
+        // Overlapping circles: the later one in the list (rendered on top) should win
+        let nodes = vec![
+            make_circle(50.0, 50.0, 10.0),
+            make_circle(50.0, 50.0, 10.0),
+        ];
+        // hit_test_circles iterates in reverse, so the LAST node (idx 1) should win
+        let result = hit_test_circles(&nodes, 50.0, 50.0);
+        assert_eq!(result, Some(1), "last (topmost) overlapping circle must win");
+    }
+
+    #[test]
+    fn bug_hunt_rect_contains_and_rect_miss_with_negative_coords() {
+        // Rect at negative coordinates must still be hit-testable
+        let nodes = vec![SceneNode::Rect {
+            x: -50.0,
+            y: -30.0,
+            w: 20.0,
+            h: 15.0,
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+            },
+            corner_radius: 0.0,
+        }];
+        assert!(hit_test_rects(&nodes, -40.0, -25.0).is_some());
+        assert!(hit_test_rects(&nodes, 0.0, 0.0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -274,7 +425,7 @@ mod tests {
             cx: 100.0,
             cy: 100.0,
             r: 10.0,
-            style: ferrum_scene::MarkStyle {
+            style: ferrum_scene::FillStroke {
                 fill: Some(ferrum_scene::Color {
                     r: 0,
                     g: 0,
@@ -284,6 +435,7 @@ mod tests {
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,
+                stroke_dash: None,
             },
         }];
         assert!(hit_test_circles(&nodes, 105.0, 100.0).is_some());

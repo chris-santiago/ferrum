@@ -151,7 +151,8 @@ _GEOJSON_GEOMETRY_TYPES = frozenset({
 
 def _is_geojson_geometry_root(data: dict) -> bool:
     """Return True if *data* is a bare GeoJSON Geometry or GeometryCollection."""
-    return data.get("type") in _GEOJSON_GEOMETRY_TYPES
+    t = data.get("type")
+    return isinstance(t, str) and t in _GEOJSON_GEOMETRY_TYPES
 
 
 def _wrap_geometry_as_feature_collection(geom: dict) -> dict:
