@@ -165,7 +165,7 @@
 12. Wire `Axis(...)` and `Legend(...)` full kwarg sets into Rust renderer
 
 ### Low (missing namespaces / Phase 12 scope)
-13. Scaffold `ferrum.data`, `ferrum.color`, `ferrum.config` namespaces
+13. ~~Scaffold `ferrum.data`~~ — dropped (users use sklearn/seaborn). Scaffold `ferrum.color`, `ferrum.config` namespaces
 14. Clean up 105 suppressed Rust dead-code warnings; remove unused `CategoricalPalette`/`Scheme` module
 15. Update stale docstrings (`CoordPolar`, Phase 8a error message, contour `smooth`)
 16. Write Phase 12 spec doc and begin extension-point implementation

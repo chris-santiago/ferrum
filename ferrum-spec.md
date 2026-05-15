@@ -1558,8 +1558,10 @@ Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level func
 ### 3.19 Utilities
 
 ```
-ferrum.data.sample_datasets()              # list available built-in datasets
-ferrum.data.load(name) -> polars.DataFrame # load a named sample dataset
+# ferrum.data — REMOVED (2026-05-15)
+# Users source sample data from sklearn/seaborn optional dependencies.
+# A ferrum-native dataset loader duplicates existing ecosystem tooling
+# with no user-facing benefit. This namespace will not be implemented.
 
 ferrum.color.palette(scheme, n)            # return n colors from a scheme as hex list
 ferrum.color.to_hex(color)                 # normalize color string to hex
