@@ -9,7 +9,7 @@ For the design rationale — why interactivity is a renderer, not a rewrite — 
 Install the interactive extras:
 
 ```bash
-pip install ferrum[interactive]
+pip install ferrum[jupyter]
 ```
 
 This adds `anywidget` and `ipywidgets` as dependencies. The WASM GPU renderer is bundled inside the `ferrum` wheel — no separate download.
