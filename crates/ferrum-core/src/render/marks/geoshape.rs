@@ -140,6 +140,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         stroke_width: ctx.mark_style.stroke_width,
         opacity: ctx.mark_style.opacity,
         stroke_dash: None,
+        stroke_opacity: 1.0,
+        angle: 0.0,
     };
 
     // Stroke color for lines: prefer explicit stroke, fall back to fill.

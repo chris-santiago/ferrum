@@ -23,6 +23,9 @@ fn shape_from_str(s: &str) -> ShapeKind {
 /// Emit one shape glyph as `SceneNode` variants. Returns a `Vec` because
 /// `ShapeKind::Cross` produces two `Line` nodes while all other shapes
 /// produce exactly one node.
+///
+/// `stroke_opacity` and `angle` flow directly from encoding columns into
+/// the emitted `FillStroke` style — no scale transform.
 fn emit_shape_nodes(
     kind: ShapeKind,
     cx: f64,
@@ -32,18 +35,37 @@ fn emit_shape_nodes(
     stroke: Option<crate::render::color::Color>,
     stroke_width: f64,
     opacity: f64,
+    stroke_opacity: f64,
+    stroke_dash_idx: Option<f64>,
+    angle: f64,
 ) -> Vec<ferrum_scene::SceneNode> {
     use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
+    let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(|idx| {
+        // Map palette index to the canonical dash pattern vector.
+        let idx = (idx.round() as i64).clamp(0, 3);
+        match idx {
+            1 => Some(vec![6.0, 3.0]),
+            2 => Some(vec![2.0, 3.0]),
+            3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+            _ => None, // 0 = solid
+        }
+    });
+    let dash_ref: Option<&[f64]> = dash_vec.as_deref();
+
     match kind {
         ShapeKind::Circle => {
-            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
+            style.stroke_opacity = stroke_opacity;
+            style.angle = angle;
             vec![SceneNode::Circle { cx, cy, r, style }]
         }
         ShapeKind::Square => {
             let s = r * 1.6;
-            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
+            style.stroke_opacity = stroke_opacity;
+            style.angle = angle;
             vec![SceneNode::Rect {
                 x: cx - s / 2.0,
                 y: cy - s / 2.0,
@@ -79,7 +101,9 @@ fn emit_shape_nodes(
         }
         ShapeKind::Diamond => {
             let d = r * 1.4;
-            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
+            style.stroke_opacity = stroke_opacity;
+            style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - d },
@@ -94,7 +118,9 @@ fn emit_shape_nodes(
         }
         ShapeKind::TriangleUp => {
             let h = r * 1.4;
-            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
+            style.stroke_opacity = stroke_opacity;
+            style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - h },
@@ -108,7 +134,9 @@ fn emit_shape_nodes(
         }
         ShapeKind::TriangleDown => {
             let h = r * 1.4;
-            let style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, None);
+            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
+            style.stroke_opacity = stroke_opacity;
+            style.angle = angle;
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy + h },
@@ -196,6 +224,23 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_str(ctx.batch, &e.field).ok());
 
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    // Per-row stroke/angle channel values (direct passthrough — no scale transform).
+    let stroke_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let stroke_dash_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
@@ -315,9 +360,35 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ShapeKind::Circle
         };
 
+        // Resolve per-row stroke/angle channel values (direct passthrough).
+        let row_stroke_opacity = stroke_opacity_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+
+        let row_stroke_width = stroke_width_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(effective_sw);
+
+        let row_stroke_dash = stroke_dash_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite());
+
+        let row_angle = angle_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0);
+
         let shape_nodes = emit_shape_nodes(
             shape_kind, cx, cy, radius,
-            effective_fill, effective_stroke, effective_sw, row_opacity,
+            effective_fill, effective_stroke, row_stroke_width, row_opacity,
+            row_stroke_opacity, row_stroke_dash, row_angle,
         );
         nodes.extend(shape_nodes);
         indices.push(i);
@@ -608,5 +679,126 @@ mod tests {
         assert!(has_translucent, "expected at least one circle with translucent fill");
         // All three rows are emitted.
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count(), 3);
+    }
+
+    // ── Task 2: stroke/angle encoding channels flow through to FillStroke ──
+
+    fn batch_with_stroke_channels() -> arrow::record_batch::RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("so", DataType::Float64, false),  // stroke_opacity
+            Field::new("sw", DataType::Float64, false),  // stroke_width
+            Field::new("sd", DataType::Float64, false),  // stroke_dash index
+            Field::new("ang", DataType::Float64, false), // angle
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.3, 0.6, 0.9])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])), // solid, dashed, dotted
+            Arc::new(Float64Array::from(vec![0.0, 45.0, 90.0])),
+        ]).unwrap()
+    }
+
+    fn spec_with_stroke_channels() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                stroke_opacity: Some(EncodingSpec { field: "so".into(), type_: None, ..Default::default() }),
+                stroke_width: Some(EncodingSpec { field: "sw".into(), type_: None, ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                angle: Some(EncodingSpec { field: "ang".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stroke_opacity_encoding_flows_to_fill_stroke() {
+        let spec = spec_with_stroke_channels();
+        let batch = batch_with_stroke_channels();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let circles: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(circles.len(), 3, "expected 3 circle nodes");
+
+        // stroke_opacity values from batch: [0.3, 0.6, 0.9]
+        assert!((circles[0].stroke_opacity - 0.3).abs() < 1e-5,
+            "row 0 stroke_opacity: expected 0.3, got {}", circles[0].stroke_opacity);
+        assert!((circles[1].stroke_opacity - 0.6).abs() < 1e-5,
+            "row 1 stroke_opacity: expected 0.6, got {}", circles[1].stroke_opacity);
+        assert!((circles[2].stroke_opacity - 0.9).abs() < 1e-5,
+            "row 2 stroke_opacity: expected 0.9, got {}", circles[2].stroke_opacity);
+    }
+
+    #[test]
+    fn angle_encoding_flows_to_fill_stroke() {
+        let spec = spec_with_stroke_channels();
+        let batch = batch_with_stroke_channels();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let circles: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style) } else { None }
+        }).collect();
+
+        // angle values: [0.0, 45.0, 90.0]
+        assert!((circles[0].angle - 0.0).abs() < 1e-5,
+            "row 0 angle: expected 0.0, got {}", circles[0].angle);
+        assert!((circles[1].angle - 45.0).abs() < 1e-5,
+            "row 1 angle: expected 45.0, got {}", circles[1].angle);
+        assert!((circles[2].angle - 90.0).abs() < 1e-5,
+            "row 2 angle: expected 90.0, got {}", circles[2].angle);
+    }
+
+    #[test]
+    fn stroke_dash_encoding_maps_index_to_dash_pattern() {
+        let spec = spec_with_stroke_channels();
+        let batch = batch_with_stroke_channels();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let circles: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style) } else { None }
+        }).collect();
+
+        // Index 0 → solid (None), index 1 → "6,3", index 2 → "2,3"
+        assert!(circles[0].stroke_dash.is_none(), "index 0 should be solid (None)");
+        assert_eq!(circles[1].stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+            "index 1 should be dashed [6,3]");
+        assert_eq!(circles[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
+            "index 2 should be dotted [2,3]");
     }
 }

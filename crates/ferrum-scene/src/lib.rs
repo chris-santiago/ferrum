@@ -42,6 +42,8 @@ mod tests {
                                 stroke_width: 0.0,
                                 opacity: 1.0,
                                 stroke_dash: None,
+                                stroke_opacity: 1.0,
+                                angle: 0.0,
                             },
                         },
                         SceneNode::Rect {
@@ -55,6 +57,8 @@ mod tests {
                                 stroke_width: 1.0,
                                 opacity: 0.8,
                                 stroke_dash: None,
+                                stroke_opacity: 1.0,
+                                angle: 0.0,
                             },
                             corner_radius: 2.0,
                         },

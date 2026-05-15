@@ -17,6 +17,9 @@ pub fn lerp_circles(
             stroke_color: lerp_color(a.stroke_color, b.stroke_color, t),
             stroke_width: a.stroke_width + (b.stroke_width - a.stroke_width) * t,
             opacity: a.opacity + (b.opacity - a.opacity) * t,
+            stroke_opacity: a.stroke_opacity + (b.stroke_opacity - a.stroke_opacity) * t,
+            stroke_dash: a.stroke_dash, // dash palette index: use old value (no lerp for discrete)
+            angle: a.angle + (b.angle - a.angle) * t,
         })
         .collect()
 }
@@ -42,6 +45,9 @@ pub fn lerp_rects(
             stroke_color: lerp_color(a.stroke_color, b.stroke_color, t),
             stroke_width: a.stroke_width + (b.stroke_width - a.stroke_width) * t,
             opacity: a.opacity + (b.opacity - a.opacity) * t,
+            stroke_opacity: a.stroke_opacity + (b.stroke_opacity - a.stroke_opacity) * t,
+            stroke_dash: a.stroke_dash, // palette index: use old value (discrete, no lerp)
+            angle: a.angle + (b.angle - a.angle) * t,
         })
         .collect()
 }
@@ -76,6 +82,9 @@ mod bug_hunt_tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         }
     }
 
@@ -88,6 +97,9 @@ mod bug_hunt_tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         }
     }
 
@@ -199,6 +211,9 @@ mod bug_hunt_tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         let black = CircleInstance {
             center: [0.0, 0.0],
@@ -207,6 +222,9 @@ mod bug_hunt_tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         let mid = lerp_circles(&[white], &[black], 0.5);
         assert!((mid[0].fill_color[0] - 0.5).abs() < 0.01, "mid-grey R channel");
@@ -260,6 +278,9 @@ mod tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         }];
         let new = vec![CircleInstance {
             center: [100.0, 200.0],
@@ -268,6 +289,9 @@ mod tests {
             stroke_color: [0.0; 4],
             stroke_width: 0.0,
             opacity: 0.5,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         }];
         let mid = lerp_circles(&old, &new, 0.5);
         assert!((mid[0].center[0] - 50.0).abs() < 0.01);

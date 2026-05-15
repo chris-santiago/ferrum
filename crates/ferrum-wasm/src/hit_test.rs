@@ -354,6 +354,8 @@ mod bug_hunt_tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
         }
     }
@@ -388,6 +390,8 @@ mod bug_hunt_tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
             corner_radius: 0.0,
         }];
@@ -411,6 +415,8 @@ mod bug_hunt_tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
             corner_radius: 0.0,
         }];
@@ -479,6 +485,8 @@ mod bug_hunt_tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
             corner_radius: 0.0,
         }];
@@ -496,6 +504,8 @@ mod bug_hunt_tests {
             stroke_width: 0.0,
             opacity: 1.0,
             stroke_dash: None,
+            stroke_opacity: 1.0,
+            angle: 0.0,
         };
         vec![Panel {
             id: 0,
@@ -627,6 +637,8 @@ mod bug_hunt_tests {
             stroke_width: 0.0,
             opacity: 1.0,
             stroke_dash: None,
+            stroke_opacity: 1.0,
+            angle: 0.0,
         }
     }
 
@@ -782,6 +794,8 @@ mod bug_hunt_tests {
                 stroke_width: 1.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
             closed: true,
         }];
@@ -948,6 +962,8 @@ mod tests {
             stroke_width: 0.0,
             opacity: 1.0,
             stroke_dash: None,
+            stroke_opacity: 1.0,
+            angle: 0.0,
         }
     }
 
@@ -1079,6 +1095,8 @@ mod tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
         }];
         assert!(hit_test_circles(&nodes, 105.0, 100.0).is_some());
@@ -1098,6 +1116,8 @@ mod tests {
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_dash: None,
+                stroke_opacity: 1.0,
+                angle: 0.0,
             },
             corner_radius: 0.0,
         }];

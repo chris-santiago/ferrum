@@ -73,6 +73,12 @@ pub(crate) struct SmoothSpec {
     pub groupby: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// WI-7 (2026-05-15): when set, evaluate the fit line over this x range
+    /// instead of ``[xs.min(), xs.max()]``. Enables ``lmplot(truncate=False)``
+    /// to extend the fit line to the axis domain boundary. Clipped at this
+    /// boundary — never extrapolates past it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_range: Option<[f64; 2]>,
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -108,8 +114,15 @@ fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<
         return residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw);
     }
 
-    let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
+    let (data_x_min, data_x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
+
+    // WI-7: when x_range is set (truncate=False), use it as the evaluation
+    // domain instead of the observed data extent. Clip to valid range.
+    let (x_min, x_max) = match spec.x_range {
+        Some([lo, hi]) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
+        _ => (data_x_min, data_x_max),
+    };
 
     let grid: Vec<f64> = (0..spec.n)
         .map(|i| if spec.n <= 1 { x_min } else {
@@ -805,7 +818,7 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
@@ -821,6 +834,7 @@ impl PySmooth {
         inject_metrics: bool,
         groupby: Option<String>,
         name: Option<String>,
+        x_range: Option<[f64; 2]>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Smooth: x and y must be non-empty"));
@@ -896,6 +910,7 @@ impl PySmooth {
             inject_metrics,
             groupby,
             name,
+            x_range,
         })))
     }
 
@@ -950,6 +965,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -978,6 +994,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1006,6 +1023,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1027,6 +1045,7 @@ mod tests {
             inject_metrics: false,
             groupby: None,
             name: None,
+            x_range: None,
         };
         let out = apply(&spec, &batch).unwrap();
         let yf = col(&out, "y");
@@ -1043,6 +1062,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1074,6 +1094,7 @@ mod tests {
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
+            x_range: None,
                 groupby: None,
                 name: None,
             };
@@ -1110,6 +1131,7 @@ mod tests {
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
+            x_range: None,
                 groupby: None,
                 name: None,
             };
@@ -1140,6 +1162,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1173,6 +1196,7 @@ mod tests {
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1203,6 +1227,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };
@@ -1230,6 +1255,7 @@ mod tests {
             inject_metrics: false,
             groupby: None,
             name: None,
+            x_range: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.schema().field(0).name(), "x");
@@ -1254,6 +1280,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             groupby: None,
             name: None,
         };

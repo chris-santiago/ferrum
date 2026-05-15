@@ -3,6 +3,31 @@ use lyon::tessellation::VertexBuffers;
 
 use crate::tessellate::{self, MeshVertex};
 
+/// Stroke-dash palette: maps palette index (0–3) to a `stroke-dasharray`
+/// pattern string, shared with the SVG renderer for cross-renderer consistency.
+///
+/// Index mapping:
+/// - 0 → solid (no dash)
+/// - 1 → dashed  "6,3"
+/// - 2 → dotted  "2,3"
+/// - 3 → dash-dot "6,3,2,3"
+///
+/// Out-of-range float values in instance data are clamped to `[0, 3]` by
+/// the shader's `clamp(floor(stroke_dash + 0.5), 0, 3)` idiom.
+pub const STROKE_DASH_PALETTE: [&str; 4] = ["", "6,3", "2,3", "6,3,2,3"];
+
+/// GPU instance record for a single circle mark.
+///
+/// Layout (16 floats = 64 bytes):
+///   center(2) + radius(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1)
+///   + stroke_opacity(1) + stroke_dash(1) + angle(1)
+///
+/// `stroke_dash` is stored as an f32 palette index (0.0–3.0) for Pod
+/// compatibility; the vertex shader casts it to a uint index with
+/// `clamp(floor(dash + 0.5), 0, 3)`.
+///
+/// `angle` is in screen-space degrees, applied as a rotation around the
+/// instance anchor (circle center / rect center).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CircleInstance {
@@ -12,8 +37,20 @@ pub struct CircleInstance {
     pub stroke_color: [f32; 4],
     pub stroke_width: f32,
     pub opacity: f32,
+    /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
+    pub stroke_opacity: f32,
+    /// Palette index as f32 (0.0 = solid, 1.0 = dashed, 2.0 = dotted,
+    /// 3.0 = dash-dot). Values outside [0, 3] are clamped. Default: 0.0.
+    pub stroke_dash: f32,
+    /// Rotation in screen-space degrees around the circle center. Default: 0.0.
+    pub angle: f32,
 }
 
+/// GPU instance record for a single rect/bar mark.
+///
+/// Layout (18 floats = 72 bytes):
+///   pos(2) + size(2) + corner_r(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1)
+///   + stroke_opacity(1) + stroke_dash(1) + angle(1)
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RectInstance {
@@ -24,6 +61,13 @@ pub struct RectInstance {
     pub stroke_color: [f32; 4],
     pub stroke_width: f32,
     pub opacity: f32,
+    /// Stroke opacity in [0, 1]. Default: 1.0 (fully opaque).
+    pub stroke_opacity: f32,
+    /// Palette index as f32 (0.0 = solid, 1.0 = dashed, 2.0 = dotted,
+    /// 3.0 = dash-dot). Values outside [0, 3] are clamped. Default: 0.0.
+    pub stroke_dash: f32,
+    /// Rotation in screen-space degrees around the rect center. Default: 0.0.
+    pub angle: f32,
 }
 
 #[derive(Clone)]
@@ -127,6 +171,9 @@ fn collect_nodes(
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
+                    stroke_opacity: style.stroke_opacity as f32,
+                    stroke_dash: stroke_dash_index(&style.stroke_dash),
+                    angle: style.angle as f32,
                 });
             }
             SceneNode::Rect { x, y, w, h, style, corner_radius } => {
@@ -138,6 +185,9 @@ fn collect_nodes(
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
+                    stroke_opacity: style.stroke_opacity as f32,
+                    stroke_dash: stroke_dash_index(&style.stroke_dash),
+                    angle: style.angle as f32,
                 });
             }
             SceneNode::Line { x1, y1, x2, y2, style } => {
@@ -230,6 +280,15 @@ fn decode_image_quad(x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) -> Option
     })
 }
 
+/// Returns `true` when a mark batch should use the additive blend pipeline.
+///
+/// Only `BlendMode::Additive` raster batches use additive compositing; all
+/// other batches use the standard alpha pipeline. This pure-logic helper is
+/// tested on the host; the actual pipeline selection in `render.rs` calls it.
+pub fn batch_uses_additive_blend(blend: BlendMode) -> bool {
+    matches!(blend, BlendMode::Additive)
+}
+
 fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     match color {
         Some(c) => [
@@ -239,5 +298,380 @@ fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
             (c.a as f32 / 255.0) * opacity as f32,
         ],
         None => [0.0, 0.0, 0.0, 0.0],
+    }
+}
+
+/// Map a `FillStroke.stroke_dash` pattern vector to the closest palette index.
+///
+/// `None` / empty vec → 0.0 (solid). Otherwise matches the first non-empty
+/// palette pattern by round-trip string comparison of the vec joined with ",".
+/// Falls back to 0.0 (solid) for unrecognised patterns.
+fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
+    match dash {
+        None => 0.0,
+        Some(v) if v.is_empty() => 0.0,
+        Some(v) => {
+            let joined = v.iter()
+                .map(|x| {
+                    // Format without trailing ".0" for integer-valued floats so
+                    // "6,3" matches rather than "6.0,3.0".
+                    if x.fract() == 0.0 {
+                        format!("{}", *x as i64)
+                    } else {
+                        format!("{x}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            STROKE_DASH_PALETTE
+                .iter()
+                .enumerate()
+                .skip(1) // index 0 is always solid / empty
+                .find(|(_, pat)| **pat == joined)
+                .map(|(i, _)| i as f32)
+                .unwrap_or(0.0) // unrecognised pattern → solid
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Task 1: instance struct layout and round-trip ─────────────────
+
+    #[test]
+    fn circle_instance_has_new_stroke_fields() {
+        let inst = CircleInstance {
+            center: [10.0, 20.0],
+            radius: 5.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 2.0,
+            opacity: 0.8,
+            stroke_opacity: 0.5,
+            stroke_dash: 1.0, // "dashed"
+            angle: 45.0,
+        };
+        assert!((inst.stroke_opacity - 0.5).abs() < 1e-6);
+        assert!((inst.stroke_dash - 1.0).abs() < 1e-6);
+        assert!((inst.angle - 45.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rect_instance_has_new_stroke_fields() {
+        let inst = RectInstance {
+            position: [0.0, 0.0],
+            size: [100.0, 50.0],
+            corner_radius: 4.0,
+            fill_color: [0.0, 1.0, 0.0, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 0.75,
+            stroke_dash: 2.0, // "dotted"
+            angle: 90.0,
+        };
+        assert!((inst.stroke_opacity - 0.75).abs() < 1e-6);
+        assert!((inst.stroke_dash - 2.0).abs() < 1e-6);
+        assert!((inst.angle - 90.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn circle_instance_pod_roundtrip() {
+        // bytemuck::Pod requires no padding — confirm the struct round-trips
+        // through byte representation without panicking.
+        let inst = CircleInstance {
+            center: [1.0, 2.0],
+            radius: 3.0,
+            fill_color: [0.1, 0.2, 0.3, 1.0],
+            stroke_color: [0.4, 0.5, 0.6, 0.9],
+            stroke_width: 1.5,
+            opacity: 0.9,
+            stroke_opacity: 0.6,
+            stroke_dash: 3.0,
+            angle: 180.0,
+        };
+        let bytes = bytemuck::bytes_of(&inst);
+        // 16 floats × 4 bytes = 64 bytes
+        assert_eq!(bytes.len(), 16 * 4, "CircleInstance must be exactly 16 floats");
+        let back: &CircleInstance = bytemuck::from_bytes(bytes);
+        assert!((back.stroke_opacity - 0.6).abs() < 1e-6);
+        assert!((back.stroke_dash - 3.0).abs() < 1e-6);
+        assert!((back.angle - 180.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rect_instance_pod_roundtrip() {
+        let inst = RectInstance {
+            position: [5.0, 10.0],
+            size: [40.0, 20.0],
+            corner_radius: 2.0,
+            fill_color: [0.9, 0.8, 0.7, 1.0],
+            stroke_color: [0.1, 0.2, 0.3, 0.5],
+            stroke_width: 2.0,
+            opacity: 0.85,
+            stroke_opacity: 0.4,
+            stroke_dash: 1.0,
+            angle: 30.0,
+        };
+        let bytes = bytemuck::bytes_of(&inst);
+        // 18 floats × 4 bytes = 72 bytes
+        assert_eq!(bytes.len(), 18 * 4, "RectInstance must be exactly 18 floats");
+        let back: &RectInstance = bytemuck::from_bytes(bytes);
+        assert!((back.stroke_opacity - 0.4).abs() < 1e-6);
+        assert!((back.stroke_dash - 1.0).abs() < 1e-6);
+        assert!((back.angle - 30.0).abs() < 1e-6);
+    }
+
+    // ── stroke_dash_index helper ──────────────────────────────────────
+
+    #[test]
+    fn stroke_dash_index_solid_on_none() {
+        assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_dash_index_solid_on_empty_vec() {
+        assert!((stroke_dash_index(&Some(vec![])) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_dash_index_dashed() {
+        // "6,3" → index 1
+        assert!((stroke_dash_index(&Some(vec![6.0, 3.0])) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_dash_index_dotted() {
+        // "2,3" → index 2
+        assert!((stroke_dash_index(&Some(vec![2.0, 3.0])) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_dash_index_dash_dot() {
+        // "6,3,2,3" → index 3
+        assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stroke_dash_index_unknown_pattern_gives_solid() {
+        // unrecognised → solid (0.0)
+        assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
+    }
+
+    // ── Task 3: scene_load builds correct instance fields ────────────
+
+    /// Build a minimal SceneGraph with one Circle and one Rect; confirm the
+    /// scene loader populates the new stroke fields from style.
+    #[test]
+    fn load_scene_populates_stroke_opacity_and_angle_for_circle() {
+        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 2.0,
+            opacity: 1.0,
+            stroke_opacity: 0.5,
+            stroke_dash: Some(vec![6.0, 3.0]), // index 1 = dashed
+            angle: 45.0,
+        };
+
+        let node = SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style };
+
+        let scene = SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![node],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(data.circle_instances.len(), 1);
+        let ci = &data.circle_instances[0];
+        assert!((ci.stroke_opacity - 0.5).abs() < 1e-6,
+            "stroke_opacity should be 0.5, got {}", ci.stroke_opacity);
+        assert!((ci.stroke_dash - 1.0).abs() < 1e-6,
+            "stroke_dash index should be 1 (dashed), got {}", ci.stroke_dash);
+        assert!((ci.angle - 45.0).abs() < 1e-6,
+            "angle should be 45.0, got {}", ci.angle);
+    }
+
+    #[test]
+    fn load_scene_populates_stroke_opacity_and_angle_for_rect() {
+        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 128, b: 255, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 1.0,
+            opacity: 0.9,
+            stroke_opacity: 0.75,
+            stroke_dash: Some(vec![2.0, 3.0]), // index 2 = dotted
+            angle: 30.0,
+        };
+
+        let node = SceneNode::Rect {
+            x: 10.0, y: 20.0, w: 40.0, h: 30.0, style, corner_radius: 0.0,
+        };
+
+        let scene = SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Bar,
+                    nodes: vec![node],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(data.rect_instances.len(), 1);
+        let ri = &data.rect_instances[0];
+        assert!((ri.stroke_opacity - 0.75).abs() < 1e-6,
+            "stroke_opacity should be 0.75, got {}", ri.stroke_opacity);
+        assert!((ri.stroke_dash - 2.0).abs() < 1e-6,
+            "stroke_dash index should be 2 (dotted), got {}", ri.stroke_dash);
+        assert!((ri.angle - 30.0).abs() < 1e-6,
+            "angle should be 30.0, got {}", ri.angle);
+    }
+
+    // ── Task 6: blend mode selection ────────────────────────────────
+
+    /// Assert that `batch_uses_additive_blend` correctly identifies additive
+    /// batches: the function is the single testable decision point for
+    /// per-batch pipeline selection.
+    #[test]
+    fn additive_blend_mode_selects_additive_pipeline() {
+        assert!(
+            batch_uses_additive_blend(BlendMode::Additive),
+            "BlendMode::Additive must select the additive pipeline"
+        );
+    }
+
+    #[test]
+    fn normal_blend_mode_does_not_select_additive_pipeline() {
+        assert!(
+            !batch_uses_additive_blend(BlendMode::Normal),
+            "BlendMode::Normal must NOT select the additive pipeline"
+        );
+    }
+
+    // ── Defaults: missing stroke_opacity/angle use defaults ─────────
+
+    #[test]
+    fn load_scene_uses_defaults_when_stroke_fields_absent() {
+        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+
+        // FillStroke with default stroke_opacity (1.0) and angle (0.0)
+        let style = FillStroke {
+            fill: Some(Color { r: 100, g: 100, b: 100, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0, // default
+            stroke_dash: None,   // solid → 0.0
+            angle: 0.0,          // default
+        };
+
+        let node = SceneNode::Circle { cx: 25.0, cy: 25.0, r: 5.0, style };
+
+        let scene = SceneGraph {
+            width: 50.0,
+            height: 50.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![node],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+        };
+
+        let data = load_scene(&scene);
+        let ci = &data.circle_instances[0];
+        assert!((ci.stroke_opacity - 1.0).abs() < 1e-6, "default stroke_opacity is 1.0");
+        assert!((ci.stroke_dash - 0.0).abs() < 1e-6, "default stroke_dash is 0.0 (solid)");
+        assert!((ci.angle - 0.0).abs() < 1e-6, "default angle is 0.0");
     }
 }

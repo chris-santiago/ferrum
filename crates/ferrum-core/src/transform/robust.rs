@@ -56,6 +56,10 @@ pub(crate) struct RobustSpec {
     pub inject_metrics: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// WI-7 (2026-05-15): when set, evaluate the fit line over this x range
+    /// instead of ``[xs.min(), xs.max()]``. Enables ``lmplot(truncate=False)``.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x_range: Option<[f64; 2]>,
 }
 
 // ---------- Main apply ----------
@@ -75,8 +79,13 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
         };
     }
 
-    let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
+    let (data_x_min, data_x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
+    // WI-7: use x_range when set (truncate=False); else fall back to data extent.
+    let (x_min, x_max) = match spec.x_range {
+        Some([lo, hi]) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
+        _ => (data_x_min, data_x_max),
+    };
     if !(x_max > x_min) {
         // Zero-variance x → no slope identifiable → NaN line.
         return match spec.output {
@@ -459,6 +468,7 @@ impl PyRobust {
         inject_zero_ref = false,
         inject_metrics = false,
         name = None,
+        x_range = None,
     ))]
     fn new(
         x: &str,
@@ -472,6 +482,7 @@ impl PyRobust {
         inject_zero_ref: bool,
         inject_metrics: bool,
         name: Option<String>,
+        x_range: Option<[f64; 2]>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Robust: x and y must be non-empty"));
@@ -524,6 +535,7 @@ impl PyRobust {
             inject_zero_ref,
             inject_metrics,
             name,
+            x_range,
         })))
     }
 
@@ -572,6 +584,7 @@ mod tests {
             output,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             name: None,
         }
     }
@@ -586,6 +599,7 @@ mod tests {
             inject_zero_ref: false,
             inject_metrics: false,
             name: None,
+            x_range: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: RobustSpec = serde_json::from_str(&json).unwrap();
@@ -600,6 +614,7 @@ mod tests {
             inject_zero_ref: false,
             inject_metrics: false,
             name: Some("r1".into()),
+            x_range: None,
         };
         let json2 = serde_json::to_string(&s2).unwrap();
         let parsed2: RobustSpec = serde_json::from_str(&json2).unwrap();
@@ -760,6 +775,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: true,
+        x_range: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();
@@ -814,6 +830,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+        x_range: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();

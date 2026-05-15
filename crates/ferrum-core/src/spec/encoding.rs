@@ -488,6 +488,21 @@ pub struct Encoding {
     // (data:image/png;base64,… or data:image/jpeg;base64,…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<EncodingSpec>,
+    // ── Stroke/angle channels (silent-drop remediation) ───────────────
+    // These are data-driven per-row constants, not scale-transformed channels.
+    // Values flow directly from the batch column into mark style / FillStroke.
+    // stroke_width: per-row stroke line width in pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<EncodingSpec>,
+    // stroke_opacity: per-row stroke opacity in [0, 1].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_opacity: Option<EncodingSpec>,
+    // stroke_dash: per-row palette index (0=solid, 1=dashed, 2=dotted, 3=dash-dot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_dash: Option<EncodingSpec>,
+    // angle: per-row rotation in degrees around the mark anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<EncodingSpec>,
 }
 
 impl Encoding {
@@ -558,6 +573,10 @@ impl Encoding {
         inherit(&mut self.description, &parent.description);
         inherit(&mut self.key, &parent.key);
         inherit(&mut self.url, &parent.url);
+        inherit(&mut self.stroke_width, &parent.stroke_width);
+        inherit(&mut self.stroke_opacity, &parent.stroke_opacity);
+        inherit(&mut self.stroke_dash, &parent.stroke_dash);
+        inherit(&mut self.angle, &parent.angle);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -576,7 +595,8 @@ impl Encoding {
                 $( if overlay.$ch.is_some() { self.$ch = overlay.$ch.clone(); } )*
             };
         }
-        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url);
+        ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
+            stroke_width, stroke_opacity, stroke_dash, angle);
     }
 }
 
@@ -925,6 +945,10 @@ mod tests {
             description: Some(EncodingSpec { field: "bd".into(), ..Default::default() }),
             key: Some(EncodingSpec { field: "bk".into(), ..Default::default() }),
             url: None,
+            stroke_width: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            angle: None,
         };
         // Overlay only tooltip, href, description (the three that were missed
         // by the old inline merge).

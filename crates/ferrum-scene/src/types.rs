@@ -164,6 +164,18 @@ pub struct FillStroke {
     pub stroke_width: f64,
     pub opacity: f64,
     pub stroke_dash: Option<Vec<f64>>,
+    /// Stroke-only opacity in [0, 1]. Independent of `opacity` (which applies
+    /// to both fill and stroke). Default: 1.0 (fully opaque stroke).
+    #[serde(default = "default_stroke_opacity")]
+    pub stroke_opacity: f64,
+    /// Rotation in screen-space degrees around the mark anchor point.
+    /// Default: 0.0 (no rotation).
+    #[serde(default)]
+    pub angle: f64,
+}
+
+fn default_stroke_opacity() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

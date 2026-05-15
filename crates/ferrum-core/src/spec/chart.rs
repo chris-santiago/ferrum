@@ -258,7 +258,8 @@ impl ChartSpec {
         Ok(ChartSpec {
             data,
             mark,
-            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url },
+            encoding: Encoding { x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
+                stroke_width: None, stroke_opacity: None, stroke_dash: None, angle: None },
             transforms,
             facet,
             layers,

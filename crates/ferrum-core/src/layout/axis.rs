@@ -274,15 +274,22 @@ pub fn layout_x_axis(
     // Step 2: decide whether any label exceeds slot * (1 - tolerance).
     let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
     let any_collision = widths.iter().any(|w| *w > threshold);
-    let angle = if any_collision {
-        input.label_angle_override.unwrap_or(DEFAULT_LABEL_ANGLE)
+    // When `label_angle_override` is explicitly set (from `axis.label_angle`),
+    // force that angle regardless of collision detection. Otherwise apply the
+    // default auto-rotation only when collision is detected.
+    let forced_angle = input.label_angle_override;
+    let angle = if let Some(override_angle) = forced_angle {
+        override_angle
+    } else if any_collision {
+        DEFAULT_LABEL_ANGLE
     } else {
         0.0
     };
 
     // Step 3: collision recovery — rotation, then elision (Tasks 11 + 12).
     // Phase 1 of this task: produce flat ticks if no collision.
-    let (ticks, warning) = if !any_collision {
+    // When a forced angle is set and there's no collision, still apply the angle.
+    let (ticks, warning) = if !any_collision && forced_angle.is_none() {
         let ticks: Vec<TickLayout> = input
             .tick_labels
             .iter()
@@ -291,6 +298,20 @@ pub fn layout_x_axis(
                 position: panel_area.x + (i as f64 + 0.5) * slot_w,
                 label: label.clone(),
                 label_angle: 0.0,
+                elided: false,
+            })
+            .collect();
+        (ticks, None)
+    } else if !any_collision && forced_angle.is_some() {
+        // No collision but angle forced by `axis.label_angle`.
+        let ticks: Vec<TickLayout> = input
+            .tick_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| TickLayout {
+                position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                label: label.clone(),
+                label_angle: angle,
                 elided: false,
             })
             .collect();

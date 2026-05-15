@@ -5,6 +5,10 @@ pub struct RenderPipelines {
     pub instanced_rect: RenderPipeline,
     pub mesh: RenderPipeline,
     pub textured: RenderPipeline,
+    /// Second pipeline with additive blend state (src + dst, no alpha attenuation).
+    /// Selected per-batch when `MarkBatch.blend == BlendMode::Additive`.
+    pub instanced_circle_additive: RenderPipeline,
+    pub instanced_rect_additive: RenderPipeline,
     pub uniform_bgl: wgpu::BindGroupLayout,
     pub texture_bgl: wgpu::BindGroupLayout,
 }
@@ -66,21 +70,29 @@ impl RenderPipelines {
                 ],
             });
 
-        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let additive_blend = Some(additive_blend_state());
 
         let instanced_circle =
-            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, blend, &circle_instance_layout());
+            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, alpha_blend, &circle_instance_layout());
         let instanced_rect =
-            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, blend, &rect_instance_layout());
-        let mesh = build_mesh_pipeline(device, &mesh_shader, format, &uniform_bgl, blend);
+            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, alpha_blend, &rect_instance_layout());
+        let mesh = build_mesh_pipeline(device, &mesh_shader, format, &uniform_bgl, alpha_blend);
         let textured =
-            build_textured_pipeline(device, &textured_shader, format, &uniform_bgl, &texture_bgl, blend);
+            build_textured_pipeline(device, &textured_shader, format, &uniform_bgl, &texture_bgl, alpha_blend);
+
+        let instanced_circle_additive =
+            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, additive_blend, &circle_instance_layout());
+        let instanced_rect_additive =
+            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, additive_blend, &rect_instance_layout());
 
         Self {
             instanced_circle,
             instanced_rect,
             mesh,
             textured,
+            instanced_circle_additive,
+            instanced_rect_additive,
             uniform_bgl,
             texture_bgl,
         }
@@ -98,35 +110,66 @@ const QUAD_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout 
 };
 
 fn circle_instance_layout() -> wgpu::VertexBufferLayout<'static> {
-    // center(2) + radius(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1) = 13 floats
+    // center(2) + radius(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1)
+    // + stroke_opacity(1) + stroke_dash(1) + angle(1) = 16 floats = 64 bytes
     wgpu::VertexBufferLayout {
-        array_stride: 13 * 4,
+        array_stride: 16 * 4,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32 },
-            wgpu::VertexAttribute { offset: 12, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: 28, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: 44, shader_location: 5, format: wgpu::VertexFormat::Float32 },
-            wgpu::VertexAttribute { offset: 48, shader_location: 6, format: wgpu::VertexFormat::Float32 },
+            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // center
+            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32 },   // radius
+            wgpu::VertexAttribute { offset: 12, shader_location: 3, format: wgpu::VertexFormat::Float32x4 }, // fill_color
+            wgpu::VertexAttribute { offset: 28, shader_location: 4, format: wgpu::VertexFormat::Float32x4 }, // stroke_color
+            wgpu::VertexAttribute { offset: 44, shader_location: 5, format: wgpu::VertexFormat::Float32 },   // stroke_width
+            wgpu::VertexAttribute { offset: 48, shader_location: 6, format: wgpu::VertexFormat::Float32 },   // opacity
+            wgpu::VertexAttribute { offset: 52, shader_location: 7, format: wgpu::VertexFormat::Float32 },   // stroke_opacity
+            wgpu::VertexAttribute { offset: 56, shader_location: 8, format: wgpu::VertexFormat::Float32 },   // stroke_dash
+            wgpu::VertexAttribute { offset: 60, shader_location: 9, format: wgpu::VertexFormat::Float32 },   // angle
         ],
     }
 }
 
 fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
-    // pos(2) + size(2) + corner_r(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1) = 15 floats
+    // pos(2) + size(2) + corner_r(1) + fill(4) + stroke(4) + stroke_w(1) + opacity(1)
+    // + stroke_opacity(1) + stroke_dash(1) + angle(1) = 18 floats = 72 bytes
     wgpu::VertexBufferLayout {
-        array_stride: 15 * 4,
+        array_stride: 18 * 4,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
-            wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32 },
-            wgpu::VertexAttribute { offset: 20, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: 36, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },
-            wgpu::VertexAttribute { offset: 52, shader_location: 6, format: wgpu::VertexFormat::Float32 },
-            wgpu::VertexAttribute { offset: 56, shader_location: 7, format: wgpu::VertexFormat::Float32 },
+            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // position
+            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32x2 }, // size
+            wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32 },   // corner_radius
+            wgpu::VertexAttribute { offset: 20, shader_location: 4, format: wgpu::VertexFormat::Float32x4 }, // fill_color
+            wgpu::VertexAttribute { offset: 36, shader_location: 5, format: wgpu::VertexFormat::Float32x4 }, // stroke_color
+            wgpu::VertexAttribute { offset: 52, shader_location: 6, format: wgpu::VertexFormat::Float32 },   // stroke_width
+            wgpu::VertexAttribute { offset: 56, shader_location: 7, format: wgpu::VertexFormat::Float32 },   // opacity
+            wgpu::VertexAttribute { offset: 60, shader_location: 8, format: wgpu::VertexFormat::Float32 },   // stroke_opacity
+            wgpu::VertexAttribute { offset: 64, shader_location: 9, format: wgpu::VertexFormat::Float32 },   // stroke_dash
+            wgpu::VertexAttribute { offset: 68, shader_location: 10, format: wgpu::VertexFormat::Float32 },  // angle
         ],
+    }
+}
+
+/// Additive blend state: src + dst with no alpha attenuation.
+///
+/// Used for `mark_raster(blend="additive")` GPU compositing. Per-batch
+/// pipeline selection: raster batches with `BlendMode::Additive` use this
+/// pipeline; all others use `wgpu::BlendState::ALPHA_BLENDING`.
+///
+/// Spec §4 / §5 / §8: implemented as a second `wgpu::RenderPipeline` —
+/// NOT a post-process pass, NOT a fragment shader hack.
+pub fn additive_blend_state() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
     }
 }
 

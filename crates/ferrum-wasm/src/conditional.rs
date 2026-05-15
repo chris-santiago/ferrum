@@ -168,6 +168,9 @@ mod tests {
             stroke_color: [0.0, 0.0, 0.0, 0.0],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         let red = Color {
             r: 255,
@@ -194,6 +197,9 @@ mod tests {
             stroke_color: [0.0, 0.0, 0.0, 0.0],
             stroke_width: 0.0,
             opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         apply_value_to_rect(
             &mut inst,
