@@ -13,15 +13,18 @@ Yellowbrick pioneered the idea of "visual diagnostics" — sklearn-protocol obje
 | `ClassPredictionError(model)` | [`fm.ClassPredictionErrorVisualizer(model)`][ferrum.ClassPredictionErrorVisualizer] | [`fm.class_prediction_error_chart(model, X, y)`][ferrum.class_prediction_error_chart] |
 | `DiscriminationThreshold(model)` | [`fm.DiscriminationThresholdVisualizer(model)`][ferrum.DiscriminationThresholdVisualizer] | [`fm.discrimination_threshold_chart(model, X, y)`][ferrum.discrimination_threshold_chart] |
 | `ResidualsPlot(model)` | [`fm.ResidualsVisualizer(model)`][ferrum.ResidualsVisualizer] | [`fm.residuals_chart(model, X, y)`][ferrum.residuals_chart] |
-| `PredictionError(model)` | [`fm.PredictionErrorVisualizer(model)`][ferrum.PredictionErrorVisualizer] | `fm.prediction_error_chart(model, X, y)` |
-| `CooksDistance(model)` | [`fm.CooksDistanceVisualizer(model)`][ferrum.CooksDistanceVisualizer] | `fm.cooks_distance_chart(model, X, y)` |
+| `PredictionError(model)` | [`fm.PredictionErrorVisualizer(model)`][ferrum.PredictionErrorVisualizer] | — |
+| `CooksDistance(model)` | [`fm.CooksDistanceVisualizer(model)`][ferrum.CooksDistanceVisualizer] | — |
 | `FeatureImportances(model)` | [`fm.FeatureImportancesVisualizer(model)`][ferrum.FeatureImportancesVisualizer] | [`fm.importance_chart(model, X, y)`][ferrum.importance_chart] |
 | `LearningCurve(model)` | [`fm.LearningCurveVisualizer(model)`][ferrum.LearningCurveVisualizer] | [`fm.learning_curve_chart(model, X, y)`][ferrum.learning_curve_chart] |
 | `ValidationCurve(model)` | [`fm.ValidationCurveVisualizer(model)`][ferrum.ValidationCurveVisualizer] | [`fm.validation_curve_chart(model, X, y)`][ferrum.validation_curve_chart] |
 | `CVScores(model)` | [`fm.CVScoresVisualizer(model)`][ferrum.CVScoresVisualizer] | [`fm.cv_scores_chart(model, X, y)`][ferrum.cv_scores_chart] |
-| `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | `fm.silhouette_chart(model, X)` |
-| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model)`][ferrum.ElbowVisualizer] | — |
+| `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | — |
+| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model_class)`][ferrum.ElbowVisualizer] | — |
 | `InterclusterDistance(model)` | [`fm.InterclusterDistanceVisualizer(model)`][ferrum.InterclusterDistanceVisualizer] | [`fm.intercluster_distance_chart(model, X)`][ferrum.intercluster_distance_chart] |
+| `Manifold(model)` | [`fm.ManifoldVisualizer(model)`][ferrum.ManifoldVisualizer] | — |
+| `ClassBalance(labels)` | [`fm.ClassBalanceVisualizer(model)`][ferrum.ClassBalanceVisualizer] | — |
+| `FeatureCorrelation` | [`fm.Rank1DVisualizer`][ferrum.Rank1DVisualizer] / [`fm.Rank2DVisualizer`][ferrum.Rank2DVisualizer] | [`fm.rank1d_chart`][ferrum.rank1d_chart] / [`fm.rank2d_chart`][ferrum.rank2d_chart] |
 
 ## The lifecycle pattern
 
@@ -90,11 +93,18 @@ roc = fm.roc_chart(model, X_test, y_test)
 roc.theme(fm.themes.publication).save("roc_pub.svg")
 ```
 
-## What yellowbrick has that Ferrum does not (yet)
+## Coverage comparison
 
-- **`ManifoldVisualizer`** — yellowbrick wraps TSNE/UMAP with a visual diagnostic. Ferrum has `ManifoldVisualizer` but the UMAP dependency is optional (`pip install ferrum[umap]`).
-- **Target visualizers** — `ClassBalance`, `FeatureCorrelation`. Ferrum covers `ClassBalanceVisualizer` and has `rank1d_chart` / `rank2d_chart` for feature correlation.
-- **Text visualizers** — `FreqDistVisualizer`, `TSNEVisualizer` for text data. Not in Ferrum's scope.
+| Category | yellowbrick | Ferrum |
+|---|---|---|
+| Classification | `ROCAUC`, `PrecisionRecallCurve`, `ConfusionMatrix`, `ClassificationReport`, `ClassPredictionError`, `DiscriminationThreshold` | All covered — plus gain, lift, and multi-model calibration via [`ComparedModelSource`][ferrum.ComparedModelSource]. |
+| Regression | `ResidualsPlot`, `PredictionError`, `CooksDistance` | All covered. |
+| Feature analysis | `FeatureImportances`, `Rank1D`, `Rank2D` | All covered — plus SHAP (beeswarm, bar, waterfall) and partial dependence. |
+| Model selection | `LearningCurve`, `ValidationCurve`, `CVScores` | All covered — plus alpha selection. |
+| Clustering | `KElbow`, `Silhouette`, `InterclusterDistance` | All covered — plus parallel coordinates and decision boundary. |
+| Manifold | `Manifold` (wraps sklearn TSNE/Isomap, optional UMAP) | [`ManifoldVisualizer`][ferrum.ManifoldVisualizer] — t-SNE and UMAP run in pure Rust via `manifolds-rs`, no optional Python dependency. Also PCA. |
+| Target | `ClassBalance`, `FeatureCorrelation` | All covered — [`ClassBalanceVisualizer`][ferrum.ClassBalanceVisualizer], plus [`rank1d_chart`][ferrum.rank1d_chart] / [`rank2d_chart`][ferrum.rank2d_chart] for feature correlation. |
+| Text | `FreqDistVisualizer`, `TSNEVisualizer` for text data | Not in scope. t-SNE is available via [`ManifoldVisualizer`][ferrum.ManifoldVisualizer] for general dimensionality reduction. |
 
 ## Where to go next
 

@@ -60,7 +60,7 @@ The `+` operator always layers — both marks share the same axes. The LOESS smo
 
 ## Try a different mark
 
-Swap `mark_point()` for any other mark — the encoding stays the same:
+Different questions call for different marks. The pattern is always the same — data, mark, encoding:
 
 ```python
 import ferrum as fm
@@ -74,7 +74,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart = (
     fm.Chart(iris)
     .mark_boxplot()
-    .encode(x="species:N", y="sepal_length")
+    .encode(x="species:N", y="sepal_length", color="species:N")
 )
 assert chart.show_svg().startswith("<svg")
 ```

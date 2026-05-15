@@ -70,11 +70,19 @@ with fm.theme_context(fm.themes.dark):
 
 seaborn requires pandas. Ferrum accepts polars, pandas, modin, cuDF, dask, ibis, and pyarrow — the same `Chart(data)` constructor handles all of them.
 
-## What seaborn has that Ferrum does not (yet)
+## Coverage comparison
 
-- **Interactive backends** — seaborn inherits matplotlib's interactive renderers (Qt, Tk, notebook widgets). Ferrum's interactive renderer is Phase 11.
-- **`relplot`** — seaborn's relational plot helper. In Ferrum, the same result is `fm.Chart(df).mark_point().encode(x=, y=, hue=).facet(col=)`.
-- **Axes-level API** — seaborn's `sns.scatterplot(ax=ax)` pattern for embedding into existing matplotlib figures. In Ferrum, you compose with `+`, `|`, `&` instead.
+| Category | seaborn | Ferrum |
+|---|---|---|
+| Distribution plots | `displot` (hist, kde, ecdf), `rugplot` | [`displot`][ferrum.displot] (hist, kde, ecdf). Rug via `mark_tick`. |
+| Categorical plots | `catplot` (strip, box, violin, swarm, bar, point, boxen, count) | [`catplot`][ferrum.catplot] — all same `kind` values. |
+| Relational plots | `relplot` (scatter, line) | [`relplot`][ferrum.relplot] — scatter and line. |
+| Regression plots | `lmplot`, `residplot` | [`lmplot`][ferrum.lmplot], [`residplot`][ferrum.residplot]. |
+| Matrix plots | `heatmap`, `clustermap` | [`heatmap`][ferrum.heatmap], [`clustermap`][ferrum.clustermap]. |
+| Multi-plot grids | `pairplot`, `jointplot`, `FacetGrid` | [`pairplot`][ferrum.pairplot], [`jointplot`][ferrum.jointplot]. Faceting via `facet` / `facet_row` / `facet_col` encoding channels. |
+| Interactive output | Inherits matplotlib backends (Qt, Tk, notebook) | WASM/GPU interactive renderer via [`.interactive()`][ferrum.Chart.interactive] — selections, zoom/pan, linked views. |
+| Axes-level API | `sns.scatterplot(ax=ax)` for embedding into matplotlib figures | No `ax` parameter — compose with `+`, `|`, `&` instead. |
+| Model diagnostics | — | ROC, PR, confusion matrix, calibration, residuals, SHAP, PDP, and 20+ more via [`ModelSource`][ferrum.ModelSource]. |
 
 ## Where to go next
 
