@@ -100,7 +100,7 @@
 | Item | Spec Location | Notes |
 |---|---|---|
 | Phase 12 extension points (`register_mark`, `register_stat`, `register_renderer`, `MarkProtocol`, `StatProtocol`, `RendererProtocol`) | `ferrum-spec.md §Part IV` | No code, no spec doc written — `ferrum-phases.md` status: `pending` |
-| `ferrum.data` namespace (`sample_datasets()`, `load(name)`) | `ferrum-spec.md §3.19` | Entirely absent from `__init__.py` and source tree |
+| `ferrum.data` namespace (`sample_datasets()`, `load(name)`) | `ferrum-spec.md §3.19` | ~~Not implemented~~ **Intentionally dropped** — users get sample data from sklearn/seaborn optional deps; a ferrum-native dataset loader adds maintenance cost for no real value |
 | `ferrum.color` namespace (`palette()`, `to_hex()`, `diverging_palette()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `ferrum.config` namespace (`set_max_rows()`, `set_renderer()`, `set_default_width/height()`, `set_raster_threshold()`, `set_raster_behavior()`, `set_default_backend()`, `set_font_paths()`) | `ferrum-spec.md §3.19` | Entirely absent |
 | `Axis(...)` value class | `ferrum-spec.md §3.7` | Not publicly constructable; `axis=` kwarg accepted but stored as opaque dict and ignored by Rust renderer |
