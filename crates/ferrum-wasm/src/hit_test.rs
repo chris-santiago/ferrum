@@ -113,7 +113,16 @@ fn hit_test_batch(batch: &MarkBatch, panel: &ferrum_scene::Panel, x: f64, y: f64
         MarkBatchKind::Polygon => hit_test_lines(&batch.nodes, x, y),
         // Arc wedges (polar pie/donut): polar coordinate hit-test.
         MarkBatchKind::Arc => hit_test_polar_arcs(&batch.nodes, panel, x, y),
-        _ => None,
+        // Short line segments (rug ticks, boxplot caps, etc.) — emit Line nodes.
+        MarkBatchKind::Tick => hit_test_lines(&batch.nodes, x, y),
+        // Text labels — point proximity using font_size as tolerance.
+        MarkBatchKind::Text => hit_test_texts(&batch.nodes, x, y),
+        // Confidence band / filled area between two lines — emit closed Path nodes.
+        MarkBatchKind::Ribbon => hit_test_lines(&batch.nodes, x, y),
+        // Diagonal line segments between two (x,y) / (x2,y2) pairs — emit Line nodes.
+        MarkBatchKind::Segment => hit_test_lines(&batch.nodes, x, y),
+        // Rectangular raster tiles — emit Image nodes with x/y/w/h bounds.
+        MarkBatchKind::Image => hit_test_images(&batch.nodes, x, y),
     }
 }
 
@@ -177,7 +186,56 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
             {
                 return Some(i);
             }
+            // Closed filled Path (Ribbon, Area with path geometry): extract
+            // MoveTo/LineTo vertices and run point-in-polygon. Curves are
+            // approximated by their endpoints, which is sufficient for tooltip
+            // hit-testing on smooth CI bands.
+            SceneNode::Path { commands, style, closed }
+                if *closed && style.fill.is_some() =>
+            {
+                let vertices: Vec<[f64; 2]> = commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        ferrum_scene::PathCmd::MoveTo { x: px, y: py } => Some([*px, *py]),
+                        ferrum_scene::PathCmd::LineTo { x: px, y: py } => Some([*px, *py]),
+                        _ => None,
+                    })
+                    .collect();
+                if point_in_polygon(x, y, &vertices) {
+                    return Some(i);
+                }
+            }
             _ => {}
+        }
+    }
+    None
+}
+
+/// Hit-test text label nodes by proximity. `SceneNode::Text` carries only the
+/// anchor point (x, y) — no pre-computed bounding box is available in the scene
+/// graph. We treat the font_size as a square half-width tolerance so that a
+/// click anywhere within the approximate glyph cell counts as a hit.
+fn hit_test_texts(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
+    for (i, node) in nodes.iter().enumerate().rev() {
+        if let SceneNode::Text { x: tx, y: ty, style, .. } = node {
+            let half = style.font_size.max(4.0);
+            if (x - tx).abs() <= half && (y - ty).abs() <= half {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Hit-test rectangular image nodes using the stored `x / y / w / h` bounds.
+/// `SceneNode::Image` is distinct from `SceneNode::Rect` — `hit_test_rects`
+/// cannot be reused here.
+fn hit_test_images(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
+    for (i, node) in nodes.iter().enumerate().rev() {
+        if let SceneNode::Image { x: ix, y: iy, w, h, .. } = node {
+            if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h {
+                return Some(i);
+            }
         }
     }
     None
@@ -546,6 +604,329 @@ mod bug_hunt_tests {
         // Click just next to first circle
         let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom).expect("must hit");
         assert_eq!(result.data_idx, Some(0));
+    }
+
+    // ── newly wired mark kinds ──────────────────────────────────────────────
+
+    fn stroke_style() -> ferrum_scene::StrokeStyle {
+        ferrum_scene::StrokeStyle {
+            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+        }
+    }
+
+    fn fill_stroke_with_fill() -> ferrum_scene::FillStroke {
+        ferrum_scene::FillStroke {
+            fill: Some(ferrum_scene::Color { r: 100, g: 100, b: 100, a: 200 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+        }
+    }
+
+    fn text_style(font_size: f64) -> ferrum_scene::TextStyle {
+        ferrum_scene::TextStyle {
+            font_size,
+            font_weight: ferrum_scene::FontWeight::Normal,
+            anchor: ferrum_scene::TextAnchor::Middle,
+            baseline: ferrum_scene::TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".into(),
+        }
+    }
+
+    // Tick — emits Line nodes; hit_test_batch must route to hit_test_lines.
+    #[test]
+    fn bug_hunt_tick_hit_test_hits_line() {
+        let nodes = vec![SceneNode::Line {
+            x1: 50.0, y1: 90.0, x2: 50.0, y2: 100.0,
+            style: stroke_style(),
+        }];
+        // Click directly on the tick line — should hit.
+        assert!(hit_test_lines(&nodes, 50.0, 95.0).is_some(), "tick line must be hit");
+        // Click far away — should miss.
+        assert!(hit_test_lines(&nodes, 200.0, 200.0).is_none(), "miss expected");
+    }
+
+    #[test]
+    fn bug_hunt_tick_batch_routes_correctly() {
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Tick,
+            nodes: vec![SceneNode::Line {
+                x1: 50.0, y1: 90.0, x2: 50.0, y2: 100.0,
+                style: stroke_style(),
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None, hrefs: None, keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None, stroke_join: None,
+        };
+        assert!(hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
+            "Tick batch must route to hit_test_lines and return a hit");
+    }
+
+    // Text — emits Text nodes; proximity check using font_size as tolerance.
+    #[test]
+    fn bug_hunt_text_hit_inside_font_box() {
+        let nodes = vec![SceneNode::Text {
+            x: 100.0, y: 100.0,
+            content: "hello".into(),
+            style: text_style(12.0),
+        }];
+        // Click within font_size radius of anchor — should hit.
+        assert!(hit_test_texts(&nodes, 105.0, 105.0).is_some(), "text hit inside box expected");
+        // Click far outside — should miss.
+        assert!(hit_test_texts(&nodes, 200.0, 200.0).is_none(), "miss expected");
+    }
+
+    #[test]
+    fn bug_hunt_text_hit_on_anchor_exact() {
+        let nodes = vec![SceneNode::Text {
+            x: 50.0, y: 50.0,
+            content: "label".into(),
+            style: text_style(16.0),
+        }];
+        assert!(hit_test_texts(&nodes, 50.0, 50.0).is_some(), "click exactly on anchor must hit");
+    }
+
+    #[test]
+    fn bug_hunt_text_batch_routes_correctly() {
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Text,
+            nodes: vec![SceneNode::Text {
+                x: 100.0, y: 100.0,
+                content: "label".into(),
+                style: text_style(14.0),
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None, hrefs: None, keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None, stroke_join: None,
+        };
+        assert!(hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
+            "Text batch must route to hit_test_texts and return a hit on anchor");
+    }
+
+    // Ribbon — emits closed filled Path nodes; point-in-polygon via hit_test_lines.
+    #[test]
+    fn bug_hunt_ribbon_hit_inside_closed_path() {
+        // Build a simple rectangular closed path: (0,0)→(100,0)→(100,50)→(0,50)→Close.
+        let commands = vec![
+            ferrum_scene::PathCmd::MoveTo { x: 0.0,   y: 0.0  },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0  },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 50.0 },
+            ferrum_scene::PathCmd::LineTo { x: 0.0,   y: 50.0 },
+            ferrum_scene::PathCmd::Close,
+        ];
+        let nodes = vec![SceneNode::Path {
+            commands,
+            style: fill_stroke_with_fill(),
+            closed: true,
+        }];
+        // Click inside the band.
+        assert!(hit_test_lines(&nodes, 50.0, 25.0).is_some(), "click inside ribbon band must hit");
+        // Click outside.
+        assert!(hit_test_lines(&nodes, 200.0, 200.0).is_none(), "click outside ribbon must miss");
+    }
+
+    #[test]
+    fn bug_hunt_ribbon_unfilled_path_not_hit_by_interior_click() {
+        // An unfilled (stroke-only) closed path should NOT hit on interior click —
+        // only the outline would be tested, and a click far from the border misses.
+        let commands = vec![
+            ferrum_scene::PathCmd::MoveTo { x: 0.0,   y: 0.0  },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0  },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 50.0 },
+            ferrum_scene::PathCmd::LineTo { x: 0.0,   y: 50.0 },
+            ferrum_scene::PathCmd::Close,
+        ];
+        let nodes = vec![SceneNode::Path {
+            commands,
+            style: ferrum_scene::FillStroke {
+                fill: None,  // stroke-only
+                stroke: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_dash: None,
+            },
+            closed: true,
+        }];
+        // Interior click should miss an unfilled path (no point-in-polygon).
+        assert!(hit_test_lines(&nodes, 50.0, 25.0).is_none(),
+            "interior click on unfilled path must miss");
+    }
+
+    #[test]
+    fn bug_hunt_ribbon_batch_routes_correctly() {
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let commands = vec![
+            ferrum_scene::PathCmd::MoveTo { x: 10.0, y: 10.0 },
+            ferrum_scene::PathCmd::LineTo { x: 200.0, y: 10.0 },
+            ferrum_scene::PathCmd::LineTo { x: 200.0, y: 100.0 },
+            ferrum_scene::PathCmd::LineTo { x: 10.0, y: 100.0 },
+            ferrum_scene::PathCmd::Close,
+        ];
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Ribbon,
+            nodes: vec![SceneNode::Path {
+                commands,
+                style: fill_stroke_with_fill(),
+                closed: true,
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None, hrefs: None, keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None, stroke_join: None,
+        };
+        assert!(hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
+            "Ribbon batch must hit inside filled closed path");
+    }
+
+    // Segment — emits Line nodes (same as Rule/Tick); routes to hit_test_lines.
+    #[test]
+    fn bug_hunt_segment_hit_on_diagonal_line() {
+        let nodes = vec![SceneNode::Line {
+            x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0,
+            style: stroke_style(),
+        }];
+        // Click very close to the midpoint of the diagonal.
+        assert!(hit_test_lines(&nodes, 50.0, 50.0).is_some(), "midpoint click on diagonal must hit");
+        // Click well off the line.
+        assert!(hit_test_lines(&nodes, 50.0, 150.0).is_none(), "off-diagonal miss expected");
+    }
+
+    #[test]
+    fn bug_hunt_segment_batch_routes_correctly() {
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Segment,
+            nodes: vec![SceneNode::Line {
+                x1: 10.0, y1: 10.0, x2: 200.0, y2: 200.0,
+                style: stroke_style(),
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None, hrefs: None, keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None, stroke_join: None,
+        };
+        assert!(hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
+            "Segment batch must route to hit_test_lines and return a hit near midpoint");
+    }
+
+    // Image — emits Image nodes with x/y/w/h bbox; routes to hit_test_images.
+    #[test]
+    fn bug_hunt_image_hit_inside_bbox() {
+        let nodes = vec![SceneNode::Image {
+            x: 10.0, y: 20.0, w: 80.0, h: 60.0,
+            data: ferrum_scene::ImageData::Url { url: "data:image/png;base64,abc".into() },
+        }];
+        // Click inside the image rect.
+        assert!(hit_test_images(&nodes, 50.0, 50.0).is_some(), "click inside image must hit");
+        // Click outside.
+        assert!(hit_test_images(&nodes, 200.0, 200.0).is_none(), "click outside image must miss");
+    }
+
+    #[test]
+    fn bug_hunt_image_hit_on_boundary() {
+        let nodes = vec![SceneNode::Image {
+            x: 0.0, y: 0.0, w: 100.0, h: 100.0,
+            data: ferrum_scene::ImageData::Url { url: "data:image/png;base64,abc".into() },
+        }];
+        // Corners should be included (<=, not <).
+        assert!(hit_test_images(&nodes, 0.0, 0.0).is_some(), "top-left corner must hit");
+        assert!(hit_test_images(&nodes, 100.0, 100.0).is_some(), "bottom-right corner must hit");
+        assert!(hit_test_images(&nodes, 100.001, 50.0).is_none(), "just outside right edge must miss");
+    }
+
+    #[test]
+    fn bug_hunt_image_batch_routes_correctly() {
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Image,
+            nodes: vec![SceneNode::Image {
+                x: 50.0, y: 50.0, w: 200.0, h: 150.0,
+                data: ferrum_scene::ImageData::Url {
+                    url: "data:image/png;base64,abc".into()
+                },
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None, hrefs: None, keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None, stroke_join: None,
+        };
+        assert!(hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
+            "Image batch must route to hit_test_images and return a hit inside bbox");
+        assert!(hit_test_batch(&batch, &panel, 10.0, 10.0).is_none(),
+            "Image batch must miss outside bbox");
     }
 }
 
