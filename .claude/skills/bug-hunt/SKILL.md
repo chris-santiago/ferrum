@@ -56,11 +56,17 @@ Each agent returns: tests added count, list of failures (test name + error), sta
 
 ### Step 5 — Run the new tests
 
+Python:
 ```bash
 uv run pytest tests/test_bug_hunt_*.py --tb=short -q
 ```
-
 (Or `uv run pytest tests/test_bug_hunt_<key>.py --tb=short -q` if scoped.)
+
+Rust (for `scale-stat` and `marks-rendering` only):
+```bash
+DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") \
+  cargo test -p ferrum-core --tests -- bug_hunt --nocapture 2>&1
+```
 
 ### Step 6 — Write the report
 
@@ -70,11 +76,11 @@ Append a timestamped run section to `.claude/skills/bug-hunt/output/BUG_REPORT.m
 ## Run — <ISO timestamp>
 
 ### <subsystem-key>
-- Tests added: N
-- Failures: N
+- Python tests added: N  |  Failures: N
+- Rust tests added:   N  |  Failures: N   (or "n/a")
 - Status: clean | BUGS FOUND
 
-<failure details if any — test name, error message>
+<failure details if any — test name, language, error message>
 ```
 
 Create the file if it does not exist. Never overwrite — always append.
@@ -82,15 +88,15 @@ Create the file if it does not exist. Never overwrite — always append.
 ### Step 7 — Print summary table
 
 ```
-Subsystem             | Tests added | Failures | Status
-----------------------|-------------|----------|--------
-scale-stat            | 12          | 2        | BUGS
-coerce-transport      | 8           | 0        | clean
-marks-rendering       | 15          | 1        | BUGS
-composition-facet     | 10          | 0        | clean
-figure-api            | 14          | 3        | BUGS
-model-diagnostics     | 11          | 0        | clean
-phase-11-interactive  | 9           | 1        | BUGS
+Subsystem             | Py tests | Py fails | Rs tests | Rs fails | Status
+----------------------|----------|----------|----------|----------|--------
+scale-stat            | 12       | 2        | 8        | 1        | BUGS
+coerce-transport      | 8        | 0        | n/a      | n/a      | clean
+marks-rendering       | 15       | 1        | 7        | 0        | BUGS
+composition-facet     | 10       | 0        | n/a      | n/a      | clean
+figure-api            | 14       | 3        | n/a      | n/a      | BUGS
+model-diagnostics     | 11       | 0        | n/a      | n/a      | clean
+phase-11-interactive  | 9        | 1        | n/a      | n/a      | BUGS
 ```
 
 Then list every failing test with its error, grouped by subsystem. These are the bugs.
@@ -100,9 +106,10 @@ Then list every failing test with its error, grouped by subsystem. These are the
 | Artifact | Path | Committed? |
 |---|---|---|
 | Bug report | `.claude/skills/bug-hunt/output/BUG_REPORT.md` | No (gitignored) |
-| Test files | `tests/test_bug_hunt_<subsystem>.py` | Yes |
+| Python test files | `tests/test_bug_hunt_<subsystem>.py` | Yes |
+| Rust test files | `crates/ferrum-core/tests/bug_hunt_<subsystem>.rs` | Yes |
 
-The test files are real pytest files and should be committed after review. Failing tests are kept with a `# BUG:` comment — they are the bug evidence.
+All test files are real and should be committed after review. Failing tests are kept with a `# BUG:` / `// BUG:` comment — they are the bug evidence.
 
 ## Repeatability
 
