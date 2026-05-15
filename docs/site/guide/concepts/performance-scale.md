@@ -44,7 +44,10 @@ The headline scale problem in visualization is mark count. Every existing librar
 
 Ferrum's response is to make the choice between vector and raster part of the chart system rather than the user's problem. You can declare a raster mark explicitly (`mark_raster`, `mark_hex`, `mark_contour`), or rely on auto-raster policies that detect when a vector backend would degrade and switch to a rasterized representation transparently.
 
-The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter at 10,000,000 rows are the same Ferrum spec. The only thing that changes is how the engine draws the marks underneath. The impact is concrete: a 1M-point scatter that would produce a 57 MB SVG with one `<circle>` per mark becomes a 606 KB SVG when auto-raster kicks in — same chart, same spec, two orders of magnitude smaller output.
+The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter at 10,000,000 rows are the same Ferrum spec. The only thing that changes is how the engine draws the marks underneath.
+
+!!! tip "Auto-raster in practice"
+    A 1M-point scatter that would produce a **57 MB** SVG with one `<circle>` per mark becomes a **606 KB** SVG when auto-raster kicks in — same chart, same spec, two orders of magnitude smaller output.
 
 ## SHAP and ICE at full sample size
 
