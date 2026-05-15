@@ -26,7 +26,9 @@ from ferrum.selection import selection_point, value
 
 def _render(chart: fm.Chart) -> dict:
     spec, data, viewport, theme = chart._render_inputs()
-    return json.loads(render_interactive(spec, data, viewport=viewport, theme=theme))
+    result = render_interactive(spec, data, viewport=viewport, theme=theme)
+    json_str = result[0] if isinstance(result, tuple) else result
+    return json.loads(json_str)
 
 
 def _simple_scatter(tooltip=None, **kwargs) -> fm.Chart:
@@ -134,7 +136,7 @@ def test_merge_scene_graphs_offsets_circle_nodes():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     spec, data, viewport, theme = chart._render_inputs()
-    scene_json = render_interactive(spec, data, viewport=viewport, theme=theme)
+    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
 
     merged = json.loads(merge_scene_graphs(
         [scene_json, scene_json],
@@ -157,7 +159,7 @@ def test_merge_scene_graphs_offsets_y():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     spec, data, viewport, theme = chart._render_inputs()
-    scene_json = render_interactive(spec, data, viewport=viewport, theme=theme)
+    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
 
     merged = json.loads(merge_scene_graphs(
         [scene_json, scene_json],
@@ -182,7 +184,7 @@ def test_interaction_config_includes_selections():
              .properties(width=300, height=200))
 
     spec, data, viewport, theme = chart._render_inputs()
-    scene_json = render_interactive(spec, data, viewport=viewport, theme=theme)
+    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
 
     cfg = json.loads(InteractiveChart._extract_interaction_config(scene_json))
     assert "selections" in cfg, "selections missing from interaction_config"
@@ -197,7 +199,7 @@ def test_interaction_config_empty_when_no_selections():
 
     chart = _simple_scatter()
     spec, data, viewport, theme = chart._render_inputs()
-    scene_json = render_interactive(spec, data, viewport=viewport, theme=theme)
+    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
     cfg = json.loads(InteractiveChart._extract_interaction_config(scene_json))
     assert cfg.get("selections", []) == []
 

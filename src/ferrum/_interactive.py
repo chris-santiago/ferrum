@@ -69,6 +69,7 @@ def _get_widget_class() -> Any:
             _esm = esm
             _css = css
             scene_json = traitlets.Unicode("").tag(sync=True)
+            packed_data = traitlets.Bytes(b"").tag(sync=True)
             selection_state = traitlets.Dict({}).tag(sync=True)
             interaction_config = traitlets.Unicode("{}").tag(sync=True)
             zoom_state = traitlets.Unicode("{}").tag(sync=True)
@@ -102,7 +103,7 @@ class InteractiveChart:
 
     def __init__(self, chart: "Chart") -> None:
         self._chart = chart
-        self._scene_json = _render_scene_json(chart)
+        self._scene_json, self._packed_data = _render_scene(chart)
         self._selection_callbacks: list[Callable] = []
         self._widget: Any = None
         self._output_widget: Any = None  # ipywidgets.Output, created lazily by on_selection_change
@@ -114,6 +115,7 @@ class InteractiveChart:
             return
         w = cls()
         w.scene_json = self._scene_json
+        w.packed_data = self._packed_data
         w.interaction_config = self._extract_interaction_config(self._scene_json)
         w.observe(self._on_zoom_change, names=["zoom_state"])
         self._widget = w
@@ -127,10 +129,11 @@ class InteractiveChart:
         try:
             # Apply per-panel xlim/ylim overrides from JS zoom state.
             new_chart = self._apply_zoom_domains(zoom)
-            new_scene = _render_scene_json(new_chart)
+            new_json, new_packed = _render_scene(new_chart)
             if self._widget is not None:
-                self._widget.scene_json = new_scene
-                self._widget.interaction_config = self._extract_interaction_config(new_scene)
+                self._widget.scene_json = new_json
+                self._widget.packed_data = new_packed
+                self._widget.interaction_config = self._extract_interaction_config(new_json)
         except Exception as exc:
             _log.warning("zoom rebuild failed: %s", exc, exc_info=True)
 
@@ -234,6 +237,13 @@ class InteractiveChart:
 
 
 def _render_scene_json(chart: "Chart") -> str:
+    """Backward-compat wrapper — returns only the JSON string."""
+    json_str, _ = _render_scene(chart)
+    return json_str
+
+
+def _render_scene(chart: "Chart") -> tuple[str, bytes]:
+    """Return (scene_json, packed_bytes) for the interactive renderer."""
     import json as _json
 
     from ferrum._core import render_interactive
@@ -241,7 +251,7 @@ def _render_scene_json(chart: "Chart") -> str:
     spec, data, viewport, theme_dict = chart._render_inputs()
     if data.num_rows == 0:
         w, h = viewport
-        return _json.dumps({"panels": [], "width": w, "height": h})
+        return _json.dumps({"panels": [], "width": w, "height": h}), b""
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
 
 

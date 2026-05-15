@@ -1113,6 +1113,7 @@ dependencies = [
 name = "ferrum-wasm"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytemuck",
  "console_error_panic_hook",
  "ferrum-scene",

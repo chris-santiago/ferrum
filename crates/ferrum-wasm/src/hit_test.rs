@@ -532,6 +532,7 @@ mod bug_hunt_tests {
                 descriptions: None,
                 stroke_cap: None,
                 stroke_join: None,
+                packed_instances: None,
             }],
             axes: vec![],
             annotations: vec![],
@@ -699,7 +700,7 @@ mod bug_hunt_tests {
             tooltips: None, hrefs: None, keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None, stroke_join: None, packed_instances: None,
         };
         assert!(hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
             "Tick batch must route to hit_test_lines and return a hit");
@@ -754,7 +755,7 @@ mod bug_hunt_tests {
             tooltips: None, hrefs: None, keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None, stroke_join: None, packed_instances: None,
         };
         assert!(hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
             "Text batch must route to hit_test_texts and return a hit on anchor");
@@ -844,7 +845,7 @@ mod bug_hunt_tests {
             tooltips: None, hrefs: None, keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None, stroke_join: None, packed_instances: None,
         };
         assert!(hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
             "Ribbon batch must hit inside filled closed path");
@@ -887,7 +888,7 @@ mod bug_hunt_tests {
             tooltips: None, hrefs: None, keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None, stroke_join: None, packed_instances: None,
         };
         assert!(hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
             "Segment batch must route to hit_test_lines and return a hit near midpoint");
@@ -944,7 +945,7 @@ mod bug_hunt_tests {
             tooltips: None, hrefs: None, keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None, stroke_join: None, packed_instances: None,
         };
         assert!(hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
             "Image batch must route to hit_test_images and return a hit inside bbox");
@@ -1005,6 +1006,7 @@ mod tests {
                 descriptions: None,
                 stroke_cap: None,
                 stroke_join: None,
+                packed_instances: None,
             }],
             axes: vec![],
             annotations: vec![],

@@ -151,13 +151,13 @@ pub fn render_png<'py>(
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
 pub fn render_interactive(
-    _py: Python<'_>,
+    py: Python<'_>,
     spec: &ChartSpec,
     data: PyRecordBatchReader,
     viewport: (f64, f64),
     theme: Option<&Bound<'_, PyDict>>,
     config: Option<&Bound<'_, PyDict>>,
-) -> PyResult<String> {
+) -> PyResult<(String, Py<PyBytes>)> {
     let batch = collect_single_batch(data)?;
     let t = theme_from_dict(theme)?;
     let c = config_from_dict(config)?;
@@ -165,7 +165,10 @@ pub fn render_interactive(
         width: viewport.0,
         height: viewport.1,
     };
-    super::render_scene_json(spec, &batch, &t, vp, &c).map_err(render_err_to_py)
+    let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c)
+        .map_err(render_err_to_py)?;
+    let py_bytes = PyBytes::new(py, &packed_bytes);
+    Ok((json, py_bytes.unbind()))
 }
 
 fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_batch::RecordBatch> {

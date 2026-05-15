@@ -150,4 +150,5 @@ def _render_scene_json(chart: "Chart") -> str:
     from ferrum._core import render_interactive
 
     spec, data, viewport, theme_dict = chart._render_inputs()
-    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
+    json_str, _packed = render_interactive(spec, data, viewport=viewport, theme=theme_dict)
+    return json_str

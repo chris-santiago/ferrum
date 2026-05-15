@@ -50,6 +50,11 @@ pub struct MarkBatch {
     pub blend: BlendMode,
     pub stroke_cap: Option<StrokeCap>,
     pub stroke_join: Option<StrokeJoin>,
+    /// Base64-encoded packed instance bytes for high-cardinality batches.
+    /// When present, the WASM renderer uses this instead of iterating `nodes`.
+    /// Format: raw `CircleInstance` or `RectInstance` bytes (Pod-cast-safe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packed_instances: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

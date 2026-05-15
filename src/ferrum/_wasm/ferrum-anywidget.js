@@ -238,7 +238,9 @@ async function _render(container, sceneJson, model) {
   try {
     await _ensureWasm();
     renderer = await WasmRenderer.create(canvas);
-    const textJson = renderer.loadScene(sceneJson);
+    const packedData = model.get('packed_data');
+    const packedArr = packedData instanceof Uint8Array ? packedData : new Uint8Array(packedData || []);
+    const textJson = renderer.loadScene(sceneJson, packedArr);
     _placeText(ov, JSON.parse(textJson));
   } catch (e) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);

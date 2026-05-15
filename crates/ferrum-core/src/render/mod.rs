@@ -19,6 +19,7 @@ pub(crate) mod marks;
 pub(crate) mod position;
 pub mod compositor;
 pub(crate) mod grid_compose;
+pub(crate) mod pack_instances;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
 pub use compositor::{
@@ -287,7 +288,7 @@ pub fn render_scene_json(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
-) -> Result<String, RenderError> {
+) -> Result<(String, Vec<u8>), RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
             width: viewport.width,
@@ -346,11 +347,18 @@ pub fn render_scene_json(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
-    let scene = scene_build::build_scene(
+    let mut scene = scene_build::build_scene(
         spec, &prep, &layout, theme_ref, config, &mut warnings,
     )?;
-    serde_json::to_string(&scene)
-        .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))
+
+    // Extract large homogeneous mark batches as raw packed bytes, clearing
+    // their nodes from the scene graph. The JSON stays lightweight; the
+    // packed bytes travel as a separate Uint8Array to the WASM renderer.
+    let packed_bytes = pack_instances::extract_packed_bytes(&mut scene);
+
+    let json = serde_json::to_string(&scene)
+        .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))?;
+    Ok((json, packed_bytes))
 }
 
 pub(crate) fn filter_batch_by_facet(

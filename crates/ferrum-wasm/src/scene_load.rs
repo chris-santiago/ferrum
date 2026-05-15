@@ -102,11 +102,18 @@ pub struct ImageQuad {
 }
 
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
+    load_scene_with_packed(scene, &[])
+}
+
+pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneData {
     let mut circles = Vec::new();
     let mut rects = Vec::new();
     let mut mesh = VertexBuffers::new();
     let mut images = Vec::new();
     let mut texts = Vec::new();
+
+    // Unpack binary instance data (passed as raw bytes, not base64).
+    unpack_binary_instances(packed_data, &mut circles, &mut rects);
 
     let background = scene.background.as_ref().map(|c| {
         [
@@ -147,6 +154,45 @@ pub fn load_scene(scene: &SceneGraph) -> SceneData {
         background,
         width: scene.width as f32,
         height: scene.height as f32,
+    }
+}
+
+/// Unpack raw binary instance data into circle/rect buffers.
+///
+/// Format: repeated `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32][data]`
+/// where kind=0 → CircleInstance, kind=1 → RectInstance.
+fn unpack_binary_instances(
+    data: &[u8],
+    circles: &mut Vec<CircleInstance>,
+    rects: &mut Vec<RectInstance>,
+) {
+    let mut offset = 0;
+    while offset + 16 <= data.len() {
+        let _panel_idx = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
+        let _batch_idx = u32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap());
+        let kind = u32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap());
+        let count = u32::from_le_bytes(data[offset+12..offset+16].try_into().unwrap()) as usize;
+        offset += 16;
+
+        match kind {
+            0 => {
+                let byte_len = count * std::mem::size_of::<CircleInstance>();
+                if offset + byte_len > data.len() { break; }
+                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                    circles.extend_from_slice(instances);
+                }
+                offset += byte_len;
+            }
+            1 => {
+                let byte_len = count * std::mem::size_of::<RectInstance>();
+                if offset + byte_len > data.len() { break; }
+                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                    rects.extend_from_slice(instances);
+                }
+                offset += byte_len;
+            }
+            _ => break,
+        }
     }
 }
 
@@ -506,6 +552,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -573,6 +620,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -662,6 +710,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -715,6 +764,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -950,6 +1000,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -1366,7 +1417,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Bar,
@@ -1374,7 +1425,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Rule,
@@ -1382,7 +1433,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Area,
@@ -1390,7 +1441,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Polygon,
@@ -1398,7 +1449,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Line,
@@ -1406,7 +1457,7 @@ mod tests {
                         data_indices: None, tooltips: None, hrefs: None,
                         descriptions: None, keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
                     },
                 ],
                 axes: vec![],
@@ -1434,5 +1485,136 @@ mod tests {
                 "mixed scene: mesh vertex {i} has non-finite position"
             );
         }
+    }
+
+    // ── Binary packed instance round-trip ────────────────────────────
+
+    fn build_packed_circle_stream(instances: &[CircleInstance]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // kind=0 circle
+        buf.extend_from_slice(&(instances.len() as u32).to_le_bytes());
+        for inst in instances {
+            buf.extend_from_slice(bytemuck::bytes_of(inst));
+        }
+        buf
+    }
+
+    fn build_packed_rect_stream(instances: &[RectInstance]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // kind=1 rect
+        buf.extend_from_slice(&(instances.len() as u32).to_le_bytes());
+        for inst in instances {
+            buf.extend_from_slice(bytemuck::bytes_of(inst));
+        }
+        buf
+    }
+
+    #[test]
+    fn binary_unpack_circle_round_trip() {
+        let inst = CircleInstance {
+            center: [100.0, 200.0], radius: 5.0,
+            fill_color: [1.0, 0.0, 0.0, 0.8],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.5, opacity: 0.8,
+            stroke_opacity: 0.6, stroke_dash: 1.0, angle: 45.0,
+        };
+        let packed = build_packed_circle_stream(&[inst]);
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects);
+        assert_eq!(circles.len(), 1);
+        assert!(rects.is_empty());
+        let c = &circles[0];
+        assert!((c.center[0] - 100.0).abs() < 1e-6);
+        assert!((c.radius - 5.0).abs() < 1e-6);
+        assert!((c.opacity - 0.8).abs() < 1e-6);
+        assert!((c.angle - 45.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn binary_unpack_rect_round_trip() {
+        let instances = vec![
+            RectInstance {
+                position: [10.0, 20.0], size: [100.0, 50.0], corner_radius: 3.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 0.5],
+                stroke_width: 2.0, opacity: 0.9, stroke_opacity: 0.7, stroke_dash: 2.0, angle: 0.0,
+            },
+            RectInstance {
+                position: [200.0, 30.0], size: [80.0, 60.0], corner_radius: 0.0,
+                fill_color: [0.0, 0.0, 1.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 90.0,
+            },
+        ];
+        let packed = build_packed_rect_stream(&instances);
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects);
+        assert_eq!(rects.len(), 2);
+        assert!(circles.is_empty());
+        assert!((rects[0].position[0] - 10.0).abs() < 1e-6);
+        assert!((rects[1].angle - 90.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn binary_unpack_malformed_data_does_not_panic() {
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        // Truncated header
+        unpack_binary_instances(&[0u8; 8], &mut circles, &mut rects);
+        assert!(circles.is_empty());
+        // Valid header but truncated instance data
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&100u32.to_le_bytes());
+        unpack_binary_instances(&buf, &mut circles, &mut rects);
+        assert!(circles.is_empty());
+    }
+
+    #[test]
+    fn load_scene_with_packed_uses_binary_sidecar() {
+        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+
+        let instances: Vec<CircleInstance> = (0..3)
+            .map(|i| CircleInstance {
+                center: [i as f32 * 100.0, 50.0], radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            })
+            .collect();
+        let packed = build_packed_circle_stream(&instances);
+
+        let scene = SceneGraph {
+            width: 400.0, height: 200.0, background: None, title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
+                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point, nodes: vec![],
+                    data_indices: None, tooltips: None, hrefs: None,
+                    descriptions: None, keys: None,
+                    blend: BlendMode::Normal, stroke_cap: None, stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![], annotations: vec![], strip_title: vec![],
+            }],
+            legend: vec![], decorations: vec![], selections: vec![],
+            interaction: InteractionConfig::default(), chart_description: None,
+        };
+
+        let data = load_scene_with_packed(&scene, &packed);
+        assert_eq!(data.circle_instances.len(), 3);
+        assert!((data.circle_instances[0].fill_color[0] - 1.0).abs() < 1e-6);
+        assert!((data.circle_instances[1].center[0] - 100.0).abs() < 1e-6);
+        assert!((data.circle_instances[2].center[0] - 200.0).abs() < 1e-6);
     }
 }
