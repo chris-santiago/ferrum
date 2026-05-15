@@ -145,6 +145,11 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
         (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
             inst.opacity = *o as f32;
         }
+        (ChannelName::Size, EncodingValue::Size { value: s }) => {
+            // No orientation context here; apply to both dimensions conservatively.
+            inst.size[0] = *s as f32;
+            inst.size[1] = *s as f32;
+        }
         _ => {}
     }
 }

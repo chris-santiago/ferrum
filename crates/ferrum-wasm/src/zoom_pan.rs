@@ -2,7 +2,6 @@ use ferrum_scene::InteractionConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScaleMode {
-    #[allow(dead_code)]
     Independent,
     Uniform,
 }
