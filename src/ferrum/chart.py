@@ -449,6 +449,13 @@ class Chart:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
                 if color_field:
                     kwargs = {**kwargs, "groupby": color_field}
+        # hex: infer aggregate field from color encoding when not explicit.
+        if kind == "hex" and kwargs.get("aggregate", "count") != "count" and kwargs.get("field") is None:
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    kwargs = {**kwargs, "field": color_field}
         # When mark_smooth was called on a chart that already had a primitive
         # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
         # the existing mark as a scatter layer. Force the Smooth transform

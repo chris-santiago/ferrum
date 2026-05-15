@@ -106,6 +106,19 @@ class ChannelBase:
                 f"{self.__class__.__name__}: field must be str, _RepeatPlaceholder, or None, "
                 f"got {type(field).__name__}"
             )
+        # Parse shorthand from the field string so Channel("col:Q") works the same
+        # as Channel("col", type_="Q"). This lets users pass shorthand strings
+        # directly to channel constructors without manually splitting field and type.
+        if isinstance(field, str) and ":" in field:
+            from ferrum._shorthand import parse_shorthand
+            try:
+                parsed_field, parsed_type, _ = parse_shorthand(field)
+                if parsed_field is not None:
+                    field = parsed_field
+                    if parsed_type is not None and "type" not in kwargs:
+                        kwargs = {**kwargs, "type": parsed_type}
+            except ValueError:
+                pass  # non-shorthand field containing ":" — keep as-is
         self.field = field
         self._kwargs = dict(kwargs)
         self._validate()

@@ -50,6 +50,7 @@ _VALID_MARK_KWARGS = frozenset(
         "density",
         "right",  # histogram
         "multiple",  # density/histogram
+        "blend",     # layer blend mode ("normal", "additive")
     ]
 )
 

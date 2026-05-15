@@ -178,10 +178,9 @@ def desugar_density(
         from ferrum.position import Stack
         position = Stack(offset="normalize")
     elif multiple == "dodge":
-        raise ValueError(
-            "mark_density(multiple='dodge') is not yet supported; "
-            "use 'layer', 'stack', or 'fill'."
-        )
+        # For density plots, "dodge" produces overlapping curves (same as "layer").
+        # Histogram dodge (side-by-side bars) is handled separately in mark_histogram.
+        position = None
     else:
         position = None
 
