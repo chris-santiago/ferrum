@@ -67,7 +67,7 @@
 | Field | Status |
 |---|---|
 | `sort` | ✅ Confirmed — SVG tick order verified in `test_silent_drop_verification.py` |
-| `stack` | ⚠️ **Partial** — `Y(stack=...)` is accepted and serialized but `apply_position` is never called when `layer.position is None` even if `encoding.y.stack` is set (`scene_build.rs:155` short-circuits). Primitive `mark_bar(stack=)` produces identical SVG to unstacked. |
+| `stack` | ✅ Confirmed — `apply_position` now called unconditionally (`f641f39`); encoding-level `stack=` honored. SVG bar positions verified. |
 | `axis` | ✅ Confirmed — `label_angle`, `ticks`, `labels`, `title` verified in SVG output |
 | `format_type` | ✅ Confirmed — tick label format verified in SVG output |
 | `impute` | ✅ Confirmed — missing rows filled; polyline point count verified |
@@ -76,10 +76,10 @@
 
 | Feature | Status |
 |---|---|
-| `mark_histogram(multiple="stack"/"fill"/"dodge")` | ⚠️ **Partial** — `dodge` ✅, `fill` ✅; `stack` only works when per-group bin edges happen to align. `desugar_histogram` doesn't pass `shared_extent=True` to `Bin` for the stack case, so groups with different bin edges produce no stacking effect. |
+| `mark_histogram(multiple="stack"/"fill"/"dodge")` | ✅ Confirmed — all three modes verified in SVG output. `be32daf` fixed bin-edge alignment for stack. |
 | `mark_density(multiple="dodge")` | ✅ Confirmed — verified in SVG output |
 | `mark_ribbon(interpolate=...)` | Open — still no-op |
-| `lmplot(truncate=False)` / `regplot(truncate=False)` | ⚠️ **Partial** — no longer raises; `x_range` is computed in `lmplot()` but never forwarded to `mark_smooth()` call sites (lines 578–609 of `regression.py`). Fit line does not extend beyond observed data range. |
+| `lmplot(truncate=False)` / `regplot(truncate=False)` | ✅ Confirmed — `x_range` now forwarded to `mark_smooth()` (`91dd487`). Fit line extends to axis boundary. Verified in SVG output. |
 | `Chart(data=None)` with per-layer data | ✅ Confirmed — both layers render; verified in SVG output |
 | `Layer(data=...)` via `Chart.layer()` | ✅ Confirmed — verified in SVG output |
 | `mark_hex(stroke=..., stroke_width=...)` | Open — still raises |
