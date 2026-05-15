@@ -57,7 +57,6 @@ def test_smooth_with_ci_renders():
     assert "<svg" in svg
 
 
-@pytest.mark.skip(reason="contour render needs per-cell quantitative coloring (Task 37 follow-up)")
 def test_contour_renders(df_2d):
     svg = fe.Chart(df_2d).mark_contour().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
@@ -84,7 +83,6 @@ def test_swarm_renders(df_grouped):
     assert "<svg" in svg
 
 
-@pytest.mark.skip(reason="hex render needs per-cell quantitative coloring (Task 37 follow-up)")
 def test_hex_renders(df_2d):
     svg = fe.Chart(df_2d).mark_hex().encode(x="x", y="y").show_svg()
     assert "<svg" in svg

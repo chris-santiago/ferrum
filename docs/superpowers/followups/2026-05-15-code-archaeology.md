@@ -20,9 +20,9 @@
 
 | File | Line | Reason |
 |---|---|---|
-| `tests/test_phase_8b_e2e.py` | 60 | `mark_contour(fill=False)` per-cell quantitative coloring — "Task 37 follow-up" never scheduled |
-| `tests/test_phase_8b_e2e.py` | 87 | `mark_hex` per-cell quantitative coloring — same "Task 37 follow-up" |
 | `tests/marks/test_heavy_stats.py` | 188 | `mark_violin(inner=None)` fails on scale-resolve integration for small samples — never fixed |
+
+> **2026-05-15 update:** `test_contour_renders` and `test_hex_renders` were verified passing and their skip markers removed. The "Task 37 follow-up" coloring work was completed at some point but the skips were never cleaned up.
 
 ---
 
