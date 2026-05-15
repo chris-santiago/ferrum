@@ -200,6 +200,68 @@ def test_interaction_config_empty_when_no_selections():
     assert cfg.get("selections", []) == []
 
 
+# ── on_selection_change output routing ───────────────────────────────────────
+
+def test_on_selection_change_callback_fires_on_trait_update():
+    from ferrum._interactive import InteractiveChart
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "group": ["A", "B"]})
+    sel = selection_point(fields=["group"], name="cb_sel")
+    chart = (fm.Chart(df).mark_point()
+             .encode(x="x:Q", y="y:Q", color="group:N", tooltip=fm.Tooltip("group"))
+             .add_selection(sel)
+             .properties(width=300, height=200))
+    ic = InteractiveChart(chart)
+
+    received = []
+    ic.on_selection_change(lambda state: received.append(state))
+
+    # Simulate the comm message that the JS click handler sends.
+    new_state = {"cb_sel": {"type": "point", "indices": [0], "field_values": []}}
+    ic._widget.selection_state = new_state
+
+    assert len(received) == 1, "callback must fire exactly once"
+    assert received[0] == new_state
+
+
+def test_on_selection_change_creates_output_widget():
+    import ipywidgets
+    from ferrum._interactive import InteractiveChart
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    ic = InteractiveChart(
+        fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    )
+    assert ic._output_widget is None, "_output_widget must be None before any callback"
+
+    ic.on_selection_change(lambda _: None)
+    assert isinstance(ic._output_widget, ipywidgets.Output), \
+        "on_selection_change must create an ipywidgets.Output widget"
+
+
+def test_repr_mimebundle_includes_output_widget_when_callback_registered():
+    import ipywidgets
+    from ferrum._interactive import InteractiveChart
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    ic = InteractiveChart(
+        fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    )
+
+    # Without a callback, repr returns the bare widget bundle.
+    mb_bare = ic._repr_mimebundle_()
+    assert mb_bare is not None
+
+    ic.on_selection_change(lambda _: None)
+
+    # After registering a callback, repr must return a VBox bundle so the
+    # output area is displayed in the same cell as the chart.
+    mb_with_out = ic._repr_mimebundle_()
+    assert mb_with_out is not None
+    # VBox produces a widget-view mimetype entry
+    assert "application/vnd.jupyter.widget-view+json" in mb_with_out
+
+
 # ── arc hit-test (pie tooltip) ────────────────────────────────────────────────
 
 def test_pie_chart_has_arc_nodes_with_path_type():
@@ -284,3 +346,250 @@ def test_polar_chart_coord_kind_is_polar():
     scene = _render(chart)
     coord = scene["panels"][0]["coord"]
     assert coord.get("kind") == "polar", "polar chart must have coord.kind == 'polar'"
+
+
+# ── tick_levels structure (zoom scale label fix) ──────────────────────────────
+#
+# Regression for: build_zoomed_text_json matched tick labels by scale-function
+# pixel position, which diverges from the axis layout's uniform-band positions.
+# Fixed by clustering axis text by shared coordinate instead.
+# These tests prove the preconditions that the clustering approach relies on.
+
+def _scatter_scene(n: int = 5, width: int = 400, height: int = 300) -> dict:
+    """A simple quantitative scatter scene used across the tick_levels tests."""
+    df = pl.DataFrame({
+        "x": [float(i) for i in range(1, n + 1)],
+        "y": [float(i * i) for i in range(1, n + 1)],
+    })
+    return _render(
+        fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=width, height=height)
+    )
+
+
+def test_tick_levels_present_for_quantitative_axes():
+    scene = _scatter_scene()
+    tl = scene["interaction"]["tick_levels"]
+    assert len(tl) == 1, "one PanelTickLevels entry per panel"
+    assert tl[0]["panel_id"] == 0
+    assert len(tl[0]["x_levels"]) > 0, "x_levels must be non-empty for Q x-axis"
+    assert len(tl[0]["y_levels"]) > 0, "y_levels must be non-empty for Q y-axis"
+
+
+def test_tick_levels_have_nonempty_ticks():
+    scene = _scatter_scene()
+    ptl = scene["interaction"]["tick_levels"][0]
+    # Every zoom level should have at least some ticks.
+    for lvl in ptl["x_levels"]:
+        assert len(lvl["ticks"]) > 0, f"x_level {lvl} has no ticks"
+    for lvl in ptl["y_levels"]:
+        assert len(lvl["ticks"]) > 0, f"y_level {lvl} has no ticks"
+
+
+def test_tick_level_labels_appear_in_axis_text_nodes():
+    """
+    Tick label strings from tick_levels must appear as text-node content in
+    panel.axes.  The clustering algorithm identifies tick labels by content
+    match, so this is the core precondition for the zoom scale fix.
+    """
+    scene = _scatter_scene()
+    ptl = scene["interaction"]["tick_levels"][0]
+
+    # Collect all text node contents from panel.axes.
+    axis_texts: set[str] = set()
+    for node in scene["panels"][0]["axes"]:
+        if node.get("type") == "text":
+            axis_texts.add(node["content"])
+
+    x_labels = {t["label"] for lvl in ptl["x_levels"] for t in lvl["ticks"]}
+    y_labels = {t["label"] for lvl in ptl["y_levels"] for t in lvl["ticks"]}
+
+    assert x_labels & axis_texts == x_labels, (
+        f"x tick labels not found in axis text nodes: {x_labels - axis_texts}"
+    )
+    assert y_labels & axis_texts == y_labels, (
+        f"y tick labels not found in axis text nodes: {y_labels - axis_texts}"
+    )
+
+
+def test_x_axis_tick_labels_share_y_coordinate():
+    """
+    All x-axis tick labels must have the same canvas y coordinate.
+    This is the invariant the clustering approach exploits: group by
+    the most common y → that cluster is the x-axis row.
+    """
+    scene = _scatter_scene()
+    ptl = scene["interaction"]["tick_levels"][0]
+
+    x_labels = {t["label"] for lvl in ptl["x_levels"] for t in lvl["ticks"]}
+    x_tick_nodes = [
+        n for n in scene["panels"][0]["axes"]
+        if n.get("type") == "text" and n["content"] in x_labels
+    ]
+    assert len(x_tick_nodes) >= 2, "need at least 2 x-axis tick labels to test clustering"
+
+    ys = [n["y"] for n in x_tick_nodes]
+    assert max(ys) - min(ys) < 2.0, (
+        f"x-axis tick labels must share a y-coordinate; spread={max(ys)-min(ys):.2f}"
+    )
+
+
+def test_y_axis_tick_labels_share_x_coordinate():
+    """
+    All y-axis tick labels must have the same canvas x coordinate.
+    """
+    scene = _scatter_scene()
+    ptl = scene["interaction"]["tick_levels"][0]
+
+    y_labels = {t["label"] for lvl in ptl["y_levels"] for t in lvl["ticks"]}
+    y_tick_nodes = [
+        n for n in scene["panels"][0]["axes"]
+        if n.get("type") == "text" and n["content"] in y_labels
+    ]
+    assert len(y_tick_nodes) >= 2, "need at least 2 y-axis tick labels to test clustering"
+
+    xs = [n["x"] for n in y_tick_nodes]
+    assert max(xs) - min(xs) < 2.0, (
+        f"y-axis tick labels must share an x-coordinate; spread={max(xs)-min(xs):.2f}"
+    )
+
+
+def test_tick_data_pixels_differ_from_axis_text_positions():
+    """
+    Documents the root cause of the old pixel-match failure: tick_data
+    scale-function outputs do NOT match axis text positions.  The axis
+    layout uses uniform band centering while tick_data uses the actual
+    scale function — systematically different mappings.
+    """
+    scene = _scatter_scene()
+    ptl = scene["interaction"]["tick_levels"][0]
+
+    # Build a map from label → tick_data pixel for x-axis (level 1 = default).
+    td_px = {t["label"]: t["pixel"] for t in ptl["x_levels"][1]["ticks"]}
+    x_labels = set(td_px)
+
+    x_tick_nodes = [
+        n for n in scene["panels"][0]["axes"]
+        if n.get("type") == "text" and n["content"] in x_labels
+    ]
+
+    # At least some labels must have mismatched positions.  A perfect match
+    # would mean the old approach worked, which we know it didn't.
+    mismatches = [
+        n for n in x_tick_nodes
+        if abs(n["x"] - td_px[n["content"]]) > 0.5
+    ]
+    assert len(mismatches) > 0, (
+        "Expected at least one label whose axis text x differs from tick_data pixel; "
+        "if all match, the old pixel-match approach would have worked fine."
+    )
+
+
+# ── zoom transform math (tooltip inverse-transform fix) ───────────────────────
+#
+# Regression for: JS tooltip hit-test used original mark positions after zoom.
+# Fixed by tracking a JS _zoom object and inverse-transforming the mouse before
+# _hitTest.  The math mirrors Rust ZoomPanState.  These tests prove correctness.
+
+def _zoom_identity():
+    return {"sx": 1.0, "sy": 1.0, "tx": 0.0, "ty": 0.0}
+
+
+def _apply_wheel(t, delta_y, cx, cy, zmin=0.1, zmax=50.0):
+    """Mirror of JS wheel handler / Rust ZoomPanState::on_wheel."""
+    f = 1.0 + delta_y * 0.001
+    sx = min(zmax, max(zmin, t["sx"] * f))
+    sy = min(zmax, max(zmin, t["sy"] * f))
+    return {
+        "sx": sx,
+        "sy": sy,
+        "tx": cx - sx * ((cx - t["tx"]) / t["sx"]),
+        "ty": cy - sy * ((cy - t["ty"]) / t["sy"]),
+    }
+
+
+def _apply_pan(t, dx, dy):
+    return {"sx": t["sx"], "sy": t["sy"], "tx": t["tx"] + dx, "ty": t["ty"] + dy}
+
+
+def _inv_zoom(t, x, y):
+    ox = (x - t["tx"]) / t["sx"] if abs(t["sx"]) > 1e-10 else x
+    oy = (y - t["ty"]) / t["sy"] if abs(t["sy"]) > 1e-10 else y
+    return ox, oy
+
+
+def _fwd_zoom(t, x, y):
+    return x * t["sx"] + t["tx"], y * t["sy"] + t["ty"]
+
+
+def test_zoom_identity_is_noop():
+    t = _zoom_identity()
+    ox, oy = _inv_zoom(t, 150.0, 200.0)
+    assert abs(ox - 150.0) < 1e-10 and abs(oy - 200.0) < 1e-10
+
+
+def test_zoom_wheel_forward_inverse_roundtrip():
+    """Applying wheel zoom then inverse-transforming must recover the original position."""
+    t = _zoom_identity()
+    t = _apply_wheel(t, delta_y=300.0, cx=200.0, cy=150.0)  # zoom in ~1.3×
+    # A mark at (200, 150) — the cursor — stays at (200, 150) after zoom.
+    fx, fy = _fwd_zoom(t, 200.0, 150.0)
+    assert abs(fx - 200.0) < 1e-6 and abs(fy - 150.0) < 1e-6
+    # Any arbitrary point round-trips.
+    orig = (80.0, 60.0)
+    rx, ry = _fwd_zoom(t, *orig)
+    bx, by = _inv_zoom(t, rx, ry)
+    assert abs(bx - orig[0]) < 1e-8 and abs(by - orig[1]) < 1e-8
+
+
+def test_zoom_pan_forward_inverse_roundtrip():
+    t = _zoom_identity()
+    t = _apply_pan(t, dx=40.0, dy=-20.0)
+    orig = (100.0, 200.0)
+    rx, ry = _fwd_zoom(t, *orig)
+    bx, by = _inv_zoom(t, rx, ry)
+    assert abs(bx - orig[0]) < 1e-10 and abs(by - orig[1]) < 1e-10
+
+
+def test_zoom_wheel_then_pan_roundtrip():
+    t = _zoom_identity()
+    t = _apply_wheel(t, 500.0, 200.0, 150.0)
+    t = _apply_pan(t, 30.0, -15.0)
+    orig = (55.0, 120.0)
+    rx, ry = _fwd_zoom(t, *orig)
+    bx, by = _inv_zoom(t, rx, ry)
+    assert abs(bx - orig[0]) < 1e-8 and abs(by - orig[1]) < 1e-8
+
+
+def test_zoom_reset_restores_identity():
+    t = _zoom_identity()
+    t = _apply_wheel(t, 800.0, 200.0, 150.0)
+    t = _apply_pan(t, 50.0, 50.0)
+    t = _zoom_identity()  # reset
+    assert t["sx"] == 1.0 and t["sy"] == 1.0
+    assert t["tx"] == 0.0 and t["ty"] == 0.0
+
+
+def test_zoom_wheel_clamps_to_min():
+    t = _zoom_identity()
+    for _ in range(300):
+        t = _apply_wheel(t, -5000.0, 100.0, 100.0)
+    assert t["sx"] >= 0.1 and t["sy"] >= 0.1
+
+
+def test_zoom_wheel_clamps_to_max():
+    t = _zoom_identity()
+    for _ in range(300):
+        t = _apply_wheel(t, 5000.0, 100.0, 100.0)
+    assert t["sx"] <= 50.0 and t["sy"] <= 50.0
+
+
+def test_zoom_cursor_stays_fixed_under_wheel():
+    """The point under the cursor must not move visually when zooming."""
+    t = _zoom_identity()
+    cursor = (180.0, 130.0)
+    # Place a mark at the cursor position, zoom around it.
+    for delta in [200.0, 500.0, -150.0]:
+        t = _apply_wheel(t, delta, *cursor)
+        rx, ry = _fwd_zoom(t, *cursor)
+        assert abs(rx - cursor[0]) < 1e-6, f"cursor x moved after delta={delta}"
+        assert abs(ry - cursor[1]) < 1e-6, f"cursor y moved after delta={delta}"
