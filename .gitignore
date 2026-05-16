@@ -213,6 +213,9 @@ crates/ferrum-wasm/pkg/
 # Bug hunt runtime output (BUG_REPORT.md). Test files in tests/ are committed separately.
 .claude/skills/bug-hunt/output/
 
+# Test sweep report (generated per-run, not committed).
+TEST_SWEEP_REPORT.md
+
 # Jupyter notebooks
 notebooks/
 
