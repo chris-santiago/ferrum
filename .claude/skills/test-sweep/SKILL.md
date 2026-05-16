@@ -46,19 +46,33 @@ For each round (up to N):
 Pick the next untested dimension from the seed queue. Skip any dimension whose test file
 already exists and passes.
 
-### 2. Write test module
+### 2. Write test modules (Python + Rust in parallel)
 
-**Dispatch to `python-coder` agent.** Do not use `general-purpose`, `Explore`, or write
-inline. The `python-coder` agent embeds the review principles and produces first-pass
-quality code.
+Dispatch **both** coding agents in parallel for each dimension:
+
+#### 2a. Python integration test → `python-coder`
 
 Write a parametrized test file in `tests/` following established patterns:
 - Polars DataFrame fixture with appropriate data shapes
 - Per-mark/function config dicts specifying base encodings and applicable channels
 - `_make_cases()` → `@pytest.mark.parametrize`
 - Assertions: SVG differs (channel/transform has effect) or no-crash (`"<svg" in svg`)
+- Run with `--noconftest` to avoid Phase 10 shap guards
 
-Run with `--noconftest` to avoid Phase 10 shap guards.
+#### 2b. Rust unit test → `rust-coder`
+
+Write a `#[cfg(test)]` module or extend an existing one in the relevant
+`crates/ferrum-core/src/` module. Rust tests target the computation layer directly:
+- Construct `RecordBatch` inputs with edge-case shapes (1 row, all-null, zero-variance)
+- Call the transform's `apply()` or internal function directly
+- Assert exact output values, column counts, row counts, and error variants
+- Faster feedback loop — no Python/rendering overhead
+
+**Why both:** Python tests catch integration bugs (PyO3 boundary, rendering pipeline,
+encoding wiring). Rust tests catch computation bugs (off-by-one, NaN propagation, empty
+partition handling) with precise value assertions that SVG checks cannot provide.
+
+Do not use `general-purpose`, `Explore`, or write inline for either track.
 
 ### 3. Collect failures
 
@@ -87,8 +101,13 @@ All fixes must consider:
 
 ### 5. Verify green
 
-Re-run the test module until all tests pass. Then run the full new-test suite
-(all `test_*_matrix.py` / `test_*_handling.py` files) to check for regressions.
+Run both test tracks until green:
+- **Python:** Re-run the test module, then the full sweep suite
+  (`test_*_matrix.py` / `test_*_handling.py`) for regressions.
+- **Rust:** `DYLD_LIBRARY_PATH=... cargo test -p ferrum-core` — run the new Rust tests
+  plus the full crate test suite.
+
+Both must pass before proceeding.
 
 ### 6. Review-lite gate
 
@@ -122,18 +141,22 @@ Analyze the round's failures:
 
 ## Seed Dimensions (ordered by expected yield)
 
-| # | Dimension | Test file pattern |
-|---|---|---|
-| 1 | mark × channel | `test_channel_mark_matrix.py` |
-| 2 | mark × CoordFlip | `test_coord_flip_matrix.py` |
-| 3 | mark × position adjustment | `test_position_matrix.py` |
-| 4 | composite mark × channel | `test_composite_mark_channels.py` |
-| 5 | figure function × kwargs passthrough | `test_figure_kwargs_passthrough.py` |
-| 6 | channel × scale type | `test_channel_scale_types.py` |
-| 7 | mark × null/NaN handling | `test_null_nan_handling.py` |
-| 8 | figure function × data shapes | `test_figure_data_shapes.py` |
-| 9 | transform × edge cases | `test_transform_edge_cases.py` |
-| 10 | composition × encoding inheritance | `test_composition_inheritance.py` |
+| # | Dimension | Python test | Rust test scope |
+|---|---|---|---|
+| 1 | mark × channel | `test_channel_mark_matrix.py` | `render/` mark dispatch |
+| 2 | mark × CoordFlip | `test_coord_flip_matrix.py` | `render/` coord flip |
+| 3 | mark × position adjustment | `test_position_matrix.py` | `position/` adjustments |
+| 4 | composite mark × channel | `test_composite_mark_channels.py` | — (Python-only) |
+| 5 | figure function × kwargs passthrough | `test_figure_kwargs_passthrough.py` | — (Python-only) |
+| 6 | channel × scale type | `test_channel_scale_types.py` | `scale/` type inference |
+| 7 | mark × null/NaN handling | `test_null_nan_handling.py` | `transform/` null paths |
+| 8 | figure function × data shapes | `test_figure_data_shapes.py` | — (Python-only) |
+| 9 | transform × edge cases | `test_transform_edge_cases.py` | `transform/` edge cases |
+| 10 | composition × encoding inheritance | `test_composition_inheritance.py` | `resolve/` inheritance |
+
+Dimensions marked "Python-only" have no meaningful Rust-level unit test because the
+logic lives entirely in the Python layer (figure function construction, composite mark
+desugaring, kwargs threading).
 
 ---
 
