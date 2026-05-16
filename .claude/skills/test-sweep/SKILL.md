@@ -48,6 +48,10 @@ already exists and passes.
 
 ### 2. Write test module
 
+**Dispatch to `python-coder` agent.** Do not use `general-purpose`, `Explore`, or write
+inline. The `python-coder` agent embeds the review principles and produces first-pass
+quality code.
+
 Write a parametrized test file in `tests/` following established patterns:
 - Polars DataFrame fixture with appropriate data shapes
 - Per-mark/function config dicts specifying base encodings and applicable channels
@@ -65,9 +69,16 @@ Run the test module. Categorize each failure as:
 
 ### 4. Fix
 
-- **Test-design issues**: fix immediately in the test file.
+- **Test-design issues**: dispatch to `python-coder` to fix the test file.
 - **Design decisions**: pause, present options with tradeoffs, get user choice.
-- **Real bugs**: fix via TDD (coding agents per CLAUDE.md dispatch rules).
+- **Real bugs**: dispatch to the language-specific coding agent:
+  - Python fixes (`src/ferrum/`, `tests/`) → `python-coder` agent
+  - Rust fixes (`crates/ferrum-core/`) → `rust-coder` agent
+  - Both → dispatch both agents with clear boundaries
+
+**Never edit `.py` or `.rs` files directly in the orchestrator.** The coding agents
+embed review principles from `.claude/skills/{python,rust}-review/` and produce
+code that passes the lite-review gate on first attempt.
 
 All fixes must consider:
 - Does this change the public API contract?
@@ -150,7 +161,8 @@ After all rounds complete, write `TEST_SWEEP_REPORT.md` (gitignored) with:
 
 - Never xfail without a dated reason AND a follow-up dimension queued
 - All fixes go through review-lite before commit
-- Coding agents follow CLAUDE.md dispatch rules
+- **All `.py`/`.rs` writes go through `python-coder` or `rust-coder` agents** — the
+  orchestrator reads, analyzes, and dispatches but never edits source directly
 - Skip dimensions whose test files already exist and pass
 - Do not modify existing passing tests (only add new ones or fix test-design issues)
 - Maximum 50 test cases per module (keep parametrize matrices bounded)
