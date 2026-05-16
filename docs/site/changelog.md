@@ -6,6 +6,30 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.8.1
+
+### Fixed
+
+- **Scale `range` now optional** — `LinearScale`, `LogScale`, `SymlogScale`, `TimeScale`, and `OrdinalScale` no longer require `range=` in their constructors. The renderer auto-fills from the plot-area dimensions, so users can write `fm.LogScale(domain=[100, 100000], base=10)` without pixel math.
+- **`mark_rule` layering with overlapping columns** — layering a rule on a scatter (`scatter + hline`) no longer draws a line per scatter row when both DataFrames share a column name (e.g. `"y"`).
+- **Chained `+` layering** — `scatter + hline + vline + label` now renders correctly. Added `Identity` transform and `inherit_non_positional` to prevent chart-level positional encoding from polluting routed layers.
+- **Docs code examples** — fixed `CoordFlip` encoding order, `stroke_dash` string→list, `Stack` Int64→Float64, `to_theme_inputs_dict()`→`to_spec_dict()`, `chart.render_config()`→`chart.properties(render_config=)`, `feature_importances_chart`→`importance_chart`, `ferrum[...]`→`ferrum-viz[...]`.
+
+### Added
+
+- **25 new documentation sections** — type suffix explanation, position adjustments (Dodge/Stack/Jitter), axis customization (log scale, limits, reversed), smooth method table, legend control, palette cycling, shared scales, regplot, multi-model comparison, precomputed scores, output methods summary, DPI note, PDF note, interactive compatibility, CoordFlip recipe, annotation recipe, chart sizing recipe, category sorting recipe, time-series recipe.
+- **13 guide PNGs** — visuals for every new section (position adjustments, axis customization, legend suppression, shared scales, regplot, multi-model ROC, CoordFlip, annotations, sizing, category order, time-series).
+- **12-theme visual grid** — side-by-side comparison of all built-in themes on the same chart.
+- **Complete 54-mark table** — all mark methods listed with reflinks in marks-encodings guide.
+- **Consistent API reflinks** — every public symbol mentioned in prose now links to its API reference across all doc pages.
+- **`Identity` transform** — Rust pass-through transform for named-output routing in layered compositions.
+- **11 regression tests** — covering scale range, rule layering, and chained layer fixes.
+- **PyPI metadata** — keywords, classifiers, and project URLs added to `pyproject.toml`.
+
+### Changed
+
+- **README** — updated install section with `ferrum-viz[all]`, added docs link, interactive rendering feature, corrected dev commands.
+
 ## 0.8.0
 
 Grammar-of-graphics core with Rust rendering engine.
