@@ -1689,4 +1689,265 @@ mod tests {
         assert_eq!(scale.min_opacity(), 0.1);
         assert_eq!(scale.max_opacity(), 1.0);
     }
+
+    // --- Encoding resolution / inheritance edge-case tests ---
+
+    #[test]
+    fn single_value_domain_expands_to_symmetric_band() {
+        // All x values are identical (5.0) — zero-range domain. The resolver
+        // must expand to avoid NaN from the linear formula 0/0.
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        // The single value (5.0) should map to a finite pixel inside the range
+        let px = scales.x.to_pixel_f64(5.0).expect("should return Some for constant domain");
+        assert!(px.is_finite(), "pixel for constant-domain value must be finite, got: {px}");
+        assert!((0.0..=100.0).contains(&px), "pixel should be within x range, got: {px}");
+    }
+
+    #[test]
+    fn single_value_zero_domain_expands_to_minus_one_plus_one() {
+        // All x values are 0.0 — the special case where expansion is [-1, 1].
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        // x=0 should map to the midpoint (~50) of the pixel range since domain is [-1, 1]
+        let px = scales.x.to_pixel_f64(0.0).expect("should return Some");
+        assert!(px.is_finite(), "pixel must be finite, got: {px}");
+        // -1.0 and 1.0 should also yield finite pixels (proving the domain expanded)
+        let px_lo = scales.x.to_pixel_f64(-1.0).expect("should return Some for -1.0");
+        let px_hi = scales.x.to_pixel_f64(1.0).expect("should return Some for 1.0");
+        assert!(px_lo.is_finite() && px_hi.is_finite());
+        // The center value (0.0) should be between the extremes
+        assert!(px > px_lo.min(px_hi) - 1.0 && px < px_lo.max(px_hi) + 1.0);
+    }
+
+    #[test]
+    fn child_scale_type_override_wins_over_parent_auto_detection() {
+        // If child encoding has an explicit ScaleSpec::Log, the resolver must
+        // use Log even when the data would default to Linear.
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 10.0, 100.0, 1000.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: Some(crate::spec::encoding::DataType::Quantitative),
+                    scale: Some(ScaleSpec::Symlog { constant: 2.0, domain: None, range: None, nice: false, clamp: false, padding: None }),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+        assert!(matches!(scales.x, ScaleKind::Symlog(_)), "expected Symlog, got: {:?}", scales.x);
+    }
+
+    #[test]
+    fn all_null_column_resolves_to_default_domain() {
+        // When all values are null/NaN, numeric_domain_union returns (0.0, 1.0)
+        // so the chart renders empty axes without panicking.
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        use arrow::array::Float64Array;
+        use arrow::buffer::NullBuffer;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, true),
+            Field::new("y", ArrowDataType::Float64, true),
+        ]));
+        // All nulls via null buffer
+        let nulls = NullBuffer::new_null(3);
+        let x_arr = Float64Array::new(
+            vec![0.0, 0.0, 0.0].into(),
+            Some(nulls.clone()),
+        );
+        let y_arr = Float64Array::new(
+            vec![0.0, 0.0, 0.0].into(),
+            Some(nulls),
+        );
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(x_arr), Arc::new(y_arr)],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
+        // Should succeed with the fallback domain [0, 1]
+        assert!(result.is_ok(), "all-null column should not error: {:?}", result.err());
+        let (scales, _) = result.unwrap();
+        // The fallback domain [0, 1] should produce finite pixels
+        let px0 = scales.x.to_pixel_f64(0.0).expect("returns Some");
+        let px1 = scales.x.to_pixel_f64(1.0).expect("returns Some");
+        assert!(px0.is_finite() && px1.is_finite());
+    }
+
+    #[test]
+    fn empty_color_domain_produces_no_color_scale() {
+        // If the color field has zero distinct values (e.g., empty batch or all nulls),
+        // the color scale should either be None or have an empty domain.
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+            Field::new("c", ArrowDataType::Utf8, true),
+        ]));
+        // Zero rows — valid RecordBatch with no data
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
+        // Should succeed — the chart is valid but empty
+        assert!(result.is_ok(), "empty batch should not error: {:?}", result.err());
+        let (scales, _) = result.unwrap();
+        // Color scale should either be None or Categorical with empty domain
+        match &scales.color {
+            None => {} // acceptable
+            Some(ColorScale::Categorical { domain, .. }) => {
+                assert!(domain.is_empty(), "empty batch should produce empty color domain");
+            }
+            Some(other) => panic!("unexpected color scale variant: {:?}", other),
+        }
+    }
 }

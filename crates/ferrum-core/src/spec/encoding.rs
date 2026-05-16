@@ -961,6 +961,249 @@ mod tests {
         assert_eq!(child.x.as_ref().unwrap().title, None);
     }
 
+    // --- Encoding inheritance edge-case tests ---
+
+    #[test]
+    fn inherit_from_partial_encoding_only_fills_absent_channels() {
+        // Parent has x, y, color, size. Child only has x, color.
+        // Expected: child.y and child.size adopt parent values;
+        // child.x and child.color remain untouched.
+        let parent = Encoding {
+            x: Some(EncodingSpec { field: "px".into(), title: Some("Parent X".into()), ..Default::default() }),
+            y: Some(EncodingSpec { field: "py".into(), title: Some("Parent Y".into()), ..Default::default() }),
+            color: Some(EncodingSpec { field: "pc".into(), scheme: Some("blues".into()), ..Default::default() }),
+            size: Some(EncodingSpec { field: "ps".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec { field: "cx".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "cc".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        // x field differs → no metadata propagation
+        assert_eq!(child.x.as_ref().unwrap().field, "cx");
+        assert_eq!(child.x.as_ref().unwrap().title, None);
+        // y was None → adopted from parent
+        assert_eq!(child.y.as_ref().unwrap().field, "py");
+        assert_eq!(child.y.as_ref().unwrap().title.as_deref(), Some("Parent Y"));
+        // color field differs → no metadata propagation
+        assert_eq!(child.color.as_ref().unwrap().field, "cc");
+        assert_eq!(child.color.as_ref().unwrap().scheme, None);
+        // size was None → adopted from parent
+        assert_eq!(child.size.as_ref().unwrap().field, "ps");
+    }
+
+    #[test]
+    fn inherit_from_propagates_all_metadata_on_same_field() {
+        // When field matches, scale + title + scheme + type_ + axis + legend + format + format_type
+        // all propagate if child has None for that slot.
+        let parent = Encoding {
+            x: Some(EncodingSpec {
+                field: "val".into(),
+                type_: Some(DataType::Quantitative),
+                scale: Some(ScaleSpec::Log { base: 2.0, domain: None, range: None, nice: true, clamp: false, padding: None }),
+                title: Some("Value (log2)".into()),
+                axis: Some(AxisSpec { extra: {
+                    let mut m = serde_json::Map::new();
+                    m.insert("grid".into(), serde_json::Value::Bool(false));
+                    m
+                }}),
+                legend: Some(LegendSpec { extra: serde_json::Map::new() }),
+                format: Some(".2f".into()),
+                format_type: Some("number".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        let cx = child.x.as_ref().unwrap();
+        assert!(cx.scale.is_some(), "scale should be inherited");
+        assert_eq!(cx.title.as_deref(), Some("Value (log2)"));
+        assert_eq!(cx.type_, Some(DataType::Quantitative));
+        assert!(cx.axis.is_some(), "axis should be inherited");
+        assert!(cx.legend.is_some(), "legend should be inherited");
+        assert_eq!(cx.format.as_deref(), Some(".2f"));
+        assert_eq!(cx.format_type.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn inherit_from_does_not_overwrite_any_child_metadata() {
+        // Child has all metadata set; parent has different values for each.
+        // None of the child's values should be replaced.
+        let parent = Encoding {
+            x: Some(EncodingSpec {
+                field: "val".into(),
+                type_: Some(DataType::Temporal),
+                scale: Some(ScaleSpec::Linear { domain: None, range: None, nice: true, zero: false, clamp: false, padding: None }),
+                title: Some("Parent Title".into()),
+                scheme: Some("parent_scheme".into()),
+                format: Some("parent_fmt".into()),
+                format_type: Some("parent_ft".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            x: Some(EncodingSpec {
+                field: "val".into(),
+                type_: Some(DataType::Quantitative),
+                scale: Some(ScaleSpec::Log { base: 10.0, domain: None, range: None, nice: false, clamp: false, padding: None }),
+                title: Some("Child Title".into()),
+                scheme: Some("child_scheme".into()),
+                format: Some("child_fmt".into()),
+                format_type: Some("child_ft".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        child.inherit_from(&parent);
+        let cx = child.x.as_ref().unwrap();
+        assert_eq!(cx.type_, Some(DataType::Quantitative));
+        assert!(matches!(cx.scale, Some(ScaleSpec::Log { .. })));
+        assert_eq!(cx.title.as_deref(), Some("Child Title"));
+        assert_eq!(cx.scheme.as_deref(), Some("child_scheme"));
+        assert_eq!(cx.format.as_deref(), Some("child_fmt"));
+        assert_eq!(cx.format_type.as_deref(), Some("child_ft"));
+    }
+
+    #[test]
+    fn inherit_non_positional_skips_x_y_x2_y2() {
+        // Parent has x, y, x2, y2, color, size. Child has nothing.
+        // inherit_non_positional must adopt color and size but NOT x/y/x2/y2.
+        let parent = Encoding {
+            x: Some(EncodingSpec { field: "px".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "py".into(), ..Default::default() }),
+            x2: Some(EncodingSpec { field: "px2".into(), ..Default::default() }),
+            y2: Some(EncodingSpec { field: "py2".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "pc".into(), scheme: Some("reds".into()), ..Default::default() }),
+            size: Some(EncodingSpec { field: "ps".into(), ..Default::default() }),
+            opacity: Some(EncodingSpec { field: "po".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut child = Encoding::default();
+        child.inherit_non_positional(&parent);
+        // Positional channels must remain None
+        assert!(child.x.is_none(), "x should not be inherited");
+        assert!(child.y.is_none(), "y should not be inherited");
+        assert!(child.x2.is_none(), "x2 should not be inherited");
+        assert!(child.y2.is_none(), "y2 should not be inherited");
+        // Non-positional channels must be inherited
+        assert_eq!(child.color.as_ref().unwrap().field, "pc");
+        assert_eq!(child.color.as_ref().unwrap().scheme.as_deref(), Some("reds"));
+        assert_eq!(child.size.as_ref().unwrap().field, "ps");
+        assert_eq!(child.opacity.as_ref().unwrap().field, "po");
+    }
+
+    #[test]
+    fn inherit_non_positional_propagates_metadata_on_same_field() {
+        // Child has color with same field but no scheme; parent has scheme.
+        let parent = Encoding {
+            color: Some(EncodingSpec {
+                field: "species".into(),
+                scheme: Some("dark2".into()),
+                title: Some("Species Group".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut child = Encoding {
+            color: Some(EncodingSpec { field: "species".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        child.inherit_non_positional(&parent);
+        assert_eq!(child.color.as_ref().unwrap().scheme.as_deref(), Some("dark2"));
+        assert_eq!(child.color.as_ref().unwrap().title.as_deref(), Some("Species Group"));
+    }
+
+    #[test]
+    fn inherit_from_propagates_stroke_and_angle_channels() {
+        // Verify that the late-addition stroke_width/stroke_opacity/stroke_dash/angle/fill_opacity
+        // channels are properly inherited when child is None.
+        let parent = Encoding {
+            stroke_width: Some(EncodingSpec { field: "sw".into(), ..Default::default() }),
+            stroke_opacity: Some(EncodingSpec { field: "so".into(), ..Default::default() }),
+            stroke_dash: Some(EncodingSpec { field: "sd".into(), ..Default::default() }),
+            angle: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+            fill_opacity: Some(EncodingSpec { field: "fo".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut child = Encoding::default();
+        child.inherit_from(&parent);
+        assert_eq!(child.stroke_width.as_ref().unwrap().field, "sw");
+        assert_eq!(child.stroke_opacity.as_ref().unwrap().field, "so");
+        assert_eq!(child.stroke_dash.as_ref().unwrap().field, "sd");
+        assert_eq!(child.angle.as_ref().unwrap().field, "a");
+        assert_eq!(child.fill_opacity.as_ref().unwrap().field, "fo");
+    }
+
+    #[test]
+    fn inherit_from_tooltip_fields_only_fills_when_child_is_none() {
+        // tooltip_fields inheritance: child None → adopt parent; child Some → keep child.
+        let parent = Encoding {
+            tooltip_fields: Some(vec![
+                EncodingSpec { field: "a".into(), ..Default::default() },
+                EncodingSpec { field: "b".into(), ..Default::default() },
+            ]),
+            ..Default::default()
+        };
+        // Case 1: child is None → inherits
+        let mut child1 = Encoding::default();
+        child1.inherit_from(&parent);
+        assert_eq!(child1.tooltip_fields.as_ref().unwrap().len(), 2);
+
+        // Case 2: child already has tooltip_fields → keeps own
+        let mut child2 = Encoding {
+            tooltip_fields: Some(vec![
+                EncodingSpec { field: "only_mine".into(), ..Default::default() },
+            ]),
+            ..Default::default()
+        };
+        child2.inherit_from(&parent);
+        assert_eq!(child2.tooltip_fields.as_ref().unwrap().len(), 1);
+        assert_eq!(child2.tooltip_fields.as_ref().unwrap()[0].field, "only_mine");
+    }
+
+    #[test]
+    fn inherit_from_completely_empty_parent_is_noop() {
+        let parent = Encoding::default();
+        let mut child = Encoding {
+            x: Some(EncodingSpec { field: "cx".into(), title: Some("My X".into()), ..Default::default() }),
+            color: Some(EncodingSpec { field: "cc".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let child_before = child.clone();
+        child.inherit_from(&parent);
+        assert_eq!(child, child_before);
+    }
+
+    #[test]
+    fn inherit_from_completely_empty_child_adopts_everything() {
+        let parent = Encoding {
+            x: Some(EncodingSpec { field: "px".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "py".into(), ..Default::default() }),
+            color: Some(EncodingSpec { field: "pc".into(), ..Default::default() }),
+            size: Some(EncodingSpec { field: "ps".into(), ..Default::default() }),
+            shape: Some(EncodingSpec { field: "psh".into(), ..Default::default() }),
+            opacity: Some(EncodingSpec { field: "po".into(), ..Default::default() }),
+            text: Some(EncodingSpec { field: "pt".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut child = Encoding::default();
+        child.inherit_from(&parent);
+        assert_eq!(child.x.as_ref().unwrap().field, "px");
+        assert_eq!(child.y.as_ref().unwrap().field, "py");
+        assert_eq!(child.color.as_ref().unwrap().field, "pc");
+        assert_eq!(child.size.as_ref().unwrap().field, "ps");
+        assert_eq!(child.shape.as_ref().unwrap().field, "psh");
+        assert_eq!(child.opacity.as_ref().unwrap().field, "po");
+        assert_eq!(child.text.as_ref().unwrap().field, "pt");
+    }
+
     #[test]
     fn overlay_from_replaces_present_channels() {
         let mut base = Encoding::default();
