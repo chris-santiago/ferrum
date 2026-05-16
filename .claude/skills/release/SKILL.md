@@ -98,4 +98,5 @@ Report the release URL. Remind the user that the `publish.yaml` workflow will bu
 - **Never push without confirmation.** Step 5 is a hard gate.
 - **Fail early on dirty working tree.** If there are uncommitted changes, abort and tell the user to commit or stash first.
 - **Fail if on a branch other than `main`.** Releases come from main only (unless user overrides).
-- **Fail if tests don't pass.** Run `uv run pytest` before proceeding. If tests fail, abort.
+- **Fail if nox doesn't pass.** Run `uv run nox` before proceeding (lint, full test suite with all extras, build). If any session fails, abort. This replaces a bare `uv run pytest` — nox runs the complete pre-release gate.
+- **Don't push main before the release commit.** If a feature branch was just merged, do NOT push main before running the release. The version bump, changelog, tag, and push should all happen in one shot — no intermediate push of the un-bumped merge commit. This avoids pushing the old version to the remote and then immediately pushing again with the new version.
