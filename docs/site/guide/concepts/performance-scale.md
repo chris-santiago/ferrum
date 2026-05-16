@@ -55,12 +55,12 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 |---|---|---|
 | SVG render time | 745 ms | OOM crash |
 | SVG file size | 606 KB | OOM crash |
-| HTML render + save | 1.50 s | OOM crash |
-| HTML file size | 5.0 MB | OOM crash |
+| Interactive HTML render + save | 1.50 s | OOM crash |
+| Interactive HTML file size | 5.0 MB | OOM crash |
 
 Altair crashed on every operation — vl-convert's embedded V8 engine hit the heap limit trying to serialize 1M points through the Vega-Lite runtime (exit code 133 = SIGKILL from the OOM handler). Altair has no auto-raster equivalent; it pushes all rows through V8 as JSON.
 
-Ferrum's auto-raster threshold (500k marks) substituted `mark_raster` for `mark_point`, rasterizing the scatter into an embedded PNG inside the SVG rather than emitting 1M individual `<circle>` elements. The SVG at 1M points is actually *faster and smaller* than at 200k (which produced 20.9 MB of individual SVG elements before the threshold kicked in). HTML output stayed at 5.0 MB — the WASM binary and packed data blob are largely size-invariant.
+Ferrum's auto-raster threshold (500k marks) substituted `mark_raster` for `mark_point`, rasterizing the scatter into an embedded PNG inside the SVG rather than emitting 1M individual `<circle>` elements. The SVG at 1M points is actually *faster and smaller* than at 200k (which produced 20.9 MB of individual SVG elements before the threshold kicked in). Interactive HTML output (`.interactive().save()`) stayed at 5.0 MB — the WASM GPU renderer and packed scene data are largely size-invariant.
 
 ## SHAP and ICE at full sample size
 
