@@ -109,7 +109,7 @@ impl SymlogScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct SymlogScale(SymlogScaleData, Option<f64>);
+pub struct SymlogScale(SymlogScaleData, Option<f64>, bool);
 
 impl SymlogScale {
     /// Rust-side constructor (no Python validation overhead).
@@ -121,7 +121,7 @@ impl SymlogScale {
             clamp,
         };
         if nice { d = d.nice(); }
-        SymlogScale(d, None)
+        SymlogScale(d, None, true)
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.0.scale(x) }
@@ -144,16 +144,18 @@ impl SymlogScale {
 #[pymethods]
 impl SymlogScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, constant = 1.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain, range = None, constant = 1.0, clamp = false, nice = false, padding = None))]
     fn new(
         domain: Vec<f64>,
-        range: Vec<f64>,
+        range: Option<Vec<f64>>,
         constant: f64,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        validate_continuous_pair(&domain, &range)?;
+        let range_user_set = range.is_some();
+        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+        validate_continuous_pair(&domain, &r)?;
         if !constant.is_finite() || constant <= 0.0 {
             return Err(PyValueError::new_err(format!(
                 "constant must be finite and > 0; got {constant}"
@@ -161,14 +163,14 @@ impl SymlogScale {
         }
         let mut d = SymlogScaleData {
             domain: [domain[0], domain[1]],
-            range:  [range[0],  range[1]],
+            range:  [r[0],  r[1]],
             constant,
             clamp,
         };
         if nice {
             d = d.nice();
         }
-        Ok(SymlogScale(d, padding))
+        Ok(SymlogScale(d, padding, range_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -181,7 +183,7 @@ impl SymlogScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
-    fn nice(&self) -> Self { SymlogScale(self.0.clone().nice(), self.1) }
+    fn nice(&self) -> Self { SymlogScale(self.0.clone().nice(), self.1, self.2) }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
@@ -192,9 +194,12 @@ impl SymlogScale {
     #[getter]
     fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
 
-    /// Output range as ``[lo, hi]`` pixel coordinates.
+    /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
+    /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
-    fn range(&self) -> Vec<f64> { self.0.range.to_vec() }
+    fn range(&self) -> Option<Vec<f64>> {
+        if self.2 { Some(self.0.range.to_vec()) } else { None }
+    }
 
     /// Half-width of the linear region around zero (default 1.0).
     #[getter]

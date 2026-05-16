@@ -131,7 +131,7 @@ impl LogScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LogScale(LogScaleData, Option<f64>);
+pub struct LogScale(LogScaleData, Option<f64>, bool);
 
 impl LogScale {
     /// Rust-side constructor (no Python validation overhead).
@@ -143,7 +143,7 @@ impl LogScale {
             clamp,
         };
         if nice { d = d.nice(); }
-        LogScale(d, None)
+        LogScale(d, None, true)
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.0.scale(x) }
@@ -166,16 +166,18 @@ impl LogScale {
 #[pymethods]
 impl LogScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, base = 10.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain, range = None, base = 10.0, clamp = false, nice = false, padding = None))]
     fn new(
         domain: Vec<f64>,
-        range: Vec<f64>,
+        range: Option<Vec<f64>>,
         base: f64,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        validate_continuous_pair(&domain, &range)?;
+        let range_user_set = range.is_some();
+        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+        validate_continuous_pair(&domain, &r)?;
         if !base.is_finite() || base <= 0.0 || base == 1.0 {
             return Err(PyValueError::new_err(format!(
                 "base must be finite, > 0, and != 1; got {base}"
@@ -193,14 +195,14 @@ impl LogScale {
         }
         let mut d = LogScaleData {
             domain: [domain[0], domain[1]],
-            range:  [range[0],  range[1]],
+            range:  [r[0],  r[1]],
             base,
             clamp,
         };
         if nice {
             d = d.nice();
         }
-        Ok(LogScale(d, padding))
+        Ok(LogScale(d, padding, range_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -213,7 +215,7 @@ impl LogScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to the nearest power of ``base``.
-    fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1) }
+    fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1, self.2) }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
@@ -224,9 +226,12 @@ impl LogScale {
     #[getter]
     fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
 
-    /// Output range as ``[lo, hi]`` pixel coordinates.
+    /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
+    /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
-    fn range(&self) -> Vec<f64> { self.0.range.to_vec() }
+    fn range(&self) -> Option<Vec<f64>> {
+        if self.2 { Some(self.0.range.to_vec()) } else { None }
+    }
 
     /// Logarithm base (default 10.0).
     #[getter]

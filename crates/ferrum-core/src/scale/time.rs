@@ -31,7 +31,7 @@ use super::ticks::{calendar_ticks, nice_calendar_interval, nice_time_interval_ms
 ///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimeScale(LinearScaleData, Option<f64>);
+pub struct TimeScale(LinearScaleData, Option<f64>, bool);
 
 impl TimeScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -43,7 +43,7 @@ impl TimeScale {
             range:  [range[0],  range[1]],
             clamp,
         };
-        let s = TimeScale(inner, None);
+        let s = TimeScale(inner, None, true);
         if nice { s.time_nice() } else { s }
     }
 
@@ -95,7 +95,7 @@ impl TimeScale {
                     return TimeScale(LinearScaleData {
                         domain: [(lo / iv).floor() * iv, (hi / iv).ceil() * iv],
                         range: self.0.range, clamp: self.0.clamp,
-                    }, self.1);
+                    }, self.1, self.2);
                 };
                 let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
                     return self.clone();
@@ -131,7 +131,7 @@ impl TimeScale {
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
         TimeScale(
             LinearScaleData { domain: new_domain, range: self.0.range, clamp: self.0.clamp },
-            self.1,
+            self.1, self.2,
         )
     }
 }
@@ -139,21 +139,23 @@ impl TimeScale {
 #[pymethods]
 impl TimeScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None))]
     fn new(
         domain: Vec<f64>,
-        range: Vec<f64>,
+        range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        validate_continuous_pair(&domain, &range)?;
+        let range_user_set = range.is_some();
+        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+        validate_continuous_pair(&domain, &r)?;
         let inner = LinearScaleData {
             domain: [domain[0], domain[1]],
-            range:  [range[0],  range[1]],
+            range:  [r[0],  r[1]],
             clamp,
         };
-        let s = TimeScale(inner, padding);
+        let s = TimeScale(inner, padding, range_user_set);
         if nice {
             Ok(s.time_nice())
         } else {
@@ -180,9 +182,12 @@ impl TimeScale {
     #[getter]
     fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
 
-    /// Output range as ``[lo, hi]`` pixel coordinates.
+    /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
+    /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
-    fn range(&self) -> Vec<f64> { self.0.range.to_vec() }
+    fn range(&self) -> Option<Vec<f64>> {
+        if self.2 { Some(self.0.range.to_vec()) } else { None }
+    }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
@@ -206,7 +211,7 @@ mod tests {
         // 2026-12-31 23:59:59 UTC ≈ 1798761599000.0 ms
         let t = TimeScale::new(
             vec![1_767_225_600_000.0, 1_798_761_599_000.0],
-            vec![0.0, 1000.0],
+            Some(vec![0.0, 1000.0]),
             false,
             false,
             None,
@@ -221,7 +226,7 @@ mod tests {
     fn test_time_ticks_returns_some_ticks_for_year_span() {
         let t = TimeScale::new(
             vec![1_767_225_600_000.0, 1_798_761_599_000.0],
-            vec![0.0, 1000.0],
+            Some(vec![0.0, 1000.0]),
             false,
             false,
             None,

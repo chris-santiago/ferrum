@@ -73,12 +73,12 @@ impl OrdinalScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrdinalScale(OrdinalScaleData);
+pub struct OrdinalScale(OrdinalScaleData, bool);
 
 impl OrdinalScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
     pub(crate) fn new_internal(domain: Vec<String>, range: Vec<f64>, padding: f64) -> Self {
-        OrdinalScale(OrdinalScaleData { domain, range, padding })
+        OrdinalScale(OrdinalScaleData { domain, range, padding }, true)
     }
 
     /// Crate-internal lookup. Returns `None` if `value` is not in the domain.
@@ -122,10 +122,12 @@ impl OrdinalScale {
 #[pymethods]
 impl OrdinalScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, padding = 0.0))]
-    fn new(domain: Vec<String>, range: Vec<f64>, padding: f64) -> PyResult<Self> {
-        validate_ordinal(&domain, &range, padding)?;
-        Ok(OrdinalScale(OrdinalScaleData { domain, range, padding }))
+    #[pyo3(signature = (*, domain, range = None, padding = 0.0))]
+    fn new(domain: Vec<String>, range: Option<Vec<f64>>, padding: f64) -> PyResult<Self> {
+        let range_user_set = range.is_some();
+        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+        validate_ordinal(&domain, &r, padding)?;
+        Ok(OrdinalScale(OrdinalScaleData { domain, range: r, padding }, range_user_set))
     }
 
     /// Map a category label to its band-center pixel coordinate.
@@ -157,10 +159,11 @@ impl OrdinalScale {
         self.0.domain.clone()
     }
 
-    /// Pixel extent of the scale as the full range list.
+    /// Pixel extent of the scale as the full range list, or ``None`` when
+    /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
-    fn range(&self) -> Vec<f64> {
-        self.0.range.clone()
+    fn range(&self) -> Option<Vec<f64>> {
+        if self.1 { Some(self.0.range.clone()) } else { None }
     }
 
     /// Fractional inner padding between bands.
