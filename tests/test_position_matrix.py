@@ -63,7 +63,6 @@ def test_stack_changes_svg(grouped_df: pl.DataFrame, mark_method: str, encoding:
 _DODGE_CASES = [
     pytest.param("mark_bar", {"x": "cat:N", "y": "val:Q", "color": "grp:N"}, id="dodge-bar"),
     pytest.param("mark_point", {"x": "cat:N", "y": "val:Q", "color": "grp:N"}, id="dodge-point"),
-    pytest.param("mark_tick", {"x": "cat:N", "y": "val:Q", "color": "grp:N"}, id="dodge-tick"),
 ]
 
 

@@ -33,7 +33,7 @@ MARK_CONFIGS = {
     },
     "mark_line": {
         "encoding": {"x": "x:Q", "y": "y:Q"},
-        "expected_elements": ["<path"],
+        "expected_elements": ["<polyline"],
     },
     "mark_bar": {
         "encoding": {"x": "cat:N", "y": "y:Q"},
@@ -75,7 +75,7 @@ def test_coord_flip_changes_output(df, mark_method):
     base_chart = getattr(fm.Chart(df), mark_method)().encode(**enc)
     base_svg = base_chart.show_svg()
 
-    flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord_flip()
+    flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord(fm.CoordFlip())
     flipped_svg = flipped_chart.show_svg()
 
     assert base_svg != flipped_svg, (
@@ -89,7 +89,7 @@ def test_coord_flip_preserves_marks(df, mark_method):
     cfg = MARK_CONFIGS[mark_method]
     enc = cfg["encoding"]
 
-    flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord_flip()
+    flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord(fm.CoordFlip())
     flipped_svg = flipped_chart.show_svg()
 
     assert "<svg" in flipped_svg, (
