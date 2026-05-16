@@ -109,6 +109,7 @@ mod tests {
             blend: BlendMode::Normal,
             stroke_cap: None,
             stroke_join: None,
+            packed_instances: None,
         };
         let panel = make_panel(vec![batch]);
         let json = serde_json::to_string(&panel).expect("serialize");
@@ -230,6 +231,7 @@ mod tests {
             blend: BlendMode::Normal,
             stroke_cap: None,
             stroke_join: None,
+            packed_instances: None,
         };
         let json = serde_json::to_string(&batch).expect("serialize");
         let back: MarkBatch = serde_json::from_str(&json).expect("deserialize");
