@@ -70,6 +70,14 @@ class ChannelBase:
                 f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
             )
 
+    def _replace_field(self, new_field: str) -> "ChannelBase":
+        """Return a shallow copy with a different field name."""
+        import copy
+
+        clone = copy.copy(self)
+        clone.field = new_field
+        return clone
+
     def to_encoding_spec_dict(self) -> dict:
         """Return kwargs for the Rust EncodingSpec constructor / serde JSON."""
         out: dict = {"field": self.field}

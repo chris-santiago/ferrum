@@ -130,6 +130,24 @@ class _NamedTransform:
 from ferrum.composition import _expand_layers, _merge_top_transforms, _warn_on_layer_conflicts
 
 
+def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
+    """Return a copy of *encoding* with field names replaced per *renames*."""
+    from ferrum.encoding.base import ChannelBase
+
+    out = {}
+    for ch, val in encoding.items():
+        if isinstance(val, ChannelBase):
+            old_field = val.field
+            if old_field in renames:
+                val = val._replace_field(renames[old_field])
+        elif isinstance(val, str):
+            bare, _, suffix = val.partition(":")
+            if bare in renames:
+                val = renames[bare] + (":" + suffix if suffix else "")
+        out[ch] = val
+    return out
+
+
 def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
     """Apply a desugar remap to an encoding dict, preserving axis titles.
 
@@ -3914,14 +3932,33 @@ class Chart(_RenderMixin):
         rhs = other._resolve_pending()
         new = lhs._clone()
         # When data differs, null-pad merge into a unified DataFrame.
+        # If column names overlap between LHS and RHS, rename the RHS
+        # columns with a unique suffix so that each layer reads only its
+        # own rows (the null-padding invariant requires disjoint names).
+        rhs_col_renames: dict[str, str] = {}
         if not self._shares_data_with(other):
             import polars as pl
 
             lhs_df = _to_polars(self._data)
             rhs_df = _to_polars(other._data)
+            overlap = set(lhs_df.columns) & set(rhs_df.columns)
+            if overlap:
+                suffix = f"__rhs_{id(other) & 0xFFFFFFFF:08x}"
+                rhs_col_renames = {c: f"{c}{suffix}" for c in overlap}
+                rhs_df = rhs_df.rename(rhs_col_renames)
             new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
         lhs_layers, _ = _expand_layers(lhs)  # lhs top xforms already in `new` via _clone()
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+
+        # When RHS columns were renamed, update RHS layer encodings to
+        # reference the renamed column names.
+        if rhs_col_renames:
+            from dataclasses import replace as _dc_replace
+
+            rhs_layers = [
+                _dc_replace(l, encoding=_rename_encoding_fields(l.encoding, rhs_col_renames))
+                for l in rhs_layers
+            ]
 
         # Named-transform routing: when the LHS contributes no chart-level
         # transforms (new._transforms is empty after clone) but the RHS does,

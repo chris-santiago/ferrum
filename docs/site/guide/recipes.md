@@ -315,9 +315,9 @@ assert chart.show_svg().startswith("<svg")
 
 Other coordinate systems exist as classes — [`CoordPolar`][ferrum.CoordPolar] (for pie/donut/radial charts) and [`CoordGeo`][ferrum.CoordGeo] (for map projections) — but their renderer support is limited compared to [`CoordFlip`][ferrum.CoordFlip] and the default [`CoordCartesian`][ferrum.CoordCartesian].
 
-## Text callouts
+## Annotations: reference line and text callout
 
-Layer [`mark_text`][ferrum.Chart.mark_text] on top of a data chart to add text annotations at specific positions:
+Layer [`mark_rule`][ferrum.Chart.mark_rule] and [`mark_text`][ferrum.Chart.mark_text] on top of a data chart to add a reference line and a text annotation:
 
 ```python
 import ferrum as fm
@@ -329,19 +329,16 @@ df = pl.DataFrame({"x": rng.standard_normal(100), "y": rng.standard_normal(100)}
 
 scatter = fm.Chart(df).mark_point(opacity=0.6).encode(x="x", y="y")
 
-label = (
-    fm.Chart(pl.DataFrame({"x": [1.5], "y": [2.0], "label": ["outlier region"]}))
-    .mark_text(fill="gray", font_size=10)
-    .encode(x="x", y="y", text="label")
-)
+# Horizontal reference line at y=0
+hline = fm.Chart(pl.DataFrame({"y": [0.0]})).mark_rule(stroke="red", stroke_dash=[4, 2]).encode(y="y")
 
-chart = scatter + label
+chart = scatter + hline
 assert chart.show_svg().startswith("<svg")
 ```
 
-![Text callouts](img/recipes_12.png)
+![Annotation](img/recipes_12.png)
 
-The `+` operator layers both marks on the same axes. [`mark_text`][ferrum.Chart.mark_text] places text at the (x, y) position with the string from the `text` encoding channel.
+[`mark_rule`][ferrum.Chart.mark_rule] with only `y` encoded draws a horizontal line spanning the full plot width; with only `x` it draws a vertical line spanning the full height. [`mark_text`][ferrum.Chart.mark_text] places text at a specific (x, y) position.
 
 ## Chart sizing
 
