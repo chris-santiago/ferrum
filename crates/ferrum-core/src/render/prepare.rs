@@ -64,7 +64,16 @@ impl LayerPrepared {
         layer: &crate::spec::layer::Layer,
     ) -> Self {
         let mut encoding = layer.encoding.clone();
-        encoding.inherit_from(&spec.encoding);
+        // Layers routed to their own data via data_source are self-contained —
+        // only inherit non-positional channels (color, size, etc.) from the
+        // chart level. Inheriting x/y would inject the primary batch's field
+        // into a layer that reads a different named output, causing marks like
+        // rule to iterate over rows they don't own.
+        if layer.data_source.is_some() {
+            encoding.inherit_non_positional(&spec.encoding);
+        } else {
+            encoding.inherit_from(&spec.encoding);
+        }
         Self {
             mark: layer.mark,
             encoding,

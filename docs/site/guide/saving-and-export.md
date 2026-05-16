@@ -2,6 +2,17 @@
 
 Ferrum charts render to SVG, PNG, HTML, and JSON — no system dependencies, no display server, no matplotlib. Every chart object (base charts, compound views, helper output, diagnostic charts) supports the same export surface.
 
+## Output methods
+
+| Method | Returns | Use case |
+|---|---|---|
+| [`.save(path)`][ferrum.Chart.save] | `None` | Write SVG, PNG, or HTML to a file (format inferred from extension) |
+| [`.show_svg()`][ferrum.Chart.show_svg] | `str` | Get SVG markup as a string |
+| [`.show_png()`][ferrum.Chart.show_png] | `bytes` | Get PNG as raw bytes |
+| [`.show()`][ferrum.Chart.show] | `None` | Display inline in Jupyter or open in browser |
+
+All four methods are available on every chart object — base `Chart`, compound views (`HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`), and diagnostic helper output.
+
 ## Output formats
 
 | Format | Method | File extension | Notes |
@@ -10,6 +21,7 @@ Ferrum charts render to SVG, PNG, HTML, and JSON — no system dependencies, no 
 | PNG | [`.show_png()`][ferrum.Chart.show_png] | `.png` | Rasterized via `resvg` in Rust. No Cairo/Pillow needed. |
 | HTML | [`.save("out.html")`][ferrum.Chart.save] | `.html` | Self-contained interactive page with inlined WASM renderer. |
 | JSON | [`.save("out.json")`][ferrum.Chart.save] | `.json` | Chart spec as JSON — the same format as `.to_json()`. |
+| PDF | — | `.pdf` | Not natively supported. Convert from SVG using CairoSVG (`cairosvg chart.svg -o chart.pdf`), Inkscape, or browser print-to-PDF. |
 
 ## Saving to disk
 
@@ -65,6 +77,9 @@ For programmatic use (embedding in notebooks, serving from a web app, writing to
 svg_str = chart.show_svg()   # str — complete <svg>…</svg> document
 png_bytes = chart.show_png()  # bytes — raw PNG data
 ```
+
+!!! note "PNG resolution"
+    PNG resolution is not separately configurable (there is no DPI parameter). To produce higher-resolution output, increase `width` and `height` via [`.properties(width=1200, height=800)`][ferrum.Chart.properties] before calling `.show_png()` or `.save("out.png")`.
 
 ## Displaying in Jupyter
 

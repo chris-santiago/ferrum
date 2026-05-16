@@ -4,6 +4,8 @@ This page covers the interactive rendering API: selections, conditional encoding
 
 For the design rationale — why interactivity is a renderer, not a rewrite — see the [Interactivity concept page](concepts/interactivity.md).
 
+Interactive rendering is `anywidget`-based and works in JupyterLab, VS Code notebooks, Google Colab, and classic Jupyter Notebook. Embedding in Streamlit, Dash, or Panel is not currently supported.
+
 ## Setup
 
 Install the interactive extras:

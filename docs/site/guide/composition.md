@@ -156,6 +156,31 @@ assert row.show_svg().startswith("<svg")
 
 These are equivalent to [`HConcatChart`][ferrum.HConcatChart]`([a, b, c])` / [`VConcatChart`][ferrum.VConcatChart]`([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
 
+## Shared scales
+
+By default, each panel in a concatenation has independent scales — its axes are computed from its own data. When you want panels to share the same domain so values are directly comparable, call [`.share_scale()`][ferrum.Chart.share_scale]:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart_a = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
+chart_b = fm.Chart(iris).mark_point().encode(x="sepal_width", y="petal_width")
+combined = (chart_a | chart_b).share_scale(x="shared")
+assert combined.show_svg().startswith("<svg")
+```
+
+![Shared scales](img/composition_08.png)
+
+[`.share_scale()`][ferrum.Chart.share_scale] accepts keyword arguments where each key is a channel name (`x`, `y`, `color`, `size`) and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
+
+The method returns a new composition of the same type — it works on [`HConcatChart`][ferrum.HConcatChart], [`VConcatChart`][ferrum.VConcatChart], [`JointChart`][ferrum.JointChart], and [`RepeatChart`][ferrum.RepeatChart].
+
 ## Joint distribution with marginals
 
 [`JointChart`][ferrum.JointChart] lays out a central chart with optional marginal plots on the top and right. It's the same shape as seaborn's `jointplot` — a scatter with marginal histograms is the canonical example.

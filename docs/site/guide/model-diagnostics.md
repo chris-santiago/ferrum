@@ -116,6 +116,45 @@ The boundary `ModelSource` enforces is the load-bearing one: it computes the der
 
 `ModelSource` also lazy-imports sklearn, shap, and umap as needed: `import ferrum` does not pull those packages into your process. They load only when you actually compute a diagnostic that requires them.
 
+## Comparing multiple models
+
+Most classification helpers accept a `compare=` keyword for side-by-side multi-model comparison on the same test set. Pass a dict mapping display names to fitted estimators:
+
+```python
+import ferrum as fm
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, random_state=0)
+rf = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
+lr = LogisticRegression(max_iter=500, random_state=0).fit(X_train, y_train)
+
+chart = fm.roc_chart(rf, X_test, y_test, compare={"Logistic Regression": lr})
+assert chart.show_svg().startswith("<svg")
+```
+
+![Multi-model ROC comparison](img/model-diagnostics_07.png)
+
+The base model is labeled `"base"` by default; each entry in `compare=` adds a named curve. The resulting chart overlays all models on the same axes with a color legend.
+
+For full control, use [`ModelSource.compare()`][ferrum.ModelSource.compare] directly to build a [`ComparedModelSource`][ferrum.ComparedModelSource] and pass it to any helper:
+
+```python
+cms = fm.ModelSource.compare(
+    {"RF": rf, "LR": lr},
+    X_test, y_test,
+)
+roc = fm.roc_chart(cms)
+cal = fm.calibration_chart(cms)
+report = roc | cal
+assert report.show_svg().startswith("<svg")
+```
+
+[`ComparedModelSource`][ferrum.ComparedModelSource] computes derived data once per model and stamps a `model` column on the concatenated output, so charts can route `color="model"` automatically.
+
 ## Precomputed scores (no model required)
 
 Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization:
@@ -263,6 +302,7 @@ A few sharp edges worth knowing:
 - **SHAP and shap-style helpers**: require `shap` installed. They lazy-import on first call; install the optional `ferrum-viz[shap]` extra to pull it in. UMAP runs in pure Rust via `manifolds-rs` — no Python dependency.
 - **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average.
 - **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a [`ComparedModelSource`][ferrum.ComparedModelSource] data source) for side-by-side comparison. See the API reference for the per-helper signatures.
+- **Non-sklearn models**: any estimator exposing `predict()` and `predict_proba()` works (XGBoost, LightGBM, CatBoost, etc.). For frameworks without sklearn-compatible APIs (PyTorch, TensorFlow), use the `y_true=` / `y_pred=` precomputed path described above.
 
 ## Where to go next
 

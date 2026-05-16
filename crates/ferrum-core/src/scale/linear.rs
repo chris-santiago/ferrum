@@ -101,7 +101,7 @@ impl LinearScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinearScale(LinearScaleData, Option<f64>);
+pub struct LinearScale(LinearScaleData, Option<f64>, bool);
 
 impl LinearScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -117,7 +117,7 @@ impl LinearScale {
         if nice {
             d = d.nice();
         }
-        LinearScale(d, None)
+        LinearScale(d, None, true)
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
@@ -150,24 +150,26 @@ impl LinearScale {
 #[pymethods]
 impl LinearScale {
     #[new]
-    #[pyo3(signature = (*, domain, range, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None))]
     fn new(
         domain: Vec<f64>,
-        range: Vec<f64>,
+        range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        validate_continuous_pair(&domain, &range)?;
+        let range_user_set = range.is_some();
+        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+        validate_continuous_pair(&domain, &r)?;
         let mut d = LinearScaleData {
             domain: [domain[0], domain[1]],
-            range:  [range[0],  range[1]],
+            range:  [r[0],  r[1]],
             clamp,
         };
         if nice {
             d = d.nice();
         }
-        Ok(LinearScale(d, padding))
+        Ok(LinearScale(d, padding, range_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -188,7 +190,7 @@ impl LinearScale {
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
     fn nice(&self) -> Self {
-        LinearScale(self.0.clone().nice(), self.1)
+        LinearScale(self.0.clone().nice(), self.1, self.2)
     }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
@@ -205,10 +207,11 @@ impl LinearScale {
         self.0.domain.to_vec()
     }
 
-    /// Output range as ``[lo, hi]`` pixel coordinates.
+    /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
+    /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
-    fn range(&self) -> Vec<f64> {
-        self.0.range.to_vec()
+    fn range(&self) -> Option<Vec<f64>> {
+        if self.2 { Some(self.0.range.to_vec()) } else { None }
     }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.

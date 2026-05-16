@@ -584,6 +584,50 @@ impl Encoding {
         inherit(&mut self.fill_opacity, &parent.fill_opacity);
     }
 
+    /// Like `inherit_from` but skips positional channels (x, y, x2, y2).
+    /// Used for layers routed to their own data via `data_source` — they
+    /// should not inherit the primary batch's positional fields.
+    pub fn inherit_non_positional(&mut self, parent: &Encoding) {
+        fn inherit(
+            child: &mut Option<EncodingSpec>,
+            parent: &Option<EncodingSpec>,
+        ) {
+            match (child.as_mut(), parent.as_ref()) {
+                (None, Some(_)) => { *child = parent.clone(); }
+                (Some(c), Some(p)) if c.field == p.field => {
+                    if c.scale.is_none() && p.scale.is_some() { c.scale = p.scale.clone(); }
+                    if c.title.is_none() && p.title.is_some() { c.title = p.title.clone(); }
+                    if c.scheme.is_none() && p.scheme.is_some() { c.scheme = p.scheme.clone(); }
+                    if c.type_.is_none() && p.type_.is_some() { c.type_ = p.type_; }
+                    if c.axis.is_none() && p.axis.is_some() { c.axis = p.axis.clone(); }
+                    if c.legend.is_none() && p.legend.is_some() { c.legend = p.legend.clone(); }
+                    if c.format.is_none() && p.format.is_some() { c.format = p.format.clone(); }
+                    if c.format_type.is_none() && p.format_type.is_some() { c.format_type = p.format_type.clone(); }
+                }
+                _ => {}
+            }
+        }
+        // Skip x, y, x2, y2 — positional channels belong to the layer's own data.
+        inherit(&mut self.color, &parent.color);
+        inherit(&mut self.size, &parent.size);
+        inherit(&mut self.shape, &parent.shape);
+        inherit(&mut self.opacity, &parent.opacity);
+        inherit(&mut self.text, &parent.text);
+        inherit(&mut self.tooltip, &parent.tooltip);
+        if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
+            self.tooltip_fields = parent.tooltip_fields.clone();
+        }
+        inherit(&mut self.href, &parent.href);
+        inherit(&mut self.description, &parent.description);
+        inherit(&mut self.key, &parent.key);
+        inherit(&mut self.url, &parent.url);
+        inherit(&mut self.stroke_width, &parent.stroke_width);
+        inherit(&mut self.stroke_opacity, &parent.stroke_opacity);
+        inherit(&mut self.stroke_dash, &parent.stroke_dash);
+        inherit(&mut self.angle, &parent.angle);
+        inherit(&mut self.fill_opacity, &parent.fill_opacity);
+    }
+
     /// Overlay channels from `overlay` onto `self`.
     ///
     /// For each of the 12 channels: if `overlay.{channel}.is_some()`,
