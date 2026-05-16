@@ -161,20 +161,20 @@ class TestSizeQuantitative:
 
 class TestSizeOrdinal:
     def test_size_ordinal_no_crash(self, df):
-        """Size channel with ordinal field does not crash."""
-        svg = _render(
-            fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", size="cat:N")
-        )
-        assert _is_valid_svg(svg)
+        """Size channel with nominal string field raises ValueError (unsupported dtype)."""
+        with pytest.raises(ValueError, match="unsupported dtype"):
+            _render(
+                fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", size="cat:N")
+            )
 
     def test_size_ordinal_explicit_channel_no_crash(self, df):
-        """Size channel via explicit fm.Size with nominal type does not crash."""
-        svg = _render(
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q", size=fm.Size("cat", type_="N"))
-        )
-        assert _is_valid_svg(svg)
+        """Size channel via explicit fm.Size with nominal type raises ValueError."""
+        with pytest.raises(ValueError, match="unsupported dtype"):
+            _render(
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", size=fm.Size("cat", type_="N"))
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -217,20 +217,20 @@ class TestOpacityQuantitative:
 
 class TestOpacityOrdinal:
     def test_opacity_ordinal_no_crash(self, df):
-        """Opacity channel with nominal field does not crash."""
-        svg = _render(
-            fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", opacity="cat:N")
-        )
-        assert _is_valid_svg(svg)
+        """Opacity channel with nominal string field raises ValueError (unsupported dtype)."""
+        with pytest.raises(ValueError, match="unsupported dtype"):
+            _render(
+                fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", opacity="cat:N")
+            )
 
     def test_opacity_ordinal_explicit_channel_no_crash(self, df):
-        """Opacity channel via explicit fm.Opacity with nominal type does not crash."""
-        svg = _render(
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q", opacity=fm.Opacity("cat", type_="N"))
-        )
-        assert _is_valid_svg(svg)
+        """Opacity channel via explicit fm.Opacity with nominal type raises ValueError."""
+        with pytest.raises(ValueError, match="unsupported dtype"):
+            _render(
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", opacity=fm.Opacity("cat", type_="N"))
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,10 @@ class TestLogScale:
         svg = _render(
             fm.Chart(df)
             .mark_point()
-            .encode(x=fm.X("x:Q", scale=fm.LogScale(base=10.0)), y="y:Q")
+            .encode(
+                x=fm.X("x:Q", scale=fm.LogScale(domain=(1.0, 200.0), range=(0.0, 1.0), base=10.0)),
+                y="y:Q",
+            )
         )
         assert _is_valid_svg(svg)
 
@@ -383,16 +386,16 @@ class TestCombinedChannels:
         assert _is_valid_svg(svg)
 
     def test_all_channels_nominal(self, df):
-        """All appearance channels with nominal field do not crash."""
-        svg = _render(
-            fm.Chart(df)
-            .mark_point()
-            .encode(
-                x="x:Q",
-                y="y:Q",
-                color="cat:N",
-                size="cat:N",
-                opacity="cat:N",
+        """Size/opacity with nominal string field raises ValueError (unsupported dtype)."""
+        with pytest.raises(ValueError, match="unsupported dtype"):
+            _render(
+                fm.Chart(df)
+                .mark_point()
+                .encode(
+                    x="x:Q",
+                    y="y:Q",
+                    color="cat:N",
+                    size="cat:N",
+                    opacity="cat:N",
+                )
             )
-        )
-        assert _is_valid_svg(svg)

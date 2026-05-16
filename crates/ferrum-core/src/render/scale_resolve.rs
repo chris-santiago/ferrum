@@ -738,10 +738,9 @@ fn numeric_domain_union(
     }
 
     if !mn.is_finite() || !mx.is_finite() {
-        return Err(RenderError::EmptyDomain {
-            channel: channel.to_string(),
-            field: field.to_string(),
-        });
+        // All values were null/NaN — return a default domain so the chart
+        // renders with axes but no marks, instead of raising an error.
+        return Ok((0.0, 1.0));
     }
     // Degenerate domain: a single row or all-equal values produce mn == mx.
     // A zero-span domain collapses every data point to the same pixel, which

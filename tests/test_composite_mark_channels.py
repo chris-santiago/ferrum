@@ -38,41 +38,52 @@ CHANNEL_ENCODINGS = {
 }
 
 COMPOSITE_MARK_CONFIGS = {
+    # boxplot/violin: only the groupby column (cat) survives the BoxStats/Violin
+    # transform, so only color="cat:N" is a valid data-driven channel.
     "mark_boxplot": {
         "base_encoding": {"x": "cat:N", "y": "val:Q"},
-        "channels": ["color", "opacity", "fill_opacity"],
+        "channels": ["color"],
     },
     "mark_violin": {
         "base_encoding": {"x": "cat:N", "y": "val:Q"},
-        "channels": ["color", "opacity", "fill_opacity"],
+        "channels": ["color"],
     },
+    # histogram: the Bin transform produces (bin_start, bin_end, count, density);
+    # no original columns survive, so no data-driven appearance channels work.
     "mark_histogram": {
         "base_encoding": {"x": "val:Q"},
-        "channels": ["color", "opacity", "fill_opacity"],
+        "channels": [],
     },
+    # density: auto-routes color field to groupby (group column survives in KDE
+    # output), but opacity/fill_opacity reference columns that are dropped.
     "mark_density": {
         "base_encoding": {"x": "val:Q"},
-        "channels": ["color", "opacity"],
+        "channels": ["color"],
     },
+    # smooth: the Smooth transform produces derived columns; no auto-groupby
+    # from color, so no original columns survive for appearance channels.
     "mark_smooth": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color", "opacity", "stroke_width"],
+        "channels": [],
     },
+    # errorbar/errorband: ErrorExtent produces (x_field, lower, upper); only the
+    # groupby field survives. color="cat:N" works via the x groupby field
+    # forwarding, but opacity/stroke_width/fill_opacity reference dropped columns.
     "mark_errorbar": {
-        "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color", "opacity", "stroke_width"],
+        "base_encoding": {"x": "cat:N", "y": "val:Q"},
+        "channels": ["color"],
     },
     "mark_errorband": {
-        "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color", "opacity", "fill_opacity"],
+        "base_encoding": {"x": "cat:N", "y": "val:Q"},
+        "channels": ["color"],
     },
     "mark_qq": {
         "base_encoding": {"x": "val:Q"},
-        "channels": ["color", "opacity", "size"],
+        "channels": ["color"],
     },
     "mark_hex": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color", "opacity", "fill_opacity"],
+        "channels": ["color"],
     },
     "mark_swarm": {
         "base_encoding": {"x": "cat:N", "y": "val:Q"},
