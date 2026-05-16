@@ -243,6 +243,15 @@ chart.interactive().save("dashboard.html")
 
 The HTML file inlines the WASM renderer and the scene data — no external dependencies, no server required. Open it in any modern browser.
 
+## Performance at scale
+
+The interactive renderer uses two optimizations that keep large charts responsive:
+
+- **Binary instance bridge** — GPU mark data bypasses JSON serialization and is sent as a packed binary buffer. This eliminates the deserialization bottleneck that would otherwise make million-point interactive charts impractical.
+- **Packed tooltips** — field-level tooltip content is transferred via a binary buffer rather than per-mark JSON objects. Tooltip lookups use a spatial hit-test (`hitTestAt`) that resolves to the nearest mark's data index.
+
+These are transparent — you don't need to opt in. A 1M-point scatter with tooltips uses the same `.interactive()` call as a 100-point chart.
+
 ## Static fallback
 
 A chart with selections renders normally in static output — `.show_svg()`, `.save("plot.png")`, `.save("plot.svg")` all work. Selections, conditional encodings, and zoom/pan are silently ignored. This means you can build one chart that serves both a notebook dashboard (interactive) and a report figure (static) without maintaining two specs.

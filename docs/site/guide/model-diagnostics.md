@@ -74,11 +74,11 @@ Every helper follows the same signature shape: `helper(model_or_source, X=None, 
 
 | Family | Helpers |
 |---|---|
-| Classification | `roc_chart`, `pr_chart`, `calibration_chart`, `confusion_matrix_chart`, `class_prediction_error_chart`, `discrimination_threshold_chart`, `gain_chart`, `lift_chart` |
-| Regression | `residuals_chart`, `prediction_error_chart` (via the regression visualizers), `cooks_distance_chart` |
-| Feature explanation | `importance_chart`, `shap_chart`, `pdp_chart` |
+| Classification | `roc_chart`, `pr_chart`, `calibration_chart`, `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart`, `class_balance_chart`, `discrimination_threshold_chart`, `gain_chart`, `lift_chart` |
+| Regression | `residuals_chart`, `prediction_error_chart`, `cooks_distance_chart` |
+| Feature explanation | `importance_chart`, `shap_chart`, `shap_beeswarm_chart`, `shap_bar_chart`, `shap_waterfall_chart`, `pdp_chart` |
 | Model selection | `learning_curve_chart`, `validation_curve_chart`, `cv_scores_chart`, `alpha_selection_chart` |
-| Clustering / manifold | `silhouette_chart`, `pca_scree_chart`, `intercluster_distance_chart`, `cluster_diagnostics`, `decision_boundary_chart` |
+| Clustering / manifold | `silhouette_chart`, `elbow_chart`, `manifold_chart`, `pca_scree_chart`, `intercluster_distance_chart`, `parallel_coordinates_chart`, `decision_boundary_chart` |
 
 The full API surface is on the [API Reference / ferrum](../api/ferrum.md) page.
 
@@ -218,8 +218,7 @@ A four-panel model report is `(roc | cm) & (residuals | importances)` — same c
 
 A few sharp edges worth knowing:
 
-- **`calibration_chart` rendering**: at the time of writing, `calibration_chart` builds the right `Chart` value but has a layering wiring gap that prevents `.show_svg()` from succeeding in the standard configuration. The chart object is well-formed; rendering will work once Phase 8a layer-data resolution is wired through for this helper. Other diagnostics on the same `ModelSource` are unaffected.
-- **SHAP, UMAP, and shap-style helpers**: require their respective packages installed (`shap`, `umap-learn`). They lazy-import on first call; install the optional `ferrum[shap]` / `ferrum[umap]` extras to pull them in.
+- **SHAP and shap-style helpers**: require `shap` installed. They lazy-import on first call; install the optional `ferrum[shap]` extra to pull it in. UMAP runs in pure Rust via `manifolds-rs` — no Python dependency.
 - **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average.
 - **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a [`ComparedModelSource`][ferrum.ComparedModelSource] data source) for side-by-side comparison. See the API reference for the per-helper signatures.
 

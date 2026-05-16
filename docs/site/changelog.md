@@ -15,9 +15,9 @@ All notable changes to Ferrum are documented here.
 - **Grouped smooth** — `mark_smooth` supports group-by; no explicit per-group layering needed.
 - **Continuous colorbar** — rendered alongside heatmaps and continuous-color charts.
 - **Full Theme key wiring** — all `ferrum-spec.md` §3.13 keys plumbed end-to-end from Python through Rust renderer. Unknown keys raise `ValueError` at construction.
-- **Model diagnostics (Phase 10)** — `ModelSource`, `ComparedModelSource`, 32 visualizer classes, 23 figure-level helpers covering classification, regression, feature explanation, model selection, and clustering.
-- **8 figure-level helpers** — `displot`, `catplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`, `clustermap`, `jointplot`.
-- **28+ mark methods** — primitives, statistical, distribution, uncertainty, scale-aware, and diagnostic marks.
+- **Model diagnostics (Phase 10)** — `ModelSource`, `ComparedModelSource`, 32 visualizer classes, 31 figure-level helpers covering classification, regression, feature explanation, model selection, and clustering.
+- **9 figure-level helpers** — `displot`, `catplot`, `relplot`, `lmplot`, `residplot`, `pairplot`, `heatmap`, `clustermap`, `jointplot`.
+- **54 mark methods** — primitives, statistical, distribution, uncertainty, scale-aware, and diagnostic marks.
 - **DataFrame pluralism** — polars, pandas, modin, cuDF, dask, ibis, and pyarrow all accepted via `Chart(data)`.
 - **Title rendering** — `Chart.properties(title="...")` rendered in the SVG with theme-controlled typography.
 - **Grid lines** — theme-controlled grid rendering with configurable color, width, dash, and opacity.
@@ -29,6 +29,26 @@ All notable changes to Ferrum are documented here.
 - **Scene graph renderer** — Rust-side `render_interactive` produces a SceneGraph JSON consumed by the WASM GPU renderer.
 - **`compose_svg_horizontal` / `compose_svg_vertical` / `compose_svg_grid`** — low-level Rust SVG composition helpers.
 - **t-SNE and UMAP in pure Rust** — `ManifoldVisualizer` runs both via `manifolds-rs`, no Python `umap-learn` dependency.
+- **7 new diagnostic helpers** — `classification_report_chart`, `class_balance_chart`, `cooks_distance_chart`, `prediction_error_chart`, `silhouette_chart`, `elbow_chart`, `manifold_chart`.
+- **`mark_label`** — text labels with collision avoidance (`avoid_overlap=True`).
+- **`mark_image`** — image tiles from URL fields.
+- **`RenderConfig`** — per-chart auto-raster policy configuration (threshold, behavior, aggregate, colormap).
+- **`raster=` keyword** — one-off auto-raster override on `.show()`, `.save()`, `.show_svg()`, `.show_png()`.
+- **`score()` on visualizers** — all Group A visualizers implement `.score()` for sklearn-protocol compatibility.
+- **`width=` on `mark_boxplot`** — API symmetry with other marks.
+- **`stroke`, `angle`, `fill_opacity` channels** — wired end-to-end to SVG attribute emission and WASM renderer.
+- **Legend `format=` and `columns=`** — kwargs now wired through to legend rendering.
+- **Packed tooltips** — field-level tooltip content sent via binary buffer for interactive performance.
+- **Binary instance bridge** — GPU data bypasses JSON serialization in interactive rendering.
+
+### Fixed
+
+- **Facet encoding** — `facet=`, `facet_col=`, `facet_row=` now correctly partition data into panels.
+- **`mark_tick` y-rug** — single-axis tick marks render correctly in both x and y orientations.
+- **CoordFlip rendering** — no longer drops violin paths or boxplot rects under coordinate flip.
+- **Histogram `multiple='stack'`/`'fill'`** — bin edges now align across groups.
+- **`calibration_chart` rendering** — layering wiring gap resolved; renders correctly via `.show_svg()`.
+- **Chart decomposition** — `chart.py` split into rendering, encoding helpers, and composition helpers for maintainability.
 
 ### Changed
 

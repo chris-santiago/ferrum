@@ -128,7 +128,7 @@ assert chart.show_svg().startswith("<svg")
 
 ## Mark families
 
-Ferrum ships 28+ mark methods on [`Chart`][ferrum.Chart]. They group into five families by what they're for.
+Ferrum ships 54 mark methods on [`Chart`][ferrum.Chart]. They group into families by what they're for.
 
 ### Primitive marks
 
@@ -144,6 +144,8 @@ The geometric building blocks. Use these when you want direct control over what 
 | `mark_tick()` | Short ticks, often used for rug plots. |
 | `mark_rect()` | Rectangular cells. Used for heatmaps and intervals. |
 | `mark_text()` | Text labels (paired with the `text` encoding). |
+| `mark_label()` | Positioned text labels with collision avoidance (`avoid_overlap=True`). |
+| `mark_image()` | Image tiles from URL fields. |
 
 Example — basic scatter:
 

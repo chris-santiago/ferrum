@@ -178,9 +178,6 @@ assert chart.show_svg().startswith("<svg")
 
 `clustermap` returns a `ClusterMapChart` — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
 
-!!! note "Clustermap rendering"
-    `clustermap` produces the correct `ClusterMapChart` value, but full SVG rendering of the assembled dendrogram + heatmap composition has remaining wiring work and is not exercised in the doctest on this page. The helper is still useful as a building block; the resulting `ClusterMapChart` exposes its heatmap, row dendrogram, and column dendrogram as attributes you can render individually with `.show_svg()`.
-
 ## Joint: `jointplot`
 
 `jointplot` produces a central bivariate plot flanked by univariate marginals — a scatter with marginal histograms is the canonical version. Returns a `JointChart`.

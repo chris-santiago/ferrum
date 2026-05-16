@@ -34,6 +34,29 @@ Pass `format=` explicitly to override the extension:
 chart.save("output", format="svg")
 ```
 
+## Controlling auto-raster
+
+At high mark counts (default threshold: 500,000), Ferrum transparently substitutes a raster image for per-element SVG marks. Override this per-call with `raster=`:
+
+```python
+chart.show_svg(raster=False)   # force vector even at high counts
+chart.save("out.svg", raster=False)
+chart.show_png(raster=True)    # force raster even at low counts
+```
+
+For persistent control, attach a [`RenderConfig`][ferrum.RenderConfig] to the chart:
+
+<!--pytest.mark.skip-->
+```python
+from ferrum import RenderConfig
+
+config = RenderConfig(raster_threshold=1_000_000, raster_behavior="silent")
+chart = chart.render_config(config)
+chart.save("out.svg")  # auto-raster fires at 1M marks, silently
+```
+
+`RenderConfig` parameters: `raster_threshold` (mark count or `None` to disable), `raster_behavior` (`"warn"`, `"silent"`, `"error"`), `raster_aggregate`, and `raster_cmap`.
+
 ## Getting raw bytes
 
 For programmatic use (embedding in notebooks, serving from a web app, writing to S3):

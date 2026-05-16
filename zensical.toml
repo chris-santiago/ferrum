@@ -62,6 +62,7 @@ nav = [
     { "ferrum.position" = "api/position.md" },
     { "ferrum.repeat" = "api/repeat.md" },
     { "ferrum.schemes" = "api/schemes.md" },
+    { "ferrum.render_config" = "api/render_config.md" },
     { "ferrum.title" = "api/title.md" },
   ] },
   { Changelog = "changelog.md" },

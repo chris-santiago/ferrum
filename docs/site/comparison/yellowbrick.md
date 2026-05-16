@@ -9,21 +9,21 @@ Yellowbrick pioneered the idea of "visual diagnostics" — sklearn-protocol obje
 | `ROCAUC(model)` | [`fm.ROCVisualizer(model)`][ferrum.ROCVisualizer] | [`fm.roc_chart(model, X, y)`][ferrum.roc_chart] |
 | `PrecisionRecallCurve(model)` | [`fm.PRVisualizer(model)`][ferrum.PRVisualizer] | [`fm.pr_chart(model, X, y)`][ferrum.pr_chart] |
 | `ConfusionMatrix(model)` | [`fm.ConfusionMatrixVisualizer(model)`][ferrum.ConfusionMatrixVisualizer] | [`fm.confusion_matrix_chart(model, X, y)`][ferrum.confusion_matrix_chart] |
-| `ClassificationReport(model)` | [`fm.ClassificationReportVisualizer(model)`][ferrum.ClassificationReportVisualizer] | — |
+| `ClassificationReport(model)` | [`fm.ClassificationReportVisualizer(model)`][ferrum.ClassificationReportVisualizer] | [`fm.classification_report_chart(model, X, y)`][ferrum.classification_report_chart] |
 | `ClassPredictionError(model)` | [`fm.ClassPredictionErrorVisualizer(model)`][ferrum.ClassPredictionErrorVisualizer] | [`fm.class_prediction_error_chart(model, X, y)`][ferrum.class_prediction_error_chart] |
 | `DiscriminationThreshold(model)` | [`fm.DiscriminationThresholdVisualizer(model)`][ferrum.DiscriminationThresholdVisualizer] | [`fm.discrimination_threshold_chart(model, X, y)`][ferrum.discrimination_threshold_chart] |
 | `ResidualsPlot(model)` | [`fm.ResidualsVisualizer(model)`][ferrum.ResidualsVisualizer] | [`fm.residuals_chart(model, X, y)`][ferrum.residuals_chart] |
-| `PredictionError(model)` | [`fm.PredictionErrorVisualizer(model)`][ferrum.PredictionErrorVisualizer] | — |
-| `CooksDistance(model)` | [`fm.CooksDistanceVisualizer(model)`][ferrum.CooksDistanceVisualizer] | — |
+| `PredictionError(model)` | [`fm.PredictionErrorVisualizer(model)`][ferrum.PredictionErrorVisualizer] | [`fm.prediction_error_chart(model, X, y)`][ferrum.prediction_error_chart] |
+| `CooksDistance(model)` | [`fm.CooksDistanceVisualizer(model)`][ferrum.CooksDistanceVisualizer] | [`fm.cooks_distance_chart(model, X, y)`][ferrum.cooks_distance_chart] |
 | `FeatureImportances(model)` | [`fm.FeatureImportancesVisualizer(model)`][ferrum.FeatureImportancesVisualizer] | [`fm.importance_chart(model, X, y)`][ferrum.importance_chart] |
 | `LearningCurve(model)` | [`fm.LearningCurveVisualizer(model)`][ferrum.LearningCurveVisualizer] | [`fm.learning_curve_chart(model, X, y)`][ferrum.learning_curve_chart] |
 | `ValidationCurve(model)` | [`fm.ValidationCurveVisualizer(model)`][ferrum.ValidationCurveVisualizer] | [`fm.validation_curve_chart(model, X, y)`][ferrum.validation_curve_chart] |
 | `CVScores(model)` | [`fm.CVScoresVisualizer(model)`][ferrum.CVScoresVisualizer] | [`fm.cv_scores_chart(model, X, y)`][ferrum.cv_scores_chart] |
-| `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | — |
-| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model_class)`][ferrum.ElbowVisualizer] | — |
+| `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | [`fm.silhouette_chart(model, X)`][ferrum.silhouette_chart] |
+| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model_class)`][ferrum.ElbowVisualizer] | [`fm.elbow_chart(model_class, X)`][ferrum.elbow_chart] |
 | `InterclusterDistance(model)` | [`fm.InterclusterDistanceVisualizer(model)`][ferrum.InterclusterDistanceVisualizer] | [`fm.intercluster_distance_chart(model, X)`][ferrum.intercluster_distance_chart] |
-| `Manifold(model)` | [`fm.ManifoldVisualizer(model)`][ferrum.ManifoldVisualizer] | — |
-| `ClassBalance(labels)` | [`fm.ClassBalanceVisualizer(model)`][ferrum.ClassBalanceVisualizer] | — |
+| `Manifold(model)` | [`fm.ManifoldVisualizer(model)`][ferrum.ManifoldVisualizer] | [`fm.manifold_chart(model, X)`][ferrum.manifold_chart] |
+| `ClassBalance(labels)` | [`fm.ClassBalanceVisualizer(model)`][ferrum.ClassBalanceVisualizer] | [`fm.class_balance_chart(model, X, y)`][ferrum.class_balance_chart] |
 | `FeatureCorrelation` | [`fm.Rank1DVisualizer`][ferrum.Rank1DVisualizer] / [`fm.Rank2DVisualizer`][ferrum.Rank2DVisualizer] | [`fm.rank1d_chart`][ferrum.rank1d_chart] / [`fm.rank2d_chart`][ferrum.rank2d_chart] |
 
 ## The lifecycle pattern

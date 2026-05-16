@@ -14,8 +14,8 @@ scikit-plot (`skplt`) provides one-function plotting for sklearn model evaluatio
 | `skplt.metrics.plot_lift_curve(y_test, y_probas)` | [`fm.lift_chart(model, X_test, y_test)`][ferrum.lift_chart] | — |
 | `skplt.estimators.plot_feature_importances(model)` | [`fm.importance_chart(model, X_test, y_test)`][ferrum.importance_chart] | Handles `feature_importances_`, permutation, and coefficients. |
 | `skplt.estimators.plot_learning_curve(model, X, y)` | [`fm.learning_curve_chart(model, X, y)`][ferrum.learning_curve_chart] | — |
-| `skplt.cluster.plot_silhouette(X, labels)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | Visualizer-style (`.fit()` / `.show()`). Takes the fitted clusterer directly. |
-| `skplt.cluster.plot_elbow_curve(model, X)` | [`fm.ElbowVisualizer(model)`][ferrum.ElbowVisualizer] | Visualizer-style (`.fit()` / `.show()`). |
+| `skplt.cluster.plot_silhouette(X, labels)` | [`fm.silhouette_chart(model, X)`][ferrum.silhouette_chart] | Also available as [`SilhouetteVisualizer`][ferrum.SilhouetteVisualizer] for lifecycle control. |
+| `skplt.cluster.plot_elbow_curve(model, X)` | [`fm.elbow_chart(model, X)`][ferrum.elbow_chart] | Also available as [`ElbowVisualizer`][ferrum.ElbowVisualizer] for lifecycle control. |
 | `skplt.decomposition.plot_pca_component_variance(pca)` | [`fm.pca_scree_chart(model, X)`][ferrum.pca_scree_chart] | — |
 
 ## Key differences
