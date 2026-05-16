@@ -120,9 +120,66 @@ pub struct PanelTickLevels {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TickLevel {
+    #[serde(
+        serialize_with = "zoom_serde::serialize",
+        deserialize_with = "zoom_serde::deserialize"
+    )]
     pub min_zoom: f64,
+    #[serde(
+        serialize_with = "zoom_serde::serialize",
+        deserialize_with = "zoom_serde::deserialize"
+    )]
     pub max_zoom: f64,
     pub ticks: Vec<Tick>,
+}
+
+/// Custom serde for zoom fields that may contain non-finite f64 values.
+/// JSON has no representation for Infinity/NaN, so we serialize them as strings.
+/// For backward compatibility, `null` deserializes as `f64::INFINITY`.
+mod zoom_serde {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.is_infinite() && value.is_sign_positive() {
+            serializer.serialize_str("Infinity")
+        } else if value.is_infinite() && value.is_sign_negative() {
+            serializer.serialize_str("-Infinity")
+        } else if value.is_nan() {
+            serializer.serialize_str("NaN")
+        } else {
+            serializer.serialize_f64(*value)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum FloatOrString {
+            Float(f64),
+            Str(String),
+            Null,
+        }
+
+        match FloatOrString::deserialize(deserializer)? {
+            FloatOrString::Float(v) => Ok(v),
+            FloatOrString::Str(s) => match s.as_str() {
+                "Infinity" => Ok(f64::INFINITY),
+                "-Infinity" => Ok(f64::NEG_INFINITY),
+                "NaN" => Ok(f64::NAN),
+                other => Err(serde::de::Error::custom(format!(
+                    "unexpected string value for zoom field: {other:?}"
+                ))),
+            },
+            // Backward compat: previously serde_json serialized INFINITY as null
+            FloatOrString::Null => Ok(f64::INFINITY),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -737,6 +737,29 @@ fn numeric_domain_union(
         union_field(p)?;
     }
 
+    // Also union domains from other layers' fields for the same channel.
+    // When two Charts with different DataFrames are composed via `+`, the RHS
+    // columns are renamed (e.g. "x__rhs_...") and routed through a named
+    // Identity transform. The primary field (from the chart-level encoding)
+    // only covers the LHS data. We must also include the RHS layer's field so
+    // the shared scale domain spans both layers' data ranges.
+    if let Some(layers) = &spec.layers {
+        for layer in layers {
+            let layer_field = match channel {
+                "x" => layer.encoding.x.as_ref().map(|e| e.field.as_str()),
+                "y" => layer.encoding.y.as_ref().map(|e| e.field.as_str()),
+                _ => None,
+            };
+            if let Some(lf) = layer_field {
+                if lf != field {
+                    // Ignore errors — the field may not exist in all batches
+                    // (e.g. when it lives in a named output that isn't loaded yet).
+                    let _ = union_field(lf);
+                }
+            }
+        }
+    }
+
     if !mn.is_finite() || !mx.is_finite() {
         // All values were null/NaN — return a default domain so the chart
         // renders with axes but no marks, instead of raising an error.
