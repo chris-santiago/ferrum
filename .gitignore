@@ -212,3 +212,6 @@ crates/ferrum-wasm/pkg/
 
 # Jupyter notebooks
 notebooks/
+
+# Nox
+.nox/
