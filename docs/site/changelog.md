@@ -4,6 +4,12 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
+*No unreleased changes.*
+
+## 0.8.0
+
+Grammar-of-graphics core with Rust rendering engine.
+
 ### Added
 
 - **12 built-in themes** — Paper Ink (default), Slate Citrus, Arctic Signal, Observable, Minimal, Dark, Publication, Economist, FiveThirtyEight, Solarized Light, Solarized Dark, plus explicit `paper_ink` for derivation.
@@ -55,7 +61,3 @@ All notable changes to Ferrum are documented here.
 - **`+` operator always layers** — no longer ambiguous between layering and concatenation. Use `|`, `&`, `fm.hconcat()`, or `fm.vconcat()` for concatenation.
 - **Default theme identity is Paper Ink** — warm cream background, blue marks, warm grid. Previously was Observable-style white background.
 - **Default categorical palette is `paper_ink`** — previously `okabe_ito`.
-
-## 0.8.0
-
-Initial development release. Grammar-of-graphics core with Rust rendering engine.
