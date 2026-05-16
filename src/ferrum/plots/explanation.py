@@ -19,9 +19,12 @@ _pdp_split_kind_both, _pdp_chart_from_source.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum import Chart
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
@@ -504,7 +507,7 @@ def importance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Feature-importance bar chart for an estimator.
 
     Extracts feature importances from the model via the selected method
@@ -588,7 +591,7 @@ def shap_beeswarm_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """SHAP beeswarm chart -- per-sample SHAP scatter colored by z-scored value.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -650,7 +653,7 @@ def shap_bar_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """SHAP bar chart -- mean absolute SHAP per feature.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -704,7 +707,7 @@ def shap_waterfall_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """SHAP waterfall chart -- cumulative per-feature contributions for one sample.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -768,7 +771,7 @@ def shap_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """SHAP value chart for an estimator.
 
     Dispatches to one of three chart types based on ``kind``. The
@@ -903,7 +906,7 @@ def pdp_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Partial-dependence plot (PDP) for one or more features.
 
     Renders one facet panel per feature, each showing how the model

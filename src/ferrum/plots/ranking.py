@@ -20,9 +20,12 @@ _build_decision_boundary_grid, _build_decision_boundary_unified.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum import Chart
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
@@ -52,7 +55,7 @@ def rank_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Feature-ranking chart: univariate bar or pairwise heatmap.
 
     Computes a ranking score for each feature (or each feature pair)
@@ -183,7 +186,7 @@ def rank1d_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Univariate feature-ranking bar chart.
 
     Computes a per-feature ranking score and renders a horizontal (or
@@ -264,7 +267,7 @@ def rank2d_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Pairwise feature-correlation heatmap.
 
     Computes pairwise feature correlation (or covariance) and renders a
@@ -332,7 +335,7 @@ def parallel_coordinates_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Parallel coordinates chart for multivariate data.
 
     Renders one polyline per sample, with each feature mapped to a
@@ -414,7 +417,7 @@ def decision_boundary_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Decision-boundary heatmap for a classifier over a 2D feature slice.
 
     Builds a ``grid_resolution x grid_resolution`` grid over two

@@ -12,9 +12,12 @@ produces a fully-formed ``Chart``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum import Chart
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
@@ -291,7 +294,7 @@ def learning_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Learning curve chart showing score vs. training set size.
 
     Plots cross-validated train and validation scores as training size
@@ -373,7 +376,7 @@ def validation_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Plot score vs. a single hyperparameter value.
 
     Sweeps one hyperparameter over a supplied value range and plots
@@ -472,7 +475,7 @@ def cv_scores_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Per-fold cross-validation score distribution chart.
 
     Visualizes the distribution of scores across folds for train and/or
@@ -549,7 +552,7 @@ def alpha_selection_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Regularization-strength (alpha) selection chart.
 
     Plots cross-validated mean score as a function of regularization

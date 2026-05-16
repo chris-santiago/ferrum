@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ferrum import Bin2D, Chart, JointChart, RepeatChart, Repeat
+from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import _finalize_chart
 from ferrum.plots.regression import _merge_layers
@@ -569,7 +569,7 @@ def clustermap(
     layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
-) -> Any:
+) -> "ClusterMapChart":
     """Clustered heatmap with row and column dendrograms.
 
     Returns a ``ClusterMapChart`` composed of:

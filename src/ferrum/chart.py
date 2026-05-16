@@ -3522,7 +3522,7 @@ class Chart(_RenderMixin):
             position=position,
         )
 
-    def mark_arc(self, **kwargs):
+    def mark_arc(self, **kwargs) -> "Chart":
         """Render data as arcs (pie or donut slices).
 
         Requires ``Chart.coord(fm.CoordPolar(theta="x"))`` to be set.
@@ -3542,7 +3542,7 @@ class Chart(_RenderMixin):
         """
         return self._set_mark("arc", **kwargs)
 
-    def mark_image(self, **kwargs):
+    def mark_image(self, **kwargs) -> "Chart":
         """Render data as raster images.
 
         Each row in the dataset becomes one image tile.  Supply a base64-encoded
@@ -3560,7 +3560,7 @@ class Chart(_RenderMixin):
         """
         return self._set_mark("image", **kwargs)
 
-    def mark_geoshape(self, **kwargs):
+    def mark_geoshape(self, **kwargs) -> "Chart":
         """Render geographic shapes from a GeoJSON FeatureCollection.
 
         Pass a GeoJSON FeatureCollection dict to ``Chart(data)`` — ferrum
@@ -3581,7 +3581,7 @@ class Chart(_RenderMixin):
         """
         return self._set_mark("geoshape", **kwargs)
 
-    def mark_label(self, **kwargs):
+    def mark_label(self, **kwargs) -> "Chart":
         """Render positioned text labels near data points with collision avoidance.
 
         Each row in the dataset becomes one text label.  By default the

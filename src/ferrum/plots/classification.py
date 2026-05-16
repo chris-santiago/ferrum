@@ -19,9 +19,12 @@ function today.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum import Chart
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides, register_layer_names
@@ -836,7 +839,7 @@ def roc_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """ROC curve chart for a classifier.
 
     Plots true-positive rate vs. false-positive rate, one curve per
@@ -942,7 +945,7 @@ def pr_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Precision-recall curve chart for a classifier.
 
     Plots precision vs. recall, one curve per class (default) or a single
@@ -1050,7 +1053,7 @@ def calibration_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Calibration (reliability) curve for one or more classifiers.
 
     Plots mean predicted probability vs. fraction of positives in each
@@ -1145,7 +1148,7 @@ def gain_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Cumulative-gain curve for a classifier.
 
     Plots the fraction of positive cases captured vs. the fraction of
@@ -1212,7 +1215,7 @@ def lift_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Lift curve for a classifier.
 
     Plots the ratio of positive-hit rate in the scored top-n vs. random
@@ -1278,7 +1281,7 @@ def confusion_matrix_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Confusion matrix heatmap for a classifier.
 
     Renders an ordinal heatmap of (actual class, predicted class) cell
@@ -1352,7 +1355,7 @@ def class_prediction_error_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Class prediction-error stacked bar chart for a classifier.
 
     One bar per predicted class, stacked by actual class so misclassified
@@ -1430,7 +1433,7 @@ def discrimination_threshold_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Discrimination-threshold sweep chart for a binary classifier.
 
     Plots multiple classification metrics (precision, recall, F1,
@@ -1520,7 +1523,7 @@ def classification_report_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Per-class precision / recall / F1 heatmap for a classifier.
 
     Renders a rect-plus-text heatmap where rows are class labels, columns
@@ -1573,7 +1576,7 @@ def class_balance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Bar chart of per-class label counts.
 
     Computes the count of each unique class label and renders a vertical

@@ -957,7 +957,7 @@ def residuals_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Residuals diagnostic chart for a regression estimator.
 
     Plots residuals vs. fitted values. Optional Cook's distance
@@ -1066,7 +1066,7 @@ def prediction_error_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Actual-vs-predicted scatter for a regression estimator.
 
     Plots ``y_true`` on the y axis against ``y_pred`` on the x axis with
@@ -1146,7 +1146,7 @@ def cooks_distance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Cook's distance / residuals-vs-leverage diagnostic for a linear estimator.
 
     Renders the residuals-vs-leverage panel with optional Cook's-distance

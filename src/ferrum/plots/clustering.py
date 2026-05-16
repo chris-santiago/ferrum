@@ -18,9 +18,12 @@ _cluster_diagnostics_chart.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum import Chart, HConcatChart
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
@@ -329,7 +332,7 @@ def pca_scree_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """PCA scree chart showing explained variance per component.
 
     Plots per-component explained variance ratio as bars, with an
@@ -446,7 +449,7 @@ def cluster_diagnostics(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart | HConcatChart":
     """Elbow and silhouette diagnostics over a range of cluster counts.
 
     Fits one clusterer per value of k and renders the requested
@@ -495,9 +498,9 @@ def cluster_diagnostics(
 
     Returns
     -------
-    Chart
-        Single-panel line chart when ``scoring`` is ``"elbow"`` or
-        ``"silhouette"``; HConcatChart of both panels when
+    Chart or HConcatChart
+        ``Chart`` when ``scoring`` is ``"elbow"`` or ``"silhouette"``;
+        ``HConcatChart`` with both panels side-by-side when
         ``scoring="both"``.
 
     Raises
@@ -554,7 +557,7 @@ def intercluster_distance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Intercluster distance map: 2D embedding of cluster centers.
 
     Embeds cluster centers into 2D using MDS so their pairwise distances
@@ -638,7 +641,7 @@ def silhouette_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Rousseeuw silhouette plot for a fitted clusterer.
 
     Computes per-sample silhouette coefficients and renders a horizontal
@@ -691,7 +694,7 @@ def manifold_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Low-dimensional manifold-embedding scatter (UMAP / t-SNE / PCA).
 
     Projects the input data to two dimensions via the selected embedding
@@ -749,7 +752,7 @@ def elbow_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Elbow / score sweep over a range of k for a clustering algorithm.
 
     Fits one model per k value and plots the selected score metric against
