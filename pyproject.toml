@@ -53,6 +53,7 @@ dev = [
     "zensical>=0.0.40",
     "ruff>=0.6",
     "ipykernel>=7.2.0",
+    "nox>=2026.4.10",
 ]
 
 [tool.ruff]
