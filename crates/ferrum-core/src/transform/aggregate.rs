@@ -55,7 +55,7 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
                 "stat_aggregate: column '{}' not found", op.field
             ))
         })?;
-        if schema.field(idx).data_type() != &DataType::Float64 {
+        if op.fn_ != AggFn::Count && schema.field(idx).data_type() != &DataType::Float64 {
             return Err(PyValueError::new_err(format!(
                 "stat_aggregate: op field '{}' must be Float64", op.field
             )));
@@ -131,22 +131,30 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     for (key, rows) in &groups {
         group_keys_out.push(key.clone());
         for (op_i, op) in spec.ops.iter().enumerate() {
-            let arr = batch
-                .column(schema.index_of(&op.field).expect("invariant: op fields validated above"))
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| PyValueError::new_err(format!(
-                    "stat_aggregate: expected Float64Array for op field '{}'", op.field
-                )))?;
-            // Filter to non-null, non-NaN values within this group.
-            let vals: Vec<f64> = rows.iter().filter_map(|&r| {
-                if arr.is_null(r) { return None; }
-                let v = arr.value(r);
-                if v.is_nan() { return None; }
-                Some(v)
-            }).collect();
-            let result = aggregate(&vals, op.fn_, rows.len());
-            op_values_out[op_i].push(result);
+            let col = batch
+                .column(schema.index_of(&op.field).expect("invariant: op fields validated above"));
+
+            if op.fn_ == AggFn::Count && col.data_type() != &DataType::Float64 {
+                // Count on non-numeric columns: count non-null rows.
+                let non_null = rows.iter().filter(|&&r| !col.is_null(r)).count();
+                op_values_out[op_i].push(non_null as f64);
+            } else {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| PyValueError::new_err(format!(
+                        "stat_aggregate: expected Float64Array for op field '{}'", op.field
+                    )))?;
+                // Filter to non-null, non-NaN values within this group.
+                let vals: Vec<f64> = rows.iter().filter_map(|&r| {
+                    if arr.is_null(r) { return None; }
+                    let v = arr.value(r);
+                    if v.is_nan() { return None; }
+                    Some(v)
+                }).collect();
+                let result = aggregate(&vals, op.fn_, rows.len());
+                op_values_out[op_i].push(result);
+            }
         }
     }
 
