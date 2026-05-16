@@ -50,7 +50,10 @@ For each iteration:
 
 4. **Plan the fix.** Decide whether it lives Python-side (composite-mark expansion, default kwarg change, layer composition) or Rust-side (mark renderer change, new transform). The composite-mark / multi-layer / desugar-Python-side rule (see CLAUDE.md "Key architectural decisions") strongly favors Python-side fixes — Rust changes only when a new primitive mark or transform is required.
 
-5. **Implement.** Edit the relevant files. Match existing code style. Don't introduce new abstractions just for one finding.
+5. **Implement.** Delegate the code change to the appropriate coding agent:
+   - Python changes (`src/ferrum/`, `tests/`) → dispatch `python-coder` agent with a clear description of what to change and why.
+   - Rust changes (`crates/`) → dispatch `rust-coder` agent with a clear description.
+   - Never write Python or Rust code directly — the coding agents embed review principles and produce code that passes the lite-review gate on first attempt.
 
 6. **Verify.**
    - Re-run the affected row: `unset CONDA_PREFIX && uv run --no-sync python .claude/skills/gallery-audit/audit.py all --rows <N>`

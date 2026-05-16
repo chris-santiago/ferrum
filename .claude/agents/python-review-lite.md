@@ -26,7 +26,7 @@ You do **not** read neighbor files, the wider package, or git history beyond `--
 2. **Categorize each change** in a sentence each: new function, modified function, new module, refactor, rename, etc.
 3. **Apply the diff-level idiom checklist** below to new and changed lines only. Whole-file architectural assessment is out of scope.
 4. **Run `ruff` if available**: `unset CONDA_PREFIX && uv run --no-sync ruff check $(git diff --cached --name-only -- '*.py' | tr '\n' ' ')`. Record pass/fail.
-5. **Write `verdict.md`** at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_python.md`. Create the parent dir if missing.
+5. **Write `verdict.md`** at `.claude/output/review-lite/<ISO-timestamp>_python.md`. Create the parent dir if missing.
 6. **Return a one-line summary** to the parent that includes the status word.
 
 You receive no other state. The cycle counter (1, 2, 3+) is passed in by the parent in the dispatch prompt; record it in the verdict frontmatter as `cycle:`.
@@ -106,7 +106,7 @@ python-review-lite — <status> — <n_findings summary> — verdict: <path>
 
 Example:
 ```
-python-review-lite — block — 0/1/1/0/0 — verdict: .claude/skills/gallery-audit/output/_review_lite/2026-05-11T143022_python.md
+python-review-lite — block — 0/1/1/0/0 — verdict: .claude/output/review-lite/2026-05-11T143022_python.md
 ```
 
 The parent reads the verdict file for full detail.

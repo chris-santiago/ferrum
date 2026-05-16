@@ -32,7 +32,7 @@ You do **not** read neighbor files, the wider crate, or git history beyond `--ca
      cargo clippy -p ferrum-core --message-format=short -- -D warnings 2>&1 | tail -40
    ```
    Record pass/fail. If `cargo` is not on `PATH`, record `clippy: not_available` and continue.
-5. **Write `verdict.md`** at `.claude/skills/gallery-audit/output/_review_lite/<ISO-timestamp>_rust.md`. Create the parent dir if missing.
+5. **Write `verdict.md`** at `.claude/output/review-lite/<ISO-timestamp>_rust.md`. Create the parent dir if missing.
 6. **Return a one-line summary** to the parent that includes the status word.
 
 The cycle counter (1, 2, 3+) is passed in by the parent in the dispatch prompt; record it in the verdict frontmatter as `cycle:`.
@@ -113,7 +113,7 @@ rust-review-lite — <status> — <n_findings summary> — verdict: <path>
 
 Example:
 ```
-rust-review-lite — escalate — 0/1/0/1/0 — verdict: .claude/skills/gallery-audit/output/_review_lite/2026-05-11T143022_rust.md
+rust-review-lite — escalate — 0/1/0/1/0 — verdict: .claude/output/review-lite/2026-05-11T143022_rust.md
 ```
 
 The parent reads the verdict file for full detail.

@@ -90,6 +90,21 @@ This rule governs Phase 12 forward; it does not retroactively reopen closed phas
 
 ---
 
+## Coding agent dispatch rule
+
+**All coding tasks in this project must be delegated to the language-specific coding agent.** Do not use `general-purpose`, `claude`, or `Explore` agents for code that writes or modifies `.py` or `.rs` files.
+
+| Task touches | Dispatch to |
+|---|---|
+| `src/ferrum/`, `tests/`, `scripts/` (Python) | `python-coder` agent |
+| `crates/ferrum-core/`, `crates/ferrum-wasm/` (Rust) | `rust-coder` agent |
+| Both Python and Rust | Dispatch both agents with clear boundaries; Python agent handles `.py`, Rust agent handles `.rs` |
+| Read-only exploration, search, or analysis | `Explore` agent (unchanged) |
+
+The coding agents internalize the review principles from `.claude/skills/python-review/` and `.claude/skills/rust-review/` respectively, so code should pass the lite-review gate on first attempt. The orchestrator still handles staging, lite-review dispatch, and commits.
+
+---
+
 ## Bug fixes and cascading issues
 
 Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a symptom in a way that violates the existing design (layers vs. chart-level computation, Python vs. Rust responsibilities, etc.). When a fix reveals a cascading issue, understand *why* before touching anything else.
@@ -112,16 +127,21 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
 | Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
+| **Coding agents** | **`.claude/agents/{python,rust}-coder.md`** |
+| Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
+| Review verdicts (gitignored) | `.claude/output/review-lite/` |
+| Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
 | Gallery audit skill | `.claude/skills/gallery-audit/` |
 | Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
-| Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
-| Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
 | Bug-hunt skill | `.claude/skills/bug-hunt/` |
 | Bug-hunter agent | `.claude/agents/bug-hunter.md` |
+| Test-sweep skill | `.claude/skills/test-sweep/` |
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
-| **Code archaeology report** | **`docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
+| **Code archaeology report** | **`docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
+| Docs audit skill | `.claude/skills/docs-audit/` |
+| Regression test skill | `.claude/skills/regression-test/` |
 | Release skill | `.claude/skills/release/` |
 | Nox sessions | `noxfile.py` |
 | Publish workflow | `.github/workflows/publish.yaml` |

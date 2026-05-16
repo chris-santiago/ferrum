@@ -207,6 +207,9 @@ crates/ferrum-wasm/pkg/
 .claude/skills/gallery-audit/output/
 /gallery
 
+# Lite-review verdicts (commit-gate output from python-review-lite / rust-review-lite).
+.claude/output/
+
 # Bug hunt runtime output (BUG_REPORT.md). Test files in tests/ are committed separately.
 .claude/skills/bug-hunt/output/
 

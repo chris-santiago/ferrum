@@ -21,7 +21,7 @@ You apply **objective** Schwabish findings to one gallery row's panel script. Yo
 3. For each finding where `objective: true` AND the `finding_id` appears in the eligibility list:
    - Read `gallery/plots/<row>/ferrum_panel.py`.
    - Check **idempotence first**: if the action's target primitive is already present (e.g., `AUCLabel()` is already in the file), skip and record the finding as skipped.
-   - Otherwise, apply the action via `Edit`. Append composites at the end of the chart construction expression chain; flip kwargs in-place.
+   - Otherwise, delegate the code change to the `python-coder` agent with a clear description of the edit (what to append/flip, where in the file). The coding agent embeds review principles and produces code that passes the lite-review gate on first attempt. Do not write code directly.
 4. After all eligible findings are applied, regenerate the row's panel:
    ```bash
    uv run python .claude/skills/gallery-audit/audit.py generate --row <row>
