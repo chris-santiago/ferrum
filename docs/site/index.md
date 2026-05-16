@@ -40,7 +40,7 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     ---
 
-    ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. [`fm.hconcat()`][ferrum.hconcat] just works.
+    ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same [`.save()`][ferrum.Chart.save]. [`fm.hconcat()`][ferrum.hconcat] just works.
 
 -   __Zero system dependencies__
 
