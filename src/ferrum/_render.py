@@ -190,7 +190,7 @@ class _RenderMixin:
         spec = chart.to_spec()
         data = to_arrow_table(chart._data)
         viewport = (chart._width or 600.0, chart._height or 400.0)
-        theme_dict = chart._theme.to_theme_inputs_dict() if chart._theme else {}
+        theme_dict = chart._theme.to_spec_dict() if chart._theme else {}
         return spec, data, viewport, theme_dict
 
     def show_svg(self, *, raster: bool | None = None) -> str:

@@ -4552,8 +4552,8 @@ class Chart(_RenderMixin):
         if resolved._coord is not None:
             c = resolved._coord
             # Back-compat: orient_coord_flip sets _coord = "flip" (a string).
-            # New coord objects expose _to_spec_dict(); CoordFlip returns "flip".
-            kw["coord"] = c._to_spec_dict() if hasattr(c, "_to_spec_dict") else c
+            # New coord objects expose to_spec_dict(); CoordFlip returns "flip".
+            kw["coord"] = c.to_spec_dict() if hasattr(c, "to_spec_dict") else c
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:

@@ -20,7 +20,7 @@ class CoordFlip:
     ... )
     """
 
-    def _to_spec_dict(self) -> str:
+    def to_spec_dict(self) -> str:
         """Return the string token passed to ChartSpec coord param."""
         return "flip"
 
@@ -64,7 +64,7 @@ class CoordCartesian:
     expand: bool = True
     clip: bool = True
 
-    def _to_spec_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         d: dict = {"kind": "cartesian", "expand": self.expand, "clip": self.clip}
         if self.xlim is not None:
@@ -105,7 +105,7 @@ class CoordFixed:
     expand: bool = True
     clip: bool = True
 
-    def _to_spec_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         d: dict = {
             "kind": "fixed",
@@ -167,7 +167,7 @@ class CoordPolar:
     outer_radius: float | None = None
     pad_angle: float = 0.0
 
-    def _to_spec_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         direction_str = "clockwise" if self.direction == 1 else "counter_clockwise"
         d: dict = {
@@ -209,6 +209,6 @@ class CoordGeo:
         "equirectangular",
     ] = "mercator"
 
-    def _to_spec_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         return {"kind": "geo", "projection": self.projection}

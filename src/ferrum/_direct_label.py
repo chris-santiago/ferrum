@@ -15,7 +15,7 @@ import polars as pl
 
 from typing import TYPE_CHECKING
 
-from ferrum.annotations import _resolve_field
+from ferrum._metric_labels import _resolve_field
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart

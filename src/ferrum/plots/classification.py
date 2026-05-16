@@ -203,7 +203,7 @@ def _roc_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _trapezoid_auc
+    from ferrum._metric_labels import _apply_metric_label_explicit, _trapezoid_auc
 
     df = source.roc_curve(average=None if per_class else average)
     color_field = _color_field_for(df, "class")
@@ -279,7 +279,7 @@ def _pr_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _ap_step
+    from ferrum._metric_labels import _apply_metric_label_explicit, _ap_step
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
@@ -409,7 +409,7 @@ def _calibration_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _brier_score
+    from ferrum._metric_labels import _apply_metric_label_explicit, _brier_score
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None

@@ -60,9 +60,9 @@ def test_coord_fixed_passes_to_spec():
 
 
 def test_coord_geo_spec_dict():
-    """CoordGeo._to_spec_dict() emits the correct kind/projection keys."""
+    """CoordGeo.to_spec_dict() emits the correct kind/projection keys."""
     geo = CoordGeo(projection="equal_earth")
-    d = geo._to_spec_dict()
+    d = geo.to_spec_dict()
     assert d["kind"] == "geo"
     assert d["projection"] == "equal_earth"
 

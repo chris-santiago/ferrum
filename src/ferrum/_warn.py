@@ -1,13 +1,29 @@
 """Warn-once registry: each (channel, kwarg) tuple emits at most one
-UserWarning per process. Tests use reset_warnings() to clear state.
+UserWarning per context. Tests use reset_warnings() to clear state.
+
+State is stored in a ``contextvars.ContextVar`` so it is scoped to the
+current execution context (thread-safe and async-safe) rather than
+process-global.
 """
 
 from __future__ import annotations
 
+import contextvars
 import warnings
 from typing import Optional
 
-_seen: set[tuple[str, str]] = set()
+_seen_var: contextvars.ContextVar[set | None] = contextvars.ContextVar(
+    "_ferrum_warn_seen", default=None
+)
+
+
+def _get_seen() -> set:
+    """Return the context-local seen set, initializing it on first access."""
+    s = _seen_var.get()
+    if s is None:
+        s = set()
+        _seen_var.set(s)
+    return s
 
 
 def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
@@ -34,9 +50,10 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
     >>> warn_once("mark_foo", "bar")  # second call — silently suppressed
     """
     key = (channel, kwarg)
-    if key in _seen:
+    seen = _get_seen()
+    if key in seen:
         return
-    _seen.add(key)
+    seen.add(key)
     msg = message or (
         f"{channel}({kwarg}=...) is accepted but not yet honored; planned for a future Phase."
     )
@@ -44,7 +61,7 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
 
 
 def reset_warnings() -> None:
-    """Clear the warn-once registry.
+    """Clear the warn-once registry for the current context.
 
     Intended for use in tests so that ``warn_once`` side effects from one
     test case do not bleed into the next.
@@ -53,4 +70,4 @@ def reset_warnings() -> None:
     --------
     >>> reset_warnings()
     """
-    _seen.clear()
+    _seen_var.set(None)
