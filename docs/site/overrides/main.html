@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block site_meta %}
+  {{ super() }}
+  {% if page.meta and page.meta.title %}
+    {% set page_title = page.meta.title ~ " - " ~ config.site_name %}
+  {% elif page.title and page.title != config.site_name %}
+    {% set page_title = page.title | striptags ~ " - " ~ config.site_name %}
+  {% else %}
+    {% set page_title = config.site_name %}
+  {% endif %}
+  {% if page.meta and page.meta.description %}
+    {% set page_description = page.meta.description %}
+  {% elif config.site_description %}
+    {% set page_description = config.site_description %}
+  {% else %}
+    {% set page_description = "" %}
+  {% endif %}
+  {% if page.canonical_url %}
+    {% set page_url = page.canonical_url %}
+  {% else %}
+    {% set page_url = config.site_url %}
+  {% endif %}
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ page_description }}">
+  <meta property="og:url" content="{{ page_url }}">
+  <meta property="og:image" content="{{ config.site_url }}assets/images/social-card.png">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ page_title }}">
+  <meta name="twitter:description" content="{{ page_description }}">
+  <meta name="twitter:image" content="{{ config.site_url }}assets/images/social-card.png">
+{% endblock %}

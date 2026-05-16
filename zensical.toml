@@ -69,6 +69,7 @@ nav = [
 ]
 
 [project.theme]
+custom_dir = "docs/site/overrides"
 language = "en"
 features = [
   "announce.dismiss",
