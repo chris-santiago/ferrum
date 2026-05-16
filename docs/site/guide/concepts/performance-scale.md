@@ -49,23 +49,53 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 !!! tip "Auto-raster in practice"
     A 1M-point scatter that would produce a **57 MB** SVG with one `<circle>` per mark becomes a **606 KB** SVG when auto-raster kicks in — same chart, same spec, two orders of magnitude smaller output.
 
-### 1M-point scatter: Ferrum vs. Altair vs. seaborn
+### Scatter benchmark: Ferrum vs. Altair vs. seaborn
+
+Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Script: `scripts/profile_scatter.py`.
+
+#### 200,000 points
 
 | Metric | Ferrum | Altair | seaborn |
 |---|---|---|---|
-| SVG render time | 741 ms | OOM crash | 8.80 s |
-| SVG file size | 607 KB | OOM crash | 162.9 MB |
-| PNG render time | — | — | 467 ms |
-| PNG file size | — | — | 163 KB |
-| Interactive HTML | 1.50 s / 5.0 MB | OOM crash | N/A |
+| SVG render time | **297 ms** | 2.54 s | 1.75 s |
+| SVG file size | **590 KB** | 57.8 MB | 32.6 MB |
+| PNG render time | 1.63 s | — | **116 ms** |
+| PNG file size | 383 KB | — | **141 KB** |
+| Interactive HTML render + save | 606 ms | **462 ms** | — |
+| Interactive HTML file size | **4.9 MB** | 14.3 MB | — |
 
-Ferrum's SVG is **275x smaller** than seaborn's. Seaborn emits 1M individual `<circle>` path elements (162.9 MB); ferrum's auto-raster substitutes an embedded PNG within the SVG (607 KB). Ferrum renders SVG **12x faster** (741 ms vs. 8.8 s).
+Ferrum SVG is **8.5x faster** than Altair and **5.9x faster** than seaborn, and **98x smaller** than Altair / **55x smaller** than seaborn. Auto-raster collapses 200k circles into one embedded PNG; the other libraries emit individual SVG elements.
 
-Seaborn's PNG path (467 ms, 163 KB) is its strong suit — matplotlib's Agg backend rasterizes efficiently. Ferrum's auto-raster is doing essentially the same thing but wrapped in an SVG container, landing at a comparable size.
+Seaborn's PNG path is **14x faster** (116 ms vs. 1.63 s) — matplotlib's Agg backend is a C extension that draws directly to a pixel buffer with no intermediate representation. Ferrum's PNG path pays for the SVG → resvg hop.
 
-Altair can't participate at 1M points — vl-convert's embedded V8 engine hits the heap limit trying to serialize 1M rows through the Vega-Lite runtime (exit code 133 = SIGKILL from the OOM handler). Altair has no auto-raster equivalent.
+Altair's interactive HTML is slightly faster to save (462 ms vs. 606 ms) because it serializes the Vega-Lite JSON spec and defers rendering to the browser. Ferrum pre-renders the scene graph and embeds WASM, producing **2.9x smaller** output (4.9 MB vs. 14.3 MB).
 
-Interactive HTML output (`.interactive().save()`) stayed at 5.0 MB — the WASM GPU renderer and packed scene data are largely size-invariant.
+#### 1,000,000 points
+
+| Metric | Ferrum | Altair | seaborn |
+|---|---|---|---|
+| SVG render time | **755 ms** | OOM crash | 8.55 s |
+| SVG file size | **607 KB** | OOM crash | 162.9 MB |
+| PNG render time | 2.18 s | — | **466 ms** |
+| PNG file size | 386 KB | — | **163 KB** |
+| Interactive HTML render + save | **1.53 s** | OOM crash | — |
+| Interactive HTML file size | **5.0 MB** | OOM crash | — |
+
+**Altair cannot participate at 1M points.** vl-convert's embedded V8 hits the heap limit (exit 133 / SIGKILL) trying to serialize 1M rows through the Vega-Lite runtime.
+
+Ferrum SVG is **11x faster** than seaborn (755 ms vs. 8.55 s) and **269x smaller** (607 KB vs. 162.9 MB). Seaborn still emits individual SVG path elements at 1M.
+
+Seaborn wins again on raw rasterization speed (466 ms vs. 2.18 s, **4.7x faster**) and PNG file size (163 KB vs. 386 KB).
+
+Ferrum is the **only library that can produce interactive HTML at this scale**. The 5.0 MB output is size-stable regardless of point count (4.9 MB at 200k vs. 5.0 MB at 1M).
+
+#### Key takeaways
+
+1. **Ferrum dominates SVG** — fastest render and smallest file at both scales by large margins (6–11x faster, 55–269x smaller). Auto-raster collapses N individual elements into one embedded raster image.
+2. **Seaborn dominates PNG** — matplotlib's Agg rasterizer is purpose-built for direct pixel output and beats ferrum's SVG → resvg pipeline 5–14x.
+3. **Altair hits a hard ceiling** — the V8/Vega-Lite architecture OOMs at 1M points. At 200k it works but produces the largest files.
+4. **Interactive HTML is Ferrum-only at scale** — neither Altair (OOM) nor seaborn (no interactive output) can produce interactive charts at 1M points. Ferrum's WASM output is size-stable across point counts.
+5. **Auto-raster changes the game for SVG** — without it, ferrum's 200k SVG was 20.9 MB / 1.20 s. With it: 590 KB / 297 ms. The default threshold (500k marks) means users get this automatically at high counts.
 
 ## SHAP and ICE at full sample size
 
