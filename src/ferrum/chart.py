@@ -358,14 +358,19 @@ class Chart(_RenderMixin):
             if y_enc is not None
             else None
         )
+        # If encodings still contain unresolved repeat placeholders, defer
+        # desugaring until the RepeatChart substitutes concrete field names.
+        from ferrum.repeat import _RepeatPlaceholder
+        if isinstance(x_field, _RepeatPlaceholder) or isinstance(y_field, _RepeatPlaceholder):
+            return self
         # Ribbon needs y2 from the encoding — inject as a kwarg.
         if kind == "ribbon":
             y2_enc = self._encoding.get("y2")
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 kwargs = {**kwargs, "y2_field": y2_field}
-        # density: auto-set groupby from color encoding when not explicit.
-        if kind == "density" and "groupby" not in kwargs:
+        # density/histogram: auto-set groupby from color encoding when not explicit.
+        if kind in ("density", "histogram") and "groupby" not in kwargs:
             color_enc = self._encoding.get("color")
             if color_enc is not None:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc

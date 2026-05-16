@@ -71,7 +71,6 @@ class TestDisplotPassthrough:
         overridden = fm.displot(df, x="val", mark={"opacity": 0.2})
         _renders_differently(default, overridden)
 
-    @pytest.mark.xfail(reason="Bin transform drops groupby column — hue not yet wired for histogram")
     def test_encode_override(self, df):
         default = fm.displot(df, x="val")
         overridden = fm.displot(df, x="val", hue="cat")
@@ -194,7 +193,6 @@ class TestResidplotPassthrough:
 
 
 class TestPairplotPassthrough:
-    @pytest.mark.xfail(reason="_RepeatPlaceholder not handled by mark override fan-out")
     def test_mark_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"])
         overridden = fm.pairplot(df, vars=["x", "y"], mark={"opacity": 0.2})
@@ -256,7 +254,6 @@ class TestJointplotPassthrough:
         # Verify no crash and valid SVG.
         assert "<svg" in overridden.show_svg()
 
-    @pytest.mark.xfail(reason="Bin transform drops groupby column — hue not yet wired for marginal histograms")
     def test_encode_override(self, df):
         default = fm.jointplot(df, x="x", y="y")
         overridden = fm.jointplot(df, x="x", y="y", hue="cat")
