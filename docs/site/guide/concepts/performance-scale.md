@@ -51,7 +51,7 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 
 ### Scatter benchmark: Ferrum vs. Altair vs. seaborn
 
-Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Script: `scripts/profile_scatter.py`.
+Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales.
 
 #### 200,000 points
 
