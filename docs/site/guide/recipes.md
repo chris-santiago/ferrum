@@ -291,6 +291,127 @@ assert chart.show_svg().startswith("<svg")
 
 `.properties(title=...)` adds a title to each panel. `.theme()` applies to the entire composed view. The same pattern works for any diagnostic helper — swap `roc_chart` for `calibration_chart`, `pr_chart`, or `confusion_matrix_chart`.
 
+## Horizontal bars with CoordFlip
+
+Ferrum draws bars vertically by default (x = category, y = value). To flip to horizontal bars, apply `CoordFlip`:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({"category": ["A", "B", "C", "D"], "value": [4.2, 2.8, 3.6, 5.1]})
+chart = (
+    fm.Chart(df)
+    .mark_bar()
+    .encode(x="value", y="category:N")
+    .coord(fm.CoordFlip())
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+`CoordFlip` swaps the x and y axes at render time — the encoding stays as written, but the visual orientation flips. This is the idiomatic way to produce horizontal bar charts, lollipop charts, or any chart where the categorical axis should run vertically.
+
+Other coordinate systems exist as classes — `CoordPolar` (for pie/donut/radial charts) and `CoordGeo` (for map projections) — but their renderer support is limited compared to `CoordFlip` and the default `CoordCartesian`.
+
+## Annotations: reference lines and text callouts
+
+Layer `mark_rule` and `mark_text` on top of a data chart to add annotations — reference lines, threshold markers, or text callouts:
+
+```python
+import ferrum as fm
+import polars as pl
+import numpy as np
+
+rng = np.random.default_rng(42)
+df = pl.DataFrame({"x": rng.standard_normal(100), "y": rng.standard_normal(100)})
+
+scatter = fm.Chart(df).mark_point(opacity=0.6).encode(x="x", y="y")
+
+# Horizontal reference line at y=0
+hline = fm.Chart(pl.DataFrame({"y": [0.0]})).mark_rule(stroke="red", stroke_dash="4,2").encode(y="y")
+
+# Vertical reference line at x=0
+vline = fm.Chart(pl.DataFrame({"x": [0.0]})).mark_rule(stroke="red", stroke_dash="4,2").encode(x="x")
+
+# Text callout
+label = (
+    fm.Chart(pl.DataFrame({"x": [1.5], "y": [2.0], "label": ["outlier region"]}))
+    .mark_text(fill="gray", font_size=10)
+    .encode(x="x", y="y", text="label")
+)
+
+chart = scatter + hline + vline + label
+assert chart.show_svg().startswith("<svg")
+```
+
+The `+` operator layers all marks on the same axes. `mark_rule` with only `y` encoded draws a horizontal line spanning the full plot width; with only `x` encoded it draws a vertical line spanning the full height. `mark_text` places text at the (x, y) position with the string from the `text` encoding channel.
+
+## Chart sizing
+
+Control chart dimensions with `.properties(width=..., height=...)`:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 3, 5, 4]})
+chart = (
+    fm.Chart(df)
+    .mark_point()
+    .encode(x="x", y="y")
+    .properties(width=600, height=400)
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+The default size is 600 x 400. Use `.properties()` when you need a wider plot for time series, a square plot for scatter matrices, or a compact sparkline.
+
+## Custom category order
+
+Force a specific category order on a nominal axis with `sort=`:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({"size": ["L", "S", "M", "L", "S", "M"], "count": [30, 10, 20, 25, 15, 22]})
+chart = (
+    fm.Chart(df)
+    .mark_bar()
+    .encode(
+        x=fm.X("size", type_="N", sort=["S", "M", "L"]),
+        y="count",
+    )
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+The `sort=` parameter on positional channels accepts a list of category values in the desired display order. Without it, categories appear in their natural (alphabetical) order.
+
+## Time-series line chart
+
+Plot temporal data by tagging the date column with `:T`:
+
+```python
+import ferrum as fm
+import polars as pl
+from datetime import date
+
+df = pl.DataFrame({
+    "date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1),
+             date(2024, 4, 1), date(2024, 5, 1), date(2024, 6, 1)],
+    "revenue": [100, 120, 115, 140, 155, 170],
+})
+chart = (
+    fm.Chart(df)
+    .mark_line()
+    .encode(x="date:T", y="revenue")
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+The `:T` suffix tells ferrum the x-axis is temporal, enabling date-aware tick formatting and axis scaling.
+
 ## Where to go next
 
 - [Marks & encodings](marks-encodings.md) for the full mark and encoding reference.

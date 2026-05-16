@@ -29,6 +29,14 @@ Ferrum ships twelve built-in themes accessible as attributes of [`ferrum.themes`
 | `solarized_light` | Warm cream (`#fdf6e3`), muted teal text, Set2 palette. |
 | `solarized_dark` | Dark teal (`#002b36`), warm-light text, Set2 palette. |
 
+### Visual comparison
+
+All twelve built-in themes applied to the same scatter-with-smooth chart:
+
+![All 12 ferrum themes](img/theme-grid.png)
+
+## Applying a theme
+
 Apply a theme to a chart:
 
 ```python
