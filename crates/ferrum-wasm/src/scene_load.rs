@@ -115,6 +115,9 @@ pub struct ImageQuad {
 pub struct PackedBatchMeta {
     pub data_indices: Option<Vec<u32>>,
     pub tooltip_bytes: Option<Vec<u8>>,
+    pub kind: u32,
+    pub instance_start: usize,
+    pub instance_count: usize,
 }
 
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
@@ -212,23 +215,25 @@ fn unpack_binary_instances(
         let flags = read_u32_le(data, offset + 16);
         offset += 20;
 
-        // Read instance data.
-        let instance_byte_len = match kind {
+        // Read instance data, tracking the start index for hit-testing.
+        let (instance_byte_len, instance_start) = match kind {
             0 => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
+                let start = circles.len();
                 if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
                     circles.extend_from_slice(instances);
                 }
-                byte_len
+                (byte_len, start)
             }
             1 => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
                 if offset + byte_len > data.len() { break; }
+                let start = rects.len();
                 if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
                     rects.extend_from_slice(instances);
                 }
-                byte_len
+                (byte_len, start)
             }
             _ => break,
         };
@@ -281,7 +286,10 @@ fn unpack_binary_instances(
 
         meta.insert(
             (panel_idx, batch_idx),
-            PackedBatchMeta { data_indices, tooltip_bytes },
+            PackedBatchMeta {
+                data_indices, tooltip_bytes,
+                kind, instance_start, instance_count: count,
+            },
         );
     }
 }

@@ -303,12 +303,41 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "hitTestAt")]
     pub fn hit_test_at(&self, x: f32, y: f32) -> String {
         let Some(loaded) = &self.loaded else { return "{}".to_string(); };
-        match hit_test::hit_test_nearest(
+
+        // Try scene-node hit-test first (non-packed batches).
+        if let Some(hr) = hit_test::hit_test_nearest(
             &loaded.scene.panels, x as f64, y as f64, &self.zoom,
         ) {
-            Some(hr) => format!(
+            return format!(
                 "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
                 hr.panel_id, hr.batch_idx, hr.node_idx
+            );
+        }
+
+        // Fallback: search packed circle instances directly.
+        let px = x as f64;
+        let py = y as f64;
+        let mut best: Option<(f64, u32, u32, usize)> = None; // (dist, panel, batch, idx)
+        for (&(panel_id, batch_idx), meta) in &loaded.data.packed_batch_meta {
+            if meta.kind != 0 { continue; } // only circles for now
+            for i in 0..meta.instance_count {
+                let ci = &loaded.data.circle_instances[meta.instance_start + i];
+                let dx = px - ci.center[0] as f64;
+                let dy = py - ci.center[1] as f64;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let r = ci.radius as f64;
+                if dist <= r * 3.0 { // generous hit radius for dense scatter
+                    if best.as_ref().is_none_or(|(d, _, _, _)| dist < *d) {
+                        best = Some((dist, panel_id, batch_idx, i));
+                    }
+                }
+            }
+        }
+
+        match best {
+            Some((_, panel_id, batch_idx, idx)) => format!(
+                "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
+                panel_id, batch_idx, idx
             ),
             None => "{}".to_string(),
         }
