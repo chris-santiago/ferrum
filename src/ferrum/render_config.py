@@ -14,8 +14,10 @@ class RenderConfig:
     ``raster_threshold``. This prevents multi-million-row charts from
     producing impractically large SVG output.
 
-    To disable auto-raster and force per-element SVG regardless of data
-    size, set ``raster_threshold=None``.
+    For one-off overrides, prefer the ``raster=`` keyword on output
+    methods (``chart.show(raster=False)``, ``chart.save(..., raster=False)``,
+    ``chart.show_svg(raster=False)``).  Use ``RenderConfig`` when you want
+    to bake the policy into the chart object itself.
 
     Parameters
     ----------

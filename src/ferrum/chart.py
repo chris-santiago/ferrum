@@ -622,7 +622,7 @@ class Chart:
         - Both ``x`` and ``y`` quantitative encodings are not present.
 
         When the chart is over-threshold but ineligible, a guidance warning
-        is emitted suggesting ``mark_raster()`` or ``raster_threshold=None``.
+        is emitted suggesting ``mark_raster()`` or ``raster=False``.
         """
         from ferrum.render_config import RenderConfig
 
@@ -658,7 +658,7 @@ class Chart:
             warnings.warn(
                 f"Chart has {mark_count:,} marks which may produce large output. "
                 f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster_threshold=None` to suppress this warning.",
+                f"`raster=False` to suppress this warning.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -671,7 +671,7 @@ class Chart:
             warnings.warn(
                 f"Chart has {mark_count:,} marks which may produce large output. "
                 f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster_threshold=None` to suppress this warning.",
+                f"`raster=False` to suppress this warning.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -691,7 +691,7 @@ class Chart:
             warnings.warn(
                 f"Chart has {mark_count:,} marks which may produce large output. "
                 f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster_threshold=None` to suppress this warning.",
+                f"`raster=False` to suppress this warning.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -701,7 +701,7 @@ class Chart:
         if behavior == "error":
             raise ValueError(
                 f"Auto-raster: {mark_count:,} marks exceed threshold "
-                f"{threshold:,}. Set raster_threshold=None to disable."
+                f"{threshold:,}. Pass raster=False to .show()/.save() to disable."
             )
 
         # Perform the substitution via mark_raster.
@@ -733,7 +733,7 @@ class Chart:
             warnings.warn(
                 f"Auto-raster: substituted mark_raster for {mark} "
                 f"({mark_count:,} marks > threshold {threshold:,}). "
-                f"Set raster_threshold=None to disable.",
+                f"Pass raster=False to .show()/.save() to disable.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -4697,8 +4697,8 @@ class Chart:
             Accessible description attached to the SVG root.
         render_config : RenderConfig or None, optional
             Rendering policy configuration. Controls auto-raster threshold
-            and behavior. Set ``render_config=fm.RenderConfig(raster_threshold=None)``
-            to disable auto-raster and force per-element SVG at any data size.
+            and behavior. For one-off overrides prefer the ``raster=``
+            keyword on ``.show()`` / ``.save()`` / ``.show_svg()`` instead.
 
         Returns
         -------
@@ -4952,14 +4952,24 @@ class Chart:
             return compact
         return json.dumps(json.loads(compact), indent=indent)
 
+    def _with_raster_override(self, raster: bool | None) -> "Chart":
+        """Return a clone with auto-raster forced on/off, or *self* if None."""
+        if raster is None:
+            return self
+        from ferrum.render_config import RenderConfig
+        import dataclasses
+
+        base = self._render_config or RenderConfig()
+        if raster is False:
+            merged = dataclasses.replace(base, raster_threshold=None)
+        else:
+            merged = dataclasses.replace(base, raster_threshold=0)
+        new = self._clone()
+        new._render_config = merged
+        return new
+
     def _render_inputs(self) -> tuple:
-        # Shared render plumbing for show_svg / show_png: spec, data, viewport, theme.
-        # Use the resolved chart's _data (not self._data) so that any dtype casts
-        # applied in _resolve_pending (e.g. swarm value column -> Float64) take effect.
         resolved = self._resolve_pending()
-        # Auto-raster policy: if mark count exceeds the threshold, substitute
-        # mark_raster for the per-element mark.  _apply_auto_raster returns self
-        # unchanged when the policy does not fire.
         chart = resolved._apply_auto_raster()
         spec = chart.to_spec()
         data = to_arrow_table(chart._data)
@@ -4967,20 +4977,16 @@ class Chart:
         theme_dict = chart._theme.to_theme_inputs_dict() if chart._theme else {}
         return spec, data, viewport, theme_dict
 
-    def show_svg(self) -> str:
+    def show_svg(self, *, raster: bool | None = None) -> str:
         """Render the chart to an SVG string.
 
-        Calls the Rust ``render_svg`` engine with the chart's spec, data, viewport,
-        and theme.  The returned string is a complete ``<svg>...</svg>`` document.
-
-        When the mark count exceeds the auto-raster threshold (default
-        500,000), per-element marks (``point``, ``bar``, ``rect``, ``tick``,
-        ``rule``, ``segment``) are transparently replaced with a rasterised
-        pixel-aggregation layer so the SVG stays compact.  A ``UserWarning``
-        is emitted when this substitution occurs.  To disable auto-raster
-        and force per-element SVG regardless of data size, pass
-        ``render_config=fm.RenderConfig(raster_threshold=None)`` via
-        ``.properties()``.
+        Parameters
+        ----------
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+            ``False`` forces per-element SVG regardless of mark count.
+            ``True`` forces raster aggregation.  ``None`` uses the chart's
+            ``RenderConfig`` policy.
 
         Returns
         -------
@@ -4998,7 +5004,8 @@ class Chart:
         """
         from ferrum._core import render_svg
 
-        spec, data, viewport, theme_dict = self._render_inputs()
+        chart = self._with_raster_override(raster)
+        spec, data, viewport, theme_dict = chart._render_inputs()
         if data.num_rows == 0:
             w, h = viewport
             return (
@@ -5007,12 +5014,15 @@ class Chart:
             )
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
-    def show_png(self) -> bytes:
+    def show_png(self, *, raster: bool | None = None) -> bytes:
         """Render the chart to PNG bytes.
 
-        Calls the Rust ``render_png`` engine (SVG → PNG rasterisation via
-        ``resvg``).  Returns raw PNG bytes that can be written to a file or
-        displayed in a Jupyter notebook via ``IPython.display.Image``.
+        Parameters
+        ----------
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+            ``False`` forces per-element rendering.  ``True`` forces raster.
+            ``None`` uses the chart's ``RenderConfig`` policy.
 
         Returns
         -------
@@ -5030,20 +5040,12 @@ class Chart:
         """
         from ferrum._core import render_png
 
-        spec, data, viewport, theme_dict = self._render_inputs()
+        chart = self._with_raster_override(raster)
+        spec, data, viewport, theme_dict = chart._render_inputs()
         return render_png(spec, data, viewport=viewport, theme=theme_dict)
 
-    def save(self, path, *, format=None, embed_wasm=True, **render_kwargs) -> None:
+    def save(self, path, *, format=None, embed_wasm=True, raster: bool | None = None) -> None:
         """Save the chart to a file on disk.
-
-        Delegates to ``ferrum.display.save_chart``.  The file format is
-        inferred from the file extension when ``format`` is not given.
-
-        The auto-raster policy applies to ``save()`` just as it does to
-        ``show_svg()`` and ``show()``: when the mark count exceeds the
-        threshold, per-element marks are replaced with a rasterised layer.
-        To disable, pass ``render_config=fm.RenderConfig(raster_threshold=None)``
-        via ``.properties()``.
 
         Parameters
         ----------
@@ -5055,8 +5057,10 @@ class Chart:
         embed_wasm : bool
             For ``"html"`` format only.  When True (default), the WASM binary
             is base64-inlined for single-file distribution.
-        **render_kwargs
-            Additional keyword arguments forwarded to the underlying renderer.
+        raster : bool or None, default None
+            Override the auto-raster policy for this save only.
+            ``False`` forces per-element output.  ``True`` forces raster.
+            ``None`` uses the chart's ``RenderConfig`` policy.
 
         Examples
         --------
@@ -5067,25 +5071,18 @@ class Chart:
         """
         from ferrum.display import save_chart
 
-        save_chart(self, path, format=format, embed_wasm=embed_wasm, **render_kwargs)
+        save_chart(self._with_raster_override(raster), path, format=format, embed_wasm=embed_wasm)
 
-    def show(self) -> None:
+    def show(self, *, raster: bool | None = None) -> None:
         """Display the chart inline or in a browser.
 
-        In a Jupyter notebook the SVG is rendered inline via
-        ``_repr_svg_``.  Outside of a notebook, the SVG is written to a
-        temporary file and opened in the system browser via
-        ``ferrum.display.show_chart``.
-
-        The auto-raster policy applies here: when the mark count exceeds the
-        threshold, per-element marks are transparently replaced with a
-        rasterised layer.  To disable, pass
-        ``render_config=fm.RenderConfig(raster_threshold=None)`` via
-        ``.properties()``.
-
-        Returns
-        -------
-        None
+        Parameters
+        ----------
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+            ``False`` forces per-element SVG regardless of mark count.
+            ``True`` forces raster aggregation.  ``None`` uses the chart's
+            ``RenderConfig`` policy.
 
         Examples
         --------
@@ -5096,7 +5093,7 @@ class Chart:
         """
         from ferrum.display import show_chart
 
-        show_chart(self)
+        show_chart(self._with_raster_override(raster))
 
     def _repr_svg_(self) -> str | None:
         """Jupyter SVG rich display hook."""

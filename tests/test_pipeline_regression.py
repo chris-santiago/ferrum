@@ -1376,3 +1376,54 @@ class TestTickRug:
         svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
         assert "<svg" in svg
         assert "<line" in svg
+
+
+class TestRasterOverride:
+    """Test the raster= parameter on show_svg/show_png/show/save."""
+
+    @pytest.fixture()
+    def chart(self):
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        return fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+
+    def test_raster_false_disables_auto_raster(self, chart):
+        """raster=False sets threshold to None internally."""
+        overridden = chart._with_raster_override(False)
+        assert overridden._render_config.raster_threshold is None
+
+    def test_raster_true_forces_raster(self, chart):
+        """raster=True sets threshold to 0 so auto-raster always fires."""
+        overridden = chart._with_raster_override(True)
+        assert overridden._render_config.raster_threshold == 0
+
+    def test_raster_none_returns_self(self, chart):
+        """raster=None returns the chart unchanged (no clone)."""
+        assert chart._with_raster_override(None) is chart
+
+    def test_show_svg_raster_false_produces_circles(self, chart):
+        """show_svg(raster=False) renders per-element circles, not raster."""
+        svg = chart.show_svg(raster=False)
+        assert "<circle" in svg or 'cx="' in svg
+
+    def test_show_svg_raster_true_substitutes_raster(self, chart):
+        """show_svg(raster=True) on a 3-row chart produces a raster image."""
+        svg = chart.show_svg(raster=True)
+        assert "<image" in svg
+
+    def test_show_png_raster_kwarg_accepted(self, chart):
+        """show_png(raster=False) produces valid PNG."""
+        png = chart.show_png(raster=False)
+        assert png[:4] == b"\x89PNG"
+
+    def test_save_raster_kwarg_accepted(self, chart, tmp_path):
+        """save(raster=False) writes an SVG with per-element marks."""
+        out = tmp_path / "test.svg"
+        chart.save(str(out), raster=False)
+        svg = out.read_text()
+        assert "<circle" in svg or 'cx="' in svg
+
+    def test_original_chart_not_mutated(self, chart):
+        """The raster= override does not mutate the original chart."""
+        original_config = chart._render_config
+        chart.show_svg(raster=False)
+        assert chart._render_config is original_config

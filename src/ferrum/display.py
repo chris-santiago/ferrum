@@ -17,14 +17,14 @@ def save_chart(
     *,
     format: str | None = None,
     embed_wasm: bool = True,
-    **render_kwargs,
 ) -> None:
     """Save a chart to disk.
 
     Parameters
     ----------
     chart : Chart
-        The chart to save.
+        The chart to save.  Callers typically pass a chart with render
+        overrides already applied (e.g. via ``Chart.save(raster=False)``).
     path : str or Path
         Destination file path.  The extension determines the format unless
         ``format`` is given explicitly.
@@ -35,8 +35,6 @@ def save_chart(
         For ``"html"`` format only.  When True (default), the WASM binary is
         base64-inlined for single-file distribution.  When False, an adjacent
         ``ferrum_wasm_bg.wasm`` sidecar file is required.
-    **render_kwargs
-        Additional keyword arguments forwarded to the render backend.
 
     Examples
     --------
@@ -50,9 +48,9 @@ def save_chart(
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
     if fmt == "svg":
-        path.write_text(chart.show_svg(**render_kwargs))
+        path.write_text(chart.show_svg())
     elif fmt == "png":
-        path.write_bytes(chart.show_png(**render_kwargs))
+        path.write_bytes(chart.show_png())
     elif fmt == "html":
         scene_json = _render_scene_json(chart)
         from ferrum._html import assemble_html
