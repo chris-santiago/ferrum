@@ -940,7 +940,7 @@ def regplot(
 
 
 def residuals_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -968,14 +968,14 @@ def residuals_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     kind : {"studentized", "raw"}, default "studentized"
         Residual type to plot on the y axis. ``"studentized"`` uses
@@ -1023,7 +1023,7 @@ def residuals_chart(
 
     >>> fm.residuals_chart(y_true=y_test, y_pred=reg.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     if panels in (None, "single"):
         panel_list: Any = None
     elif panels == "auto":
@@ -1051,7 +1051,7 @@ def residuals_chart(
 
 
 def prediction_error_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1075,15 +1075,15 @@ def prediction_error_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator, an explicit
         ``ferrum.ModelSource``, or ``None`` when pre-computed arrays are
         supplied via ``y_true`` / ``y_pred``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y_true : array-like, optional
         Pre-computed true labels. Use with ``y_pred`` to bypass model
@@ -1117,7 +1117,7 @@ def prediction_error_chart(
     >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
     source = _resolve_source(
-        model_or_source, X, y,
+        model, X, y,
         y_true=y_true, y_pred=y_pred,
         random_state=random_state,
     )
@@ -1135,7 +1135,7 @@ def prediction_error_chart(
 
 
 def cooks_distance_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1155,15 +1155,15 @@ def cooks_distance_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator that exposes
         ``coef_`` (required for leverage-aware Cook's distance), or an
         explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     threshold : float, "auto", or None, default None
         Cook's-distance threshold for outlier highlighting. A float is
@@ -1186,7 +1186,7 @@ def cooks_distance_chart(
     >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
     """
     source = _resolve_source(
-        model_or_source, X, y,
+        model, X, y,
         random_state=random_state,
     )
     return _residuals_chart_from_source(

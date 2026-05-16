@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+from contextlib import AbstractContextManager
 
 from ferrum.themes import Theme, default as _ferrum_default
 
@@ -13,28 +15,16 @@ _default_theme: contextvars.ContextVar[Theme] = contextvars.ContextVar(
 )
 
 
-class _DefaultThemeCM:
-    """Context manager returned by ``set_default_theme()``.
-
-    Restores the prior process-default theme on ``__exit__``. Also usable as
-    a plain object for fire-and-forget ``set_default_theme(t)`` calls.
-    """
-
-    __slots__ = ("_token",)
-
-    def __init__(self, token: contextvars.Token) -> None:
-        self._token = token
-
-    def __enter__(self) -> "_DefaultThemeCM":
-        """Enter the context manager — returns self."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Restore the previous process-default theme."""
-        _default_theme.reset(self._token)
+@contextlib.contextmanager
+def _default_theme_cm(token: contextvars.Token):
+    """Context manager that resets the default theme token on exit."""
+    try:
+        yield
+    finally:
+        _default_theme.reset(token)
 
 
-def set_default_theme(theme: Theme) -> _DefaultThemeCM:
+def set_default_theme(theme: Theme) -> AbstractContextManager:
     """Set the process-default theme for all subsequent charts.
 
     The returned object is a context manager. Use it with ``with`` to scope
@@ -50,7 +40,7 @@ def set_default_theme(theme: Theme) -> _DefaultThemeCM:
 
     Returns
     -------
-    _DefaultThemeCM
+    contextlib.AbstractContextManager
         Context manager that restores the prior default on ``__exit__``.
 
     Raises
@@ -73,7 +63,7 @@ def set_default_theme(theme: Theme) -> _DefaultThemeCM:
     if not isinstance(theme, Theme):
         raise TypeError(f"theme must be a Theme instance, got {type(theme).__name__}")
     token = _default_theme.set(theme)
-    return _DefaultThemeCM(token)
+    return _default_theme_cm(token)
 
 
 def get_default_theme() -> Theme:
@@ -95,7 +85,7 @@ def get_default_theme() -> Theme:
     return _default_theme.get()
 
 
-def theme_context(theme: Theme) -> _DefaultThemeCM:
+def theme_context(theme: Theme) -> AbstractContextManager:
     """Scope a theme to a ``with`` block — alias for ``set_default_theme()``.
 
     Prefer this spelling over ``set_default_theme()`` when the intent is
@@ -108,7 +98,7 @@ def theme_context(theme: Theme) -> _DefaultThemeCM:
 
     Returns
     -------
-    _DefaultThemeCM
+    contextlib.AbstractContextManager
         Context manager; restores the prior default on ``__exit__``.
 
     Examples

@@ -822,7 +822,7 @@ def _class_balance_chart_from_dataframe(
 
 
 def roc_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -848,20 +848,20 @@ def roc_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator, optional
+    model : estimator, ModelSource, or dict of str -> estimator, optional
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.  When a dict is passed, each estimator is evaluated
         and curves are overlaid.  Mutually exclusive with ``y_true``/``y_pred``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     y_true : array-like, optional
         Ground-truth class labels for the precomputed path.  Must be
-        paired with ``y_pred``; mutually exclusive with ``model_or_source``.
+        paired with ``y_pred``; mutually exclusive with ``model``.
     y_pred : array-like, optional
         Soft scores / probabilities for the precomputed path.  1-D for
         binary classifiers (positive-class scores); 2-D
@@ -881,7 +881,7 @@ def roc_chart(
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -904,7 +904,7 @@ def roc_chart(
     >>> fm.roc_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -927,7 +927,7 @@ def roc_chart(
 
 
 def pr_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -956,15 +956,15 @@ def pr_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator
+    model : estimator, ModelSource, or dict of str -> estimator
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     per_class : bool, default True
         When ``True``, one PR curve per class is drawn using the
@@ -988,7 +988,7 @@ def pr_chart(
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -1012,7 +1012,7 @@ def pr_chart(
     >>> fm.pr_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -1036,7 +1036,7 @@ def pr_chart(
 
 
 def calibration_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1062,16 +1062,16 @@ def calibration_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator
+    model : estimator, ModelSource, or dict of str -> estimator
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.  When a dict is passed, each estimator is evaluated
         and curves are overlaid.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True binary labels.  Required when ``model_or_source`` is a raw
+        True binary labels.  Required when ``model`` is a raw
         estimator.
     n_bins : int, default 10
         Number of probability bins for the reliability diagram.
@@ -1087,7 +1087,7 @@ def calibration_chart(
         Optional one-line subtitle drawn beneath the chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -1111,7 +1111,7 @@ def calibration_chart(
     >>> fm.calibration_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -1134,7 +1134,7 @@ def calibration_chart(
 
 
 def gain_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1161,14 +1161,14 @@ def gain_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
@@ -1196,12 +1196,12 @@ def gain_chart(
 
     >>> fm.gain_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _gain_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def lift_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1227,14 +1227,14 @@ def lift_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
@@ -1262,12 +1262,12 @@ def lift_chart(
 
     >>> fm.lift_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _lift_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def confusion_matrix_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1290,14 +1290,14 @@ def confusion_matrix_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     normalize : {"true", "pred", "all"} or None, default "true"
         Normalization scheme for cell values.  ``None`` shows raw
@@ -1327,7 +1327,7 @@ def confusion_matrix_chart(
 
     >>> fm.confusion_matrix_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _confusion_chart_from_source(
         source,
         normalize=normalize,
@@ -1341,7 +1341,7 @@ def confusion_matrix_chart(
 
 
 def class_prediction_error_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1364,14 +1364,14 @@ def class_prediction_error_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     normalize : bool, default False
         When ``True``, each bar is normalized to 100% (relative
@@ -1400,7 +1400,7 @@ def class_prediction_error_chart(
 
     >>> fm.class_prediction_error_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _class_prediction_error_chart_from_source(
         source,
         normalize=normalize,
@@ -1414,7 +1414,7 @@ def class_prediction_error_chart(
 
 
 def discrimination_threshold_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1444,14 +1444,14 @@ def discrimination_threshold_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible binary classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True binary labels.  Required when ``model_or_source`` is a raw
+        True binary labels.  Required when ``model`` is a raw
         estimator.
     n_thresholds : int, default 50
         Number of evenly spaced threshold values in ``[0, 1]`` to
@@ -1495,7 +1495,7 @@ def discrimination_threshold_chart(
 
     >>> fm.discrimination_threshold_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _discrimination_threshold_chart_from_source(
         source,
         n_thresholds=n_thresholds,
@@ -1513,7 +1513,7 @@ def discrimination_threshold_chart(
 
 
 def classification_report_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1533,14 +1533,14 @@ def classification_report_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible classifier that exposes ``predict``,
         or an explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        True labels. Required when ``model_or_source`` is a raw estimator;
+        True labels. Required when ``model`` is a raw estimator;
         ignored when it is already a ``ModelSource``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -1557,7 +1557,7 @@ def classification_report_chart(
     >>> import ferrum as fm
     >>> fm.classification_report_chart(clf, X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _classification_report_chart(
         source,
         mark=mark,

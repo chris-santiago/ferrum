@@ -39,7 +39,7 @@ from ferrum.plots._helpers import _resolve_source
 
 
 def rank_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -66,14 +66,14 @@ def rank_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is
         supplied, the feature matrix is taken from the bound data.
         When a DataFrame or 2D array is supplied, ``X`` is used as
         the feature matrix if provided.
     X : array-like, optional
-        Feature matrix. Used when ``data_or_source`` is a raw estimator
-        (not a ``ModelSource``) or when ``data_or_source`` is a raw
+        Feature matrix. Used when ``source`` is a raw estimator
+        (not a ``ModelSource``) or when ``source`` is a raw
         DataFrame and ``X`` overrides it.
     y : array-like, optional
         Target vector. Required only for
@@ -135,7 +135,7 @@ def rank_chart(
     )
     if rank == "1d":
         return rank1d_chart(
-            data_or_source,
+            source,
             X,
             y,
             algorithm=algorithm,
@@ -151,7 +151,7 @@ def rank_chart(
         )
     if rank == "2d":
         return rank2d_chart(
-            data_or_source,
+            source,
             X,
             y,
             algorithm=algorithm,
@@ -172,7 +172,7 @@ def rank_chart(
 
 
 def rank1d_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -196,12 +196,12 @@ def rank1d_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is supplied,
         the feature matrix is taken from the bound data.
     X, y : optional
         Feature matrix / target -- forwarded to ``_resolve_source`` when
-        ``data_or_source`` is a raw estimator.
+        ``source`` is a raw estimator.
     algorithm : str or None, default None
         Ranking algorithm. ``None`` selects ``"shapiro"``.
     top_k, orient, color_field, random_state, theme : forwarded to the
@@ -220,21 +220,21 @@ def rank1d_chart(
     import ferrum
 
     algo = algorithm or "shapiro"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank1d(algorithm=algo)
+    if isinstance(source, ferrum.ModelSource):
+        df = source.rank1d(algorithm=algo)
     elif algo == "covariance":
-        source = _resolve_source(
-            data_or_source,
+        ms = _resolve_source(
+            source,
             X,
             y,
             random_state=random_state,
         )
-        df = source.rank1d(algorithm=algo)
+        df = ms.rank1d(algorithm=algo)
     else:
         from ferrum._diagnostics._rank_helpers import rank1d_compute
 
-        data = data_or_source if X is None else X
-        df = rank1d_compute(data, algorithm=algo)
+        input_data = source if X is None else X
+        df = rank1d_compute(input_data, algorithm=algo)
     return _rank1d_chart_from_dataframe(
         df,
         algorithm=algo,
@@ -255,7 +255,7 @@ def rank1d_chart(
 
 
 def rank2d_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -276,7 +276,7 @@ def rank2d_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data.
     X, y : optional
         Feature matrix / target.
@@ -299,13 +299,13 @@ def rank2d_chart(
     import ferrum
 
     algo = algorithm or "pearson"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank2d(algorithm=algo)
+    if isinstance(source, ferrum.ModelSource):
+        df = source.rank2d(algorithm=algo)
     else:
         from ferrum._diagnostics._rank_helpers import rank2d_compute
 
-        data = data_or_source if X is None else X
-        df = rank2d_compute(data, algorithm=algo)
+        input_data = source if X is None else X
+        df = rank2d_compute(input_data, algorithm=algo)
     return _rank2d_chart_from_dataframe(
         df,
         algorithm=algo,

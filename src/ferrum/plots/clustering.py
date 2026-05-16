@@ -320,7 +320,7 @@ def _cluster_diagnostics_chart(
 
 
 def pca_scree_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,  # noqa: N803 — matches ferrum-spec.md parameter name
     *,
     n_components: int | None = None,
@@ -341,13 +341,13 @@ def pca_scree_chart(
 
     Parameters
     ----------
-    model_or_source : PCA estimator, ModelSource, or DataFrame
+    model : PCA estimator, ModelSource, or DataFrame
         A fitted ``sklearn.decomposition.PCA`` instance, an explicit
         ``ferrum.ModelSource`` wrapping one, an unfitted PCA
         estimator (fit is run on ``X``), or a raw polars/pandas
         DataFrame (variance computed via Rust SVD -- no sklearn needed).
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         (unfitted) estimator; ignored when it is already a
         ``ModelSource`` with data bound.
     n_components : int or None, default None
@@ -384,14 +384,14 @@ def pca_scree_chart(
     import pyarrow as pa
 
     is_raw_data = False
-    if isinstance(model_or_source, pl.DataFrame):
+    if isinstance(model, pl.DataFrame):
         is_raw_data = True
-    elif isinstance(model_or_source, np.ndarray) and model_or_source.ndim == 2:
+    elif isinstance(model, np.ndarray) and model.ndim == 2:
         is_raw_data = True
     else:
         try:
             import pandas as pd
-            if isinstance(model_or_source, pd.DataFrame):
+            if isinstance(model, pd.DataFrame):
                 is_raw_data = True
         except ImportError:
             pass
@@ -399,12 +399,12 @@ def pca_scree_chart(
     if is_raw_data:
         from ferrum import _core
 
-        if isinstance(model_or_source, pl.DataFrame):
-            x_df = model_or_source
-        elif isinstance(model_or_source, np.ndarray):
-            x_df = pl.from_numpy(model_or_source, schema=[f"f{i}" for i in range(model_or_source.shape[1])])
+        if isinstance(model, pl.DataFrame):
+            x_df = model
+        elif isinstance(model, np.ndarray):
+            x_df = pl.from_numpy(model, schema=[f"f{i}" for i in range(model.shape[1])])
         else:
-            x_df = pl.from_pandas(model_or_source)
+            x_df = pl.from_pandas(model)
 
         x_arrow = pa.RecordBatch.from_pydict(
             {c: x_df[c].to_arrow() for c in x_df.columns}
@@ -422,7 +422,7 @@ def pca_scree_chart(
             theme=theme,
         )
 
-    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    source = _resolve_source(model, X, None, random_state=random_state)
     return _pca_scree_chart_from_source(
         source,
         n_components=n_components,
@@ -546,7 +546,7 @@ def cluster_diagnostics(
 
 
 def intercluster_distance_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,  # noqa: N803 — matches ferrum-spec.md parameter name
     *,
     k: int | None = None,
@@ -568,13 +568,13 @@ def intercluster_distance_chart(
 
     Parameters
     ----------
-    model_or_source : fitted clusterer or ModelSource
+    model : fitted clusterer or ModelSource
         A fitted sklearn-compatible clusterer (must expose
         ``cluster_centers_`` or ``n_clusters``) or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
         Feature matrix used to compute cluster member counts.
-        Required when ``model_or_source`` is a raw estimator.
+        Required when ``model`` is a raw estimator.
     k : int or None, default None
         Number of clusters. When ``None``, inferred from
         ``model.n_clusters`` or ``len(model.cluster_centers_)``; raises
@@ -607,7 +607,7 @@ def intercluster_distance_chart(
     >>> from sklearn.cluster import KMeans
     >>> fm.intercluster_distance_chart(KMeans(n_clusters=5).fit(X_train), X_train)
     """
-    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    source = _resolve_source(model, X, None, random_state=random_state)
     if k is None:
         if hasattr(source.model, "n_clusters"):
             k = int(source.model.n_clusters)
@@ -632,7 +632,7 @@ def intercluster_distance_chart(
 
 
 def silhouette_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     *,
     random_state: int | None = None,
@@ -650,11 +650,11 @@ def silhouette_chart(
 
     Parameters
     ----------
-    model_or_source : fitted clusterer or ModelSource
+    model : fitted clusterer or ModelSource
         A fitted sklearn-compatible clustering estimator that exposes
         ``labels_``, or an explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
@@ -672,7 +672,7 @@ def silhouette_chart(
     >>> from sklearn.cluster import KMeans
     >>> fm.silhouette_chart(KMeans(n_clusters=3, random_state=0).fit(X), X)
     """
-    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    source = _resolve_source(model, X, None, random_state=random_state)
     return _silhouette_chart_from_source(
         source,
         mark=mark,
@@ -684,7 +684,7 @@ def silhouette_chart(
 
 
 def manifold_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     *,
     method: str = "umap",
@@ -703,11 +703,11 @@ def manifold_chart(
 
     Parameters
     ----------
-    model_or_source : fitted clusterer or ModelSource
+    model : fitted clusterer or ModelSource
         A fitted clustering estimator whose ``labels_`` attribute colors
         the points, or an explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     method : str, default "umap"
         Embedding algorithm. Typical values are ``"umap"``, ``"tsne"``,
@@ -730,7 +730,7 @@ def manifold_chart(
     """
     import ferrum
 
-    source = _resolve_source(model_or_source, X, None, random_state=random_state)
+    source = _resolve_source(model, X, None, random_state=random_state)
     emb = source.embeddings(method=method)
     chart = (
         ferrum.Chart(emb)
@@ -741,7 +741,7 @@ def manifold_chart(
 
 
 def elbow_chart(
-    model_class: Any,
+    model: Any,
     X: Any,
     *,
     ks: Any,
@@ -760,7 +760,7 @@ def elbow_chart(
 
     Parameters
     ----------
-    model_class : type
+    model : type
         Uninstantiated clustering class (e.g. ``sklearn.cluster.KMeans``).
         Must accept ``n_clusters``, ``random_state``, and ``n_init`` keyword
         arguments.
@@ -790,7 +790,7 @@ def elbow_chart(
     from ferrum._diagnostics.visualizers.clustering import ElbowVisualizer
 
     viz = ElbowVisualizer(
-        model_class,
+        model,
         ks=ks,
         metric=metric,
         random_state=random_state,

@@ -208,7 +208,7 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
 
 
 def _resolve_source(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -221,8 +221,8 @@ def _resolve_source(
     or ``_PrecomputedSource``.
 
     Exactly one input path must be active:
-    - **Model path**: ``model_or_source`` is not ``None``; ``y_true``/``y_pred`` must both be ``None``.
-    - **Precomputed path**: both ``y_true`` and ``y_pred`` are not ``None``; ``model_or_source`` must be ``None``.
+    - **Model path**: ``model`` is not ``None``; ``y_true``/``y_pred`` must both be ``None``.
+    - **Precomputed path**: both ``y_true`` and ``y_pred`` are not ``None``; ``model`` must be ``None``.
     - **Neither**: ``ValueError``.
 
     The precomputed path is incompatible with ``compare=``.
@@ -231,12 +231,12 @@ def _resolve_source(
     from ferrum._diagnostics.source import ComparedModelSource
 
     has_precomputed = y_true is not None or y_pred is not None
-    has_model = model_or_source is not None
+    has_model = model is not None
 
     if has_precomputed:
         if has_model:
             raise ValueError(
-                "Supply either a model/source (model_or_source=) or precomputed arrays "
+                "Supply either a model/source (model=) or precomputed arrays "
                 "(y_true=, y_pred=), not both."
             )
         if compare is not None:
@@ -255,25 +255,25 @@ def _resolve_source(
 
     if not has_model:
         raise ValueError(
-            "Supply either a fitted model/source (model_or_source=) or precomputed arrays "
+            "Supply either a fitted model/source (model=) or precomputed arrays "
             "(y_true=, y_pred=)."
         )
 
-    if isinstance(model_or_source, ComparedModelSource):
-        return model_or_source
+    if isinstance(model, ComparedModelSource):
+        return model
     if compare is not None:
         if not isinstance(compare, dict):
             raise TypeError(
                 f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
             )
-        models = {"base": model_or_source, **compare}
+        models = {"base": model, **compare}
         return ferrum.ModelSource.compare(
             models, X, y, random_state=random_state,
         )
-    if isinstance(model_or_source, dict):
+    if isinstance(model, dict):
         return ferrum.ModelSource.compare(
-            model_or_source, X, y, random_state=random_state,
+            model, X, y, random_state=random_state,
         )
-    if isinstance(model_or_source, ferrum.ModelSource):
-        return model_or_source
-    return ferrum.ModelSource(model_or_source, X, y, random_state=random_state)
+    if isinstance(model, ferrum.ModelSource):
+        return model
+    return ferrum.ModelSource(model, X, y, random_state=random_state)

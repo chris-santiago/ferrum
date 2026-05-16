@@ -491,7 +491,7 @@ def _pdp_chart_from_source(
 
 
 def importance_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -516,15 +516,15 @@ def importance_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``. The estimator must expose
         ``feature_importances_`` or ``coef_`` for ``method="builtin"``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator. Also required for ``method="permutation"``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator. Also required for ``method="permutation"``.
     method : {"builtin", "permutation"}, default "builtin"
         Importance extraction method. ``"builtin"`` reads
@@ -557,7 +557,7 @@ def importance_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.importance_chart(RandomForestClassifier().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _importance_chart_from_source(
         source,
         method=method,
@@ -576,7 +576,7 @@ def importance_chart(
 
 
 def shap_beeswarm_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -599,7 +599,7 @@ def shap_beeswarm_chart(
     the first class (the only group on regression and binary).
 
     See :func:`shap_chart` for the shared parameter docstring
-    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    (``model``, ``X``, ``y``, ``max_display``, ``order``,
     ``background``, ``per_class``, ``random_state``, ``theme``) — this
     function is the dedicated sibling for ``kind="beeswarm"``.
 
@@ -622,7 +622,7 @@ def shap_beeswarm_chart(
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_beeswarm_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_beeswarm_chart_from_source(
         source,
         max_display=max_display,
@@ -639,7 +639,7 @@ def shap_beeswarm_chart(
 
 
 def shap_bar_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -661,7 +661,7 @@ def shap_bar_chart(
     the first class.
 
     See :func:`shap_chart` for the full shared parameter docstring
-    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    (``model``, ``X``, ``y``, ``max_display``, ``order``,
     ``background``, ``per_class``, ``random_state``, ``theme``) — this
     function is the dedicated sibling for ``kind="bar"``.
 
@@ -676,7 +676,7 @@ def shap_bar_chart(
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_bar_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_bar_chart_from_source(
         source,
         max_display=max_display,
@@ -692,7 +692,7 @@ def shap_bar_chart(
 
 
 def shap_waterfall_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -716,7 +716,7 @@ def shap_waterfall_chart(
     class.
 
     See :func:`shap_chart` for the full shared parameter docstring
-    (``model_or_source``, ``X``, ``y``, ``max_display``, ``order``,
+    (``model``, ``X``, ``y``, ``max_display``, ``order``,
     ``background``, ``per_class``, ``random_state``, ``theme``) — this
     function is the dedicated sibling for ``kind="waterfall"``.
 
@@ -739,7 +739,7 @@ def shap_waterfall_chart(
     ...     sample_idx=0,
     ... )
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_waterfall_chart_from_source(
         source,
         sample_idx=sample_idx,
@@ -756,7 +756,7 @@ def shap_waterfall_chart(
 
 
 def shap_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -782,15 +782,15 @@ def shap_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``. SHAP computation requires a tree-based
         or kernel-explainer-compatible model.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; not used by the SHAP computation itself.
     kind : {"beeswarm", "bar", "waterfall"}, default "beeswarm"
         Chart type. ``"beeswarm"`` renders one point per (sample,
@@ -847,7 +847,7 @@ def shap_chart(
         stacklevel=2,
     )
 
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     if kind == "beeswarm":
         return _shap_beeswarm_chart_from_source(
             source,
@@ -891,7 +891,7 @@ def shap_chart(
 
 
 def pdp_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -917,14 +917,14 @@ def pdp_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; not used by PDP computation.
     features : list of str or int, required
         Column names or integer indices of the features to plot. Each
@@ -970,7 +970,7 @@ def pdp_chart(
         features,
         hint="pass a list of column names or indices",
     )
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _pdp_chart_from_source(
         source,
         list(features),

@@ -279,7 +279,7 @@ def _alpha_selection_chart_from_source(
 
 
 def learning_curve_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -303,14 +303,14 @@ def learning_curve_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     cv : int, default 5
         Number of cross-validation folds.
@@ -342,7 +342,7 @@ def learning_curve_chart(
     >>> from sklearn.svm import SVC
     >>> fm.learning_curve_chart(SVC(), X_train, y_train, cv=5)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _learning_curve_chart_from_source(
         source,
         cv=cv,
@@ -359,7 +359,7 @@ def learning_curve_chart(
 
 
 def validation_curve_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -387,14 +387,14 @@ def validation_curve_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     param : str, default "alpha"
         Name of the hyperparameter to sweep, passed to
@@ -442,7 +442,7 @@ def validation_curve_chart(
         values,
         hint="pass an explicit list of values to sweep for the given param",
     )
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
         source,
         param,
@@ -461,7 +461,7 @@ def validation_curve_chart(
 
 
 def cv_scores_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -484,14 +484,14 @@ def cv_scores_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     cv : int, default 5
         Number of cross-validation folds.
@@ -521,7 +521,7 @@ def cv_scores_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.cv_scores_chart(RandomForestClassifier(), X_train, y_train, cv=10)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _cv_scores_chart_from_source(
         source,
         cv=cv,
@@ -537,7 +537,7 @@ def cv_scores_chart(
 
 
 def alpha_selection_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -561,15 +561,15 @@ def alpha_selection_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible penalized estimator or
         an explicit ``ferrum.ModelSource``. The estimator must accept an
         ``alpha`` constructor parameter.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     alphas : array-like, required
         Regularization-strength values to sweep. Must be provided;
@@ -611,7 +611,7 @@ def alpha_selection_chart(
         alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
     )
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(
         source,
         alphas,
