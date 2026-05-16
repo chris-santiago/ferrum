@@ -70,7 +70,7 @@ report.save("model_report.svg")
 
 ### Figure-level helpers as a fast path
 
-Every yellowbrick visualizer also has a one-line helper in Ferrum (`roc_chart`, `confusion_matrix_chart`, etc.) that skips the `.fit()` / `.score()` ceremony. Pass a fitted model and held-out data, get a chart back.
+Every yellowbrick visualizer also has a one-line helper in Ferrum ([`roc_chart`][ferrum.roc_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], etc.) that skips the `.fit()` / `.score()` ceremony. Pass a fitted model and held-out data, get a chart back.
 
 ### ModelSource for efficiency
 

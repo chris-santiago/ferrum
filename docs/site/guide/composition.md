@@ -10,9 +10,9 @@ Ferrum ships six composition operators, each producing a different kind of compo
 | **`\|` (HConcat)** | Independent charts laid out left-to-right. |
 | **`&` (VConcat)** | Independent charts stacked top-to-bottom. |
 | **`fm.hconcat()` / `fm.vconcat()`** | Convenience functions for building concat layouts from more than two charts. |
-| **`JointChart`** | Central plot with marginal distributions on the top and right. |
-| **`RepeatChart`** | Template chart repeated across a grid of field combinations. |
-| **`ClusterMapChart`** | Clustered heatmap with row and column dendrograms. |
+| **[`JointChart`][ferrum.JointChart]** | Central plot with marginal distributions on the top and right. |
+| **[`RepeatChart`][ferrum.RepeatChart]** | Template chart repeated across a grid of field combinations. |
+| **[`ClusterMapChart`][ferrum.ClusterMapChart]** | Clustered heatmap with row and column dendrograms. |
 
 The principles that govern these operators are the same as the rest of Ferrum's grammar: composition is structural, declarative, and produces a value that you can theme, save, render statically or interactively, and embed into larger views. Compound views are the same kind of object as base charts — they accept the same theme, the same renderer, and the same composition operators recursively.
 
@@ -110,7 +110,7 @@ assert stacked.show_svg().startswith("<svg")
 
 You can chain operators to compose deeper trees: `(a | b) & (c | d)` produces a 2 × 2 grid where the two rows have different charts and the left and right columns differ within each row. The operators are left-associative and follow normal Python precedence.
 
-`HConcatChart` and `VConcatChart` also accept explicit list construction with a `spacing` keyword for fine control:
+[`HConcatChart`][ferrum.HConcatChart] and [`VConcatChart`][ferrum.VConcatChart] also accept explicit list construction with a `spacing` keyword for fine control:
 
 ```python
 import ferrum as fm
@@ -154,7 +154,7 @@ assert row.show_svg().startswith("<svg")
 
 ![fm.hconcat convenience](img/composition_05.png)
 
-These are equivalent to `HConcatChart([a, b, c])` / `VConcatChart([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
+These are equivalent to [`HConcatChart`][ferrum.HConcatChart]`([a, b, c])` / [`VConcatChart`][ferrum.VConcatChart]`([a, b, c])` but read more naturally at the call site. Use them when you have more than two charts or want explicit `spacing` control; use the `|` / `&` operators for quick two-chart layouts.
 
 ## Joint distribution with marginals
 
@@ -224,7 +224,7 @@ Use `RepeatChart` when:
 
 For a small-multiples layout where the data is *partitioned* across cells (one panel per group), use the `facet` encoding channel instead. The difference is structural: faceting splits one chart by a categorical field; `RepeatChart` substitutes a different encoding into a template.
 
-`ferrum.plots.pairplot` is the figure-level helper that uses `RepeatChart` internally to produce a full pairs grid.
+[`ferrum.plots.pairplot`][ferrum.pairplot] is the figure-level helper that uses [`RepeatChart`][ferrum.RepeatChart] internally to produce a full pairs grid.
 
 ## Clustered heatmap with dendrograms
 
@@ -239,7 +239,7 @@ A decision guide for the common cases:
 - **Multiple marks, one set of axes?** Use `+` (layer). Examples: scatter + smooth, line + ribbon, bars + text labels.
 - **Multiple charts, no shared axes, side-by-side?** Use `|` (`HConcat`).
 - **Multiple charts, no shared axes, stacked vertically?** Use `&` (`VConcat`).
-- **Central plot with marginals on top and right?** Use `JointChart` (or the `jointplot` helper).
+- **Central plot with marginals on top and right?** Use [`JointChart`][ferrum.JointChart] (or the [`jointplot`][ferrum.jointplot] helper).
 - **Template chart repeated across a grid of fields?** Use `RepeatChart` (or `pairplot` for the canonical pairs case).
 - **Heatmap with hierarchical clustering structure?** Use `ClusterMapChart` (or the `clustermap` helper).
 - **Same chart broken into panels by a categorical field?** That is not composition — use the `facet` / `facet_row` / `facet_col` encoding channels (see [Marks & encodings](marks-encodings.md#faceting-channels)).

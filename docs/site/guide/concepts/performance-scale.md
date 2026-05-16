@@ -10,7 +10,7 @@ This page explains the architecture behind that commitment and the choices it fo
 
 Python is the declaration layer. Rust is the computation layer. Data crosses the boundary once, through the Arrow C Data Interface, with no row-level copying. The Rust engine runs scale resolution, statistical transforms, and layout against columnar Arrow batches, then produces a renderer-agnostic intermediate form (the SceneGraph). Different backends — SVG, CPU raster, and GPU/WASM — consume that SceneGraph without changing the chart's conceptual identity.
 
-That single pipeline is what lets the same `Chart` spec produce a vector SVG for a publication figure and a rasterized GPU-backed plot for a 10-million-row scatter, both inside one library.
+That single pipeline is what lets the same [`Chart`][ferrum.Chart] spec produce a vector SVG for a publication figure and a rasterized GPU-backed plot for a 10-million-row scatter, both inside one library.
 
 ## Python declares, Rust computes
 
@@ -42,7 +42,7 @@ The chart spec does not change when you switch outputs. The renderer changes. Th
 
 The headline scale problem in visualization is mark count. Every existing library breaks at some mark threshold — Altair around 5,000 rows, seaborn or matplotlib around 100,000 marks, plotly around 500,000. The usual symptoms are slow renders, browser hangs, and eventually crashes.
 
-Ferrum's response is to make the choice between vector and raster part of the chart system rather than the user's problem. You can declare a raster mark explicitly (`mark_raster`, `mark_hex`, `mark_contour`), or rely on auto-raster policies that detect when a vector backend would degrade and switch to a rasterized representation transparently.
+Ferrum's response is to make the choice between vector and raster part of the chart system rather than the user's problem. You can declare a raster mark explicitly ([`mark_raster`][ferrum.Chart.mark_raster], [`mark_hex`][ferrum.Chart.mark_hex], [`mark_contour`][ferrum.Chart.mark_contour]), or rely on auto-raster policies that detect when a vector backend would degrade and switch to a rasterized representation transparently.
 
 The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter at 10,000,000 rows are the same Ferrum spec. The only thing that changes is how the engine draws the marks underneath.
 

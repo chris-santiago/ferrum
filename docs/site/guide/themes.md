@@ -226,7 +226,7 @@ fm.set_default_theme(fm.themes.default)
 
 ![Dark theme via process default](img/themes_02.png)
 
-`set_default_theme()` does not mutate a module-level config object. It writes to a per-thread `contextvars.ContextVar`, which means:
+[`set_default_theme()`][ferrum.set_default_theme] does not mutate a module-level config object. It writes to a per-thread `contextvars.ContextVar`, which means:
 
 - The default is scoped to the current Python interpreter context.
 - Concurrent tasks (asyncio, multiprocessing, threads using contextvars) do not share defaults.

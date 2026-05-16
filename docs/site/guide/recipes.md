@@ -165,7 +165,7 @@ assert chart.show_svg().startswith("<svg")
 
 ## Pairwise scatter grid
 
-Use `RepeatChart` to show multiple field combinations in a grid:
+Use [`RepeatChart`][ferrum.RepeatChart] to show multiple field combinations in a grid:
 
 ```python
 import ferrum as fm
@@ -191,7 +191,7 @@ assert chart.show_svg().startswith("<svg")
 
 ![Pairwise scatter grid](img/recipes_07.png)
 
-Each cell in the grid swaps one field into the x or y encoding. This is the grammar-level equivalent of `fm.pairplot()` — use `RepeatChart` when you want full control over the template chart.
+Each cell in the grid swaps one field into the x or y encoding. This is the grammar-level equivalent of [`fm.pairplot()`][ferrum.pairplot] — use [`RepeatChart`][ferrum.RepeatChart] when you want full control over the template chart.
 
 ## Three-layer scatter with smooth and rug
 

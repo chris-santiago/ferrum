@@ -14,10 +14,10 @@ Treating diagnostics as data has direct, practical consequences for what you can
 
 That means a ROC curve participates in the rest of the grammar:
 
-- **It composes.** `fm.hconcat(roc_chart, confusion_chart, calibration_chart)` puts three diagnostics in a row. The same `hconcat` you use for scatter plots, with the same `|` operator.
-- **It themes.** Set a process-wide theme via `set_default_theme()`, or pass a theme to one chart with `.theme()`, and the ROC curve picks it up identically to a faceted distribution plot.
+- **It composes.** [`fm.hconcat()`][ferrum.hconcat] puts three diagnostics in a row. The same [`hconcat`][ferrum.hconcat] you use for scatter plots, with the same `|` operator.
+- **It themes.** Set a process-wide theme via [`set_default_theme()`][ferrum.set_default_theme], or pass a theme to one chart with `.theme()`, and the ROC curve picks it up identically to a faceted distribution plot.
 - **It saves.** `.save("roc.svg")` works exactly the same as for any other chart.
-- **It facets.** When the underlying data supports it, the same encoding channels (`Facet`, `FacetRow`, `FacetCol`) apply to diagnostics.
+- **It facets.** When the underlying data supports it, the same encoding channels ([`Facet`][ferrum.Facet], [`FacetRow`][ferrum.FacetRow], [`FacetCol`][ferrum.FacetCol]) apply to diagnostics.
 - **It renders.** Static SVG, CPU raster, GPU interactive — same chart spec, same renderer choices. (Interactive output is described in [Interactivity is a renderer](interactivity.md).)
 
 These compositions are not special-cased. They fall out of the chart model because a ROC chart and a scatter chart are the same kind of object.
@@ -28,9 +28,9 @@ Ferrum exposes the model-output side of the library through three coordinated la
 
 **[`ModelSource`][ferrum.ModelSource]** is the data interface. It wraps a fitted model and a held-out dataset and exposes the derived tables that diagnostics build on: predicted probabilities, predicted classes, residuals, ROC curve points, PR curve points, calibration bins, confusion-matrix counts, learning-curve samples, validation-curve samples, SHAP values, partial dependence grids, and related outputs. The point of `ModelSource` is that you compute those derived tables once, then the various diagnostic plots reuse the same data.
 
-**Figure-level diagnostic helpers** are the convenience layer: [`roc_chart`][ferrum.roc_chart], [`pr_chart`][ferrum.pr_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], `residuals_chart`, `shap_chart`, `learning_curve_chart`, `validation_curve_chart`, `feature_importances_chart`, `pdp_chart`, and similar functions. They take a fitted model + data (or a `ModelSource`) and return a `Chart`. This is the layer you reach for when you want a diagnostic in one line.
+**Figure-level diagnostic helpers** are the convenience layer: [`roc_chart`][ferrum.roc_chart], [`pr_chart`][ferrum.pr_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`residuals_chart`][ferrum.residuals_chart], [`shap_chart`][ferrum.shap_chart], [`learning_curve_chart`][ferrum.learning_curve_chart], [`validation_curve_chart`][ferrum.validation_curve_chart], [`feature_importances_chart`][ferrum.feature_importances_chart], [`pdp_chart`][ferrum.pdp_chart], and similar functions. They take a fitted model + data (or a `ModelSource`) and return a `Chart`. This is the layer you reach for when you want a diagnostic in one line.
 
-**sklearn-protocol visualizers** — [`ROCVisualizer`][ferrum.ROCVisualizer], `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, `ResidualsVisualizer`, `SHAPVisualizer`, `LearningCurveVisualizer`, and others — provide an object-oriented interface that mirrors yellowbrick's pattern. Each visualizer has a `.fit()` / `.score()` / `.show()` flow and ultimately returns a `Chart`. These are useful when you want lifecycle control or when the visualizer needs to manage CV-fold state.
+**sklearn-protocol visualizers** — [`ROCVisualizer`][ferrum.ROCVisualizer], [`CalibrationVisualizer`][ferrum.CalibrationVisualizer], [`ConfusionMatrixVisualizer`][ferrum.ConfusionMatrixVisualizer], [`ResidualsVisualizer`][ferrum.ResidualsVisualizer], [`SHAPVisualizer`][ferrum.SHAPVisualizer], [`LearningCurveVisualizer`][ferrum.LearningCurveVisualizer], and others — provide an object-oriented interface that mirrors yellowbrick's pattern. Each visualizer has a `.fit()` / `.score()` / `.show()` flow and ultimately returns a `Chart`. These are useful when you want lifecycle control or when the visualizer needs to manage CV-fold state.
 
 All three layers produce the same kind of chart object. You can mix them freely: take a `roc_chart()` helper result and `hconcat` it with a `ROCVisualizer().show()` result.
 

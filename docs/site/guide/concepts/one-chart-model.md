@@ -11,7 +11,7 @@ This is the foundation that every other choice in the library rests on.
 Every visualization in Ferrum is a composition of the same building blocks:
 
 - **Data** — a tabular source. Pandas, Polars, Arrow tables, NumPy arrays, or any dataframe Narwhals can interpret. Data is always columnar and always referenced by field name from the rest of the spec.
-- **Encodings** — typed mappings from data fields to visual variables. `X` and `Y` are encodings; so are `Color`, `Size`, `Shape`, `Facet`, and the error and angle channels. Encodings declare *what* a field means in the chart, not *how* it should look.
+- **Encodings** — typed mappings from data fields to visual variables. [`X`][ferrum.X] and [`Y`][ferrum.Y] are encodings; so are [`Color`][ferrum.Color], [`Size`][ferrum.Size], [`Shape`][ferrum.Shape], [`Facet`][ferrum.Facet], and the error and angle channels. Encodings declare *what* a field means in the chart, not *how* it should look.
 - **Marks** — the geometric primitives that visualize encoded data: points, lines, bars, areas, rectangles, ticks, text, ribbons, contours, swarms, density curves, and more. A mark is the smallest visible unit of a chart.
 - **Scales** — the functions that turn data domains into visual ranges. Linear, log, symlog, time, quantile, threshold, ordinal. Scales are explicit; Ferrum does not silently choose a scale on your behalf when the choice would be ambiguous.
 - **Coordinate systems** — Cartesian by default, with explicit `CoordFlip`, `CoordPolar`, `CoordGeo`, and `CoordFixed` for the cases where the geometry needs to change rather than the data.

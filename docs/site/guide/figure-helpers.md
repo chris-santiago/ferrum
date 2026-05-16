@@ -10,7 +10,7 @@ Reach for a helper when:
 
 - You want the canonical version of a common chart with one call.
 - You're prototyping and the chart shape is more important than fine-grained control.
-- You're following a seaborn-style mental model (`displot`, `catplot`, `lmplot` follow seaborn's signatures intentionally).
+- You're following a seaborn-style mental model ([`displot`][ferrum.displot], [`catplot`][ferrum.catplot], [`lmplot`][ferrum.lmplot] follow seaborn's signatures intentionally).
 
 Drop down into the grammar when:
 
@@ -36,7 +36,7 @@ The two paths converge: a helper's output and a grammar-authored chart are the s
 
 ## Distribution: `displot`
 
-A univariate distribution plot. Supports `kind="hist"` (default), `"kde"`, `"ecdf"`, and `"rug"`. Returns a `Chart`.
+A univariate distribution plot. Supports `kind="hist"` (default), `"kde"`, `"ecdf"`, and `"rug"`. Returns a [`Chart`][ferrum.Chart].
 
 ```python
 import ferrum as fm
@@ -53,11 +53,11 @@ assert chart.show_svg().startswith("<svg")
 
 ![displot histogram](img/figure-helpers_01.png)
 
-`displot` follows seaborn's signature: `x`, `y`, `hue`, `col`, `row` for encoding; `kind` for the geometry; `bins`, `bandwidth`, `bw_adjust`, `multiple`, `kde`, `rug` for the statistical details.
+[`displot`][ferrum.displot] follows seaborn's signature: `x`, `y`, `hue`, `col`, `row` for encoding; `kind` for the geometry; `bins`, `bandwidth`, `bw_adjust`, `multiple`, `kde`, `rug` for the statistical details.
 
 ## Categorical: `catplot`
 
-Categorical comparisons across groups. Supports `kind="strip"` (default), `"swarm"`, `"box"`, `"violin"`, `"boxen"`, `"point"`, `"bar"`, `"count"`. Returns a `Chart`.
+Categorical comparisons across groups. Supports `kind="strip"` (default), `"swarm"`, `"box"`, `"violin"`, `"boxen"`, `"point"`, `"bar"`, `"count"`. Returns a [`Chart`][ferrum.Chart].
 
 ```python
 import ferrum as fm
@@ -74,11 +74,11 @@ assert chart.show_svg().startswith("<svg")
 
 ![catplot box](img/figure-helpers_02.png)
 
-`catplot` is the one-call entry point for the boxplot / violin / strip / swarm family. It selects the right composite mark based on `kind=` and applies sensible defaults (jitter for strip plots, dodge for grouped bars, bootstrap CIs for point and bar estimates).
+[`catplot`][ferrum.catplot] is the one-call entry point for the boxplot / violin / strip / swarm family. It selects the right composite mark based on `kind=` and applies sensible defaults (jitter for strip plots, dodge for grouped bars, bootstrap CIs for point and bar estimates).
 
 ## Relational: `relplot`
 
-`relplot` produces a relational plot — scatter or line — with optional faceting. Supports `kind="scatter"` (default) and `"line"`. Returns a `Chart`.
+`relplot` produces a relational plot — scatter or line — with optional faceting. Supports `kind="scatter"` (default) and `"line"`. Returns a [`Chart`][ferrum.Chart].
 
 ```python
 import ferrum as fm
@@ -95,11 +95,11 @@ assert chart.show_svg().startswith("<svg")
 
 ![relplot scatter](img/figure-helpers_03.png)
 
-`relplot` follows seaborn's signature: `x`, `y`, `hue`, `size`, `style`, `col`, `row` for encoding; `kind` for the geometry. Use it when you want a quick faceted scatter or line chart without dropping into the grammar.
+[`relplot`][ferrum.relplot] follows seaborn's signature: `x`, `y`, `hue`, `size`, `style`, `col`, `row` for encoding; `kind` for the geometry. Use it when you want a quick faceted scatter or line chart without dropping into the grammar.
 
 ## Regression: `lmplot` and `residplot`
 
-`lmplot` produces a regression scatter with a fit overlay. The fit is configurable through `method=` (`"lm"`, `"loess"`, `"logistic"`, polynomial order) and `ci=` for the confidence band. Returns a `Chart` with the scatter and the fit as layers.
+[`lmplot`][ferrum.lmplot] produces a regression scatter with a fit overlay. The fit is configurable through `method=` (`"lm"`, `"loess"`, `"logistic"`, polynomial order) and `ci=` for the confidence band. Returns a [`Chart`][ferrum.Chart] with the scatter and the fit as layers.
 
 ```python
 import ferrum as fm
@@ -116,7 +116,7 @@ assert chart.show_svg().startswith("<svg")
 
 ![lmplot](img/figure-helpers_04.png)
 
-`residplot` plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a `Chart`.
+[`residplot`][ferrum.residplot] plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a [`Chart`][ferrum.Chart].
 
 ```python
 import ferrum as fm
@@ -137,7 +137,7 @@ Pass `lowess=True` to overlay a lowess smoother on the residuals; `robust=True` 
 
 ## Matrix: `pairplot`, `heatmap`, `clustermap`
 
-`pairplot` produces a pairwise-scatter grid (also known as a scatterplot matrix). Returns a `RepeatChart`.
+[`pairplot`][ferrum.pairplot] produces a pairwise-scatter grid (also known as a scatterplot matrix). Returns a [`RepeatChart`][ferrum.RepeatChart].
 
 ```python
 import ferrum as fm
@@ -156,7 +156,7 @@ assert chart.show_svg().startswith("<svg")
 
 For a triangular instead of square layout, pass `corner=True`. To set diagonal cells separately (typically univariate distributions), use `diag_kind="hist"` or `"kde"`.
 
-`heatmap` renders a 2-D heatmap from a wide-format DataFrame. Each row of the input becomes a row of the heatmap; each numeric column becomes a column. Returns a `Chart`.
+[`heatmap`][ferrum.heatmap] renders a 2-D heatmap from a wide-format DataFrame. Each row of the input becomes a row of the heatmap; each numeric column becomes a column. Returns a [`Chart`][ferrum.Chart].
 
 ```python
 import ferrum as fm
@@ -176,11 +176,11 @@ assert chart.show_svg().startswith("<svg")
 
 ![heatmap](img/figure-helpers_07.png)
 
-`clustermap` returns a `ClusterMapChart` — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
+[`clustermap`][ferrum.clustermap] returns a [`ClusterMapChart`][ferrum.ClusterMapChart] — a heatmap with row and column dendrograms computed from a hierarchical clustering of the data. The signature mirrors seaborn's: `method=` selects the linkage ("ward", "single", "complete", "average"), `metric=` selects the distance ("euclidean", "correlation", etc.), and `z_score=` / `standard_scale=` normalize the data before clustering.
 
 ## Joint: `jointplot`
 
-`jointplot` produces a central bivariate plot flanked by univariate marginals — a scatter with marginal histograms is the canonical version. Returns a `JointChart`.
+[`jointplot`][ferrum.jointplot] produces a central bivariate plot flanked by univariate marginals — a scatter with marginal histograms is the canonical version. Returns a [`JointChart`][ferrum.JointChart].
 
 ```python
 import ferrum as fm

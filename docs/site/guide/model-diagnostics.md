@@ -6,9 +6,9 @@ The diagnostic surface consists of three coordinated layers. You can mix and mat
 
 | Layer | What it is | When to reach for it |
 |---|---|---|
-| **Figure-level helpers** | [`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], `shap_chart`, etc. | One-line entry points. Takes a fitted model + test data, returns a [`Chart`][ferrum.Chart]. |
+| **Figure-level helpers** | [`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`shap_chart`][ferrum.shap_chart], etc. | One-line entry points. Takes a fitted model + test data, returns a [`Chart`][ferrum.Chart]. |
 | **[`ModelSource`][ferrum.ModelSource]** | The data interface | When you want to compute derived diagnostic data once and reuse it across multiple charts. |
-| **sklearn-protocol visualizers** | [`ROCVisualizer`][ferrum.ROCVisualizer], `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, etc. | When you want lifecycle control (`.fit()` / `.score()` / `.show()`) or are following a yellowbrick-style pattern. |
+| **sklearn-protocol visualizers** | [`ROCVisualizer`][ferrum.ROCVisualizer], [`CalibrationVisualizer`][ferrum.CalibrationVisualizer], [`ConfusionMatrixVisualizer`][ferrum.ConfusionMatrixVisualizer], etc. | When you want lifecycle control (`.fit()` / `.score()` / `.show()`) or are following a yellowbrick-style pattern. |
 
 The design rationale is on the [Model outputs are data](concepts/model-outputs-as-data.md) Concepts page; this page is the practical reference.
 
@@ -74,10 +74,10 @@ Every helper follows the same signature shape: `helper(model_or_source, X=None, 
 
 | Family | Helpers |
 |---|---|
-| Classification | `roc_chart`, `pr_chart`, `calibration_chart`, `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart`, `class_balance_chart`, `discrimination_threshold_chart`, `gain_chart`, `lift_chart` |
-| Regression | `residuals_chart`, `prediction_error_chart`, `cooks_distance_chart` |
-| Feature explanation | `importance_chart`, `shap_chart`, `shap_beeswarm_chart`, `shap_bar_chart`, `shap_waterfall_chart`, `pdp_chart` |
-| Model selection | `learning_curve_chart`, `validation_curve_chart`, `cv_scores_chart`, `alpha_selection_chart` |
+| Classification | [`roc_chart`][ferrum.roc_chart], [`pr_chart`][ferrum.pr_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`class_prediction_error_chart`][ferrum.class_prediction_error_chart], [`classification_report_chart`][ferrum.classification_report_chart], [`class_balance_chart`][ferrum.class_balance_chart], [`discrimination_threshold_chart`][ferrum.discrimination_threshold_chart], [`gain_chart`][ferrum.gain_chart], [`lift_chart`][ferrum.lift_chart] |
+| Regression | [`residuals_chart`][ferrum.residuals_chart], [`prediction_error_chart`][ferrum.prediction_error_chart], [`cooks_distance_chart`][ferrum.cooks_distance_chart] |
+| Feature explanation | [`importance_chart`][ferrum.importance_chart], [`shap_chart`][ferrum.shap_chart], [`shap_beeswarm_chart`][ferrum.shap_beeswarm_chart], [`shap_bar_chart`][ferrum.shap_bar_chart], [`shap_waterfall_chart`][ferrum.shap_waterfall_chart], [`pdp_chart`][ferrum.pdp_chart] |
+| Model selection | [`learning_curve_chart`][ferrum.learning_curve_chart], [`validation_curve_chart`][ferrum.validation_curve_chart], [`cv_scores_chart`][ferrum.cv_scores_chart], [`alpha_selection_chart`][ferrum.alpha_selection_chart] |
 | Clustering / manifold | `silhouette_chart`, `elbow_chart`, `manifold_chart`, `pca_scree_chart`, `intercluster_distance_chart`, `parallel_coordinates_chart`, `decision_boundary_chart` |
 
 The full API surface is on the [API Reference / ferrum](../api/ferrum.md) page.
@@ -184,10 +184,10 @@ The full visualizer menu mirrors the helpers:
 
 | Family | Visualizers |
 |---|---|
-| Classification | `ROCVisualizer`, `PRVisualizer`, `CalibrationVisualizer`, `ConfusionMatrixVisualizer`, `ClassificationReportVisualizer`, `ClassPredictionErrorVisualizer`, `ClassBalanceVisualizer`, `DiscriminationThresholdVisualizer` |
-| Regression | `ResidualsVisualizer`, `PredictionErrorVisualizer`, `CooksDistanceVisualizer` |
-| Explanation | `FeatureImportancesVisualizer`, `SHAPVisualizer` |
-| Model selection | `LearningCurveVisualizer`, `ValidationCurveVisualizer`, `CVScoresVisualizer`, `AlphaSelectionVisualizer` |
+| Classification | [`ROCVisualizer`][ferrum.ROCVisualizer], [`PRVisualizer`][ferrum.PRVisualizer], [`CalibrationVisualizer`][ferrum.CalibrationVisualizer], [`ConfusionMatrixVisualizer`][ferrum.ConfusionMatrixVisualizer], [`ClassificationReportVisualizer`][ferrum.ClassificationReportVisualizer], [`ClassPredictionErrorVisualizer`][ferrum.ClassPredictionErrorVisualizer], [`ClassBalanceVisualizer`][ferrum.ClassBalanceVisualizer], [`DiscriminationThresholdVisualizer`][ferrum.DiscriminationThresholdVisualizer] |
+| Regression | [`ResidualsVisualizer`][ferrum.ResidualsVisualizer], [`PredictionErrorVisualizer`][ferrum.PredictionErrorVisualizer], [`CooksDistanceVisualizer`][ferrum.CooksDistanceVisualizer] |
+| Explanation | [`FeatureImportancesVisualizer`][ferrum.FeatureImportancesVisualizer], [`SHAPVisualizer`][ferrum.SHAPVisualizer] |
+| Model selection | [`LearningCurveVisualizer`][ferrum.LearningCurveVisualizer], [`ValidationCurveVisualizer`][ferrum.ValidationCurveVisualizer], [`CVScoresVisualizer`][ferrum.CVScoresVisualizer], [`AlphaSelectionVisualizer`][ferrum.AlphaSelectionVisualizer] |
 | Clustering / manifold | `SilhouetteVisualizer`, `ElbowVisualizer`, `ManifoldVisualizer`, `InterclusterDistanceVisualizer`, `PCAVarianceVisualizer` |
 
 Pick the helper when you want the diagnostic with minimal ceremony. Pick the visualizer when you want CV-fold lifecycle, custom training/scoring splits, or compatibility with code patterns from yellowbrick.
@@ -249,7 +249,7 @@ The same `mark=`, `encode=`, `properties=`, `layers=` pattern works on every dia
 
 The most important property of these helpers is structural: their output is a regular Ferrum chart. That means a ROC curve participates in the rest of the grammar identically to a scatter plot:
 
-- **Theme** it with `.theme(fm.themes.publication)` or set a process default with `set_default_theme`.
+- **Theme** it with `.theme(fm.themes.publication)` or set a process default with [`set_default_theme`][ferrum.set_default_theme].
 - **Save** it with `.save("roc.svg")`.
 - **Concatenate** it with `|` or `&` (as shown above).
 - **Pass** it through anywhere a `Chart` is expected.

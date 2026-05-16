@@ -6,7 +6,7 @@ Real teams move between pandas, Polars, Arrow tables, modin, cuDF, dask, ibis, a
 
 ## One constructor for every dataframe
 
-Pandas, Polars, modin, cuDF, dask, ibis, Arrow tables, and NumPy arrays all flow through the same `Chart(data)` constructor. They are internally normalized to Arrow once, then routed through the Rust core unchanged. There are no per-framework adapters in user code, and no special-case ingestion paths inside ferrum.
+Pandas, Polars, modin, cuDF, dask, ibis, Arrow tables, and NumPy arrays all flow through the same [`Chart(data)`][ferrum.Chart] constructor. They are internally normalized to Arrow once, then routed through the Rust core unchanged. There are no per-framework adapters in user code, and no special-case ingestion paths inside ferrum.
 
 <!--pytest.mark.skip-->
 ```python
@@ -52,7 +52,7 @@ That commitment shapes the rest of the library:
 
 - **Stat transforms** ([Stats in the rendering pipeline](stats-pipeline.md)) run on Arrow columns, not on a specific dataframe type, so the same KDE / binning / smoothing works regardless of source.
 - **Performance** ([Performance & scale](performance-scale.md)) depends on a columnar boundary; if every dataframe type were a special case, the zero-copy story would not hold.
-- **Composition** ([One chart model](one-chart-model.md)) works because charts that come from different data sources are still the same kind of object — you can `hconcat` a Polars-backed chart with a pandas-backed chart without thinking about it.
+- **Composition** ([One chart model](one-chart-model.md)) works because charts that come from different data sources are still the same kind of object — you can [`hconcat`][ferrum.hconcat] a Polars-backed chart with a pandas-backed chart without thinking about it.
 
 ## What this does not promise
 

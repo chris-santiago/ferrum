@@ -4,11 +4,19 @@ Grammar-of-graphics statistical visualization for Python, with a Rust core.
 
 Ferrum builds every chart — scatter plot, faceted histogram, ROC curve, SHAP beeswarm — from the same grammar of data, encodings, marks, scales, and statistical transforms. The declaration layer is Python; the computation engine is Rust compiled via PyO3.
 
-## Quickstart
+## Install
 
 ```bash
 pip install ferrum-viz
 ```
+
+Install with all optional extras (scikit-learn, SHAP, Jupyter interactive rendering):
+
+```bash
+pip install ferrum-viz[all]
+```
+
+## Quickstart
 
 ```python
 import ferrum as fm
@@ -18,6 +26,7 @@ df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [2, 4, 3, 5], "group": ["a", "a", "b"
 
 chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="group:N")
 chart.save("scatter.svg")
+chart.show_png()  # raster output, no display server needed
 ```
 
 ## Key features
@@ -26,7 +35,8 @@ chart.save("scatter.svg")
 - **Stat transforms in the pipeline** — KDE, LOESS, bootstrap CIs, binning, and aggregations are declared in the chart spec and computed in Rust.
 - **Model diagnostics as charts** — `fm.roc_chart(model, X, y)`, `fm.confusion_matrix_chart(...)`, `fm.shap_chart(...)` return regular `Chart` objects.
 - **Zero system dependencies** — no Cairo, no X11, no display server. Renders anywhere `pip install` works.
-- **DataFrame pluralism** — polars, pandas, modin, cuDF, dask, and ibis all work through `Chart(data)`.
+- **DataFrame pluralism** — polars, pandas, modin, cuDF, dask, ibis, and pyarrow all work through `Chart(data)`.
+- **Interactive rendering** — `chart.interactive()` switches to a GPU-backed WASM renderer with selections, zoom/pan, linked views, and tooltips. Backed by `anywidget` for Jupyter.
 - **12 built-in themes** — from Paper Ink (warm cream default) to dark, publication, and editorial styles.
 
 ## Examples
@@ -62,9 +72,13 @@ Requires Python 3.10+, Rust toolchain, and [maturin](https://www.maturin.rs/).
 
 ```bash
 uv sync
-unset CONDA_PREFIX && uv run maturin develop       # build Rust extension
-uv run pytest                                       # run tests
+unset CONDA_PREFIX && uv run --no-sync maturin develop   # build Rust extension
+uv run pytest                                            # run tests
 ```
+
+## Documentation
+
+Full docs at [ferrumviz.com](https://ferrumviz.com).
 
 ## License
 

@@ -14,7 +14,7 @@ The contract has three parts, and they only make sense together:
 
 **Selections are declared in the spec.** A selection — "click points to highlight," "drag to brush," "hover for details" — is a property of the chart, not a side-effect of how the renderer is wired. Selections live in the spec the same way encodings and marks do. That means a chart with selections is still a value that can be themed, concatenated, faceted, and saved.
 
-**Linked views fall out of composition.** Because composition operators (`hconcat`, `vconcat`, `JointChart`, `RepeatChart`) take charts and return compound views, and selections live in charts, linked-view behavior comes from declaring a selection in one chart and referencing it in another. There is no second API for "make these two plots linked."
+**Linked views fall out of composition.** Because composition operators ([`hconcat`][ferrum.hconcat], [`vconcat`][ferrum.vconcat], [`JointChart`][ferrum.JointChart], [`RepeatChart`][ferrum.RepeatChart]) take charts and return compound views, and selections live in charts, linked-view behavior comes from declaring a selection in one chart and referencing it in another. There is no second API for "make these two plots linked."
 
 The principle is the same as for stats and for diagnostics: the structural decision — *where does interactivity live?* — is fixed by the library so the user-facing grammar can stay invariant.
 

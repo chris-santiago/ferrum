@@ -40,7 +40,7 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     ---
 
-    ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. `fm.hconcat(roc_chart, confusion_chart)` just works.
+    ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. [`fm.hconcat()`][ferrum.hconcat] just works.
 
 -   __Zero system dependencies__
 
@@ -58,7 +58,7 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     ---
 
-    Polars, pandas, modin, cuDF, dask, and ibis all flow through the same `Chart(data)` constructor. Narwhals normalizes the input to Arrow once; the Rust core sees one shape. No per-framework adapters in your code, no special-case ingestion paths in ferrum.
+    Polars, pandas, modin, cuDF, dask, and ibis all flow through the same [`Chart`][ferrum.Chart] constructor. Narwhals normalizes the input to Arrow once; the Rust core sees one shape. No per-framework adapters in your code, no special-case ingestion paths in ferrum.
 
 </div>
 
