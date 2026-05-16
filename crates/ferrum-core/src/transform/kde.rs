@@ -653,4 +653,53 @@ mod tests {
         let parsed: KdeSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
     }
+
+    #[test]
+    fn test_kde_single_row_emits_nan_densities() {
+        // A single data point → n < 2, so Scott/Silverman bandwidth is undefined.
+        // The transform should handle gracefully by emitting NaN densities.
+        let batch = batch_with("x", vec![7.0]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Silverman,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 10,
+            extent: Some((5.0, 9.0)),
+            cumulative: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 10);
+        let density = col(&out, "density");
+        assert!(
+            density.iter().all(|d| d.is_nan()),
+            "single-row KDE should emit all-NaN densities"
+        );
+    }
+
+    #[test]
+    fn test_kde_all_identical_values_emits_nan_densities() {
+        // All values identical → std=0 → bandwidth=0 (both Scott and Silverman).
+        // This is effectively the zero-variance case.
+        let batch = batch_with("x", vec![4.0; 20]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Silverman,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 16,
+            extent: Some((2.0, 6.0)),
+            cumulative: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        assert!(
+            density.iter().all(|d| d.is_nan()),
+            "zero-variance KDE should emit all-NaN densities"
+        );
+    }
 }

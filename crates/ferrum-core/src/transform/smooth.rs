@@ -1297,4 +1297,62 @@ mod tests {
         let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
         assert_eq!(names, vec!["x".to_string(), "y".to_string(), "ci_lower".to_string(), "ci_upper".to_string()]);
     }
+
+    #[test]
+    fn test_lm_two_row_minimal_fit() {
+        // 2 points is the minimum for a valid linear fit: y = 1 + 2x.
+        let batch = xy_batch(vec![0.0, 1.0], vec![1.0, 3.0]);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            x_range: None,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        assert_eq!(xg.len(), 5);
+        // Fit should be y = 1 + 2x exactly (perfect fit through 2 points).
+        for (xq, yq) in xg.iter().zip(yf.iter()) {
+            let expected = 1.0 + 2.0 * xq;
+            assert!(
+                (yq - expected).abs() < 1e-10,
+                "y(x={xq})={yq}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lm_constant_y_flat_line() {
+        // All y=3.0 → fit should be flat at y=3.0 regardless of x.
+        let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ys: Vec<f64> = vec![3.0; 10];
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 7, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            x_range: None,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let yf = col(&out, "y");
+        for (i, &v) in yf.iter().enumerate() {
+            assert!(
+                (v - 3.0).abs() < 1e-10,
+                "expected y=3.0 at grid point {i}; got {v}"
+            );
+        }
+    }
 }

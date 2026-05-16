@@ -778,4 +778,69 @@ mod tests {
         let last = densities.value(n - 1);
         assert!((last - 1.0).abs() < 1e-12, "cumulative density should reach 1.0, got {last}");
     }
+
+    #[test]
+    fn test_bin_single_row_produces_one_bin() {
+        let batch = batch_with(vec![42.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: None,
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let counts = col_u64(&out, "count");
+        assert_eq!(counts.value(0), 1);
+    }
+
+    #[test]
+    fn test_bin_all_identical_values_single_bin() {
+        // 10 rows all with value=5.0 → should produce exactly 1 bin containing all 10.
+        let batch = batch_with(vec![5.0; 10]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(5),
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let counts = col_u64(&out, "count");
+        assert_eq!(counts.value(0), 10);
+    }
+
+    #[test]
+    fn test_bin_count_one_single_bin_spanning_full_extent() {
+        let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(1),
+            bin_width: None,
+            extent: Some((1.0, 5.0)),
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let counts = col_u64(&out, "count");
+        assert_eq!(counts.value(0), 5);
+        let starts = col_f64(&out, "bin_start");
+        let ends = col_f64(&out, "bin_end");
+        assert!((starts.value(0) - 1.0).abs() < 1e-12);
+        assert!((ends.value(0) - 5.0).abs() < 1e-12);
+    }
 }

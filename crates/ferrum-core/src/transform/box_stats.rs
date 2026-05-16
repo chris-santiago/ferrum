@@ -531,4 +531,54 @@ mod tests {
         let parsed_iqr: BoxStatsSpec = serde_json::from_str(&json_iqr).unwrap();
         assert_eq!(parsed_iqr, s_iqr);
     }
+
+    #[test]
+    fn box_stats_single_row_all_equal() {
+        // Single-row input: q1=median=q3=value, whiskers=value, IQR=0.
+        pyo3::Python::initialize();
+        let b = batch("v", vec![9.0]);
+        let spec = BoxStatsSpec {
+            field: "v".into(),
+            groupby: vec![],
+            whisker_extent: WhiskerExtent::IqrMultiplier(1.5),
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let q1 = col_f64(&out, "q1");
+        let median = col_f64(&out, "median");
+        let q3 = col_f64(&out, "q3");
+        let lo = col_f64(&out, "lower_whisker");
+        let hi = col_f64(&out, "upper_whisker");
+        assert!((q1[0] - 9.0).abs() < 1e-12, "q1 should be 9.0; got {}", q1[0]);
+        assert!((median[0] - 9.0).abs() < 1e-12, "median should be 9.0; got {}", median[0]);
+        assert!((q3[0] - 9.0).abs() < 1e-12, "q3 should be 9.0; got {}", q3[0]);
+        assert!((lo[0] - 9.0).abs() < 1e-12, "lower whisker should be 9.0; got {}", lo[0]);
+        assert!((hi[0] - 9.0).abs() < 1e-12, "upper whisker should be 9.0; got {}", hi[0]);
+    }
+
+    #[test]
+    fn box_stats_constant_values_iqr_zero() {
+        // 10 identical values → q1=q3=7.0, IQR=0, whiskers=7.0.
+        pyo3::Python::initialize();
+        let b = batch("v", vec![7.0; 10]);
+        let spec = BoxStatsSpec {
+            field: "v".into(),
+            groupby: vec![],
+            whisker_extent: WhiskerExtent::IqrMultiplier(1.5),
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let q1 = col_f64(&out, "q1");
+        let median = col_f64(&out, "median");
+        let q3 = col_f64(&out, "q3");
+        let lo = col_f64(&out, "lower_whisker");
+        let hi = col_f64(&out, "upper_whisker");
+        assert!((q1[0] - 7.0).abs() < 1e-12, "q1 should be 7.0; got {}", q1[0]);
+        assert!((median[0] - 7.0).abs() < 1e-12, "median should be 7.0; got {}", median[0]);
+        assert!((q3[0] - 7.0).abs() < 1e-12, "q3 should be 7.0; got {}", q3[0]);
+        assert!((lo[0] - 7.0).abs() < 1e-12, "lower whisker should be 7.0; got {}", lo[0]);
+        assert!((hi[0] - 7.0).abs() < 1e-12, "upper whisker should be 7.0; got {}", hi[0]);
+    }
 }

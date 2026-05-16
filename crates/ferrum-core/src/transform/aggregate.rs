@@ -510,4 +510,65 @@ mod tests {
         let parsed: AggregateSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
     }
+
+    #[test]
+    fn test_aggregate_count_on_utf8_column() {
+        // Regression: Count on a non-Float64 (Utf8) column should count non-null rows.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("group", DataType::Utf8, false),
+        ]));
+        let names = StringArray::from(vec![
+            Some("alice"),
+            Some("bob"),
+            None,
+            Some("carol"),
+            Some("dave"),
+            None,
+        ]);
+        let groups = StringArray::from(vec!["a", "a", "a", "b", "b", "b"]);
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(names), Arc::new(groups)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "name".into(),
+                fn_: AggFn::Count,
+                as_: "n".into(),
+            }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        let groups_out = col_str(&out, "group");
+        let counts = col_f64(&out, "n");
+        let a_idx = groups_out.iter().position(|g| g == "a").unwrap();
+        let b_idx = groups_out.iter().position(|g| g == "b").unwrap();
+        // Group a has 2 non-null names (alice, bob); group b has 2 non-null (carol, dave).
+        assert_eq!(counts[a_idx] as u64, 2);
+        assert_eq!(counts[b_idx] as u64, 2);
+    }
+
+    #[test]
+    fn test_aggregate_all_null_float64_mean_returns_nan() {
+        // Spec §4.4: all-null column with Mean op → NaN.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let arr = Float64Array::from(vec![None, None, None, None, None]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "v".into(),
+                fn_: AggFn::Mean,
+                as_: "m".into(),
+            }],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let m = col_f64(&out, "m");
+        assert!(m[0].is_nan(), "all-null Mean should be NaN; got {}", m[0]);
+    }
 }
