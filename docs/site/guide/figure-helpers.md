@@ -28,6 +28,7 @@ The two paths converge: a helper's output and a grammar-authored chart are the s
 | [`catplot`][ferrum.catplot] | Categorical comparison | Categorical |
 | [`relplot`][ferrum.relplot] | Relational scatter or line | Relational |
 | [`lmplot`][ferrum.lmplot] | Regression scatter with fit overlay | Regression |
+| [`regplot`][ferrum.regplot] | Single-axes regression plot | Regression |
 | [`residplot`][ferrum.residplot] | Residuals from a regression fit | Regression |
 | [`pairplot`][ferrum.pairplot] | Pairwise scatter grid | Matrix |
 | [`heatmap`][ferrum.heatmap] | 2-D heatmap of a wide table | Matrix |

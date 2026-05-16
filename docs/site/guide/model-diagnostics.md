@@ -78,7 +78,7 @@ Every helper follows the same signature shape: `helper(model_or_source, X=None, 
 | Regression | [`residuals_chart`][ferrum.residuals_chart], [`prediction_error_chart`][ferrum.prediction_error_chart], [`cooks_distance_chart`][ferrum.cooks_distance_chart] |
 | Feature explanation | [`importance_chart`][ferrum.importance_chart], [`shap_chart`][ferrum.shap_chart], [`shap_beeswarm_chart`][ferrum.shap_beeswarm_chart], [`shap_bar_chart`][ferrum.shap_bar_chart], [`shap_waterfall_chart`][ferrum.shap_waterfall_chart], [`pdp_chart`][ferrum.pdp_chart] |
 | Model selection | [`learning_curve_chart`][ferrum.learning_curve_chart], [`validation_curve_chart`][ferrum.validation_curve_chart], [`cv_scores_chart`][ferrum.cv_scores_chart], [`alpha_selection_chart`][ferrum.alpha_selection_chart] |
-| Clustering / manifold | `silhouette_chart`, `elbow_chart`, `manifold_chart`, `pca_scree_chart`, `intercluster_distance_chart`, `parallel_coordinates_chart`, `decision_boundary_chart` |
+| Clustering / manifold | `silhouette_chart`, `elbow_chart`, `manifold_chart`, `pca_scree_chart`, `intercluster_distance_chart`, `parallel_coordinates_chart`, `decision_boundary_chart`, [`rank_chart`][ferrum.rank_chart], [`rank1d_chart`][ferrum.rank1d_chart], [`rank2d_chart`][ferrum.rank2d_chart], [`cluster_diagnostics`][ferrum.cluster_diagnostics] |
 
 The full API surface is on the [API Reference / ferrum](../api/ferrum.md) page.
 
@@ -186,9 +186,9 @@ The full visualizer menu mirrors the helpers:
 |---|---|
 | Classification | [`ROCVisualizer`][ferrum.ROCVisualizer], [`PRVisualizer`][ferrum.PRVisualizer], [`CalibrationVisualizer`][ferrum.CalibrationVisualizer], [`ConfusionMatrixVisualizer`][ferrum.ConfusionMatrixVisualizer], [`ClassificationReportVisualizer`][ferrum.ClassificationReportVisualizer], [`ClassPredictionErrorVisualizer`][ferrum.ClassPredictionErrorVisualizer], [`ClassBalanceVisualizer`][ferrum.ClassBalanceVisualizer], [`DiscriminationThresholdVisualizer`][ferrum.DiscriminationThresholdVisualizer] |
 | Regression | [`ResidualsVisualizer`][ferrum.ResidualsVisualizer], [`PredictionErrorVisualizer`][ferrum.PredictionErrorVisualizer], [`CooksDistanceVisualizer`][ferrum.CooksDistanceVisualizer] |
-| Explanation | [`FeatureImportancesVisualizer`][ferrum.FeatureImportancesVisualizer], [`SHAPVisualizer`][ferrum.SHAPVisualizer] |
+| Explanation | [`FeatureImportancesVisualizer`][ferrum.FeatureImportancesVisualizer], [`SHAPVisualizer`][ferrum.SHAPVisualizer], [`SHAPBeeswarmVisualizer`][ferrum.SHAPBeeswarmVisualizer], [`SHAPBarVisualizer`][ferrum.SHAPBarVisualizer], [`SHAPWaterfallVisualizer`][ferrum.SHAPWaterfallVisualizer] |
 | Model selection | [`LearningCurveVisualizer`][ferrum.LearningCurveVisualizer], [`ValidationCurveVisualizer`][ferrum.ValidationCurveVisualizer], [`CVScoresVisualizer`][ferrum.CVScoresVisualizer], [`AlphaSelectionVisualizer`][ferrum.AlphaSelectionVisualizer] |
-| Clustering / manifold | `SilhouetteVisualizer`, `ElbowVisualizer`, `ManifoldVisualizer`, `InterclusterDistanceVisualizer`, `PCAVarianceVisualizer` |
+| Clustering / manifold | `SilhouetteVisualizer`, `ElbowVisualizer`, `ManifoldVisualizer`, `InterclusterDistanceVisualizer`, `PCAVarianceVisualizer`, [`Rank1DVisualizer`][ferrum.Rank1DVisualizer], [`Rank2DVisualizer`][ferrum.Rank2DVisualizer], [`ParallelCoordinatesVisualizer`][ferrum.ParallelCoordinatesVisualizer] |
 
 Pick the helper when you want the diagnostic with minimal ceremony. Pick the visualizer when you want CV-fold lifecycle, custom training/scoring splits, or compatibility with code patterns from yellowbrick.
 
@@ -260,7 +260,7 @@ A four-panel model report is `(roc | cm) & (residuals | importances)` — same c
 
 A few sharp edges worth knowing:
 
-- **SHAP and shap-style helpers**: require `shap` installed. They lazy-import on first call; install the optional `ferrum[shap]` extra to pull it in. UMAP runs in pure Rust via `manifolds-rs` — no Python dependency.
+- **SHAP and shap-style helpers**: require `shap` installed. They lazy-import on first call; install the optional `ferrum-viz[shap]` extra to pull it in. UMAP runs in pure Rust via `manifolds-rs` — no Python dependency.
 - **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average.
 - **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a [`ComparedModelSource`][ferrum.ComparedModelSource] data source) for side-by-side comparison. See the API reference for the per-helper signatures.
 

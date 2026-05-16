@@ -183,7 +183,7 @@ assert joint.show_svg().startswith("<svg")
 
 The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis; the `right` marginal needs to be a chart authored with the correct orientation for that side. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal.
 
-If you want a one-line entry point that handles both marginals and the orientation for you, [`jointplot`](figure-helpers.md) in `ferrum.plots` is the convenience helper that builds a `JointChart` automatically.
+If you want a one-line entry point that handles both marginals and the orientation for you, [`jointplot`][ferrum.jointplot] in `ferrum.plots` is the convenience helper that builds a [`JointChart`][ferrum.JointChart] automatically.
 
 ## Repeating a template across fields
 
@@ -240,8 +240,8 @@ A decision guide for the common cases:
 - **Multiple charts, no shared axes, side-by-side?** Use `|` (`HConcat`).
 - **Multiple charts, no shared axes, stacked vertically?** Use `&` (`VConcat`).
 - **Central plot with marginals on top and right?** Use [`JointChart`][ferrum.JointChart] (or the [`jointplot`][ferrum.jointplot] helper).
-- **Template chart repeated across a grid of fields?** Use `RepeatChart` (or `pairplot` for the canonical pairs case).
-- **Heatmap with hierarchical clustering structure?** Use `ClusterMapChart` (or the `clustermap` helper).
+- **Template chart repeated across a grid of fields?** Use [`RepeatChart`][ferrum.RepeatChart] (or [`pairplot`][ferrum.pairplot] for the canonical pairs case).
+- **Heatmap with hierarchical clustering structure?** Use [`ClusterMapChart`][ferrum.ClusterMapChart] (or the [`clustermap`][ferrum.clustermap] helper).
 - **Same chart broken into panels by a categorical field?** That is not composition — use the `facet` / `facet_row` / `facet_col` encoding channels (see [Marks & encodings](marks-encodings.md#faceting-channels)).
 
 ## Composition is recursive

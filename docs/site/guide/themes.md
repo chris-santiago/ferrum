@@ -63,8 +63,8 @@ import ferrum as fm
 base = fm.Theme(background="#f9f9f9", grid=True, padding=16)
 darker = base.update(background="#222222", mark_color="#e74c3c")
 assert base != darker
-assert base.to_theme_inputs_dict()["background_color"] == "#f9f9f9"
-assert darker.to_theme_inputs_dict()["background_color"] == "#222222"
+assert base.to_spec_dict()["background_color"] == "#f9f9f9"
+assert darker.to_spec_dict()["background_color"] == "#222222"
 ```
 
 This immutability is structural: themes are values that compose, like encodings and marks. You can keep a "base theme" in a module and derive variants without worrying about side-effects.
@@ -314,8 +314,8 @@ brand = fm.themes.paper_ink.update(
     grid=False,
     padding=24,
 )
-assert brand.to_theme_inputs_dict()["mark_color"] == "#0d47a1"
-assert brand.to_theme_inputs_dict()["background_color"] == "#FAF7F2"
+assert brand.to_spec_dict()["mark_color"] == "#0d47a1"
+assert brand.to_spec_dict()["background_color"] == "#FAF7F2"
 ```
 
 This produces a new `Theme` with Paper Ink's warm background and typography but your mark color and grid preferences. The original `paper_ink` theme is unchanged.

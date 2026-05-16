@@ -82,7 +82,7 @@ seaborn requires pandas. Ferrum accepts polars, pandas, modin, cuDF, dask, ibis,
 | Multi-plot grids | `pairplot`, `jointplot`, `FacetGrid` | [`pairplot`][ferrum.pairplot], [`jointplot`][ferrum.jointplot]. Faceting via `facet` / `facet_row` / `facet_col` encoding channels. |
 | Interactive output | Inherits matplotlib backends (Qt, Tk, notebook) | WASM/GPU interactive renderer via [`.interactive()`][ferrum.Chart.interactive] — selections, zoom/pan, linked views. |
 | Axes-level API | `sns.scatterplot(ax=ax)` for embedding into matplotlib figures | No `ax` parameter — compose with `+`, `|`, `&` instead. |
-| Model diagnostics | — | ROC, PR, confusion matrix, calibration, residuals, SHAP, PDP, and 30+ more via [`ModelSource`][ferrum.ModelSource]. 31 figure-level helpers, 32 visualizer classes. |
+| Model diagnostics | — | ROC, PR, confusion matrix, calibration, residuals, SHAP, PDP, and 30+ more via [`ModelSource`][ferrum.ModelSource]. 44 figure-level helpers, 28 visualizer classes. |
 
 ## Where to go next
 

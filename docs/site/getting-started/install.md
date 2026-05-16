@@ -63,12 +63,12 @@ Ferrum ships four optional dependency groups for features that need external pac
 
 | Extra | What it adds | Install |
 |---|---|---|
-| `models` | Model diagnostics (ROC, confusion matrix, residuals, etc.) via sklearn | `pip install ferrum[models]` |
-| `shap` | SHAP explanations (beeswarm, bar, waterfall) via sklearn + shap | `pip install ferrum[shap]` |
-| `jupyter` | Interactive rendering via anywidget (WASM/GPU canvas in notebooks) | `pip install ferrum[jupyter]` |
-| `all` | Everything above | `pip install ferrum[all]` |
+| `models` | Model diagnostics (ROC, confusion matrix, residuals, etc.) via sklearn | `pip install ferrum-viz[models]` |
+| `shap` | SHAP explanations (beeswarm, bar, waterfall) via sklearn + shap | `pip install ferrum-viz[shap]` |
+| `jupyter` | Interactive rendering via anywidget (WASM/GPU canvas in notebooks) | `pip install ferrum-viz[jupyter]` |
+| `all` | Everything above | `pip install ferrum-viz[all]` |
 
-The base install (`pip install ferrum`) covers the grammar API, all marks, themes, composition, static SVG/PNG rendering, and DataFrame ingestion. The extras add sklearn-dependent diagnostics, SHAP, and Jupyter interactivity.
+The base install (`pip install ferrum-viz`) covers the grammar API, all marks, themes, composition, static SVG/PNG rendering, and DataFrame ingestion. The extras add sklearn-dependent diagnostics, SHAP, and Jupyter interactivity.
 
 ## Optional dataframe ecosystems
 

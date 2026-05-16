@@ -51,7 +51,7 @@ For persistent control, attach a [`RenderConfig`][ferrum.RenderConfig] to the ch
 from ferrum import RenderConfig
 
 config = RenderConfig(raster_threshold=1_000_000, raster_behavior="silent")
-chart = chart.render_config(config)
+chart = chart.properties(render_config=config)
 chart.save("out.svg")  # auto-raster fires at 1M marks, silently
 ```
 

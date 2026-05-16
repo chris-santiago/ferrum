@@ -112,7 +112,7 @@ Ferrum ships [twelve built-in themes](../guide/themes.md) in the [`themes`][ferr
 In four snippets you used:
 
 1. **Data binding** — `fm.Chart(iris)` accepts polars, pandas, modin, cuDF, dask, ibis, pyarrow, or dict-of-arrays. One constructor.
-2. **Marks** — [`mark_point()`][ferrum.Chart.mark_point], [`mark_smooth()`][ferrum.Chart.mark_smooth], [`mark_boxplot()`][ferrum.Chart.mark_boxplot]. Ferrum has 28+ marks covering primitives, statistical transforms, distributions, and model diagnostics.
+2. **Marks** — [`mark_point()`][ferrum.Chart.mark_point], [`mark_smooth()`][ferrum.Chart.mark_smooth], [`mark_boxplot()`][ferrum.Chart.mark_boxplot]. Ferrum has 54 marks covering primitives, statistical transforms, distributions, and model diagnostics.
 3. **Encodings** — `x`, `y`, `color`. Shorthand strings like `"species:N"` set the type (Nominal); the full form [`fm.X("field", type="Q", title="...")`][ferrum.X] gives finer control.
 4. **Composition** — `+` layers marks on shared axes. `|` and `&` concatenate charts side-by-side or stacked.
 5. **Themes** — `.theme(fm.themes.publication)` swaps the entire visual style without touching the data or encoding.

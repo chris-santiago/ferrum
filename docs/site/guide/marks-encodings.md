@@ -31,7 +31,7 @@ The three pieces — data, mark, encoding — compose freely. You can change the
 
 ## Encoding channels
 
-An encoding channel declares: *this field drives this visual variable*. Channels are typed by the engine: a quantitative field gets a continuous scale, a nominal field gets a categorical color palette, a temporal field gets a time scale. You can be explicit by passing an encoding object (`fm.X("col", type="Q")`) or use the shorthand syntax (described below).
+An encoding channel declares: *this field drives this visual variable*. Channels are typed by the engine: a quantitative field gets a continuous scale, a nominal field gets a categorical color palette, a temporal field gets a time scale. You can be explicit by passing an encoding object ([`fm.X("col", type="Q")`][ferrum.X]) or use the shorthand syntax (described below).
 
 ### Positional channels
 
@@ -144,7 +144,7 @@ The geometric building blocks. Use these when you want direct control over what 
 | `mark_tick()` | Short ticks, often used for rug plots. |
 | `mark_rect()` | Rectangular cells. Used for heatmaps and intervals. |
 | `mark_text()` | Text labels (paired with the `text` encoding). |
-| `mark_label()` | Positioned text labels with collision avoidance (`avoid_overlap=True`). |
+| `mark_label()` | Positioned text labels with automatic collision avoidance. |
 | `mark_image()` | Image tiles from URL fields. |
 
 Example — basic scatter:
