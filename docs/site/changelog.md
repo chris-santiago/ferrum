@@ -56,6 +56,6 @@ All notable changes to Ferrum are documented here.
 - **Default theme identity is Paper Ink** — warm cream background, blue marks, warm grid. Previously was Observable-style white background.
 - **Default categorical palette is `paper_ink`** — previously `okabe_ito`.
 
-## 0.1.0
+## 0.8.0
 
 Initial development release. Grammar-of-graphics core with Rust rendering engine.
