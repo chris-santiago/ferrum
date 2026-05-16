@@ -136,9 +136,11 @@ chart = fm.roc_chart(rf, X_test, y_test, compare={"Logistic Regression": lr})
 assert chart.show_svg().startswith("<svg")
 ```
 
+![Multi-model ROC comparison](img/model-diagnostics_07.png)
+
 The base model is labeled `"base"` by default; each entry in `compare=` adds a named curve. The resulting chart overlays all models on the same axes with a color legend.
 
-For full control, use `ModelSource.compare()` directly to build a `ComparedModelSource` and pass it to any helper:
+For full control, use [`ModelSource.compare()`][ferrum.ModelSource.compare] directly to build a [`ComparedModelSource`][ferrum.ComparedModelSource] and pass it to any helper:
 
 ```python
 cms = fm.ModelSource.compare(
@@ -151,7 +153,7 @@ report = roc | cal
 assert report.show_svg().startswith("<svg")
 ```
 
-`ComparedModelSource` computes derived data once per model and stamps a `model` column on the concatenated output, so charts can route `color="model"` automatically.
+[`ComparedModelSource`][ferrum.ComparedModelSource] computes derived data once per model and stamps a `model` column on the concatenated output, so charts can route `color="model"` automatically.
 
 ## Precomputed scores (no model required)
 

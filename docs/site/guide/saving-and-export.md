@@ -79,7 +79,7 @@ png_bytes = chart.show_png()  # bytes — raw PNG data
 ```
 
 !!! note "PNG resolution"
-    PNG resolution is not separately configurable (there is no DPI parameter). To produce higher-resolution output, increase `width` and `height` via `.properties(width=1200, height=800)` before calling `.show_png()` or `.save("out.png")`.
+    PNG resolution is not separately configurable (there is no DPI parameter). To produce higher-resolution output, increase `width` and `height` via [`.properties(width=1200, height=800)`][ferrum.Chart.properties] before calling `.show_png()` or `.save("out.png")`.
 
 ## Displaying in Jupyter
 

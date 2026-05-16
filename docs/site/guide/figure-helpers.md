@@ -117,7 +117,7 @@ assert chart.show_svg().startswith("<svg")
 
 ![lmplot](img/figure-helpers_04.png)
 
-[`regplot`][ferrum.regplot] is the single-axes equivalent of `lmplot` — same API for the regression fit (`method=`, `ci=`, `order=`, `scatter=`, `scatter_kws=`, `line_kws=`) but without faceting (`col=` and `row=` are excluded). Use `regplot` when you want one regression plot on one set of axes; use `lmplot` when you want the same plot faceted across a categorical variable.
+[`regplot`][ferrum.regplot] is the single-axes equivalent of [`lmplot`][ferrum.lmplot] — same API for the regression fit (`method=`, `ci=`, `order=`, `scatter=`, `scatter_kws=`, `line_kws=`) but without faceting (`col=` and `row=` are excluded). Use [`regplot`][ferrum.regplot] when you want one regression plot on one set of axes; use [`lmplot`][ferrum.lmplot] when you want the same plot faceted across a categorical variable.
 
 ```python
 import ferrum as fm
@@ -131,6 +131,8 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart = fm.regplot(iris, x="sepal_length", y="petal_length", method="lm", ci=95)
 assert chart.show_svg().startswith("<svg")
 ```
+
+![regplot](img/figure-helpers_11.png)
 
 [`residplot`][ferrum.residplot] plots the residuals from a regression fit. Useful for diagnosing whether a linear fit is appropriate and whether residuals are heteroscedastic. Returns a [`Chart`][ferrum.Chart].
 

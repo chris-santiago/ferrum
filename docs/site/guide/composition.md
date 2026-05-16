@@ -175,6 +175,8 @@ combined = (chart_a | chart_b).share_scale(x="shared")
 assert combined.show_svg().startswith("<svg")
 ```
 
+![Shared scales](img/composition_08.png)
+
 [`.share_scale()`][ferrum.Chart.share_scale] accepts keyword arguments where each key is a channel name (`x`, `y`, `color`, `size`) and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
 
 The method returns a new composition of the same type — it works on [`HConcatChart`][ferrum.HConcatChart], [`VConcatChart`][ferrum.VConcatChart], [`JointChart`][ferrum.JointChart], and [`RepeatChart`][ferrum.RepeatChart].

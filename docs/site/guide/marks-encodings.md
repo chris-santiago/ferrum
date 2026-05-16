@@ -42,7 +42,7 @@ These channels place marks in space:
 | `x`, `y` | Primary horizontal / vertical position. |
 | `x2`, `y2` | Secondary position. Used for bands, segments, intervals, error extents. |
 | `xerror`, `yerror`, `xerror2`, `yerror2` | Error extents around the primary position. |
-| `theta`, `radius` | Polar coordinates. Used with `CoordPolar`. |
+| `theta`, `radius` | Polar coordinates. Used with [`CoordPolar`][ferrum.CoordPolar]. |
 
 Most charts only declare `x` and `y`. The rest unlock band marks (`mark_area`, `mark_errorband`), intervals (`mark_rect`, `mark_rule`), and polar plots.
 
@@ -141,7 +141,7 @@ import polars as pl
 df = pl.DataFrame({
     "category": ["A", "A", "B", "B"],
     "group": ["x", "y", "x", "y"],
-    "value": [10, 15, 8, 12],
+    "value": [10.0, 15.0, 8.0, 12.0],
 })
 chart = (
     fm.Chart(df)
@@ -149,6 +149,8 @@ chart = (
     .encode(x="category:N", y="value:Q", color="group:N")
 )
 ```
+
+![Dodge grouped bars](img/marks-encodings_08.png)
 
 ### [`Stack`][ferrum.Stack] — stacked bars/areas
 
@@ -165,6 +167,8 @@ chart = (
     .encode(x="category:N", y="value:Q", color="group:N")
 )
 ```
+
+![Stack stacked bars](img/marks-encodings_09.png)
 
 ### [`Jitter`][ferrum.Jitter] — random displacement for overplotting
 
@@ -193,32 +197,48 @@ Positional channels accept an explicit scale via the `scale=` parameter. Ferrum 
 | [`OrdinalScale`][ferrum.OrdinalScale] | Discrete/categorical. |
 
 ```python
-from ferrum import LogScale
+import ferrum as fm
+import polars as pl
+import numpy as np
 
+rng = np.random.default_rng(42)
+df_log = pl.DataFrame({"income": rng.uniform(100, 100000, 80), "score": rng.uniform(20, 90, 80)})
 chart = (
-    fm.Chart(df)
-    .mark_point()
+    fm.Chart(df_log)
+    .mark_point(size=40)
     .encode(
-        x=fm.X("income", scale=LogScale(domain=[100, 100000], range=[0, 1], base=10)),
+        x=fm.X("income", scale=fm.LogScale(domain=[100, 100000], base=10)),
         y="score:Q",
     )
 )
+assert chart.show_svg().startswith("<svg")
 ```
+
+![Log scale axis](img/marks-encodings_10.png)
 
 ### Axis limits (domain)
 
 Set explicit axis limits by passing a `domain=` list to the scale constructor:
 
 ```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"])
 chart = (
-    fm.Chart(df)
-    .mark_point()
+    fm.Chart(iris)
+    .mark_point(size=40)
     .encode(
-        x=fm.X("sepal_length", scale=fm.LinearScale(domain=[4, 8], range=[0, 1])),
+        x=fm.X("sepal_length", scale=fm.LinearScale(domain=[4, 8])),
         y="petal_length:Q",
     )
 )
+assert chart.show_svg().startswith("<svg")
 ```
+
+![Axis limits](img/marks-encodings_11.png)
 
 ### Reversed axis
 
@@ -231,7 +251,7 @@ chart = (
     .mark_point()
     .encode(
         x="x:Q",
-        y=fm.Y("depth", scale=fm.LinearScale(domain=[100, 0], range=[0, 1])),
+        y=fm.Y("depth", scale=fm.LinearScale(domain=[100, 0])),
     )
 )
 ```
@@ -254,6 +274,8 @@ chart = (
     )
 )
 ```
+
+![Legend suppressed](img/marks-encodings_12.png)
 
 ### Legend title
 
@@ -358,7 +380,7 @@ Key parameters:
 - `n` — number of evaluation grid points. Default `200`.
 
 !!! note
-    `"logistic"` regression is available via the separate [`Logistic`][ferrum.Logistic] transform (used by [`lmplot`][ferrum.lmplot]), not through `mark_smooth`.
+    `"logistic"` regression is available via the separate [`Logistic`][ferrum.Logistic] transform (used by [`lmplot`][ferrum.lmplot]), not through [`mark_smooth`][ferrum.Chart.mark_smooth].
 
 Example — 1-D kernel density estimate:
 
