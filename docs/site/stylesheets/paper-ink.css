@@ -1,0 +1,67 @@
+/* Paper Ink — warm cream light mode derived from ferrum's default theme */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #FAF7F2;
+  --md-default-fg-color: #1F2937;
+  --md-default-fg-color--light: #6B7280;
+  --md-code-bg-color: #f3eeE6;
+  --md-typeset-color: #1F2937;
+}
+
+/* Slate Citrus — dark mode derived from ferrum's slate_citrus theme */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #111827;
+  --md-default-fg-color: #E5E7EB;
+  --md-default-fg-color--light: #9CA3AF;
+  --md-code-bg-color: #1E293B;
+  --md-typeset-color: #E5E7EB;
+}
+
+/* ── Grid cards ─────────────────────────────────────────────────────── */
+
+/* Light mode cards */
+[data-md-color-scheme="default"] .md-typeset .grid.cards > ul > li,
+[data-md-color-scheme="default"] .md-typeset .grid.cards > ol > li {
+  background: #FFFFFF;
+  border: 1px solid #E5DDD0;
+  border-left: 4px solid #2563EB;
+  box-shadow: 0 2px 6px rgba(31, 41, 55, 0.06);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+[data-md-color-scheme="default"] .md-typeset .grid.cards > ul > li:hover,
+[data-md-color-scheme="default"] .md-typeset .grid.cards > ol > li:hover {
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+  border-left-color: #1D4ED8;
+}
+
+/* Dark mode cards */
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ol > li {
+  background: #1E293B;
+  border: 1px solid #334155;
+  border-left: 4px solid #60A5FA;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ol > li:hover {
+  box-shadow: 0 4px 12px rgba(96, 165, 250, 0.2);
+  border-left-color: #93C5FD;
+}
+
+/* Card icons — pick up the accent blue */
+[data-md-color-scheme="default"] .md-typeset .grid.cards .twemoji,
+[data-md-color-scheme="default"] .md-typeset .grid.cards .emojione,
+[data-md-color-scheme="default"] .md-typeset .grid.cards .md-icon {
+  color: #2563EB;
+}
+[data-md-color-scheme="slate"] .md-typeset .grid.cards .twemoji,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards .emojione,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards .md-icon {
+  color: #60A5FA;
+}
+
+/* Card headings — slightly bolder for scannability */
+.md-typeset .grid.cards > ul > li > :first-child,
+.md-typeset .grid.cards > ol > li > :first-child {
+  font-weight: 600;
+}

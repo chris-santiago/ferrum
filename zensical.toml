@@ -1,0 +1,160 @@
+# docs_dir is "docs/site" (not the default "docs") so the legacy
+# docs/superpowers/ tree stays outside Zensical's scope. When that tree
+# relocates to design-docs/, collapse docs/site/* up to docs/ and revert
+# docs_dir to the default.
+
+[project]
+site_name = "Ferrum"
+site_description = "Grammar-of-graphics statistical visualization for Python, with a Rust core. One chart model for statistical graphics, interactive views, and ML diagnostics."
+site_author = "The Ferrum authors"
+site_url = "https://ferrumviz.com/"
+docs_dir = "docs/site"
+copyright = """
+Copyright &copy; 2026 The Ferrum authors
+"""
+
+repo_url = "https://github.com/chris-santiago/ferrum"
+repo_name = "chris-santiago/ferrum"
+extra_css = ["stylesheets/paper-ink.css"]
+
+nav = [
+  { Home = "index.md" },
+  { "Get Started" = [
+    { Install = "getting-started/install.md" },
+    { "First plot" = "getting-started/first-plot.md" },
+    { "Why Ferrum" = "getting-started/why-ferrum.md" },
+  ] },
+  { Guide = [
+    { Concepts = [
+      { "One chart model" = "guide/concepts/one-chart-model.md" },
+      { "Stats in the pipeline" = "guide/concepts/stats-pipeline.md" },
+      { "Dataframe pluralism" = "guide/concepts/dataframe-pluralism.md" },
+      { "Interactivity is a renderer" = "guide/concepts/interactivity.md" },
+      { "Model outputs are data" = "guide/concepts/model-outputs-as-data.md" },
+      { "Performance & scale" = "guide/concepts/performance-scale.md" },
+    ] },
+    { "Marks & encodings" = "guide/marks-encodings.md" },
+    { Composition = "guide/composition.md" },
+    { Themes = "guide/themes.md" },
+    { "Figure-level helpers" = "guide/figure-helpers.md" },
+    { "Model diagnostics" = "guide/model-diagnostics.md" },
+    { "Saving & export" = "guide/saving-and-export.md" },
+    { Recipes = "guide/recipes.md" },
+    { "Interactive rendering" = "guide/interactive.md" },
+  ] },
+  { Gallery = "gallery/index.md" },
+  { Comparison = [
+    { "vs seaborn" = "comparison/seaborn.md" },
+    { "vs yellowbrick" = "comparison/yellowbrick.md" },
+    { "vs scikit-plot" = "comparison/scikit-plot.md" },
+  ] },
+  { "API Reference" = [
+    { "ferrum" = "api/ferrum.md" },
+    { "ferrum.chart" = "api/chart.md" },
+    { "ferrum.encoding" = "api/encoding.md" },
+    { "ferrum.plots" = "api/plots.md" },
+    { "ferrum.themes" = "api/themes.md" },
+    { "ferrum.selection" = "api/selection.md" },
+    { "ferrum.annotations" = "api/annotations.md" },
+    { "ferrum.composition" = "api/composition.md" },
+    { "ferrum.coord" = "api/coord.md" },
+    { "ferrum.layer" = "api/layer.md" },
+    { "ferrum.position" = "api/position.md" },
+    { "ferrum.repeat" = "api/repeat.md" },
+    { "ferrum.schemes" = "api/schemes.md" },
+    { "ferrum.render_config" = "api/render_config.md" },
+    { "ferrum.title" = "api/title.md" },
+  ] },
+  { Changelog = "changelog.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "announce.dismiss",
+  "content.action.edit",
+  "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "indigo"
+accent = "light-blue"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.plugins.autorefs]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+inventories = ["https://docs.python.org/3/objects.inv"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "numpy"
+inherited_members = true
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+members_order = "source"
+separate_signature = true
+show_signature_annotations = true
+docstring_section_style = "table"
+filters = ["!^_"]
+
+[project.markdown_extensions.abbr]
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.footnotes]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.toc]
+permalink = true
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+[project.markdown_extensions.pymdownx.betterem]
+[project.markdown_extensions.pymdownx.caret]
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.emoji]
+emoji_generator = "zensical.extensions.emoji.to_svg"
+emoji_index = "zensical.extensions.emoji.twemoji"
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.keys]
+[project.markdown_extensions.pymdownx.magiclink]
+[project.markdown_extensions.pymdownx.mark]
+[project.markdown_extensions.pymdownx.smartsymbols]
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" }
+]
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+combine_header_slug = true
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true
+[project.markdown_extensions.pymdownx.tilde]
