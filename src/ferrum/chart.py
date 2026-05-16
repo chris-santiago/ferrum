@@ -6,15 +6,14 @@ spec is deep-copied on each call so chains compose without aliasing surprises.
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
-import warnings
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
 from ferrum._layer import _Layer, _PendingMark
+from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase
@@ -102,136 +101,7 @@ class _Facet:
     nrows: Optional[int] = None
 
 
-@functools.cache
-def _channel_class_map() -> dict:
-    """Build the channel-name → channel-class mapping (lazy import; once-per-process)."""
-    from ferrum.encoding import (
-        X,
-        Y,
-        X2,
-        Y2,
-        XError,
-        YError,
-        XError2,
-        YError2,
-        Theta,
-        Radius,
-        Color,
-        Fill,
-        Stroke,
-        Opacity,
-        FillOpacity,
-        StrokeOpacity,
-        StrokeWidth,
-        StrokeDash,
-        Size,
-        Shape,
-        Angle,
-        Text,
-        Detail,
-        Tooltip,
-        TooltipField,
-        Href,
-        Description,
-        Key,
-        Url,
-        Facet,
-        FacetRow,
-        FacetCol,
-    )
-
-    return {
-        "x": X,
-        "y": Y,
-        "x2": X2,
-        "y2": Y2,
-        "x_error": XError,
-        "y_error": YError,
-        "x_error2": XError2,
-        "y_error2": YError2,
-        "theta": Theta,
-        "radius": Radius,
-        "color": Color,
-        "fill": Fill,
-        "stroke": Stroke,
-        "opacity": Opacity,
-        "fill_opacity": FillOpacity,
-        "stroke_opacity": StrokeOpacity,
-        "stroke_width": StrokeWidth,
-        "stroke_dash": StrokeDash,
-        "size": Size,
-        "shape": Shape,
-        "angle": Angle,
-        "text": Text,
-        "detail": Detail,
-        "tooltip": Tooltip,
-        "tooltip_field": TooltipField,
-        "href": Href,
-        "description": Description,
-        "key": Key,
-        "url": Url,
-        "facet": Facet,
-        "facet_row": FacetRow,
-        "facet_col": FacetCol,
-    }
-
-
-def _channel_class_for(name: str):
-    """Return the channel-class for a given parameter name."""
-    return _channel_class_map().get(name)
-
-
-def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
-    """Apply channel-alias rules, mapping convenience channels to their targets.
-
-    Operates on shallow copies of the encoding and mark-kwargs dicts from
-    ``to_spec()`` — does not mutate the chart's internal state.
-
-    Alias rules (order matters — earlier aliases take priority):
-
-    1. ``fill`` → ``color`` when ``color`` is not already present.
-    2. ``stroke`` → ``color`` when ``color`` is not already present;
-       when ``color`` IS present, the stroke encoding is silently dropped.
-    3. ``detail`` → ``mk["detail"]`` via ``setdefault`` (always, regardless
-       of other channels).
-
-    Note: ``fill_opacity`` is no longer aliased to ``opacity``. It is a
-    first-class renderer-honored channel that emits a per-element SVG
-    ``fill-opacity`` attribute, separate from ``opacity`` (which bakes
-    into the fill RGBA alpha).
-
-    Returns the (possibly-modified) ``(enc, mk)`` pair.
-    """
-    from ferrum.repeat import _RepeatPlaceholder
-
-    # Fill → color
-    if "fill" in enc and "color" not in enc:
-        enc["color"] = enc["fill"]
-
-    # Stroke → color (when color absent); silent drop otherwise.
-    if "stroke" in enc:
-        stroke_ch = enc["stroke"]
-        if "color" not in enc:
-            enc["color"] = stroke_ch
-        elif stroke_ch.field is not None and not isinstance(
-            stroke_ch.field, _RepeatPlaceholder
-        ):
-            # Can't map to a scale — inject as a mark_style grouping hint.
-            # mark_style.stroke expects a hex color, not a field name, so
-            # this is a best-effort: when the user maps a field to stroke
-            # while color is already mapped, the stroke encoding is silently
-            # stored but produces no visual effect.
-            pass
-
-    # Detail → mark_style.detail
-    if "detail" in enc:
-        detail_ch = enc["detail"]
-        if detail_ch.field is not None and not isinstance(
-            detail_ch.field, _RepeatPlaceholder
-        ):
-            mk.setdefault("detail", detail_ch.field)
-
-    return enc, mk
+from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
 
 
 class _NamedTransform:
@@ -254,66 +124,50 @@ class _NamedTransform:
         return bool(self.transform == inner)
 
 
-def _expand_layers(c: "Chart") -> tuple[list, list]:
-    """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
+from ferrum.composition import _expand_layers, _merge_top_transforms, _warn_on_layer_conflicts
 
-    Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
-    ``None``) — splat their layers as-is and carry their top-level transforms
-    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list.
 
-    Transforms are returned as plain PyO3 objects.  The named-transform path
-    (routing a layer's output to a specific ``data_source``) is handled in
-    ``__add__`` when the LHS chart has no transforms and the RHS does.
+def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
+    """Apply a desugar remap to an encoding dict, preserving axis titles.
+
+    Modifies *encoding* in place.  When *orig_encoding* is provided and
+    a remap changes the field name (e.g. ``"tip"`` -> ``"bin_start"``),
+    the original field name is injected as the ``title`` kwarg so axes
+    keep a human-readable label.
+
+    Parameters
+    ----------
+    encoding : dict
+        Encoding dict to modify (e.g. ``chart._encoding``).
+    remap : dict
+        Mapping from channel name to new field name (``result.remap``).
+    orig_encoding : dict or None, optional
+        The chart's encoding dict *before* the remap, used to recover
+        original field names for title preservation.  ``None`` disables
+        title preservation.
     """
-    if c._layers is not None:
-        return list(c._layers), list(c._transforms or [])
-    return [
-        _Layer(
-            mark=c._mark,
-            encoding=dict(c._encoding),
-            transforms=[],
-            mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
-            position=c._position,
-        )
-    ], list(c._transforms or [])
+    from ferrum.encoding import X, X2, Y, Y2
 
+    def _orig_field(channel: str) -> str | None:
+        if orig_encoding is None:
+            return None
+        enc = orig_encoding.get(channel)
+        if enc is None:
+            return None
+        return enc.field if isinstance(enc, ChannelBase) else enc
 
-def _merge_top_transforms(new: "Chart", rhs_top_xforms: list) -> None:
-    # Merge RHS top-level transforms into the combined chart's top-level
-    # pipeline.  Deduplicate by identity first (fast), then by value equality
-    # (PyO3 transform classes implement __eq__ via #[pyclass(eq, ...)];
-    # _NamedTransform defers to its inner transform for equality checks).
-    # Value deduplication prevents the same logical transform from running
-    # twice when both sides of + use an identical transform object.
-    existing = list(new._transforms or [])
-    existing_ids = {id(t) for t in existing}
-    for t in rhs_top_xforms:
-        if id(t) in existing_ids:
-            continue
-        # Value dedup: unwrap _NamedTransform for the equality check.
-        inner_t = t.transform if isinstance(t, _NamedTransform) else t
-        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e)
-               for e in existing):
-            continue
-        existing.append(t)
-        existing_ids.add(id(t))
-    new._transforms = existing
-
-
-def _warn_on_layer_conflicts(lhs: "Chart", rhs: "Chart") -> None:
-    if (
-        (rhs._theme is not None and rhs._theme != lhs._theme)
-        or rhs._facet != lhs._facet
-        or rhs._coord != lhs._coord
-    ):
-        import warnings
-
-        warnings.warn(
-            "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
-            "primary layer wins.",
-            UserWarning,
-            stacklevel=3,
-        )
+    if "x" in remap:
+        x_field = _orig_field("x")
+        title = x_field if (x_field and remap["x"] != x_field) else None
+        encoding["x"] = X(remap["x"], type="Q", title=title) if title else X(remap["x"], type="Q")
+    if "y" in remap:
+        y_field = _orig_field("y")
+        title = y_field if (y_field and remap["y"] != y_field) else None
+        encoding["y"] = Y(remap["y"], type="Q", title=title) if title else Y(remap["y"], type="Q")
+    if "x2" in remap:
+        encoding["x2"] = X2(remap["x2"], type="Q")
+    if "y2" in remap:
+        encoding["y2"] = Y2(remap["y2"], type="Q")
 
 
 def _to_polars(data):
@@ -329,7 +183,7 @@ def _to_polars(data):
     return pl.from_arrow(to_arrow_table(data))
 
 
-class Chart:
+class Chart(_RenderMixin):
     """Top-level chart value class.
 
     Every method returns a new ``Chart`` — the object is effectively immutable and
@@ -553,14 +407,10 @@ class Chart:
         remap = result.remap
         if _prior_layer is not None:
             from ferrum._layer import _Layer as _SmoothLyr
-            from ferrum.encoding import X as _XS, Y as _YS
 
             smooth_enc = dict(self._encoding)
             if remap:
-                if "x" in remap:
-                    smooth_enc["x"] = _XS(remap["x"], type="Q")
-                if "y" in remap:
-                    smooth_enc["y"] = _YS(remap["y"], type="Q")
+                _apply_remap(smooth_enc, remap, orig_encoding=self._encoding)
             smooth_layer = _SmoothLyr(
                 mark=mark,
                 encoding=smooth_enc,
@@ -576,169 +426,8 @@ class Chart:
         if result.position is not None:
             new._position = result.position
         if remap:
-            from ferrum.encoding import X, X2, Y, Y2
-
-            if "x" in remap:
-                # Preserve the original field name as axis title when the
-                # remap changes the field (e.g. "tip" → "bin_start").
-                title = x_field if (x_field and remap["x"] != x_field) else None
-                new._encoding["x"] = X(remap["x"], type="Q", title=title) if title else X(remap["x"], type="Q")
-            if "y" in remap:
-                title = y_field if (y_field and remap["y"] != y_field) else None
-                new._encoding["y"] = Y(remap["y"], type="Q", title=title) if title else Y(remap["y"], type="Q")
-            if "x2" in remap:
-                new._encoding["x2"] = X2(remap["x2"], type="Q")
-            if "y2" in remap:
-                new._encoding["y2"] = Y2(remap["y2"], type="Q")
+            _apply_remap(new._encoding, remap, orig_encoding=self._encoding)
         return new
-
-    # ---- Auto-raster policy ----
-
-    # Mark types eligible for automatic raster substitution.
-    _AUTO_RASTER_ELIGIBLE_MARKS = frozenset(
-        ["point", "bar", "rect", "tick", "rule", "segment"]
-    )
-
-    def _apply_auto_raster(self) -> "Chart":
-        """Return *self* unchanged, or a substituted chart with ``mark_raster``.
-
-        Called between ``_resolve_pending()`` and ``to_spec()`` inside
-        ``_render_inputs()``.  When the mark count exceeds
-        ``RenderConfig.raster_threshold`` and the mark type is eligible,
-        the chart is transparently replaced with a ``mark_raster`` equivalent
-        so the SVG stays compact.
-
-        The substitution **will not fire** when:
-
-        - ``raster_threshold`` is ``None`` (auto-raster disabled).
-        - The mark count is below the threshold.
-        - The mark type is not a per-element type (line, area, hex, raster,
-          image, etc. are excluded).
-        - The chart was produced by a composite/statistical mark (histogram,
-          density, hex, etc.) where the row count does not reflect the
-          actual SVG element count.
-        - The chart has an active ``color`` encoding (rasterising would
-          silently discard categorical information).
-        - Both ``x`` and ``y`` quantitative encodings are not present.
-
-        When the chart is over-threshold but ineligible, a guidance warning
-        is emitted suggesting ``mark_raster()`` or ``raster=False``.
-        """
-        from ferrum.render_config import RenderConfig
-
-        cfg = self._render_config or RenderConfig()
-
-        # Disabled?
-        if cfg.raster_threshold is None:
-            return self
-
-        threshold = cfg.raster_threshold
-        behavior = cfg.raster_behavior
-
-        # Count marks -- row count of the resolved data.
-        if self._data is None:
-            return self
-        mark_count = len(self._data)
-        if mark_count < threshold:
-            return self
-
-        # Check mark type eligibility.
-        mark = self._mark
-        if mark not in self._AUTO_RASTER_ELIGIBLE_MARKS:
-            return self
-
-        # Composite/statistical marks (histogram, density, hex, raster, smooth,
-        # boxplot, etc.) produce aggregate output -- the raw row count does not
-        # reflect the actual SVG element count. Skip auto-raster for these.
-        if self._composite_kind is not None:
-            return self
-
-        # Check for active color encoding -- do NOT auto-raster.
-        if "color" in self._encoding:
-            warnings.warn(
-                f"Chart has {mark_count:,} marks which may produce large output. "
-                f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster=False` to suppress this warning.",
-                UserWarning,
-                stacklevel=4,
-            )
-            return self
-
-        # Check x and y are both present and quantitative.
-        x_enc = self._encoding.get("x")
-        y_enc = self._encoding.get("y")
-        if x_enc is None or y_enc is None:
-            warnings.warn(
-                f"Chart has {mark_count:,} marks which may produce large output. "
-                f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster=False` to suppress this warning.",
-                UserWarning,
-                stacklevel=4,
-            )
-            return self
-
-        # Determine if both are quantitative.
-        def _is_quantitative(enc) -> bool:
-            if isinstance(enc, ChannelBase):
-                t = enc._kwargs.get("type")
-                return t in ("Q", "quantitative")
-            # Raw string shorthand -- check for :Q suffix.
-            if isinstance(enc, str) and ":Q" in enc:
-                return True
-            return False
-
-        if not _is_quantitative(x_enc) or not _is_quantitative(y_enc):
-            warnings.warn(
-                f"Chart has {mark_count:,} marks which may produce large output. "
-                f"Use `.mark_raster()` for efficient rendering, or set "
-                f"`raster=False` to suppress this warning.",
-                UserWarning,
-                stacklevel=4,
-            )
-            return self
-
-        # Error mode -- raise instead of substituting.
-        if behavior == "error":
-            raise ValueError(
-                f"Auto-raster: {mark_count:,} marks exceed threshold "
-                f"{threshold:,}. Pass raster=False to .show()/.save() to disable."
-            )
-
-        # Perform the substitution via mark_raster.
-        x_field = x_enc.field if isinstance(x_enc, ChannelBase) else x_enc
-        y_field = y_enc.field if isinstance(y_enc, ChannelBase) else y_enc
-
-        substituted = self._clone()
-        # Apply mark_raster by going through the composite mark path.
-        # This sets _pending_stat_mark which will be resolved by to_spec().
-        from ferrum.marks.heavy_stat import desugar_raster
-
-        substituted._pending_stat_mark = _PendingMark(
-            "raster",
-            {
-                "aggregate": cfg.raster_aggregate,
-                "cmap": cfg.raster_cmap,
-                "resolution": "screen",
-                "blend": "alpha",
-                "min_count": None,
-                "log_scale": False,
-            },
-            desugar_raster,
-            prior_mark=None,
-        )
-        substituted._mark = "image"  # placeholder for raster
-        substituted._composite_kind = "raster"
-
-        if behavior == "warn":
-            warnings.warn(
-                f"Auto-raster: substituted mark_raster for {mark} "
-                f"({mark_count:,} marks > threshold {threshold:,}). "
-                f"Pass raster=False to .show()/.save() to disable.",
-                UserWarning,
-                stacklevel=4,
-            )
-
-        return substituted
 
     # ---- Marks (primitives) ----
 
@@ -2052,14 +1741,10 @@ class Chart:
         if self._layers is not None and self._layers:
             # Multi-layer: build a fresh single-chart with the function data and
             # compose via + so it becomes a proper layer alongside existing layers.
-            from ferrum.encoding import X as _X, Y as _Y
             fn_chart = self.__class__(synthetic)
             fn_chart._mark = mark
             if remap:
-                if "x" in remap:
-                    fn_chart._encoding["x"] = _X(remap["x"], type="Q")
-                if "y" in remap:
-                    fn_chart._encoding["y"] = _Y(remap["y"], type="Q")
+                _apply_remap(fn_chart._encoding, remap, orig_encoding=self._encoding)
             fn_chart._position = position
             return self + fn_chart
 
@@ -2068,11 +1753,7 @@ class Chart:
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if remap:
-            from ferrum.encoding import X, Y
-            if "x" in remap:
-                new._encoding["x"] = X(remap["x"], type="Q")
-            if "y" in remap:
-                new._encoding["y"] = Y(remap["y"], type="Q")
+            _apply_remap(new._encoding, remap, orig_encoding=self._encoding)
         new._position = position
         return new
 
@@ -4951,165 +4632,6 @@ class Chart:
         if indent is None:
             return compact
         return json.dumps(json.loads(compact), indent=indent)
-
-    def _with_raster_override(self, raster: bool | None) -> "Chart":
-        """Return a clone with auto-raster forced on/off, or *self* if None."""
-        if raster is None:
-            return self
-        from ferrum.render_config import RenderConfig
-        import dataclasses
-
-        base = self._render_config or RenderConfig()
-        if raster is False:
-            merged = dataclasses.replace(base, raster_threshold=None)
-        else:
-            merged = dataclasses.replace(base, raster_threshold=0)
-        new = self._clone()
-        new._render_config = merged
-        return new
-
-    def _render_inputs(self) -> tuple:
-        resolved = self._resolve_pending()
-        chart = resolved._apply_auto_raster()
-        spec = chart.to_spec()
-        data = to_arrow_table(chart._data)
-        viewport = (chart._width or 600.0, chart._height or 400.0)
-        theme_dict = chart._theme.to_theme_inputs_dict() if chart._theme else {}
-        return spec, data, viewport, theme_dict
-
-    def show_svg(self, *, raster: bool | None = None) -> str:
-        """Render the chart to an SVG string.
-
-        Parameters
-        ----------
-        raster : bool or None, default None
-            Override the auto-raster policy for this render only.
-            ``False`` forces per-element SVG regardless of mark count.
-            ``True`` forces raster aggregation.  ``None`` uses the chart's
-            ``RenderConfig`` policy.
-
-        Returns
-        -------
-        str
-            SVG markup for the chart.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import polars as pl
-        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-        >>> svg.startswith("<svg")
-        True
-        """
-        from ferrum._core import render_svg
-
-        chart = self._with_raster_override(raster)
-        spec, data, viewport, theme_dict = chart._render_inputs()
-        if data.num_rows == 0:
-            w, h = viewport
-            return (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
-                f"<!-- empty dataset --></svg>"
-            )
-        return render_svg(spec, data, viewport=viewport, theme=theme_dict)
-
-    def show_png(self, *, raster: bool | None = None) -> bytes:
-        """Render the chart to PNG bytes.
-
-        Parameters
-        ----------
-        raster : bool or None, default None
-            Override the auto-raster policy for this render only.
-            ``False`` forces per-element rendering.  ``True`` forces raster.
-            ``None`` uses the chart's ``RenderConfig`` policy.
-
-        Returns
-        -------
-        bytes
-            PNG-encoded image data.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import polars as pl
-        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> png = fm.Chart(df).mark_point().encode(x="x", y="y").show_png()
-        >>> png[:4] == b'\\x89PNG'
-        True
-        """
-        from ferrum._core import render_png
-
-        chart = self._with_raster_override(raster)
-        spec, data, viewport, theme_dict = chart._render_inputs()
-        return render_png(spec, data, viewport=viewport, theme=theme_dict)
-
-    def save(self, path, *, format=None, embed_wasm=True, raster: bool | None = None) -> None:
-        """Save the chart to a file on disk.
-
-        Parameters
-        ----------
-        path : str or pathlib.Path
-            Destination file path.  Extension determines the default format:
-            ``.svg`` -> SVG, ``.png`` -> PNG, ``.html`` -> HTML, ``.json`` -> JSON.
-        format : {"svg", "png", "html", "json"} or None, optional
-            Explicit format override.  ``None`` (default) infers from ``path``.
-        embed_wasm : bool
-            For ``"html"`` format only.  When True (default), the WASM binary
-            is base64-inlined for single-file distribution.
-        raster : bool or None, default None
-            Override the auto-raster policy for this save only.
-            ``False`` forces per-element output.  ``True`` forces raster.
-            ``None`` uses the chart's ``RenderConfig`` policy.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import polars as pl
-        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> fm.Chart(df).mark_point().encode(x="x", y="y").save("/tmp/chart.svg")
-        """
-        from ferrum.display import save_chart
-
-        save_chart(self._with_raster_override(raster), path, format=format, embed_wasm=embed_wasm)
-
-    def show(self, *, raster: bool | None = None) -> None:
-        """Display the chart inline or in a browser.
-
-        Parameters
-        ----------
-        raster : bool or None, default None
-            Override the auto-raster policy for this render only.
-            ``False`` forces per-element SVG regardless of mark count.
-            ``True`` forces raster aggregation.  ``None`` uses the chart's
-            ``RenderConfig`` policy.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import polars as pl
-        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
-        >>> fm.Chart(df).mark_point().encode(x="x", y="y").show()  # doctest: +SKIP
-        """
-        from ferrum.display import show_chart
-
-        show_chart(self._with_raster_override(raster))
-
-    def _repr_svg_(self) -> str | None:
-        """Jupyter SVG rich display hook."""
-        try:
-            return self.show_svg()
-        except Exception:
-            _logger.debug("Chart._repr_svg_ failed; falling back to __repr__", exc_info=True)
-            return None
-
-    def _repr_html_(self) -> str | None:
-        """Jupyter HTML rich display hook — wraps SVG in a <div>."""
-        try:
-            return f"<div>{self.show_svg()}</div>"
-        except Exception:
-            _logger.debug("Chart._repr_html_ failed; falling back to __repr__", exc_info=True)
-            return None
 
     # ---- Selections / interactivity (spec §3.10) ----
 
