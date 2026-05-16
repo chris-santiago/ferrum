@@ -6,6 +6,30 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.8.2
+
+### Added
+
+- `/test-sweep` skill — iterative combinatorial test-and-fix campaign
+- `python-coder` and `rust-coder` coding agents for language-specific dispatch
+- Plotly added to scatter benchmark suite
+- Social card generation script with iris lmplot
+
+### Fixed
+
+- **Per-instance channel rendering** — `opacity`, `stroke_width`, `fill_opacity`, `size`, and `angle` encoding channels now affect SVG output for all 9 primitive marks (previously only `mark_point` had full wiring)
+- **All-null data handling** — charts with entirely null/NaN columns now render an empty chart gracefully instead of crashing with `ValueError`
+- **Histogram auto-groupby** — `displot(hue=)` and `jointplot(hue=)` no longer crash; the Bin transform now preserves the color-groupby column
+- **RepeatPlaceholder guard** — `pairplot` mark overrides no longer crash when encodings contain unresolved repeat placeholders
+- **Chained layer column-overlap** — `mark_rule` layering with overlapping column names resolved
+- **Scale constructors** — `range` parameter now optional on all scale constructors
+- **License packaging** — NOTICE file declared in `license-files` for sdist inclusion
+
+### Changed
+
+- Benchmark tables updated with Plotly results (4-library comparison)
+- Documentation expanded: 25 new-user gaps addressed, API reflinks, stale gallery PNGs regenerated
+
 ## 0.8.1
 
 ### Fixed

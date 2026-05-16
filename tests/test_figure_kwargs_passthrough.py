@@ -95,16 +95,12 @@ class TestDisplotPassthrough:
 class TestCatplotPassthrough:
     def test_mark_override(self, df):
         default = fm.catplot(df, x="cat", y="val", kind="box")
-        overridden = fm.catplot(
-            df, x="cat", y="val", kind="box", mark={"box": {"opacity": 0.3}}
-        )
+        overridden = fm.catplot(df, x="cat", y="val", kind="box", mark={"box": {"opacity": 0.3}})
         _renders_differently(default, overridden)
 
     def test_encode_override(self, df):
         default = fm.catplot(df, x="cat", y="val", kind="box")
-        overridden = fm.catplot(
-            df, x="cat", y="val", kind="box", encode={"color": "cat:N"}
-        )
+        overridden = fm.catplot(df, x="cat", y="val", kind="box", encode={"color": "cat:N"})
         _renders_differently(default, overridden)
 
     def test_properties_override(self, df):
@@ -165,7 +161,11 @@ class TestResidplotPassthrough:
     def test_encode_override(self, df):
         default = fm.residplot(df, x="x", y="y", show_metrics=False, zero_line=False)
         overridden = fm.residplot(
-            df, x="x", y="y", show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
             encode={"size": "residual"},
         )
         _renders_differently(default, overridden)
@@ -173,7 +173,11 @@ class TestResidplotPassthrough:
     def test_properties_override(self, df):
         default = fm.residplot(df, x="x", y="y", show_metrics=False, zero_line=False)
         overridden = fm.residplot(
-            df, x="x", y="y", show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
             properties={"width": 700, "height": 400},
         )
         _renders_differently(default, overridden)
@@ -181,7 +185,11 @@ class TestResidplotPassthrough:
     def test_properties_title(self, df):
         default = fm.residplot(df, x="x", y="y", show_metrics=False, zero_line=False)
         overridden = fm.residplot(
-            df, x="x", y="y", show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
             properties={"title": "Residuals"},
         )
         _renders_differently(default, overridden)
@@ -205,9 +213,7 @@ class TestPairplotPassthrough:
 
     def test_properties_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"])
-        overridden = fm.pairplot(
-            df, vars=["x", "y"], properties={"width": 500, "height": 500}
-        )
+        overridden = fm.pairplot(df, vars=["x", "y"], properties={"width": 500, "height": 500})
         _renders_differently(default, overridden)
 
 

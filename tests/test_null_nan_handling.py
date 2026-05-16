@@ -91,9 +91,7 @@ def _assert_valid_svg(svg: str, context: str) -> None:
     """Assert the SVG output is well-formed (non-empty, proper start/end tags)."""
     assert isinstance(svg, str), f"[{context}] expected str, got {type(svg)}"
     assert "<svg" in svg, f"[{context}] expected SVG output to contain '<svg'"
-    assert svg.rstrip().endswith("</svg>"), (
-        f"[{context}] expected SVG output to end with '</svg>'"
-    )
+    assert svg.rstrip().endswith("</svg>"), f"[{context}] expected SVG output to end with '</svg>'"
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +191,7 @@ _CHANNEL_MARKS = [
     ("mark_rect", {"x": "cat:N", "y": "cat2:N", "color": "y:Q"}),
 ]
 
-_CHANNEL_IDS = [
-    f"{mark}/{list(enc.keys())[-1]}_null" for mark, enc in _CHANNEL_MARKS
-]
+_CHANNEL_IDS = [f"{mark}/{list(enc.keys())[-1]}_null" for mark, enc in _CHANNEL_MARKS]
 
 
 @pytest.mark.parametrize("mark_name,enc_kwargs", _CHANNEL_MARKS, ids=_CHANNEL_IDS)

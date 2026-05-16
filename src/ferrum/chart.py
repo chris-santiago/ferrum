@@ -139,6 +139,7 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
         if isinstance(val, ChannelBase):
             if val.field in renames:
                 import copy
+
                 val = copy.copy(val)
                 val.field = renames[val.field]
         elif isinstance(val, str):
@@ -361,6 +362,7 @@ class Chart(_RenderMixin):
         # If encodings still contain unresolved repeat placeholders, defer
         # desugaring until the RepeatChart substitutes concrete field names.
         from ferrum.repeat import _RepeatPlaceholder
+
         if isinstance(x_field, _RepeatPlaceholder) or isinstance(y_field, _RepeatPlaceholder):
             return self
         # Ribbon needs y2 from the encoding — inject as a kwarg.

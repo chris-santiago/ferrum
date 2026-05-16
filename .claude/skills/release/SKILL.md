@@ -79,8 +79,10 @@ Do NOT proceed until the user confirms.
 
 ### 6. On approval — commit, tag, push, release
 
+The skill starts from a verified clean working tree (guardrail above). Therefore **every dirty file at commit time was caused by the release steps** (version bumps, changelog, lock file updates, linter formatting from the nox lint session) and MUST be included. Use `git add -A`, not a hand-picked file list.
+
 ```bash
-git add pyproject.toml Cargo.toml docs/site/changelog.md
+git add -A
 git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 git push origin main

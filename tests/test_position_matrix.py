@@ -118,9 +118,7 @@ _STACK_OFFSETS = [
 
 
 @pytest.mark.parametrize("offset", _STACK_OFFSETS)
-def test_stack_offset_differs_from_no_position(
-    grouped_df: pl.DataFrame, offset: str
-) -> None:
+def test_stack_offset_differs_from_no_position(grouped_df: pl.DataFrame, offset: str) -> None:
     """Each Stack offset variant must produce SVG different from unpositioned bars."""
     svg_without = (
         fm.Chart(grouped_df).mark_bar().encode(x="cat:N", y="val:Q", color="grp:N").show_svg()
@@ -183,9 +181,7 @@ def test_stack_offsets_differ_from_each_other(
 )
 def test_jitter_axis_changes_svg(grouped_df: pl.DataFrame, axis: str) -> None:
     """Each Jitter axis setting must alter SVG vs. unpositioned marks."""
-    svg_without = (
-        fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").show_svg()
-    )
+    svg_without = fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").show_svg()
     svg_with = (
         fm.Chart(grouped_df)
         .mark_point(position=Jitter(axis=axis, seed=42))
@@ -193,9 +189,7 @@ def test_jitter_axis_changes_svg(grouped_df: pl.DataFrame, axis: str) -> None:
         .show_svg()
     )
 
-    assert svg_without != svg_with, (
-        f"Jitter(axis={axis!r}) did not change SVG output."
-    )
+    assert svg_without != svg_with, f"Jitter(axis={axis!r}) did not change SVG output."
 
 
 # ---------------------------------------------------------------------------

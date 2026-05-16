@@ -15,15 +15,17 @@ import ferrum as fm
 
 @pytest.fixture()
 def df():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "y": [2.0, 4.0, 1.0, 5.0, 3.0],
-        "x2": [2.0, 3.0, 4.0, 5.0, 6.0],
-        "y2": [3.0, 5.0, 2.0, 6.0, 4.0],
-        "cat": ["a", "b", "c", "d", "e"],
-        "cat2": ["p", "q", "r", "s", "t"],
-        "label": ["one", "two", "three", "four", "five"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [2.0, 4.0, 1.0, 5.0, 3.0],
+            "x2": [2.0, 3.0, 4.0, 5.0, 6.0],
+            "y2": [3.0, 5.0, 2.0, 6.0, 4.0],
+            "cat": ["a", "b", "c", "d", "e"],
+            "cat2": ["p", "q", "r", "s", "t"],
+            "label": ["one", "two", "three", "four", "five"],
+        }
+    )
 
 
 MARK_CONFIGS = {
@@ -92,9 +94,7 @@ def test_coord_flip_preserves_marks(df, mark_method):
     flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord(fm.CoordFlip())
     flipped_svg = flipped_chart.show_svg()
 
-    assert "<svg" in flipped_svg, (
-        f"{mark_method}: coord_flip produced invalid SVG (no <svg root)"
-    )
+    assert "<svg" in flipped_svg, f"{mark_method}: coord_flip produced invalid SVG (no <svg root)"
 
     for element in cfg["expected_elements"]:
         assert element in flipped_svg, (

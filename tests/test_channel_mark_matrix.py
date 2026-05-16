@@ -16,25 +16,27 @@ import ferrum as fm
 
 @pytest.fixture()
 def df():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "y": [2.0, 4.0, 1.0, 5.0, 3.0],
-        "x2": [2.0, 3.0, 4.0, 5.0, 6.0],
-        "y2": [3.0, 5.0, 2.0, 6.0, 4.0],
-        "cat": ["a", "b", "a", "b", "a"],
-        "cat2": ["x", "y", "x", "y", "x"],
-        "label": ["one", "two", "three", "four", "five"],
-        "sz": [10.0, 20.0, 30.0, 40.0, 50.0],
-        "ang": [0.0, 45.0, 90.0, 135.0, 180.0],
-        "op": [0.2, 0.4, 0.6, 0.8, 1.0],
-        "url": [
-            "http://a.com",
-            "http://b.com",
-            "http://c.com",
-            "http://d.com",
-            "http://e.com",
-        ],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [2.0, 4.0, 1.0, 5.0, 3.0],
+            "x2": [2.0, 3.0, 4.0, 5.0, 6.0],
+            "y2": [3.0, 5.0, 2.0, 6.0, 4.0],
+            "cat": ["a", "b", "a", "b", "a"],
+            "cat2": ["x", "y", "x", "y", "x"],
+            "label": ["one", "two", "three", "four", "five"],
+            "sz": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "ang": [0.0, 45.0, 90.0, 135.0, 180.0],
+            "op": [0.2, 0.4, 0.6, 0.8, 1.0],
+            "url": [
+                "http://a.com",
+                "http://b.com",
+                "http://c.com",
+                "http://d.com",
+                "http://e.com",
+            ],
+        }
+    )
 
 
 CHANNEL_ENCODINGS = {
@@ -54,7 +56,18 @@ CHANNEL_ENCODINGS = {
 MARK_CONFIGS = {
     "mark_point": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
-        "channels": ["color", "size", "shape", "opacity", "fill_opacity", "stroke", "stroke_width", "angle", "tooltip", "href"],
+        "channels": [
+            "color",
+            "size",
+            "shape",
+            "opacity",
+            "fill_opacity",
+            "stroke",
+            "stroke_width",
+            "angle",
+            "tooltip",
+            "href",
+        ],
     },
     "mark_line": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
@@ -62,7 +75,15 @@ MARK_CONFIGS = {
     },
     "mark_bar": {
         "base_encoding": {"x": "cat:N", "y": "y:Q"},
-        "channels": ["color", "opacity", "fill_opacity", "stroke", "stroke_width", "tooltip", "href"],
+        "channels": [
+            "color",
+            "opacity",
+            "fill_opacity",
+            "stroke",
+            "stroke_width",
+            "tooltip",
+            "href",
+        ],
     },
     "mark_area": {
         "base_encoding": {"x": "x:Q", "y": "y:Q"},
@@ -82,7 +103,15 @@ MARK_CONFIGS = {
     },
     "mark_rect": {
         "base_encoding": {"x": "cat:N", "y": "cat2:N"},
-        "channels": ["color", "opacity", "fill_opacity", "stroke", "stroke_width", "tooltip", "href"],
+        "channels": [
+            "color",
+            "opacity",
+            "fill_opacity",
+            "stroke",
+            "stroke_width",
+            "tooltip",
+            "href",
+        ],
     },
     "mark_segment": {
         "base_encoding": {"x": "x:Q", "y": "y:Q", "x2": "x2:Q", "y2": "y2:Q"},

@@ -19,14 +19,16 @@ import ferrum as fm
 @pytest.fixture()
 def df():
     rng = np.random.default_rng(42)
-    return pl.DataFrame({
-        "cat": ["a"] * 30 + ["b"] * 30,
-        "val": rng.normal(0, 1, 60).tolist(),
-        "x": rng.normal(0, 1, 60).tolist(),
-        "y": rng.normal(0, 1, 60).tolist(),
-        "op": rng.uniform(0.2, 1.0, 60).tolist(),
-        "sz": rng.uniform(5, 50, 60).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "cat": ["a"] * 30 + ["b"] * 30,
+            "val": rng.normal(0, 1, 60).tolist(),
+            "x": rng.normal(0, 1, 60).tolist(),
+            "y": rng.normal(0, 1, 60).tolist(),
+            "op": rng.uniform(0.2, 1.0, 60).tolist(),
+            "sz": rng.uniform(5, 50, 60).tolist(),
+        }
+    )
 
 
 CHANNEL_ENCODINGS = {

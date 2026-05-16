@@ -40,9 +40,13 @@ class TestScaleRangeOptional:
         assert scale.range is None
 
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [2.0, 4.0, 6.0, 8.0, 10.0]})
-        chart = fm.Chart(df).mark_point().encode(
-            x=X("x", scale=scale),
-            y="y",
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(
+                x=X("x", scale=scale),
+                y="y",
+            )
         )
         svg = chart.show_svg()
         assert svg.strip().startswith("<svg")
@@ -54,9 +58,13 @@ class TestScaleRangeOptional:
         assert scale.range is None
 
         df = pl.DataFrame({"x": [1.0, 10.0, 100.0, 1000.0], "y": [1.0, 2.0, 3.0, 4.0]})
-        chart = fm.Chart(df).mark_point().encode(
-            x=X("x", scale=scale),
-            y="y",
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(
+                x=X("x", scale=scale),
+                y="y",
+            )
         )
         svg = chart.show_svg()
         assert svg.strip().startswith("<svg")
@@ -124,9 +132,7 @@ class TestRuleLayerColumnRename:
 
     def test_text_layer_overlapping_columns(self):
         """Layering scatter + text callout with shared x/y should render without error."""
-        df_scatter = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [2.0, 4.0, 1.0, 5.0, 3.0]}
-        )
+        df_scatter = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [2.0, 4.0, 1.0, 5.0, 3.0]})
         df_text = pl.DataFrame({"x": [3.0], "y": [5.0], "label": ["peak"]})
 
         scatter = fm.Chart(df_scatter).mark_point().encode(x="x", y="y")
