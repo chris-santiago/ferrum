@@ -17,10 +17,11 @@ use arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, Int8Array,
     LargeStringArray, StringArray,
-    TimestampMillisecondArray,
+    TimestampMillisecondArray, TimestampMicrosecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
     UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use super::RenderError;
@@ -70,7 +71,10 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::UInt32 => collect_as!(UInt32Array),
         DataType::UInt16 => collect_as!(UInt16Array),
         DataType::UInt8 => collect_as!(UInt8Array),
-        DataType::Timestamp(_, _) => collect_as!(TimestampMillisecondArray),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => collect_as!(TimestampNanosecondArray),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => collect_as!(TimestampMicrosecondArray),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => collect_as!(TimestampMillisecondArray),
+        DataType::Timestamp(TimeUnit::Second, _) => collect_as!(TimestampSecondArray),
         other => Err(RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!("{other:?}"),
@@ -138,7 +142,10 @@ pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
         DataType::UInt32 => min_max_int!(UInt32Array, u32),
         DataType::UInt16 => min_max_int!(UInt16Array, u16),
         DataType::UInt8 => min_max_int!(UInt8Array, u8),
-        DataType::Timestamp(_, _) => min_max_int!(TimestampMillisecondArray, i64),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => min_max_int!(TimestampNanosecondArray, i64),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => min_max_int!(TimestampMicrosecondArray, i64),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => min_max_int!(TimestampMillisecondArray, i64),
+        DataType::Timestamp(TimeUnit::Second, _) => min_max_int!(TimestampSecondArray, i64),
         other => Err(format!("unsupported column dtype: {other:?}")),
     }
 }
