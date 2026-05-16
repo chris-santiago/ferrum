@@ -5,10 +5,12 @@ import ferrum as fe
 
 @pytest.fixture
 def df():
-    return pl.DataFrame({
-        "x": ["a", "b"] * 5,
-        "y": [1.0, 2.0, 1.5, 2.5, 1.2, 2.2, 1.8, 2.8, 1.1, 2.1],
-    })
+    return pl.DataFrame(
+        {
+            "x": ["a", "b"] * 5,
+            "y": [1.0, 2.0, 1.5, 2.5, 1.2, 2.2, 1.8, 2.8, 1.1, 2.1],
+        }
+    )
 
 
 def test_errorbar_default_3_layers(df):

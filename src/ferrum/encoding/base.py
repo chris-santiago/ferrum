@@ -35,6 +35,7 @@ class ChannelBase:
         # directly to channel constructors without manually splitting field and type.
         if isinstance(field, str) and ":" in field:
             from ferrum._shorthand import parse_shorthand
+
             try:
                 parsed_field, parsed_type, _ = parse_shorthand(field)
                 if parsed_field is not None:

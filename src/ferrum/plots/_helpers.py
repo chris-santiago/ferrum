@@ -57,7 +57,7 @@ def _inject_cook_outliers(
 def _r2_score(y_true: pl.Series, y_pred: pl.Series) -> float:
     """Coefficient of determination — Schwabish SB3 corner-metrics helper."""
     diff = y_true - y_pred
-    ss_res = float((diff ** 2).sum())
+    ss_res = float((diff**2).sum())
     mean_y = float(y_true.mean())
     ss_tot = float(((y_true - mean_y) ** 2).sum())
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
@@ -90,7 +90,7 @@ def _inject_metrics_corner(
 
     diff = df["y_pred"] - df["y_true"]
     r2 = _r2_score(df["y_true"], df["y_pred"])
-    rmse = float((diff ** 2).mean() ** 0.5)
+    rmse = float((diff**2).mean() ** 0.5)
     mae = float(diff.abs().mean())
     corner_text = format_corner_metrics(r2, rmse, mae)
 
@@ -255,8 +255,7 @@ def _resolve_source(
 
     if not has_model:
         raise ValueError(
-            "Supply either a fitted model/source (model=) or precomputed arrays "
-            "(y_true=, y_pred=)."
+            "Supply either a fitted model/source (model=) or precomputed arrays (y_true=, y_pred=)."
         )
 
     if isinstance(model, ComparedModelSource):
@@ -268,11 +267,17 @@ def _resolve_source(
             )
         models = {"base": model, **compare}
         return ferrum.ModelSource.compare(
-            models, X, y, random_state=random_state,
+            models,
+            X,
+            y,
+            random_state=random_state,
         )
     if isinstance(model, dict):
         return ferrum.ModelSource.compare(
-            model, X, y, random_state=random_state,
+            model,
+            X,
+            y,
+            random_state=random_state,
         )
     if isinstance(model, ferrum.ModelSource):
         return model

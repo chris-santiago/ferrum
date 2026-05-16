@@ -10,6 +10,7 @@ from tests.fixtures import load_fixture, load_dataset
 
 class _DuckModel:
     """Minimal duck-typed model: predict only."""
+
     def predict(self, X):
         return np.zeros(len(X))
 
@@ -36,6 +37,7 @@ def test_capability_detection():
 def test_predictions_requires_predict():
     class NoPredict:
         pass
+
     df = pl.DataFrame({"a": [1.0]})
     source = ferrum.ModelSource(NoPredict(), df, y=[0.0])
     with pytest.raises(AttributeError, match="predict"):
@@ -52,8 +54,12 @@ def test_predictions_against_ridge_fixture():
     source = ferrum.ModelSource(model, X, y)
     pred = source.predictions()
     assert pred.columns == [
-        "y_true", "y_pred", "residual", "studentized_residual",
-        "cooks_distance", "leverage",
+        "y_true",
+        "y_pred",
+        "residual",
+        "studentized_residual",
+        "cooks_distance",
+        "leverage",
     ]
     assert pred.shape == (df.height, 6)
     # Leverage for a linear estimator is in (0, 1) and sums to p (the
@@ -267,7 +273,11 @@ def test_discrimination_threshold_schema_and_grid():
     source = ferrum.ModelSource(model, X, df["y"])
     dt = source.discrimination_threshold(n_thresholds=20)
     assert set(dt.columns) == {
-        "threshold", "precision", "recall", "f1", "queue_rate",
+        "threshold",
+        "precision",
+        "recall",
+        "f1",
+        "queue_rate",
     }
     assert dt.height == 20
     near_zero = dt.filter(pl.col("threshold") < 0.05)["queue_rate"].to_list()
@@ -305,13 +315,19 @@ def test_discrimination_threshold_cv_averaging():
 
 def test_learning_curve_schema_and_splits():
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
     lc = source.learning_curve(cv=3)
     assert set(lc.columns) == {
-        "train_size", "split", "score",
-        "mean_score", "std_score", "lower", "upper",
+        "train_size",
+        "split",
+        "score",
+        "mean_score",
+        "std_score",
+        "lower",
+        "upper",
     }
     assert set(lc["split"].unique().to_list()) == {"train", "test"}
     # 5 default train sizes × 2 splits × 3 folds = 30 rows.
@@ -325,13 +341,19 @@ def test_learning_curve_schema_and_splits():
 
 def test_validation_curve_schema_and_values():
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
     vc = source.validation_curve("alpha", [0.1, 1.0, 10.0], cv=3)
     assert set(vc.columns) == {
-        "param_value", "split", "score",
-        "mean_score", "std_score", "lower", "upper",
+        "param_value",
+        "split",
+        "score",
+        "mean_score",
+        "std_score",
+        "lower",
+        "upper",
     }
     assert set(vc["param_value"].unique().to_list()) == {0.1, 1.0, 10.0}
     # 3 alphas × 2 splits × 3 folds = 18 rows.
@@ -340,6 +362,7 @@ def test_validation_curve_schema_and_values():
 
 def test_cv_scores_schema_and_count():
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
@@ -352,12 +375,17 @@ def test_cv_scores_schema_and_count():
 
 def test_alpha_selection_schema_and_alphas():
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
     al = source.alpha_selection([0.1, 1.0, 10.0], cv=3)
     assert set(al.columns) == {
-        "alpha", "fold", "score", "mean_score", "std_score",
+        "alpha",
+        "fold",
+        "score",
+        "mean_score",
+        "std_score",
     }
     assert set(al["alpha"].unique().to_list()) == {0.1, 1.0, 10.0}
     # 3 alphas × 3 folds = 9 rows.
@@ -374,18 +402,14 @@ def test_compare_unknown_kwarg_raises_type_error():
     df = pl.DataFrame({"a": [1.0, 2.0]})
     source = ferrum.ModelSource(_DuckModel(), df, y=[0, 1])
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        ferrum.ModelSource.compare(
-            {"m": _DuckModel()}, df, [0, 1], unknown_param=42
-        )
+        ferrum.ModelSource.compare({"m": _DuckModel()}, df, [0, 1], unknown_param=42)
 
 
 def test_compare_unknown_kwarg_message_lists_accepted():
     """TypeError message must name accepted kwargs."""
     df = pl.DataFrame({"a": [1.0, 2.0]})
     with pytest.raises(TypeError, match="random_state"):
-        ferrum.ModelSource.compare(
-            {"m": _DuckModel()}, df, [0, 1], bad_kwarg="x"
-        )
+        ferrum.ModelSource.compare({"m": _DuckModel()}, df, [0, 1], bad_kwarg="x")
 
 
 def test_compare_accepted_kwargs_do_not_raise():
@@ -393,6 +417,9 @@ def test_compare_accepted_kwargs_do_not_raise():
     df = pl.DataFrame({"a": [1.0, 2.0]})
     # No assertion needed beyond not raising.
     ferrum.ModelSource.compare(
-        {"m": _DuckModel()}, df, [0, 1],
-        random_state=0, feature_names=["a"],
+        {"m": _DuckModel()},
+        df,
+        [0, 1],
+        random_state=0,
+        feature_names=["a"],
     )

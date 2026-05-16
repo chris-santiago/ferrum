@@ -14,6 +14,7 @@ output on a known numeric fixture so any future format-string change is
 caught loudly instead of producing a silent visual divergence between the
 residplot path (Python) and the lmplot path (Rust).
 """
+
 from __future__ import annotations
 
 import re
@@ -37,15 +38,13 @@ def _rust_metrics_text(seed: int = 0) -> str:
         Chart(df)
         .mark_line()
         .encode(x="x", y="y")
-        .transform(Smooth(x="x", y="y", method="lm", ci=0.95,
-                          inject_metrics=True, output="fitted"))
+        .transform(Smooth(x="x", y="y", method="lm", ci=0.95, inject_metrics=True, output="fitted"))
     )
     text_layer = (
         Chart(df)
         .mark_text(align="right")
         .encode(x="x", y="_metrics_y", text="_metrics_text")
-        .transform(Smooth(x="x", y="y", method="lm", ci=0.95,
-                          inject_metrics=True, output="fitted"))
+        .transform(Smooth(x="x", y="y", method="lm", ci=0.95, inject_metrics=True, output="fitted"))
     )
     svg = (line_layer + text_layer).show_svg()
     # With multiline tspan support, metric text may be split across <tspan>
@@ -75,10 +74,10 @@ def _python_metrics_text(seed: int = 0) -> str:
     beta = sxy / sxx
     alpha = mean_y - beta * mean_x
     resid = y - (alpha + beta * x)
-    ss_res = float((resid ** 2).sum())
+    ss_res = float((resid**2).sum())
     ss_tot = float(((y - mean_y) ** 2).sum())
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    rmse = float(np.sqrt((resid ** 2).mean()))
+    rmse = float(np.sqrt((resid**2).mean()))
     mae = float(np.abs(resid).mean())
     return format_corner_metrics(r2, rmse, mae)
 

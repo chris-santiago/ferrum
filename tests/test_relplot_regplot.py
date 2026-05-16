@@ -1,4 +1,5 @@
 """Smoke and validation tests for relplot and regplot."""
+
 from __future__ import annotations
 
 import polars as pl
@@ -10,17 +11,20 @@ from ferrum import Chart
 
 @pytest.fixture
 def df():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        "y": [2.1, 3.9, 6.2, 7.8, 10.1, 12.0, 13.9, 16.2],
-        "group": ["a", "b"] * 4,
-        "time": ["am", "am", "am", "am", "pm", "pm", "pm", "pm"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "y": [2.1, 3.9, 6.2, 7.8, 10.1, 12.0, 13.9, 16.2],
+            "group": ["a", "b"] * 4,
+            "time": ["am", "am", "am", "am", "pm", "pm", "pm", "pm"],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # relplot — scatter
 # ---------------------------------------------------------------------------
+
 
 def test_relplot_scatter_returns_chart(df):
     chart = fm.relplot(df, x="x", y="y")
@@ -56,6 +60,7 @@ def test_relplot_scatter_height_aspect(df):
 # relplot — line
 # ---------------------------------------------------------------------------
 
+
 def test_relplot_line_returns_chart(df):
     chart = fm.relplot(df, x="x", y="y", kind="line")
     assert isinstance(chart, Chart)
@@ -75,6 +80,7 @@ def test_relplot_line_with_style_maps_stroke_dash(df):
 # relplot — invalid kind
 # ---------------------------------------------------------------------------
 
+
 def test_relplot_invalid_kind_raises(df):
     with pytest.raises(ValueError, match="kind must be one of"):
         fm.relplot(df, x="x", y="y", kind="hist")
@@ -88,6 +94,7 @@ def test_relplot_invalid_kind_message_lists_valid_values(df):
 # ---------------------------------------------------------------------------
 # regplot
 # ---------------------------------------------------------------------------
+
 
 def test_regplot_basic_returns_chart(df):
     chart = fm.regplot(df, x="x", y="y")
@@ -122,6 +129,7 @@ def test_regplot_invalid_method_raises(df):
 # ---------------------------------------------------------------------------
 # Export surface checks
 # ---------------------------------------------------------------------------
+
 
 def test_relplot_in_ferrum_namespace():
     assert hasattr(fm, "relplot")

@@ -1,4 +1,5 @@
 """Subjective findings never appear in the eligibility list."""
+
 import re
 from pathlib import Path
 
@@ -9,9 +10,7 @@ def test_eligibility_list_excludes_subjective_finding_ids():
     # subjective IDs that must NOT appear in the eligible section
     forbidden = ["T1_active_title", "T3_callout", "T1_subtitle"]
     for fid in forbidden:
-        assert fid not in body, (
-            f"subjective finding {fid!r} found in eligibility list"
-        )
+        assert fid not in body, f"subjective finding {fid!r} found in eligibility list"
 
 
 def test_eligibility_list_only_lists_T2_or_T4_in_eligible_section():

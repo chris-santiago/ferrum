@@ -72,9 +72,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
             # cast to Datetime[ms] so Arrow produces timestamp[ms] instead.
             date_cols = [c for c in data.columns if data[c].dtype == pl.Date]
             if date_cols:
-                data = data.with_columns(
-                    [pl.col(c).cast(pl.Datetime("ms")) for c in date_cols]
-                )
+                data = data.with_columns([pl.col(c).cast(pl.Datetime("ms")) for c in date_cols])
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
             return data.collect().to_arrow()
@@ -146,18 +144,23 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
 
 # ── GeoJSON FeatureCollection support ────────────────────────────────────────
 
+
 def _is_geojson_feature_collection(data: dict) -> bool:
     """Return True if *data* looks like a GeoJSON FeatureCollection."""
-    return (
-        data.get("type") == "FeatureCollection"
-        and isinstance(data.get("features"), list)
-    )
+    return data.get("type") == "FeatureCollection" and isinstance(data.get("features"), list)
 
 
-_GEOJSON_GEOMETRY_TYPES = frozenset({
-    "Point", "MultiPoint", "LineString", "MultiLineString",
-    "Polygon", "MultiPolygon", "GeometryCollection",
-})
+_GEOJSON_GEOMETRY_TYPES = frozenset(
+    {
+        "Point",
+        "MultiPoint",
+        "LineString",
+        "MultiLineString",
+        "Polygon",
+        "MultiPolygon",
+        "GeometryCollection",
+    }
+)
 
 
 def _is_geojson_geometry_root(data: dict) -> bool:

@@ -72,7 +72,15 @@ class _PrecomputedSource:
             except ValueError:
                 auc = float("nan")
             for f, t, h in zip(fpr, tpr, thr):
-                rows.append({"fpr": float(f), "tpr": float(t), "threshold": float(h), "class": pos_class, "auc": auc})
+                rows.append(
+                    {
+                        "fpr": float(f),
+                        "tpr": float(t),
+                        "threshold": float(h),
+                        "class": pos_class,
+                        "auc": auc,
+                    }
+                )
         else:
             # Multiclass: y_pred is (n_samples, n_classes); columns map to
             # sorted unique classes (sklearn convention).
@@ -86,7 +94,15 @@ class _PrecomputedSource:
                 except ValueError:
                     auc = float("nan")
                 for f, t, h in zip(fpr, tpr, thr):
-                    rows.append({"fpr": float(f), "tpr": float(t), "threshold": float(h), "class": str(cls), "auc": auc})
+                    rows.append(
+                        {
+                            "fpr": float(f),
+                            "tpr": float(t),
+                            "threshold": float(h),
+                            "class": str(cls),
+                            "auc": auc,
+                        }
+                    )
 
             if average in ("micro", "macro", "weighted"):
                 rows.extend(_avg_roc_rows(y_true, y_pred, classes, average, drop_intermediate))
@@ -135,9 +151,7 @@ class _PrecomputedSource:
         bin_idx = np.clip(np.digitize(y_pred, edges[1:-1]), 0, n_bins - 1)
         counts_all = np.bincount(bin_idx, minlength=n_bins)
         centers = edges[:-1] + np.diff(edges) / 2.0
-        used_bins = np.array(
-            [int(np.argmin(np.abs(centers - mp))) for mp in mean_pred], dtype=int
-        )
+        used_bins = np.array([int(np.argmin(np.abs(centers - mp))) for mp in mean_pred], dtype=int)
         counts = counts_all[used_bins] if used_bins.size else np.empty(0, dtype=int)
 
         return pl.DataFrame(
@@ -169,7 +183,9 @@ class _PrecomputedSource:
                 xs = np.concatenate([[0.0], pct_pop])
                 ys = np.concatenate([[0.0], gain])
                 for pp, g in zip(xs, ys):
-                    rows.append({"percent_population": float(pp), "gain": float(g), "class": str(cls)})
+                    rows.append(
+                        {"percent_population": float(pp), "gain": float(g), "class": str(cls)}
+                    )
         else:
             classes = list(np.unique(y_true))
             for i, cls in enumerate(classes):
@@ -182,7 +198,9 @@ class _PrecomputedSource:
                 xs = np.concatenate([[0.0], pct_pop])
                 ys = np.concatenate([[0.0], gain])
                 for pp, g in zip(xs, ys):
-                    rows.append({"percent_population": float(pp), "gain": float(g), "class": str(cls)})
+                    rows.append(
+                        {"percent_population": float(pp), "gain": float(g), "class": str(cls)}
+                    )
 
         rows.append({"percent_population": 0.0, "gain": 0.0, "class": "baseline"})
         rows.append({"percent_population": 1.0, "gain": 1.0, "class": "baseline"})
@@ -209,7 +227,9 @@ class _PrecomputedSource:
                 lift = cum_rate / base_rate
                 pct_pop = denom / n
                 for pp, lv in zip(pct_pop, lift):
-                    rows.append({"percent_population": float(pp), "lift": float(lv), "class": str(cls)})
+                    rows.append(
+                        {"percent_population": float(pp), "lift": float(lv), "class": str(cls)}
+                    )
         else:
             classes = list(np.unique(y_true))
             for i, cls in enumerate(classes):
@@ -224,7 +244,9 @@ class _PrecomputedSource:
                 lift = cum_rate / base_rate
                 pct_pop = denom / n
                 for pp, lv in zip(pct_pop, lift):
-                    rows.append({"percent_population": float(pp), "lift": float(lv), "class": str(cls)})
+                    rows.append(
+                        {"percent_population": float(pp), "lift": float(lv), "class": str(cls)}
+                    )
 
         rows.append({"percent_population": 0.0, "lift": 1.0, "class": "baseline"})
         rows.append({"percent_population": 1.0, "lift": 1.0, "class": "baseline"})
@@ -349,14 +371,18 @@ def _pr_rows_binary_np(y_true: np.ndarray, y_pred: np.ndarray) -> list[dict]:
         ap = float("nan")
     thresholds_padded = np.concatenate([thr, [float("nan")]])
     return [
-        {"precision": float(pi), "recall": float(ri), "threshold": float(ti), "class": pos_class, "ap": ap}
+        {
+            "precision": float(pi),
+            "recall": float(ri),
+            "threshold": float(ti),
+            "class": pos_class,
+            "ap": ap,
+        }
         for pi, ri, ti in zip(p, r, thresholds_padded)
     ]
 
 
-def _pr_rows_per_class_np(
-    y_true: np.ndarray, y_pred: np.ndarray, classes: list
-) -> list[dict]:
+def _pr_rows_per_class_np(y_true: np.ndarray, y_pred: np.ndarray, classes: list) -> list[dict]:
     from sklearn.metrics import precision_recall_curve, average_precision_score
 
     rows: list[dict] = []
@@ -371,14 +397,18 @@ def _pr_rows_per_class_np(
         thresholds_padded = np.concatenate([thr, [float("nan")]])
         for pi, ri, ti in zip(p, r, thresholds_padded):
             rows.append(
-                {"precision": float(pi), "recall": float(ri), "threshold": float(ti), "class": str(cls), "ap": ap}
+                {
+                    "precision": float(pi),
+                    "recall": float(ri),
+                    "threshold": float(ti),
+                    "class": str(cls),
+                    "ap": ap,
+                }
             )
     return rows
 
 
-def _avg_pr_rows(
-    y_true: np.ndarray, y_pred: np.ndarray, classes: list, average: str
-) -> list[dict]:
+def _avg_pr_rows(y_true: np.ndarray, y_pred: np.ndarray, classes: list, average: str) -> list[dict]:
     from sklearn.metrics import precision_recall_curve, average_precision_score
     from sklearn.preprocessing import label_binarize
 
@@ -388,7 +418,13 @@ def _avg_pr_rows(
         ap = float(average_precision_score(y_bin, y_pred, average="micro"))
         thresholds_padded = np.concatenate([thr, [float("nan")]])
         return [
-            {"precision": float(pi), "recall": float(ri), "threshold": float(ti), "class": "micro", "ap": ap}
+            {
+                "precision": float(pi),
+                "recall": float(ri),
+                "threshold": float(ti),
+                "class": "micro",
+                "ap": ap,
+            }
             for pi, ri, ti in zip(p, r, thresholds_padded)
         ]
     grid = np.linspace(0.0, 1.0, 100)
@@ -405,7 +441,13 @@ def _avg_pr_rows(
     precision_avg = (np.array(precisions).T * weights).sum(axis=1)
     ap = float(average_precision_score(y_bin, y_pred, average=average))
     return [
-        {"precision": float(p), "recall": float(r), "threshold": float("nan"), "class": average, "ap": ap}
+        {
+            "precision": float(p),
+            "recall": float(r),
+            "threshold": float("nan"),
+            "class": average,
+            "ap": ap,
+        }
         for p, r in zip(precision_avg, grid)
     ]
 
@@ -422,7 +464,9 @@ def _avg_roc_rows(
 
     y_bin = label_binarize(y_true, classes=classes)
     if average == "micro":
-        fpr, tpr, thr = roc_curve(y_bin.ravel(), y_pred.ravel(), drop_intermediate=drop_intermediate)
+        fpr, tpr, thr = roc_curve(
+            y_bin.ravel(), y_pred.ravel(), drop_intermediate=drop_intermediate
+        )
         auc = float(roc_auc_score(y_bin, y_pred, average="micro"))
         return [
             {"fpr": float(f), "tpr": float(t), "threshold": float(h), "class": "micro", "auc": auc}

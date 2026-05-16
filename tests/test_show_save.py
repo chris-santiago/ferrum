@@ -56,6 +56,7 @@ def test_save_explicit_format_overrides_extension(chart, tmp_path):
 
 # Task 33: show browser fallback + Jupyter rich-display paths
 
+
 def test_show_in_non_jupyter_opens_browser(chart, monkeypatch):
     """When not in Jupyter, .show() writes a temp HTML and calls webbrowser.open."""
     opened = []

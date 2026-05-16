@@ -27,9 +27,7 @@ class RankingMixin:
         if key in self._cache:
             return self._cache[key]
 
-        x_arrow = pa.RecordBatch.from_pydict(
-            {c: self._X[c].to_arrow() for c in self._X.columns}
-        )
+        x_arrow = pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
         if algorithm == "covariance":
             from ferrum._core import py_rank1d_with_y
 
@@ -60,9 +58,7 @@ class RankingMixin:
         key = self._cache_key("rank2d", algorithm=algorithm)
         if key in self._cache:
             return self._cache[key]
-        x_arrow = pa.RecordBatch.from_pydict(
-            {c: self._X[c].to_arrow() for c in self._X.columns}
-        )
+        x_arrow = pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
         result = py_rank2d(x_arrow, algorithm)
         df = pl.from_arrow(result)
         self._cache[key] = df

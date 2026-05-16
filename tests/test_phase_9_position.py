@@ -1,4 +1,5 @@
 """Phase 9c position-adjustment tests."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ from ferrum import Dodge, Identity, Jitter, Stack
 # ---------------------------------------------------------------------------
 # Task 20 — Identity + Dodge
 # ---------------------------------------------------------------------------
+
 
 class TestIdentity:
     def test_to_spec_dict(self):
@@ -66,9 +68,7 @@ class TestPositionEligibility:
 
     def test_dodge_accepted_by_bar(self):
         df = pl.DataFrame({"x": ["a", "b"], "y": [3.0, 4.0], "g": ["a", "b"]})
-        chart = fe.Chart(df).mark_bar(position=Dodge(by="g")).encode(
-            x="x", y="y", color="g"
-        )
+        chart = fe.Chart(df).mark_bar(position=Dodge(by="g")).encode(x="x", y="y", color="g")
         spec = chart.to_spec()
         d = json.loads(spec.to_json())
         assert d.get("position", {}).get("type") == "dodge"
@@ -86,8 +86,8 @@ def test_dodge_renders_side_by_side(hue_field, categories):
         for g in categories:
             rows.append({"cat": cat, "g": g, "v": float(ord(cat) + len(g))})
     df = pl.DataFrame(rows)
-    chart = fe.Chart(df).mark_bar(position=Dodge(by=hue_field)).encode(
-        x="cat", y="v", color=hue_field
+    chart = (
+        fe.Chart(df).mark_bar(position=Dodge(by=hue_field)).encode(x="cat", y="v", color=hue_field)
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -98,6 +98,7 @@ def test_dodge_renders_side_by_side(hue_field, categories):
 # ---------------------------------------------------------------------------
 # Task 21 — Jitter
 # ---------------------------------------------------------------------------
+
 
 class TestJitter:
     def test_construction(self):
@@ -144,11 +145,7 @@ class TestJitter:
 
     def test_renders_with_explicit_seed_byte_identical(self):
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        c = (
-            fe.Chart(df)
-            .mark_point(position=Jitter(width=0.3, seed=42))
-            .encode(x="x", y="y")
-        )
+        c = fe.Chart(df).mark_point(position=Jitter(width=0.3, seed=42)).encode(x="x", y="y")
         a = c.show_svg()
         b = c.show_svg()
         assert a == b  # identical seed → identical output
@@ -156,11 +153,7 @@ class TestJitter:
     def test_renders_with_seed_none_byte_identical(self):
         # seed=None falls back to xxh3 hash of (x, y) per row — also byte-deterministic.
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        c = (
-            fe.Chart(df)
-            .mark_point(position=Jitter(width=0.3))
-            .encode(x="x", y="y")
-        )
+        c = fe.Chart(df).mark_point(position=Jitter(width=0.3)).encode(x="x", y="y")
         a = c.show_svg()
         b = c.show_svg()
         assert a == b
@@ -185,6 +178,7 @@ class TestJitter:
 # ---------------------------------------------------------------------------
 # Task 22 — Stack
 # ---------------------------------------------------------------------------
+
 
 class TestStack:
     def test_construction_default(self):
@@ -237,25 +231,25 @@ class TestStack:
         fe.Chart(df).mark_area(position=Stack()).encode(x="x", y="y")
 
     def test_stack_zero_renders(self):
-        df = pl.DataFrame({
-            "x": ["1", "2", "1", "2"],
-            "y": [10.0, 20.0, 5.0, 8.0],
-            "g": ["a", "a", "b", "b"],
-        })
-        chart = (
-            fe.Chart(df)
-            .mark_bar(position=Stack(by="g"))
-            .encode(x="x", y="y", color="g")
+        df = pl.DataFrame(
+            {
+                "x": ["1", "2", "1", "2"],
+                "y": [10.0, 20.0, 5.0, 8.0],
+                "g": ["a", "a", "b", "b"],
+            }
         )
+        chart = fe.Chart(df).mark_bar(position=Stack(by="g")).encode(x="x", y="y", color="g")
         svg = chart.show_svg()
         assert "<svg" in svg
 
     def test_stack_normalize_total_y_is_one(self):
-        df = pl.DataFrame({
-            "x": ["1", "1", "2", "2"],
-            "y": [3.0, 7.0, 1.0, 9.0],
-            "g": ["a", "b", "a", "b"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": ["1", "1", "2", "2"],
+                "y": [3.0, 7.0, 1.0, 9.0],
+                "g": ["a", "b", "a", "b"],
+            }
+        )
         chart = (
             fe.Chart(df)
             .mark_bar(position=Stack(by="g", offset="normalize"))
@@ -269,43 +263,44 @@ class TestStack:
 # Task 23 — eligibility-matrix enforcement across every Chart.mark_* method
 # ---------------------------------------------------------------------------
 
+
 class TestEligibilityMatrix:
     @pytest.mark.parametrize(
         "mark_name,position_class,should_accept",
         [
-            ("bar",       "Identity", True),
-            ("bar",       "Dodge",    True),
-            ("bar",       "Jitter",   False),
-            ("bar",       "Stack",    True),
-            ("point",     "Dodge",    True),
-            ("point",     "Jitter",   True),
+            ("bar", "Identity", True),
+            ("bar", "Dodge", True),
+            ("bar", "Jitter", False),
+            ("bar", "Stack", True),
+            ("point", "Dodge", True),
+            ("point", "Jitter", True),
             # Schwabish SB-followup (2026-05-12): point/text/rule/tick
             # accept Stack — y maps to segment midpoint for
             # annotations on stacked bars.
-            ("point",     "Stack",    True),
-            ("line",      "Dodge",    False),
-            ("line",      "Jitter",   False),
-            ("line",      "Stack",    False),
-            ("rule",      "Dodge",    False),
-            ("rule",      "Jitter",   False),
-            ("rule",      "Stack",    True),
-            ("area",      "Stack",    True),
-            ("area",      "Dodge",    False),
-            ("ribbon",    "Stack",    True),
-            ("ribbon",    "Dodge",    True),
-            ("tick",      "Jitter",   True),
-            ("tick",      "Dodge",    False),
-            ("tick",      "Stack",    True),
-            ("swarm",     "Jitter",   True),
-            ("swarm",     "Dodge",    True),
-            ("violin",    "Dodge",    True),
-            ("violin",    "Jitter",   False),
-            ("boxplot",   "Dodge",    True),
-            ("boxplot",   "Stack",    False),
-            ("errorbar",  "Dodge",    True),
-            ("errorbar",  "Jitter",   False),
-            ("errorband", "Dodge",    True),
-            ("errorband", "Stack",    False),
+            ("point", "Stack", True),
+            ("line", "Dodge", False),
+            ("line", "Jitter", False),
+            ("line", "Stack", False),
+            ("rule", "Dodge", False),
+            ("rule", "Jitter", False),
+            ("rule", "Stack", True),
+            ("area", "Stack", True),
+            ("area", "Dodge", False),
+            ("ribbon", "Stack", True),
+            ("ribbon", "Dodge", True),
+            ("tick", "Jitter", True),
+            ("tick", "Dodge", False),
+            ("tick", "Stack", True),
+            ("swarm", "Jitter", True),
+            ("swarm", "Dodge", True),
+            ("violin", "Dodge", True),
+            ("violin", "Jitter", False),
+            ("boxplot", "Dodge", True),
+            ("boxplot", "Stack", False),
+            ("errorbar", "Dodge", True),
+            ("errorbar", "Jitter", False),
+            ("errorband", "Dodge", True),
+            ("errorband", "Stack", False),
         ],
     )
     def test_eligibility(self, mark_name, position_class, should_accept):
@@ -316,12 +311,14 @@ class TestEligibilityMatrix:
             "Stack": Stack(),
         }
         pos = position_classes[position_class]
-        df = pl.DataFrame({
-            "x": [1.0, 2.0],
-            "y": [3.0, 4.0],
-            "y2": [5.0, 6.0],
-            "g": ["a", "b"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0],
+                "y": [3.0, 4.0],
+                "y2": [5.0, 6.0],
+                "g": ["a", "b"],
+            }
+        )
         method = getattr(fe.Chart(df), f"mark_{mark_name}")
         if should_accept:
             method(position=pos)

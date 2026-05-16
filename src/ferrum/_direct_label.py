@@ -92,9 +92,7 @@ def _direct_label_endpoint(
         ep_y = float(row[y_col]) if has_y else 0.0
         series_endpoints.append((str(series), global_idx, ep_x, ep_y))
 
-    y_range = (
-        float(df[y_col].max() - df[y_col].min()) if (has_y and n > 0) else 1.0
-    )
+    y_range = float(df[y_col].max() - df[y_col].min()) if (has_y and n > 0) else 1.0
     stagger_step = max(y_range * 0.05, 1e-9)
     stagger_threshold = stagger_step * 0.8
 

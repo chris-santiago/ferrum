@@ -19,13 +19,14 @@ def test_markbase_rejects_unknown_kwargs():
 def test_to_mark_kwargs_dict_filters_to_style_only():
     m = MarkBase("smooth", size=100, method="loess", bandwidth=0.5)
     d = m.to_mark_kwargs_dict()
-    assert d == {"size": 100}   # method and bandwidth go to transforms, not style
+    assert d == {"size": 100}  # method and bandwidth go to transforms, not style
 
 
 def test_desugar_density_returns_area_with_kde_transform():
     from ferrum.marks.statistical import desugar_density
     from ferrum import Kde
     from ferrum._layer import MarkDesugarResult
+
     result = desugar_density("price")
     assert isinstance(result, MarkDesugarResult)
     assert result.mark == "area"
@@ -38,6 +39,7 @@ def test_desugar_histogram_returns_bar_with_bin_transform():
     from ferrum.marks.statistical import desugar_histogram
     from ferrum import Bin
     from ferrum._layer import MarkDesugarResult
+
     result = desugar_histogram("price", bin_count=20)
     assert isinstance(result, MarkDesugarResult)
     assert result.mark == "bar"
@@ -69,17 +71,22 @@ def test_desugar_smooth_with_ci_returns_layered_result():
 # Task 36: deferred-mark NotImplementedError parametrized test
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("method,extra_args", [
-    # Phase 11d closed arc, geoshape, and label — they no longer raise NotImplementedError.
-    # These tests verify that the mark methods are callable (return a Chart, not raise).
-    ("mark_arc", ()),
-    ("mark_geoshape", ()),
-    ("mark_label", ()),
-])
+
+@pytest.mark.parametrize(
+    "method,extra_args",
+    [
+        # Phase 11d closed arc, geoshape, and label — they no longer raise NotImplementedError.
+        # These tests verify that the mark methods are callable (return a Chart, not raise).
+        ("mark_arc", ()),
+        ("mark_geoshape", ()),
+        ("mark_label", ()),
+    ],
+)
 def test_phase_11d_marks_are_callable(method, extra_args):
     """Phase 11d marks (arc, geoshape, label) must not raise on construction."""
     df = pl.DataFrame({"a": [1]})
     from ferrum import Chart
+
     c = Chart(df).encode(x="a", y="a")
     result = getattr(c, method)(*extra_args)
     assert result is not None
@@ -88,6 +95,7 @@ def test_phase_11d_marks_are_callable(method, extra_args):
 # ---------------------------------------------------------------------------
 # Task 36: e2e log-scale roundtrip — load-bearing test
 # ---------------------------------------------------------------------------
+
 
 def test_encode_with_explicit_log_scale_renders_log_axis():
     """Proves EncodingSpec.scale roundtrip (Task 3): LogScale flows to renderer.
@@ -104,14 +112,21 @@ def test_encode_with_explicit_log_scale_renders_log_axis():
     from ferrum._warn import reset_warnings
 
     reset_warnings()
-    df = pl.DataFrame({
-        "x": [1.0, 10.0, 100.0, 1000.0],
-        "y": [1.0, 2.0, 3.0, 4.0],
-    })
-    svg = Chart(df).mark_point().encode(
-        x=X("x", scale=LogScale(domain=[1.0, 1000.0], range=[0.0, 600.0], base=10.0)),
-        y="y",
-    ).show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 10.0, 100.0, 1000.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    svg = (
+        Chart(df)
+        .mark_point()
+        .encode(
+            x=X("x", scale=LogScale(domain=[1.0, 1000.0], range=[0.0, 600.0], base=10.0)),
+            y="y",
+        )
+        .show_svg()
+    )
 
     # Extract text-element labels from the SVG (strip font/base64 blobs).
     text_labels = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
@@ -136,9 +151,11 @@ def test_encode_with_explicit_log_scale_renders_log_axis():
 # Test 1: stat-mark order independence (Phase 8a final review)
 # ---------------------------------------------------------------------------
 
+
 def test_mark_smooth_then_encode_resolves_correctly():
     """Confirms _pending_stat_mark machinery in Chart works regardless of method order."""
     from ferrum import Chart
+
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [1.0, 4.0, 9.0, 16.0]})
     # Order: mark BEFORE encode (the e2e example pattern)
     c = Chart(df).mark_smooth().encode(x="a", y="b")
@@ -149,6 +166,7 @@ def test_mark_smooth_then_encode_resolves_correctly():
 
 def test_mark_density_then_encode_resolves_correctly():
     from ferrum import Chart
+
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0]})
     c = Chart(df).mark_density().encode(x="a")
     spec = c.to_spec()
@@ -158,6 +176,7 @@ def test_mark_density_then_encode_resolves_correctly():
 
 def test_mark_histogram_then_encode_resolves_correctly():
     from ferrum import Chart
+
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
     c = Chart(df).mark_histogram().encode(x="a")
     spec = c.to_spec()
@@ -171,8 +190,10 @@ def test_mark_histogram_then_encode_resolves_correctly():
 # at render time rather than defaulting to the accent mark_color.
 # ---------------------------------------------------------------------------
 
+
 def test_desugar_boxplot_whisker_carries_theme_label_stroke():
     from ferrum.marks.composite import desugar_boxplot
+
     result = desugar_boxplot("species", "sepal_length", outliers=False)
     whisker = next(l for l in result.layers if l.name == "whisker")
     assert whisker.mark_kwargs is not None
@@ -183,6 +204,7 @@ def test_desugar_boxplot_whisker_carries_theme_label_stroke():
 
 def test_desugar_boxplot_whisker_stroke_dash_cleared():
     from ferrum.marks.composite import desugar_boxplot
+
     result = desugar_boxplot("species", "sepal_length", outliers=False)
     whisker = next(l for l in result.layers if l.name == "whisker")
     assert whisker.mark_kwargs.get("stroke_dash") == [], (
@@ -192,6 +214,7 @@ def test_desugar_boxplot_whisker_stroke_dash_cleared():
 
 def test_desugar_boxplot_caps_carry_theme_label_stroke():
     from ferrum.marks.composite import desugar_boxplot
+
     result = desugar_boxplot("species", "sepal_length", outliers=False)
     for cap_name in ("lower_cap", "upper_cap"):
         cap = next(l for l in result.layers if l.name == cap_name)
@@ -203,6 +226,7 @@ def test_desugar_boxplot_caps_carry_theme_label_stroke():
 
 def test_desugar_boxplot_median_carries_theme_label_stroke():
     from ferrum.marks.composite import desugar_boxplot
+
     result = desugar_boxplot("species", "sepal_length", outliers=False)
     median = next(l for l in result.layers if l.name == "median")
     assert median.mark_kwargs is not None
@@ -213,6 +237,7 @@ def test_desugar_boxplot_median_carries_theme_label_stroke():
 
 def test_desugar_errorbar_rule_carries_theme_label_stroke():
     from ferrum.marks.composite import desugar_errorbar
+
     result = desugar_errorbar("day", "tip")
     rule = next(l for l in result.layers if l.name == "rule")
     assert rule.mark_kwargs is not None
@@ -222,6 +247,7 @@ def test_desugar_errorbar_rule_carries_theme_label_stroke():
 
 def test_desugar_errorbar_caps_carry_theme_label_stroke():
     from ferrum.marks.composite import desugar_errorbar
+
     result = desugar_errorbar("day", "tip")
     for cap_name in ("lower_cap", "upper_cap"):
         cap = next(l for l in result.layers if l.name == cap_name)
@@ -231,6 +257,7 @@ def test_desugar_errorbar_caps_carry_theme_label_stroke():
 
 def test_desugar_boxen_median_rule_carries_theme_label_stroke():
     from ferrum.marks.composite import desugar_boxen
+
     result = desugar_boxen("species", "sepal_length")
     median = next(l for l in result.layers if l.name == "median")
     assert median.mark_kwargs is not None

@@ -34,6 +34,7 @@ def _resolve_field(enc_value: Any) -> Optional[str]:
 def _trapezoid_auc(x, y) -> float:
     """Trapezoidal AUC for a curve. Sorts by x before integrating."""
     import numpy as np
+
     order = np.argsort(x)
     trap = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
     return float(trap(y[order], x[order]))
@@ -42,6 +43,7 @@ def _trapezoid_auc(x, y) -> float:
 def _ap_step(x, y) -> float:
     """Step-integrated average precision: sum((R_i - R_{i-1}) * P_i)."""
     import numpy as np
+
     order = np.argsort(x)
     xs, ys = x[order], y[order]
     return float(np.sum(np.diff(np.concatenate([[0.0], xs])) * ys))
@@ -50,6 +52,7 @@ def _ap_step(x, y) -> float:
 def _brier_score(p, obs) -> float:
     """Brier score as mean squared error between predicted prob and observed rate."""
     import numpy as np
+
     return float(np.mean((p - obs) ** 2))
 
 
@@ -105,6 +108,7 @@ def _apply_metric_label(
                 continue
             # metric_fn expects numpy arrays (AUC/AP/Brier integration)
             import numpy as np
+
             metric = metric_fn(
                 np.asarray(group[x_col].to_list(), dtype=float),
                 np.asarray(group[y_col].to_list(), dtype=float),
@@ -116,6 +120,7 @@ def _apply_metric_label(
             label_y_col[global_idx] = y_top - stack_i * stagger_step
     else:
         import numpy as np
+
         metric = metric_fn(
             np.asarray(df[x_col].to_list(), dtype=float),
             np.asarray(df[y_col].to_list(), dtype=float),
@@ -174,6 +179,7 @@ class AUCLabel:
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
+
         if not isinstance(base, Chart):
             return NotImplemented
         return _apply_metric_label(base, self, metric_fn=_trapezoid_auc)
@@ -211,6 +217,7 @@ class APLabel:
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
+
         if not isinstance(base, Chart):
             return NotImplemented
         return _apply_metric_label(base, self, metric_fn=_ap_step)
@@ -247,6 +254,7 @@ class BrierLabel:
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
+
         if not isinstance(base, Chart):
             return NotImplemented
         return _apply_metric_label(base, self, metric_fn=_brier_score)
@@ -306,9 +314,7 @@ class OutlierLabel:
         df = base_pl.with_row_index("_idx")
         mu = float(df[field].mean())
         sigma = float(df[field].std(ddof=1)) or 1.0
-        df = df.with_columns(
-            ((pl.col(field) - mu).abs() / sigma).alias("_z")
-        )
+        df = df.with_columns(((pl.col(field) - mu).abs() / sigma).alias("_z"))
         outliers = (
             df.filter(pl.col("_z") > self.threshold)
             .sort("_z", descending=True)

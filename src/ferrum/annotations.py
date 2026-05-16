@@ -214,7 +214,6 @@ def annotate_text(
     return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
 
 
-
 def annotate_arrow(
     x1: float,
     y1: float,

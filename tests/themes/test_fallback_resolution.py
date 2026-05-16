@@ -1,4 +1,5 @@
 """Theme fallback chain resolution in to_spec_dict()."""
+
 import ferrum as fm
 
 

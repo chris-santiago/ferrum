@@ -312,7 +312,9 @@ def desugar_discrimination_threshold(
     _ = metrics, n_thresholds  # informational; data is pre-melted
     user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
-        _Layer(name="line", mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}),
+        _Layer(
+            name="line", mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}
+        ),
     ]
     if threshold_line:
         layers.append(

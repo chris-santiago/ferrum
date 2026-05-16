@@ -20,6 +20,7 @@ _case().  factory_fn takes no arguments and returns a Chart-like object.
 Deferred marks (arc, label, geoshape, image) are included as xfail to
 document the expected failure and alert when they become implemented.
 """
+
 from __future__ import annotations
 
 import base64
@@ -34,67 +35,149 @@ from ferrum.encoding import X, Y, Y2, X2, Color, Size, Shape, Text
 # ---------------------------------------------------------------------------
 
 # 10-row bivariate quantitative
-_Q2 = pl.DataFrame({
-    "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-    "y": [2.1, 3.9, 1.2, 5.0, 3.3, 6.8, 2.4, 5.7, 4.1, 7.9],
-})
+_Q2 = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        "y": [2.1, 3.9, 1.2, 5.0, 3.3, 6.8, 2.4, 5.7, 4.1, 7.9],
+    }
+)
 
 # 10-row trivariate quantitative
 _Q3 = _Q2.with_columns(pl.Series("z", [3.0, 1.0, 5.0, 2.0, 4.0, 6.0, 1.0, 3.0, 5.0, 2.0]))
 
 # 12-row nominal + quantitative (3 categories × 4 observations each)
-_NQ = pl.DataFrame({
-    "cat": ["a", "b", "c"] * 4,
-    "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8, 2.8, 3.8],
-})
+_NQ = pl.DataFrame(
+    {
+        "cat": ["a", "b", "c"] * 4,
+        "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8, 2.8, 3.8],
+    }
+)
 
 # 10-row bivariate + nominal group
 _Q2N = _Q2.with_columns(pl.Series("grp", ["X", "Y"] * 5))
 
 # 5-row with text labels
-_TEXT_DF = pl.DataFrame({
-    "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-    "y": [2.0, 4.0, 1.0, 5.0, 3.0],
-    "label": ["alpha", "beta", "gamma", "delta", "epsilon"],
-})
+_TEXT_DF = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "y": [2.0, 4.0, 1.0, 5.0, 3.0],
+        "label": ["alpha", "beta", "gamma", "delta", "epsilon"],
+    }
+)
 
 # 5-row ribbon band (lower / upper)
-_BAND = pl.DataFrame({
-    "x":  [1.0, 2.0, 3.0, 4.0, 5.0],
-    "lo": [0.5, 1.5, 0.5, 4.0, 2.5],
-    "hi": [1.5, 2.5, 1.5, 6.0, 3.5],
-})
+_BAND = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "lo": [0.5, 1.5, 0.5, 4.0, 2.5],
+        "hi": [1.5, 2.5, 1.5, 6.0, 3.5],
+    }
+)
 
 # 3-row segment (x, y) → (x2, y2)
-_SEG = pl.DataFrame({
-    "x":  [1.0, 2.0, 3.0],
-    "y":  [1.0, 2.0, 3.0],
-    "x2": [1.5, 2.5, 3.5],
-    "y2": [2.0, 3.0, 4.0],
-})
+_SEG = pl.DataFrame(
+    {
+        "x": [1.0, 2.0, 3.0],
+        "y": [1.0, 2.0, 3.0],
+        "x2": [1.5, 2.5, 3.5],
+        "y2": [2.0, 3.0, 4.0],
+    }
+)
 
 # 6-row grid for rect heatmap
-_GRID = pl.DataFrame({
-    "xcat": ["A", "A", "B", "B", "C", "C"],
-    "ycat": ["X", "Y", "X", "Y", "X", "Y"],
-    "val":  [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-})
+_GRID = pl.DataFrame(
+    {
+        "xcat": ["A", "A", "B", "B", "C", "C"],
+        "ycat": ["X", "Y", "X", "Y", "X", "Y"],
+        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    }
+)
 
 # 1-row edge case
 _SINGLE = _Q2[:1]
 
 # 3-row image URL-tile dataset — minimal valid 1×1 PNG as base64 data URLs
-_1x1_PNG_BYTES = bytes([
-    137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,2,0,0,0,
-    144,119,83,222,0,0,0,12,73,68,65,84,8,215,99,248,207,192,0,0,0,2,0,1,
-    227,33,188,51,0,0,0,0,73,69,78,68,174,66,96,130,
-])
+_1x1_PNG_BYTES = bytes(
+    [
+        137,
+        80,
+        78,
+        71,
+        13,
+        10,
+        26,
+        10,
+        0,
+        0,
+        0,
+        13,
+        73,
+        72,
+        68,
+        82,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        8,
+        2,
+        0,
+        0,
+        0,
+        144,
+        119,
+        83,
+        222,
+        0,
+        0,
+        0,
+        12,
+        73,
+        68,
+        65,
+        84,
+        8,
+        215,
+        99,
+        248,
+        207,
+        192,
+        0,
+        0,
+        0,
+        2,
+        0,
+        1,
+        227,
+        33,
+        188,
+        51,
+        0,
+        0,
+        0,
+        0,
+        73,
+        69,
+        78,
+        68,
+        174,
+        66,
+        96,
+        130,
+    ]
+)
 _1x1_PNG_B64 = base64.b64encode(_1x1_PNG_BYTES).decode()
-_IMG_DF = pl.DataFrame({
-    "x": [1.0, 3.0, 5.0],
-    "y": [2.0, 4.0, 2.0],
-    "url": [f"data:image/png;base64,{_1x1_PNG_B64}"] * 3,
-})
+_IMG_DF = pl.DataFrame(
+    {
+        "x": [1.0, 3.0, 5.0],
+        "y": [2.0, 4.0, 2.0],
+        "url": [f"data:image/png;base64,{_1x1_PNG_B64}"] * 3,
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Case registry
@@ -113,226 +196,338 @@ def _case(case_id: str, factory, *, xfail: bool = False, reason: str = "") -> No
 # ---------------------------------------------------------------------------
 # mark_point
 # ---------------------------------------------------------------------------
-_case("point/xy_q",          lambda: fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q"))
-_case("point/xy_color_n",    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:N"))
-_case("point/xy_size_q",     lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", size="z:Q"))
-_case("point/xy_shape_n",    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", shape="grp:N"))
-_case("point/xy_opacity_q",  lambda: fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q", opacity="x:Q"))
-_case("point/xy_color_q",    lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", color="z:Q"))
-_case("point/single_row",    lambda: fm.Chart(_SINGLE).mark_point().encode(x="x:Q", y="y:Q"))
+_case("point/xy_q", lambda: fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q"))
+_case(
+    "point/xy_color_n", lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:N")
+)
+_case("point/xy_size_q", lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", size="z:Q"))
+_case(
+    "point/xy_shape_n", lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", shape="grp:N")
+)
+_case(
+    "point/xy_opacity_q", lambda: fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q", opacity="x:Q")
+)
+_case("point/xy_color_q", lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", color="z:Q"))
+_case("point/single_row", lambda: fm.Chart(_SINGLE).mark_point().encode(x="x:Q", y="y:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_line
 # ---------------------------------------------------------------------------
-_case("line/xy_q",           lambda: fm.Chart(_Q2).mark_line().encode(x="x:Q", y="y:Q"))
-_case("line/xy_color_n",     lambda: fm.Chart(_Q2N).mark_line().encode(x="x:Q", y="y:Q", color="grp:N"))
+_case("line/xy_q", lambda: fm.Chart(_Q2).mark_line().encode(x="x:Q", y="y:Q"))
+_case("line/xy_color_n", lambda: fm.Chart(_Q2N).mark_line().encode(x="x:Q", y="y:Q", color="grp:N"))
 
 # ---------------------------------------------------------------------------
 # mark_bar
 # ---------------------------------------------------------------------------
-_case("bar/cat_x",           lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q"))
-_case("bar/horiz_coord_flip", lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()))
-_case("bar/cat_x_color_n",   lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q", color="cat:N"))
+_case("bar/cat_x", lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q"))
+_case(
+    "bar/horiz_coord_flip",
+    lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()),
+)
+_case(
+    "bar/cat_x_color_n",
+    lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q", color="cat:N"),
+)
 
 # ---------------------------------------------------------------------------
 # mark_area
 # ---------------------------------------------------------------------------
-_case("area/xy",             lambda: fm.Chart(_Q2).mark_area().encode(x="x:Q", y="y:Q"))
-_case("area/xy_color_n",     lambda: fm.Chart(_Q2N).mark_area().encode(x="x:Q", y="y:Q", color="grp:N"))
+_case("area/xy", lambda: fm.Chart(_Q2).mark_area().encode(x="x:Q", y="y:Q"))
+_case("area/xy_color_n", lambda: fm.Chart(_Q2N).mark_area().encode(x="x:Q", y="y:Q", color="grp:N"))
 
 # ---------------------------------------------------------------------------
 # mark_tick — all four modes; x-rug + y-rug are regression guards
 # ---------------------------------------------------------------------------
-_case("tick/x_rug",              lambda: fm.Chart(_Q2).mark_tick().encode(x="x:Q"))
-_case("tick/y_rug",              lambda: fm.Chart(_Q2).mark_tick().encode(y="y:Q"))
-_case("tick/strip_ordinal_y",    lambda: fm.Chart(_NQ).mark_tick().encode(x="val:Q", y="cat:N"))
-_case("tick/strip_ordinal_x",    lambda: fm.Chart(_NQ).mark_tick().encode(x="cat:N", y="val:Q"))
+_case("tick/x_rug", lambda: fm.Chart(_Q2).mark_tick().encode(x="x:Q"))
+_case("tick/y_rug", lambda: fm.Chart(_Q2).mark_tick().encode(y="y:Q"))
+_case("tick/strip_ordinal_y", lambda: fm.Chart(_NQ).mark_tick().encode(x="val:Q", y="cat:N"))
+_case("tick/strip_ordinal_x", lambda: fm.Chart(_NQ).mark_tick().encode(x="cat:N", y="val:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_rule
 # ---------------------------------------------------------------------------
-_case("rule/y_only",         lambda: fm.Chart(_Q2).mark_rule().encode(y="y:Q"))
-_case("rule/x_only",         lambda: fm.Chart(_Q2).mark_rule().encode(x="x:Q"))
+_case("rule/y_only", lambda: fm.Chart(_Q2).mark_rule().encode(y="y:Q"))
+_case("rule/x_only", lambda: fm.Chart(_Q2).mark_rule().encode(x="x:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_text
 # ---------------------------------------------------------------------------
-_case("text/xy_text",        lambda: fm.Chart(_TEXT_DF).mark_text().encode(x="x:Q", y="y:Q", text="label"))
+_case("text/xy_text", lambda: fm.Chart(_TEXT_DF).mark_text().encode(x="x:Q", y="y:Q", text="label"))
 
 # ---------------------------------------------------------------------------
 # mark_rect
 # ---------------------------------------------------------------------------
-_case("rect/heatmap",        lambda: fm.Chart(_GRID).mark_rect().encode(x="xcat:N", y="ycat:N", color="val:Q"))
+_case(
+    "rect/heatmap",
+    lambda: fm.Chart(_GRID).mark_rect().encode(x="xcat:N", y="ycat:N", color="val:Q"),
+)
 
 # ---------------------------------------------------------------------------
 # mark_boxplot
 # ---------------------------------------------------------------------------
-_case("boxplot/cat_x",       lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q"))
-_case("boxplot/horiz",       lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()))
+_case("boxplot/cat_x", lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q"))
+_case(
+    "boxplot/horiz",
+    lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()),
+)
 
 # ---------------------------------------------------------------------------
 # mark_violin
 # ---------------------------------------------------------------------------
-_case("violin/cat_x",        lambda: fm.Chart(_NQ).mark_violin().encode(x="cat:N", y="val:Q"))
-_case("violin/horiz",        lambda: fm.Chart(_NQ).mark_violin().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()))
+_case("violin/cat_x", lambda: fm.Chart(_NQ).mark_violin().encode(x="cat:N", y="val:Q"))
+_case(
+    "violin/horiz",
+    lambda: fm.Chart(_NQ).mark_violin().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()),
+)
 
 # ---------------------------------------------------------------------------
 # mark_histogram
 # ---------------------------------------------------------------------------
-_case("histogram/basic",     lambda: fm.Chart(_Q2).mark_histogram().encode(x="x", y="count"))
-_case("histogram/grouped",   lambda: fm.Chart(_Q2N).mark_histogram(groupby="grp").encode(x="x", y="count", color="grp:N"))
+_case("histogram/basic", lambda: fm.Chart(_Q2).mark_histogram().encode(x="x", y="count"))
+_case(
+    "histogram/grouped",
+    lambda: fm.Chart(_Q2N).mark_histogram(groupby="grp").encode(x="x", y="count", color="grp:N"),
+)
 
 # ---------------------------------------------------------------------------
 # mark_density
 # ---------------------------------------------------------------------------
-_case("density/basic",       lambda: fm.Chart(_Q2).mark_density().encode(x="x"))
-_case("density/grouped",     lambda: fm.Chart(_Q2N).mark_density(groupby="grp").encode(x="x", color="grp:N"))
+_case("density/basic", lambda: fm.Chart(_Q2).mark_density().encode(x="x"))
+_case(
+    "density/grouped",
+    lambda: fm.Chart(_Q2N).mark_density(groupby="grp").encode(x="x", color="grp:N"),
+)
 
 # ---------------------------------------------------------------------------
 # mark_hex
 # ---------------------------------------------------------------------------
-_case("hex/xy",              lambda: fm.Chart(_Q2).mark_hex().encode(x="x:Q", y="y:Q"))
+_case("hex/xy", lambda: fm.Chart(_Q2).mark_hex().encode(x="x:Q", y="y:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_smooth
 # ---------------------------------------------------------------------------
-_case("smooth/loess",        lambda: fm.Chart(_Q2).mark_smooth().encode(x="x:Q", y="y:Q"))
-_case("smooth/lm",           lambda: fm.Chart(_Q2).mark_smooth(method="lm").encode(x="x:Q", y="y:Q"))
-_case("smooth/ci_0.95",      lambda: fm.Chart(_Q2).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q"))
-_case("smooth/grouped",      lambda: fm.Chart(_Q2N).mark_smooth(method="lm", groupby="grp").encode(x="x:Q", y="y:Q", color="grp:N"))
+_case("smooth/loess", lambda: fm.Chart(_Q2).mark_smooth().encode(x="x:Q", y="y:Q"))
+_case("smooth/lm", lambda: fm.Chart(_Q2).mark_smooth(method="lm").encode(x="x:Q", y="y:Q"))
+_case("smooth/ci_0.95", lambda: fm.Chart(_Q2).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q"))
+_case(
+    "smooth/grouped",
+    lambda: (
+        fm.Chart(_Q2N)
+        .mark_smooth(method="lm", groupby="grp")
+        .encode(x="x:Q", y="y:Q", color="grp:N")
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # mark_contour
 # ---------------------------------------------------------------------------
-_case("contour/xy",          lambda: fm.Chart(_Q2).mark_contour().encode(x="x:Q", y="y:Q"))
+_case("contour/xy", lambda: fm.Chart(_Q2).mark_contour().encode(x="x:Q", y="y:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_raster
 # ---------------------------------------------------------------------------
-_case("raster/xy",           lambda: fm.Chart(_Q2).mark_raster().encode(x="x:Q", y="y:Q"))
+_case("raster/xy", lambda: fm.Chart(_Q2).mark_raster().encode(x="x:Q", y="y:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_swarm
 # ---------------------------------------------------------------------------
-_case("swarm/cat_x",         lambda: fm.Chart(_NQ).mark_swarm().encode(x="cat:N", y="val:Q"))
+_case("swarm/cat_x", lambda: fm.Chart(_NQ).mark_swarm().encode(x="cat:N", y="val:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_boxen
 # ---------------------------------------------------------------------------
-_case("boxen/cat_x",         lambda: fm.Chart(_NQ).mark_boxen().encode(x="cat:N", y="val:Q"))
+_case("boxen/cat_x", lambda: fm.Chart(_NQ).mark_boxen().encode(x="cat:N", y="val:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_qq
 # ---------------------------------------------------------------------------
-_case("qq/x_q",              lambda: fm.Chart(_Q2).mark_qq().encode(x="x:Q"))
+_case("qq/x_q", lambda: fm.Chart(_Q2).mark_qq().encode(x="x:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_ribbon
 # ---------------------------------------------------------------------------
-_case("ribbon/lo_hi",        lambda: fm.Chart(_BAND).mark_ribbon().encode(x="x:Q", y="lo:Q", y2="hi:Q"))
+_case("ribbon/lo_hi", lambda: fm.Chart(_BAND).mark_ribbon().encode(x="x:Q", y="lo:Q", y2="hi:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_segment
 # ---------------------------------------------------------------------------
-_case("segment/xy_x2y2",     lambda: fm.Chart(_SEG).mark_segment().encode(x="x:Q", y="y:Q", x2="x2:Q", y2="y2:Q"))
+_case(
+    "segment/xy_x2y2",
+    lambda: fm.Chart(_SEG).mark_segment().encode(x="x:Q", y="y:Q", x2="x2:Q", y2="y2:Q"),
+)
 
 # ---------------------------------------------------------------------------
 # mark_errorbar
 # ---------------------------------------------------------------------------
-_case("errorbar/stdev",      lambda: fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q"))
-_case("errorbar/ci",         lambda: fm.Chart(_NQ).mark_errorbar(extent="ci").encode(x="cat:N", y="val:Q"))
+_case(
+    "errorbar/stdev",
+    lambda: fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q"),
+)
+_case("errorbar/ci", lambda: fm.Chart(_NQ).mark_errorbar(extent="ci").encode(x="cat:N", y="val:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_errorband
 # ---------------------------------------------------------------------------
-_case("errorband/ci",        lambda: fm.Chart(_NQ).mark_errorband(extent="ci").encode(x="cat:N", y="val:Q"))
+_case(
+    "errorband/ci", lambda: fm.Chart(_NQ).mark_errorband(extent="ci").encode(x="cat:N", y="val:Q")
+)
 
 # ---------------------------------------------------------------------------
 # mark_function  (no data or encodings required)
 # ---------------------------------------------------------------------------
-_case("function/parabola",   lambda: fm.Chart(None).mark_function(lambda x: x ** 2, domain=[0, 5], n=50))
+_case(
+    "function/parabola", lambda: fm.Chart(None).mark_function(lambda x: x**2, domain=[0, 5], n=50)
+)
 
 # ---------------------------------------------------------------------------
 # Deferred marks — expected failures; become passing when implemented
 # ---------------------------------------------------------------------------
-_case("arc/theta",     lambda: fm.Chart(_NQ).mark_arc().encode(x="cat:N"),
-      xfail=True, reason="mark_arc not yet implemented (deferred)")
-_case("label/xy",      lambda: fm.Chart(_TEXT_DF).mark_label().encode(x="x:Q", y="y:Q", text="label"))
-_case("geoshape/basic", lambda: fm.Chart({}).mark_geoshape(),
-      xfail=True, reason="mark_geoshape not yet implemented (deferred)")
-_case("image/basic",   lambda: fm.Chart(_Q2).mark_image().encode(x="x:Q", y="y:Q"))
+_case(
+    "arc/theta",
+    lambda: fm.Chart(_NQ).mark_arc().encode(x="cat:N"),
+    xfail=True,
+    reason="mark_arc not yet implemented (deferred)",
+)
+_case("label/xy", lambda: fm.Chart(_TEXT_DF).mark_label().encode(x="x:Q", y="y:Q", text="label"))
+_case(
+    "geoshape/basic",
+    lambda: fm.Chart({}).mark_geoshape(),
+    xfail=True,
+    reason="mark_geoshape not yet implemented (deferred)",
+)
+_case("image/basic", lambda: fm.Chart(_Q2).mark_image().encode(x="x:Q", y="y:Q"))
 _case("image/url_tiles", lambda: fm.Chart(_IMG_DF).mark_image().encode(x="x:Q", y="y:Q", url="url"))
 
 # ---------------------------------------------------------------------------
 # Facet — regression for encode(facet_col/row=...) being silently dropped
 # ---------------------------------------------------------------------------
-_case("facet/encode_facet_col",  lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet_col="grp:N"))
-_case("facet/encode_facet_row",  lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet_row="grp:N"))
-_case("facet/encode_facet_bare", lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet="grp:N"))
-_case("facet/method_col",        lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q").facet(col="grp"))
-_case("facet/method_field",      lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q").facet(field="grp", ncols=2))
+_case(
+    "facet/encode_facet_col",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet_col="grp:N"),
+)
+_case(
+    "facet/encode_facet_row",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet_row="grp:N"),
+)
+_case(
+    "facet/encode_facet_bare",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", facet="grp:N"),
+)
+_case(
+    "facet/method_col",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q").facet(col="grp"),
+)
+_case(
+    "facet/method_field",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q").facet(field="grp", ncols=2),
+)
 
 # ---------------------------------------------------------------------------
 # Compositions
 # ---------------------------------------------------------------------------
-_case("compose/point_plus_smooth",     lambda: (
-    fm.Chart(_Q2).mark_point(opacity=0.3).mark_smooth().encode(x="x:Q", y="y:Q")
-))
-_case("compose/scatter_smooth_grouped", lambda: (
-    fm.Chart(_Q2N).mark_point(opacity=0.3).mark_smooth(method="lm", groupby="grp")
-    .encode(x="x:Q", y="y:Q", color="grp:N")
-))
-_case("compose/hconcat",               lambda: (
-    fm.hconcat(
+_case(
+    "compose/point_plus_smooth",
+    lambda: fm.Chart(_Q2).mark_point(opacity=0.3).mark_smooth().encode(x="x:Q", y="y:Q"),
+)
+_case(
+    "compose/scatter_smooth_grouped",
+    lambda: (
+        fm.Chart(_Q2N)
+        .mark_point(opacity=0.3)
+        .mark_smooth(method="lm", groupby="grp")
+        .encode(x="x:Q", y="y:Q", color="grp:N")
+    ),
+)
+_case(
+    "compose/hconcat",
+    lambda: fm.hconcat(
         fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q").properties(width=250, height=250),
         fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q").properties(width=250, height=250),
-    )
-))
-_case("compose/bar_plus_errorbar",     lambda: (
-    fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q")
-    + fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q")
-))
-_case("compose/ribbon_plus_line",      lambda: (
-    fm.Chart(_BAND).mark_ribbon().encode(x="x:Q", y="lo:Q", y2="hi:Q")
-    + fm.Chart(_BAND).mark_line().encode(x="x:Q", y="hi:Q")
-))
+    ),
+)
+_case(
+    "compose/bar_plus_errorbar",
+    lambda: (
+        fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q")
+        + fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q")
+    ),
+)
+_case(
+    "compose/ribbon_plus_line",
+    lambda: (
+        fm.Chart(_BAND).mark_ribbon().encode(x="x:Q", y="lo:Q", y2="hi:Q")
+        + fm.Chart(_BAND).mark_line().encode(x="x:Q", y="hi:Q")
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Encoding type variants
 # ---------------------------------------------------------------------------
-_case("encode/nominal_color",    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:N"))
-_case("encode/ordinal_color",    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:O"))
-_case("encode/quant_color",      lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", color="z:Q"))
-_case("encode/channel_objects",  lambda: fm.Chart(_Q3).mark_point().encode(
-    x=X("x", type="Q"), y=Y("y", type="Q"), color=Color("z", type="Q"), size=Size("z", type="Q")
-))
+_case(
+    "encode/nominal_color",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:N"),
+)
+_case(
+    "encode/ordinal_color",
+    lambda: fm.Chart(_Q2N).mark_point().encode(x="x:Q", y="y:Q", color="grp:O"),
+)
+_case(
+    "encode/quant_color", lambda: fm.Chart(_Q3).mark_point().encode(x="x:Q", y="y:Q", color="z:Q")
+)
+_case(
+    "encode/channel_objects",
+    lambda: (
+        fm.Chart(_Q3)
+        .mark_point()
+        .encode(
+            x=X("x", type="Q"),
+            y=Y("y", type="Q"),
+            color=Color("z", type="Q"),
+            size=Size("z", type="Q"),
+        )
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Scale overrides
 # ---------------------------------------------------------------------------
-_case("scale/log_x",           lambda: fm.Chart(_Q2).mark_point().encode(
-    x=X("x:Q", scale={"type": "log"}), y="y:Q"
-))
-_case("scale/zero_false",      lambda: fm.Chart(_Q2).mark_point().encode(
-    x=X("x:Q", scale={"zero": False}), y="y:Q"
-))
+_case(
+    "scale/log_x",
+    lambda: fm.Chart(_Q2).mark_point().encode(x=X("x:Q", scale={"type": "log"}), y="y:Q"),
+)
+_case(
+    "scale/zero_false",
+    lambda: fm.Chart(_Q2).mark_point().encode(x=X("x:Q", scale={"zero": False}), y="y:Q"),
+)
 
 # ---------------------------------------------------------------------------
 # Properties and themes
 # ---------------------------------------------------------------------------
-_case("props/width_height_title", lambda: (
-    fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q")
-    .properties(width=300, height=200, title="Smoke test")
-))
-_case("theme/paper_ink",          lambda: (
-    fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q").theme(fm.themes.paper_ink)
-))
+_case(
+    "props/width_height_title",
+    lambda: (
+        fm.Chart(_Q2)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .properties(width=300, height=200, title="Smoke test")
+    ),
+)
+_case(
+    "theme/paper_ink",
+    lambda: fm.Chart(_Q2).mark_point().encode(x="x:Q", y="y:Q").theme(fm.themes.paper_ink),
+)
 
 # ---------------------------------------------------------------------------
 # Coord
 # ---------------------------------------------------------------------------
-_case("coord/flip_bar",     lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()))
-_case("coord/flip_boxplot", lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()))
+_case(
+    "coord/flip_bar",
+    lambda: fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()),
+)
+_case(
+    "coord/flip_boxplot",
+    lambda: fm.Chart(_NQ).mark_boxplot().encode(x="cat:N", y="val:Q").coord(fm.CoordFlip()),
+)
 
 # ---------------------------------------------------------------------------
 # Test
@@ -363,12 +558,15 @@ def test_smoke_renders(case_id: str, factory) -> None:
     svg = factory().show_svg()
     assert "<svg" in svg, f"[{case_id}] expected a valid SVG document; got {svg[:120]!r}"
     # A non-empty chart always exceeds 500 characters (axes + at least one mark element).
-    assert len(svg) > 500, f"[{case_id}] SVG suspiciously small ({len(svg)} chars) — data marks may not be rendering"
+    assert len(svg) > 500, (
+        f"[{case_id}] SVG suspiciously small ({len(svg)} chars) — data marks may not be rendering"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Structural SVG assertion helpers
 # ---------------------------------------------------------------------------
+
 
 def _check_has_circles(svg: str, case_id: str, min_count: int = 1) -> None:
     count = svg.count("<circle")
@@ -382,7 +580,7 @@ def _check_has_polyline_or_path_with_M(svg: str, case_id: str) -> None:
     has_polyline = "<polyline" in svg
     has_path_M = bool(re.search(r'<path[^>]+d="M', svg))
     assert has_polyline or has_path_M, (
-        f"[{case_id}] Expected <polyline> or <path d=\"M...\">, found neither"
+        f'[{case_id}] Expected <polyline> or <path d="M...">, found neither'
     )
 
 
@@ -395,9 +593,10 @@ def _check_has_data_rects(svg: str, case_id: str, min_count: int = 1) -> None:
     # is not a pure white/transparent placeholder; also skip the SVG frame rect
     # (width="600" or width="5xx" — the outer canvas rect).
     data_rects = [
-        r for r in all_rects
+        r
+        for r in all_rects
         if "fill=" in r
-        and '#faf7f2' not in r
+        and "#faf7f2" not in r
         and 'fill="none"' not in r
         and 'fill="white"' not in r
     ]
@@ -409,37 +608,28 @@ def _check_has_data_rects(svg: str, case_id: str, min_count: int = 1) -> None:
 
 def _check_has_path_with_fill(svg: str, case_id: str) -> None:
     """Check for <path> elements that carry a fill (area, ribbon, density, errorband)."""
-    filled_paths = re.findall(r'<path[^>]+fill[^>]*d=|<path[^>]+d=[^>]+fill', svg)
+    filled_paths = re.findall(r"<path[^>]+fill[^>]*d=|<path[^>]+d=[^>]+fill", svg)
     # Simpler: any <path> that has both 'd=' and 'fill=' (not fill="none")
     paths = re.findall(r"<path[^>]*>", svg)
-    filled = [
-        p for p in paths
-        if 'd="M' in p and 'fill=' in p and 'fill="none"' not in p
-    ]
+    filled = [p for p in paths if 'd="M' in p and "fill=" in p and 'fill="none"' not in p]
     assert len(filled) >= 1, (
-        f"[{case_id}] Expected at least one filled <path d=\"M...\">, found none "
+        f'[{case_id}] Expected at least one filled <path d="M...">, found none '
         f"(total paths: {len(paths)})"
     )
 
 
 def _check_has_lines(svg: str, case_id: str, min_count: int = 1) -> None:
     count = svg.count("<line")
-    assert count >= min_count, (
-        f"[{case_id}] Expected >= {min_count} <line> elements; found {count}"
-    )
+    assert count >= min_count, f"[{case_id}] Expected >= {min_count} <line> elements; found {count}"
 
 
 def _check_has_text_elements(svg: str, case_id: str, min_count: int = 1) -> None:
     count = svg.count("<text")
-    assert count >= min_count, (
-        f"[{case_id}] Expected >= {min_count} <text> elements; found {count}"
-    )
+    assert count >= min_count, f"[{case_id}] Expected >= {min_count} <text> elements; found {count}"
 
 
 def _check_has_image_element(svg: str, case_id: str) -> None:
-    assert "<image" in svg, (
-        f"[{case_id}] Expected at least one <image> element; found none"
-    )
+    assert "<image" in svg, f"[{case_id}] Expected at least one <image> element; found none"
 
 
 def _check_has_polygon_or_path(svg: str, case_id: str) -> None:
@@ -470,6 +660,7 @@ def _check_has_data_lines(svg: str, case_id: str, min_count: int = 1) -> None:
 # Cross-cutting structural checks
 # ---------------------------------------------------------------------------
 
+
 def _check_axes_present(svg: str, case_id: str) -> None:
     """At least one <text> element must be present (tick labels)."""
     count = svg.count("<text")
@@ -491,7 +682,9 @@ def _check_color_encoding_distinct(svg: str, case_id: str) -> None:
 def _check_size_encoding_varies(svg: str, case_id: str) -> None:
     """If 'size' is in the case_id, circle r= values must not all be identical."""
     radii = re.findall(r'<circle[^>]+r="([^"]+)"', svg)
-    assert radii, f"[{case_id}] Size encoding: expected <circle> elements with r= attribute; found none"
+    assert radii, (
+        f"[{case_id}] Size encoding: expected <circle> elements with r= attribute; found none"
+    )
     distinct = set(radii)
     assert len(distinct) >= 2, (
         f"[{case_id}] Size encoding expected varied circle r= values; "
@@ -524,8 +717,12 @@ _MARK_CHECKS: dict[str, list] = {
     "rule": [_check_has_data_lines],
     "text": [_check_has_text_elements],
     "rect": [_check_has_data_rects],
-    "boxplot": [_check_has_lines],   # data lines always present (box/whiskers); rects absent on CoordFlip
-    "violin": [_check_has_lines],    # axis/box lines always present; paths absent on CoordFlip (known gap)
+    "boxplot": [
+        _check_has_lines
+    ],  # data lines always present (box/whiskers); rects absent on CoordFlip
+    "violin": [
+        _check_has_lines
+    ],  # axis/box lines always present; paths absent on CoordFlip (known gap)
     "histogram": [_check_has_data_rects],
     "density": [_check_has_path_with_fill],
     "hex": [_check_has_polygon_or_path],
@@ -533,7 +730,9 @@ _MARK_CHECKS: dict[str, list] = {
     "contour": [_check_has_lines],
     "raster": [_check_has_image_element],
     "swarm": [_check_has_circles],
-    "boxen": [_check_has_data_lines],  # boxen renders median/IQR as lines; circles for outliers when present
+    "boxen": [
+        _check_has_data_lines
+    ],  # boxen renders median/IQR as lines; circles for outliers when present
     "qq": [_check_has_circles],
     "ribbon": [_check_has_path_with_fill],
     "segment": [_check_has_data_lines],
@@ -545,7 +744,7 @@ _MARK_CHECKS: dict[str, list] = {
     # Per-case override handled in test body via _IMAGE_CHECKS below.
     "image": [],
     # composition cases: check both component marks present
-    "compose": [],   # handled below with custom per-case logic
+    "compose": [],  # handled below with custom per-case logic
     # encoding / scale / props / theme / coord variants: rely on cross-cutting checks only
     "encode": [],
     "scale": [],

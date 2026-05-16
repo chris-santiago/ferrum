@@ -320,5 +320,3 @@ def _attach_hue_from_y(X: Any, y: Any) -> Any:
         raise ValueError(f"X must be 2D; got shape {arr.shape}")
     df = pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
     return df.with_columns(pl.Series("_hue", hue_vals))
-
-

@@ -118,7 +118,9 @@ def _importance_chart_from_source(
             )
         chart = chart.layer(text_ly)
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +131,8 @@ def _importance_chart_from_source(
 def _shap_select_class(sv: pl.DataFrame, *, per_class: bool) -> pl.DataFrame:
     """Either return all rows (``per_class=True``) or filter to the first
     ``class_label`` group (``per_class=False``). On regression and binary
-    classifiers the single-group filter is a no-op."""
+    classifiers the single-group filter is a no-op.
+    """
     if per_class:
         return sv
     classes = sv["class_label"].unique(maintain_order=True)
@@ -199,9 +202,11 @@ def _shap_beeswarm_chart_from_source(
     # Sort rows so features appear in descending mean-|SHAP| order (keep[0]
     # is most important). Rust's distinct_values_in_order uses encounter order
     # to build the ordinal-y domain, so row order drives axis ordering.
-    plot_df = plot_df.with_columns(
-        pl.col("feature").cast(pl.Enum(keep)).alias("_feature_order")
-    ).sort("_feature_order").drop("_feature_order")
+    plot_df = (
+        plot_df.with_columns(pl.col("feature").cast(pl.Enum(keep)).alias("_feature_order"))
+        .sort("_feature_order")
+        .drop("_feature_order")
+    )
 
     is_faceted = per_class and plot_df["class_label"].n_unique() > 1
     x_min = float(plot_df["shap_value"].min())
@@ -222,7 +227,9 @@ def _shap_beeswarm_chart_from_source(
     chart = chart.properties(title=ferrum.Title("SHAP Summary"))
     if is_faceted:
         chart = chart.facet(col="class_label")
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _shap_bar_chart_from_source(
@@ -275,7 +282,9 @@ def _shap_bar_chart_from_source(
     )
     if per_class and agg["class_label"].n_unique() > 1:
         chart = chart.facet(col="class_label")
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _shap_waterfall_chart_from_source(
@@ -354,7 +363,9 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +493,9 @@ def _pdp_chart_from_source(
         .facet(col="feature")
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------

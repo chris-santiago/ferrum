@@ -1,4 +1,5 @@
 """Phase 5 smoke tests — one happy path per transform via polars DataFrames."""
+
 import polars as pl
 from ferrum._core import (
     Aggregate,
@@ -60,7 +61,8 @@ def test_summary_smoke():
 
 def test_full_pipeline_round_trip():
     cs = ChartSpec(
-        mark="point", x="x",
+        mark="point",
+        x="x",
         transforms=[
             Bin(field="x", bin_count=8),
             Aggregate(

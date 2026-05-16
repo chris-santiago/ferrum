@@ -2,6 +2,7 @@
 
 Tests use small synthetic data so the SVG inspection is deterministic.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -37,9 +38,8 @@ def test_auc_label_default_format():
 
 def test_auc_label_custom_format_and_prefix():
     df = _roc_data()
-    chart = (
-        Chart(df).encode(x="fpr", y="tpr", color="class").mark_line()
-        + AUCLabel(format=".2f", prefix="auc:")
+    chart = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line() + AUCLabel(
+        format=".2f", prefix="auc:"
     )
     svg = chart.show_svg()
     assert "auc:0.67" in svg
@@ -64,10 +64,7 @@ def _pr_data():
 
 def test_ap_label_default():
     df = _pr_data()
-    chart = (
-        Chart(df).encode(x="recall", y="precision", color="class").mark_line()
-        + APLabel()
-    )
+    chart = Chart(df).encode(x="recall", y="precision", color="class").mark_line() + APLabel()
     svg = chart.show_svg()
     assert "AP = " in svg
 
@@ -84,10 +81,7 @@ def _calibration_data():
 
 def test_brier_label_default():
     df = _calibration_data()
-    chart = (
-        Chart(df).encode(x="predicted", y="observed", color="model").mark_line()
-        + BrierLabel()
-    )
+    chart = Chart(df).encode(x="predicted", y="observed", color="model").mark_line() + BrierLabel()
     svg = chart.show_svg()
     assert "Brier = " in svg
 
@@ -102,14 +96,15 @@ def test_outlier_label_threshold_3_emits_only_high_z():
     residuals[[100, 200, 300]] = 5.0
     residuals[[400, 500]] = -4.5
     obs_ids = [f"id_{i}" for i in range(n)]
-    df = pl.DataFrame({
-        "fitted": np.linspace(0, 10, n),
-        "residual": residuals,
-        "obs_id": obs_ids,
-    })
-    chart = (
-        Chart(df).encode(x="fitted", y="residual").mark_point()
-        + OutlierLabel(threshold=3.0, field="residual", label_field="obs_id")
+    df = pl.DataFrame(
+        {
+            "fitted": np.linspace(0, 10, n),
+            "residual": residuals,
+            "obs_id": obs_ids,
+        }
+    )
+    chart = Chart(df).encode(x="fitted", y="residual").mark_point() + OutlierLabel(
+        threshold=3.0, field="residual", label_field="obs_id"
     )
     svg = chart.show_svg()
     for idx in (100, 200, 300, 400, 500):
@@ -121,14 +116,15 @@ def test_outlier_label_max_labels_caps():
     n = 1000
     residuals = rng.normal(0, 1, n)
     residuals[:20] = 5.0
-    df = pl.DataFrame({
-        "fitted": np.linspace(0, 10, n),
-        "residual": residuals,
-        "obs_id": [f"id_{i}" for i in range(n)],
-    })
-    chart = (
-        Chart(df).encode(x="fitted", y="residual").mark_point()
-        + OutlierLabel(threshold=3.0, field="residual", label_field="obs_id", max_labels=3)
+    df = pl.DataFrame(
+        {
+            "fitted": np.linspace(0, 10, n),
+            "residual": residuals,
+            "obs_id": [f"id_{i}" for i in range(n)],
+        }
+    )
+    chart = Chart(df).encode(x="fitted", y="residual").mark_point() + OutlierLabel(
+        threshold=3.0, field="residual", label_field="obs_id", max_labels=3
     )
     svg = chart.show_svg()
     count = sum(1 for i in range(20) if f">id_{i}<" in svg)
@@ -138,10 +134,12 @@ def test_outlier_label_max_labels_caps():
 def test_outlier_label_no_outliers_returns_base_chart():
     rng = np.random.default_rng(1)
     n = 100
-    df = pl.DataFrame({
-        "fitted": np.linspace(0, 10, n),
-        "residual": rng.normal(0, 1, n),  # nothing above z=10
-    })
+    df = pl.DataFrame(
+        {
+            "fitted": np.linspace(0, 10, n),
+            "residual": rng.normal(0, 1, n),  # nothing above z=10
+        }
+    )
     chart = Chart(df).encode(x="fitted", y="residual").mark_point()
     out = chart + OutlierLabel(threshold=10.0)
     assert out is chart
@@ -168,13 +166,11 @@ def test_annotate_arrow_with_label_is_vconcat_with_label_panel():
     scale extents. The structural test confirms the wiring is correct.)
     """
     from ferrum.composition import VConcatChart
+
     chart = annotate_arrow(0.5, 1.5, 1.5, 3.5, label="trend")
     assert isinstance(chart, VConcatChart)
     # Locate the mark_text label chart among the VConcat children.
-    label_charts = [
-        c for c in chart.charts
-        if getattr(c, "_mark", None) == "text"
-    ]
+    label_charts = [c for c in chart.charts if getattr(c, "_mark", None) == "text"]
     assert len(label_charts) == 1
     label_chart = label_charts[0]
     text_value = label_chart._data["_text"][0]

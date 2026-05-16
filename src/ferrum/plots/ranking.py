@@ -622,7 +622,9 @@ def _rank1d_chart_from_dataframe(
             x=X("feature"),
             y=Y("score", scale={"type": "linear", "domain": x_domain}),
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _rank2d_chart_from_dataframe(
@@ -657,7 +659,9 @@ def _rank2d_chart_from_dataframe(
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     chart = chart.properties(title=ferrum.Title("Feature Correlation"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +785,9 @@ def _parallel_coords_chart_from_dataframe(
         color_field=hue,
     )
     chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------

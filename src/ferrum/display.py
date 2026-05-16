@@ -74,13 +74,9 @@ def save_chart(
         scene_json = _render_scene_json(chart)
         path.write_text(scene_json)
     elif fmt == "":
-        raise ValueError(
-            f"save({str(path)!r}) requires a format= or a path with extension."
-        )
+        raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
     else:
-        raise ValueError(
-            f"unknown extension {fmt!r}; supported: svg, png, html, json."
-        )
+        raise ValueError(f"unknown extension {fmt!r}; supported: svg, png, html, json.")
 
 
 def show_chart(chart: "Chart") -> None:

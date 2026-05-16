@@ -4,6 +4,7 @@ Figure-shape tests verify that each chart family renders to SVG and
 carries the layers expected by the desugar. Quantized SVG byte-equality
 goldens live in ``test_goldens_phase_10.py``.
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -15,6 +16,7 @@ from tests.fixtures import load_dataset
 
 def _ridge_xy():
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     return Ridge(random_state=0), X, df["y"]
@@ -33,7 +35,12 @@ def test_learning_curve_chart_renders():
 def test_learning_curve_chart_errorbar_style():
     model, X, y = _ridge_xy()
     chart = ferrum.learning_curve_chart(
-        model, X, y, cv=3, ci_style="errorbar", random_state=0,
+        model,
+        X,
+        y,
+        cv=3,
+        ci_style="errorbar",
+        random_state=0,
     )
     assert "<svg" in chart.show_svg()
 
@@ -46,7 +53,12 @@ def test_learning_curve_chart_invalid_ci_style():
     model, X, y = _ridge_xy()
     with pytest.raises(ValueError, match="ci_style"):
         ferrum.learning_curve_chart(
-            model, X, y, cv=3, ci_style="invalid", random_state=0,
+            model,
+            X,
+            y,
+            cv=3,
+            ci_style="invalid",
+            random_state=0,
         )
 
 
@@ -56,9 +68,13 @@ def test_learning_curve_chart_invalid_ci_style():
 def test_validation_curve_chart_linear_x():
     model, X, y = _ridge_xy()
     chart = ferrum.validation_curve_chart(
-        model, X, y,
-        param="alpha", values=[0.1, 1.0, 10.0],
-        cv=3, log_scale=False,
+        model,
+        X,
+        y,
+        param="alpha",
+        values=[0.1, 1.0, 10.0],
+        cv=3,
+        log_scale=False,
     )
     assert "<svg" in chart.show_svg()
 
@@ -67,9 +83,13 @@ def test_validation_curve_chart_auto_log_scale():
     model, X, y = _ridge_xy()
     # alpha range spans 4 orders of magnitude → auto log.
     chart = ferrum.validation_curve_chart(
-        model, X, y,
-        param="alpha", values=[0.001, 0.01, 0.1, 1.0, 10.0],
-        cv=3, log_scale="auto",
+        model,
+        X,
+        y,
+        param="alpha",
+        values=[0.001, 0.01, 0.1, 1.0, 10.0],
+        cv=3,
+        log_scale="auto",
     )
     assert "<svg" in chart.show_svg()
 
@@ -120,7 +140,11 @@ def test_cv_scores_chart_invalid_kind():
 def test_alpha_selection_chart_default():
     model, X, y = _ridge_xy()
     chart = ferrum.alpha_selection_chart(
-        model, X, y, alphas=[0.1, 1.0, 10.0], cv=3,
+        model,
+        X,
+        y,
+        alphas=[0.1, 1.0, 10.0],
+        cv=3,
     )
     assert "<svg" in chart.show_svg()
 
@@ -128,7 +152,12 @@ def test_alpha_selection_chart_default():
 def test_alpha_selection_chart_highlight_best_injects_column():
     model, X, y = _ridge_xy()
     chart = ferrum.alpha_selection_chart(
-        model, X, y, alphas=[0.1, 1.0, 10.0, 100.0], cv=3, highlight_best=True,
+        model,
+        X,
+        y,
+        alphas=[0.1, 1.0, 10.0, 100.0],
+        cv=3,
+        highlight_best=True,
     )
     # The Chart's data should now carry a _best_alpha sentinel column.
     df = chart._data  # private; touch only inside diagnostics tests
@@ -141,7 +170,12 @@ def test_alpha_selection_chart_highlight_best_injects_column():
 def test_alpha_selection_chart_no_highlight():
     model, X, y = _ridge_xy()
     chart = ferrum.alpha_selection_chart(
-        model, X, y, alphas=[0.1, 1.0, 10.0], cv=3, highlight_best=False,
+        model,
+        X,
+        y,
+        alphas=[0.1, 1.0, 10.0],
+        cv=3,
+        highlight_best=False,
     )
     df = chart._data
     assert isinstance(df, pl.DataFrame)
@@ -168,7 +202,10 @@ def test_learning_curve_visualizer_records_final_test_score():
 def test_validation_curve_visualizer_records_best_param():
     model, X, y = _ridge_xy()
     viz = ferrum.ValidationCurveVisualizer(
-        model, "alpha", [0.1, 1.0, 10.0], cv=3,
+        model,
+        "alpha",
+        [0.1, 1.0, 10.0],
+        cv=3,
     ).fit(X, y)
     r = repr(viz)
     assert "best_param=" in r
@@ -186,7 +223,9 @@ def test_cv_scores_visualizer_records_mean_and_std():
 def test_alpha_selection_visualizer_records_best_alpha():
     model, X, y = _ridge_xy()
     viz = ferrum.AlphaSelectionVisualizer(
-        model, [0.01, 0.1, 1.0, 10.0], cv=3,
+        model,
+        [0.01, 0.1, 1.0, 10.0],
+        cv=3,
     ).fit(X, y)
     r = repr(viz)
     assert "best_alpha=" in r
@@ -200,14 +239,20 @@ def test_validation_curve_visualizer_best_param_matches_max_mean_score():
     model, X, y = _ridge_xy()
     values = [0.01, 0.1, 1.0, 10.0, 100.0]
     viz = ferrum.ValidationCurveVisualizer(
-        model, "alpha", values, cv=3, random_state=0,
+        model,
+        "alpha",
+        values,
+        cv=3,
+        random_state=0,
     ).fit(X, y)
     df = viz._source.validation_curve(
-        "alpha", values, cv=3, scoring=None,
+        "alpha",
+        values,
+        cv=3,
+        scoring=None,
     )
-    test_rows = (
-        df.filter(pl.col("split") == "test")
-        .unique(subset=["param_value"], keep="first", maintain_order=True)
+    test_rows = df.filter(pl.col("split") == "test").unique(
+        subset=["param_value"], keep="first", maintain_order=True
     )
     expected_best_score = float(test_rows["mean_score"].max())
     expected_best_param = float(
@@ -227,14 +272,15 @@ def test_alpha_selection_visualizer_best_alpha_matches_max_mean_score():
     model, X, y = _ridge_xy()
     alphas = [0.01, 0.1, 1.0, 10.0, 100.0]
     viz = ferrum.AlphaSelectionVisualizer(
-        model, alphas, cv=3, random_state=0,
+        model,
+        alphas,
+        cv=3,
+        random_state=0,
     ).fit(X, y)
     df = viz._source.alpha_selection(alphas, cv=3, scoring=None)
     agg = df.unique(subset=["alpha"], keep="first", maintain_order=True)
     expected_best_score = float(agg["mean_score"].max())
-    expected_best_alpha = float(
-        agg.filter(pl.col("mean_score") == expected_best_score)["alpha"][0]
-    )
+    expected_best_alpha = float(agg.filter(pl.col("mean_score") == expected_best_score)["alpha"][0])
     assert viz._metrics["best_score"] == pytest.approx(expected_best_score)
     assert viz._metrics["best_alpha"] == pytest.approx(expected_best_alpha)
 
@@ -280,10 +326,16 @@ def test_learning_curve_forwards_mark_kwargs_to_line_layer():
 def test_validation_curve_forwards_mark_kwargs():
     model, X, y = _ridge_xy()
     chart = ferrum.validation_curve_chart(
-        model, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3,
+        model,
+        X,
+        y,
+        param="alpha",
+        values=[0.1, 1.0, 10.0],
+        cv=3,
     )
     chart = chart._clone().mark_validation_curve(
-        log_scale=True, stroke_width=2,
+        log_scale=True,
+        stroke_width=2,
     )
     kw = _line_layer_mark_kwargs(chart, "validation_curve")
     assert kw["stroke_width"] == 2
@@ -292,7 +344,11 @@ def test_validation_curve_forwards_mark_kwargs():
 def test_alpha_selection_forwards_mark_kwargs():
     model, X, y = _ridge_xy()
     chart = ferrum.alpha_selection_chart(
-        model, X, y, alphas=[0.1, 1.0, 10.0], cv=3,
+        model,
+        X,
+        y,
+        alphas=[0.1, 1.0, 10.0],
+        cv=3,
     )
     chart = chart._clone().mark_alpha_selection(stroke="#00aa00")
     kw = _line_layer_mark_kwargs(chart, "alpha_selection")

@@ -62,18 +62,20 @@ _RENDERER_HONORED_CHANNELS = (
 # current static SVG renderer.  They are handled by special-case logic in
 # to_spec() (alias to another channel, inject into mark_style, or simply
 # stored for future interactive rendering).  No warning emitted.
-_SILENT_CHANNELS = frozenset((
-    "fill",           # alias → color encoding
-    "stroke",         # alias → color encoding or mark_style.stroke
-    # fill_opacity is intentionally NOT listed here: it is wired through Rust
-    # mark renderers as a per-element SVG fill-opacity attribute.
-    "detail",         # injected into mark_style.detail
-    "key",            # stored for future interactive/animated rendering
-    "x_error",        # used through composite mark desugar (mark_errorbar)
-    "y_error",        # used through composite mark desugar (mark_errorbar)
-    "x_error2",       # used through composite mark desugar (mark_errorbar)
-    "y_error2",       # used through composite mark desugar (mark_errorbar)
-))
+_SILENT_CHANNELS = frozenset(
+    (
+        "fill",  # alias → color encoding
+        "stroke",  # alias → color encoding or mark_style.stroke
+        # fill_opacity is intentionally NOT listed here: it is wired through Rust
+        # mark renderers as a per-element SVG fill-opacity attribute.
+        "detail",  # injected into mark_style.detail
+        "key",  # stored for future interactive/animated rendering
+        "x_error",  # used through composite mark desugar (mark_errorbar)
+        "y_error",  # used through composite mark desugar (mark_errorbar)
+        "x_error2",  # used through composite mark desugar (mark_errorbar)
+        "y_error2",  # used through composite mark desugar (mark_errorbar)
+    )
+)
 # Polar channels raise NotImplementedError when a chart is actually rendered
 # with them, rather than emitting a misleading "not yet rendered" warning.
 _POLAR_CHANNELS = frozenset(("theta", "radius"))
@@ -113,6 +115,7 @@ class _NamedTransform:
     not advance the unnamed chain).  The corresponding ``_Layer`` sets
     ``data_source`` to the same name so it reads the correct output.
     """
+
     __slots__ = ("transform", "name")
 
     def __init__(self, transform: object, name: str) -> None:
@@ -350,7 +353,11 @@ class Chart(_RenderMixin):
                 if color_field:
                     kwargs = {**kwargs, "groupby": color_field}
         # hex: infer aggregate field from color encoding when not explicit.
-        if kind == "hex" and kwargs.get("aggregate", "count") != "count" and kwargs.get("field") is None:
+        if (
+            kind == "hex"
+            and kwargs.get("aggregate", "count") != "count"
+            and kwargs.get("field") is None
+        ):
             color_enc = self._encoding.get("color")
             if color_enc is not None:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
@@ -372,15 +379,17 @@ class Chart(_RenderMixin):
         if kind == "swarm":
             try:
                 import polars as pl
+
                 orient = kwargs.get("orient", "vertical")
                 value_field = y_field if orient != "horizontal" else x_field
-                if (value_field and new._data is not None
-                        and isinstance(new._data, pl.DataFrame)
-                        and value_field in new._data.columns
-                        and new._data[value_field].dtype != pl.Float64):
-                    new._data = new._data.with_columns(
-                        pl.col(value_field).cast(pl.Float64)
-                    )
+                if (
+                    value_field
+                    and new._data is not None
+                    and isinstance(new._data, pl.DataFrame)
+                    and value_field in new._data.columns
+                    and new._data[value_field].dtype != pl.Float64
+                ):
+                    new._data = new._data.with_columns(pl.col(value_field).cast(pl.Float64))
             except (ImportError, TypeError, AttributeError, ValueError):
                 pass
 
@@ -388,7 +397,10 @@ class Chart(_RenderMixin):
         _prior_layer = None
         if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
             _prior_layer = _build_prior_layer(
-                _prior_mark, self._encoding, self._mark_kwargs, self._position,
+                _prior_mark,
+                self._encoding,
+                self._mark_kwargs,
+                self._position,
             )
 
         # Layered mode: result.layers is set.
@@ -3729,9 +3741,13 @@ class Chart(_RenderMixin):
             ncols = existing.ncols if existing is not None else None
             nrows = existing.nrows if existing is not None else None
             if facet_enc is not None:
-                new._facet = _Facet(mode_kind="wrap", field=facet_enc.field, ncols=ncols, nrows=nrows)
+                new._facet = _Facet(
+                    mode_kind="wrap", field=facet_enc.field, ncols=ncols, nrows=nrows
+                )
             elif col_enc is not None and row_enc is not None:
-                new._facet = _Facet(mode_kind="grid", col=col_enc.field, row=row_enc.field, ncols=ncols, nrows=nrows)
+                new._facet = _Facet(
+                    mode_kind="grid", col=col_enc.field, row=row_enc.field, ncols=ncols, nrows=nrows
+                )
             elif col_enc is not None:
                 new._facet = _Facet(mode_kind="wrap", field=col_enc.field, ncols=ncols, nrows=nrows)
             elif row_enc is not None:
@@ -3798,7 +3814,9 @@ class Chart(_RenderMixin):
                     )
                 )
             else:
-                raise TypeError(f"layer() expects Layer or _Layer instances; got {type(ly).__name__}")
+                raise TypeError(
+                    f"layer() expects Layer or _Layer instances; got {type(ly).__name__}"
+                )
         new._layers = existing + converted
         return new
 
@@ -3918,6 +3936,7 @@ class Chart(_RenderMixin):
             auto_name = f"_auto_{id(rhs_top_xforms[-1]) & 0xFFFFFFFF:08x}"
             named_xforms = [_NamedTransform(t, auto_name) for t in rhs_top_xforms]
             from dataclasses import replace as _dc_replace
+
             rhs_layers = [_dc_replace(l, data_source=auto_name) for l in rhs_layers]
             _merge_top_transforms(new, named_xforms)
         else:
@@ -4288,8 +4307,10 @@ class Chart(_RenderMixin):
                     # this via DataType::from_str, but serde only knows "quantitative"
                     # etc.
                     _TYPE_EXPAND = {
-                        "Q": "quantitative", "N": "nominal",
-                        "O": "ordinal",      "T": "temporal",
+                        "Q": "quantitative",
+                        "N": "nominal",
+                        "O": "ordinal",
+                        "T": "temporal",
                     }
                     enc_json_dict: dict = {"field": field}
                     if raw_type := d.get("type_"):
@@ -4360,7 +4381,9 @@ class Chart(_RenderMixin):
 
     # ---- Properties ----
 
-    def properties(self, *, width=None, height=None, title=None, description=None, render_config=None) -> "Chart":
+    def properties(
+        self, *, width=None, height=None, title=None, description=None, render_config=None
+    ) -> "Chart":
         """Set chart-level display properties.
 
         Only the keyword arguments that are explicitly provided are updated;
@@ -4451,6 +4474,7 @@ class Chart(_RenderMixin):
         # knows x/y; the spec-side coord conversion in scene_build.rs handles
         # the polar→Cartesian pixel transformation.
         from ferrum.coord import CoordPolar
+
         if isinstance(resolved._coord, CoordPolar):
             theta_ch = resolved._coord.theta  # "x" or "y"
             radius_ch = "y" if theta_ch == "x" else "x"
@@ -4571,13 +4595,9 @@ class Chart(_RenderMixin):
         if resolved._description:
             kw["chart_description"] = resolved._description
         if resolved._selections:
-            kw["selections"] = json.dumps(
-                [s.to_spec_dict() for s in resolved._selections]
-            )
+            kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
         if resolved._conditionals:
-            kw["conditionals"] = json.dumps(
-                [c.to_spec_dict() for c in resolved._conditionals]
-            )
+            kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
         return ChartSpec(**kw)
 
     def _build_spec(self):
@@ -4687,6 +4707,7 @@ class Chart(_RenderMixin):
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").interactive()
         """
         from ferrum._interactive import InteractiveChart
+
         return InteractiveChart(self)
 
     def conditional(self, spec: Any) -> "Chart":

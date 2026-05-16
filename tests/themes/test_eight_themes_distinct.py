@@ -45,22 +45,14 @@ _REGENERATE = bool(os.environ.get("FERRUM_UPDATE_GOLDENS")) or bool(
 
 
 def _base_chart() -> fm.Chart:
-    df = pl.DataFrame(
-        {"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 15.0, 25.0]}
-    )
-    return (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y="val", color="cat")
-    )
+    df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 15.0, 25.0]})
+    return fm.Chart(df).mark_bar().encode(x="cat", y="val", color="cat")
 
 
 def test_all_eight_themes_produce_distinct_svgs() -> None:
     chart = _base_chart()
     svgs = {name: chart.theme(theme).show_svg() for name, theme in THEMES.items()}
-    hashes = {
-        name: hashlib.sha256(svg.encode()).hexdigest()[:16] for name, svg in svgs.items()
-    }
+    hashes = {name: hashlib.sha256(svg.encode()).hexdigest()[:16] for name, svg in svgs.items()}
     assert len(set(hashes.values())) == 8, (
         f"expected 8 distinct theme hashes, got duplicates: {hashes}"
     )

@@ -8,6 +8,7 @@ via ``FLOAT_PRECISION = 3``.
 
 Regenerate with ``FERRUM_REGENERATE_GOLDENS=1 pytest tests/diagnostics/test_goldens_phase_10.py``.
 """
+
 from __future__ import annotations
 
 import os
@@ -37,8 +38,11 @@ def _check_golden(svg: str, name: str) -> None:
     # directly with a compact message. See
     # docs/superpowers/followups/2026-05-11-phase-9-render-perf.md.
     from tests._snapshots import assert_svg_eq
+
     assert_svg_eq(
-        svg, expected, name=name,
+        svg,
+        expected,
+        name=name,
         regen_hint="set FERRUM_REGENERATE_GOLDENS=1 to refresh after intentional changes",
     )
 
@@ -65,6 +69,7 @@ def test_golden_residuals_chart_regression():
 
 def test_golden_prediction_error_regression_ci95():
     from ferrum.plots.regression import _prediction_error_chart_from_source
+
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -75,6 +80,7 @@ def test_golden_prediction_error_regression_ci95():
 
 def test_golden_prediction_error_regression_reference_band():
     from ferrum.plots.regression import _prediction_error_chart_from_source
+
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -85,6 +91,7 @@ def test_golden_prediction_error_regression_reference_band():
 
 def test_golden_prediction_error_regression():
     from ferrum.plots.regression import _prediction_error_chart_from_source
+
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
@@ -189,10 +196,15 @@ def test_golden_lift_chart_binary():
 def test_golden_discrimination_threshold_binary_threshold_line():
     model, X, y = _binary_xy()
     chart = ferrum.discrimination_threshold_chart(
-        model, X, y, n_thresholds=20, threshold_line=True,
+        model,
+        X,
+        y,
+        n_thresholds=20,
+        threshold_line=True,
     )
     _check_golden(
-        chart.show_svg(), "discrimination_threshold_binary_threshold_line",
+        chart.show_svg(),
+        "discrimination_threshold_binary_threshold_line",
     )
 
 
@@ -251,7 +263,11 @@ def test_golden_importance_chart_builtin():
 def test_golden_importance_chart_permutation():
     model, X, y = _regression_xy()
     chart = ferrum.importance_chart(
-        model, X, y, method="permutation", random_state=0,
+        model,
+        X,
+        y,
+        method="permutation",
+        random_state=0,
     )
     _check_golden(chart.show_svg(), "importance_chart_permutation")
 
@@ -288,8 +304,12 @@ def test_golden_pdp_chart_individual_ice():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pdp_chart(
-        model, X, df["y"],
-        features=["f0", "f1"], grid_resolution=15, kind="individual",
+        model,
+        X,
+        df["y"],
+        features=["f0", "f1"],
+        grid_resolution=15,
+        kind="individual",
     )
     _check_golden(chart.show_svg(), "pdp_chart_individual_ice")
 
@@ -299,9 +319,13 @@ def test_golden_pdp_chart_both_centered():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pdp_chart(
-        model, X, df["y"],
-        features=["f0", "f1"], grid_resolution=15,
-        kind="both", center=True,
+        model,
+        X,
+        df["y"],
+        features=["f0", "f1"],
+        grid_resolution=15,
+        kind="both",
+        center=True,
     )
     _check_golden(chart.show_svg(), "pdp_chart_both_centered")
 
@@ -309,7 +333,11 @@ def test_golden_pdp_chart_both_centered():
 def test_golden_pdp_chart_three_features():
     model, X, y = _regression_xy()
     chart = ferrum.pdp_chart(
-        model, X, y, features=["f0", "f1", "f2"], grid_resolution=20,
+        model,
+        X,
+        y,
+        features=["f0", "f1", "f2"],
+        grid_resolution=20,
     )
     _check_golden(chart.show_svg(), "pdp_chart_three_features")
 
@@ -320,6 +348,7 @@ def test_golden_pdp_chart_three_features():
 def _ridge_for_selection():
     """Fresh Ridge — deterministic across runs given fixed random_state."""
     from sklearn.linear_model import Ridge
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     return Ridge(random_state=0), X, df["y"]
@@ -334,7 +363,12 @@ def test_golden_learning_curve_ridge():
 def test_golden_validation_curve_ridge_alpha():
     model, X, y = _ridge_for_selection()
     chart = ferrum.validation_curve_chart(
-        model, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3,
+        model,
+        X,
+        y,
+        param="alpha",
+        values=[0.1, 1.0, 10.0],
+        cv=3,
     )
     _check_golden(chart.show_svg(), "validation_curve_ridge_alpha")
 
@@ -348,7 +382,11 @@ def test_golden_cv_scores_ridge_box():
 def test_golden_alpha_selection_ridge():
     model, X, y = _ridge_for_selection()
     chart = ferrum.alpha_selection_chart(
-        model, X, y, alphas=[0.01, 0.1, 1.0, 10.0], cv=3,
+        model,
+        X,
+        y,
+        alphas=[0.01, 0.1, 1.0, 10.0],
+        cv=3,
     )
     _check_golden(chart.show_svg(), "alpha_selection_ridge")
 
@@ -358,6 +396,7 @@ def test_golden_alpha_selection_ridge():
 
 def test_golden_silhouette_kmeans():
     from ferrum.plots.clustering import _silhouette_chart_from_source
+
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df)
@@ -380,7 +419,11 @@ def test_golden_intercluster_distance_kmeans():
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     chart = ferrum.intercluster_distance_chart(
-        model, df, k=3, method="mds", random_state=0,
+        model,
+        df,
+        k=3,
+        method="mds",
+        random_state=0,
     )
     _check_golden(chart.show_svg(), "intercluster_distance_mds_3cluster")
 
@@ -389,8 +432,12 @@ def test_golden_decision_boundary_binary():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     chart = ferrum.decision_boundary_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
-        features=(0, 1), grid_resolution=50, proba=True,
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
+        features=(0, 1),
+        grid_resolution=50,
+        proba=True,
     )
     _check_golden(chart.show_svg(), "decision_boundary_binary_logistic")
 
@@ -403,11 +450,16 @@ def test_golden_decision_boundary_binary_with_scatter():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     chart = ferrum.decision_boundary_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
-        features=(0, 1), grid_resolution=40, scatter=True,
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
+        features=(0, 1),
+        grid_resolution=40,
+        scatter=True,
     )
     _check_golden(
-        chart.show_svg(), "decision_boundary_binary_with_scatter",
+        chart.show_svg(),
+        "decision_boundary_binary_with_scatter",
     )
 
 
@@ -429,7 +481,9 @@ def test_golden_rank2d_kendall_regression():
 def test_golden_parallel_coordinates_multiclass():
     df = load_dataset("multiclass_classification")
     chart = ferrum.parallel_coordinates_chart(
-        df, features=["f0", "f1", "f2", "f3"], hue="y",
+        df,
+        features=["f0", "f1", "f2", "f3"],
+        hue="y",
         rescale="minmax",
     )
     _check_golden(chart.show_svg(), "parallel_coordinates_multiclass")

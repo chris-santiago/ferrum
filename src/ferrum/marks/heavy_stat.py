@@ -138,9 +138,15 @@ def desugar_contour(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("contour", frozenset({
-    "polygon", "segment",
-}))
+register_layer_names(
+    "contour",
+    frozenset(
+        {
+            "polygon",
+            "segment",
+        }
+    ),
+)
 
 
 def desugar_violin(
@@ -232,7 +238,10 @@ def desugar_violin(
     if inner == "point":
         return MarkDesugarResult(
             transforms=transforms,
-            layers=[violin_layer, _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field})],
+            layers=[
+                violin_layer,
+                _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field}),
+            ],
         )
     if inner == "quartile":
         transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
@@ -252,19 +261,30 @@ def desugar_violin(
     # inner == "box"
     from ferrum.marks.composite import desugar_boxplot
 
-    box_result = desugar_boxplot(
-        x_field, y_field, extent=1.5, outliers=False, size=0.1
-    )
+    box_result = desugar_boxplot(x_field, y_field, extent=1.5, outliers=False, size=0.1)
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
         layers=[violin_layer, *box_result.layers],
     )
 
 
-register_layer_names("violin", frozenset({
-    "body", "point", "q1", "median", "q3",
-    "whisker", "lower_cap", "upper_cap", "box", "outlier",
-}))
+register_layer_names(
+    "violin",
+    frozenset(
+        {
+            "body",
+            "point",
+            "q1",
+            "median",
+            "q3",
+            "whisker",
+            "lower_cap",
+            "upper_cap",
+            "box",
+            "outlier",
+        }
+    ),
+)
 
 
 def desugar_qq(
@@ -368,9 +388,15 @@ def desugar_qq(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("qq", frozenset({
-    "point", "reference",
-}))
+register_layer_names(
+    "qq",
+    frozenset(
+        {
+            "point",
+            "reference",
+        }
+    ),
+)
 
 
 def desugar_raster(
@@ -483,9 +509,14 @@ def desugar_raster(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("raster", frozenset({
-    "image",
-}))
+register_layer_names(
+    "raster",
+    frozenset(
+        {
+            "image",
+        }
+    ),
+)
 
 
 def desugar_hex(
@@ -569,9 +600,7 @@ def desugar_hex(
         raise ValueError(f"mark_hex(stroke_width={stroke_width!r}) is not supported")
     _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
     if aggregate not in _VALID_AGGREGATES:
-        raise ValueError(
-            f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}"
-        )
+        raise ValueError(f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}")
     if aggregate != "count" and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     transforms = [
@@ -592,9 +621,14 @@ def desugar_hex(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("hex", frozenset({
-    "polygon",
-}))
+register_layer_names(
+    "hex",
+    frozenset(
+        {
+            "polygon",
+        }
+    ),
+)
 
 
 def desugar_swarm(
@@ -717,9 +751,14 @@ def desugar_swarm(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("swarm", frozenset({
-    "point",
-}))
+register_layer_names(
+    "swarm",
+    frozenset(
+        {
+            "point",
+        }
+    ),
+)
 
 
 def desugar_function(
@@ -791,9 +830,7 @@ def desugar_function(
     200
     """
     if not clip:
-        raise ValueError(
-            "mark_function(clip=False) is not supported; clipping is always enabled"
-        )
+        raise ValueError("mark_function(clip=False) is not supported; clipping is always enabled")
     import numpy as np
     import pyarrow as pa
 

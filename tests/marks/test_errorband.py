@@ -5,10 +5,12 @@ import ferrum as fe
 
 @pytest.fixture
 def df():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0] * 3,
-        "y": [1.1, 2.2, 3.3, 4.4, 5.5, 1.0, 2.0, 3.0, 4.0, 5.0, 1.2, 2.1, 3.4, 4.3, 5.2],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0] * 3,
+            "y": [1.1, 2.2, 3.3, 4.4, 5.5, 1.0, 2.0, 3.0, 4.0, 5.0, 1.2, 2.1, 3.4, 4.3, 5.2],
+        }
+    )
 
 
 def test_errorband_default_1_layer(df):

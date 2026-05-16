@@ -1,4 +1,5 @@
 """Phase 8b end-to-end smoke tests: every new mark renders without panic."""
+
 import polars as pl
 import numpy as np
 import pytest
@@ -8,10 +9,12 @@ import ferrum as fe
 @pytest.fixture
 def df_grouped():
     np.random.seed(42)
-    return pl.DataFrame({
-        "g": ["a"] * 30 + ["b"] * 30,
-        "v": np.concatenate([np.random.normal(0, 1, 30), np.random.normal(2, 1, 30)]),
-    })
+    return pl.DataFrame(
+        {
+            "g": ["a"] * 30 + ["b"] * 30,
+            "v": np.concatenate([np.random.normal(0, 1, 30), np.random.normal(2, 1, 30)]),
+        }
+    )
 
 
 @pytest.fixture
@@ -32,11 +35,13 @@ def test_errorbar_renders(df_grouped):
 
 
 def test_errorband_renders():
-    df_lines = pl.DataFrame({
-        "g": ["a"] * 10 + ["b"] * 10,
-        "x": [float(i) for i in range(10)] * 2,
-        "v": [float(i) + 0.1 for i in range(10)] + [float(i) + 0.5 for i in range(10)],
-    })
+    df_lines = pl.DataFrame(
+        {
+            "g": ["a"] * 10 + ["b"] * 10,
+            "x": [float(i) for i in range(10)] * 2,
+            "v": [float(i) + 0.1 for i in range(10)] + [float(i) + 0.5 for i in range(10)],
+        }
+    )
     svg = fe.Chart(df_lines).mark_errorband(extent="ci").encode(x="x", y="v").show_svg()
     assert "<svg" in svg
 
@@ -96,8 +101,10 @@ def test_function_renders():
 
 
 def test_layered_violin_plus_swarm(df_grouped):
-    svg = (fe.Chart(df_grouped).mark_violin(inner=None).encode(x="g", y="v") +
-           fe.Chart(df_grouped).mark_swarm().encode(x="g", y="v")).show_svg()
+    svg = (
+        fe.Chart(df_grouped).mark_violin(inner=None).encode(x="g", y="v")
+        + fe.Chart(df_grouped).mark_swarm().encode(x="g", y="v")
+    ).show_svg()
     assert "<svg" in svg
 
 

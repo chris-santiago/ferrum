@@ -87,7 +87,9 @@ def _learning_curve_chart_from_source(
             name="point",
         )
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _validation_curve_chart_from_source(
@@ -159,7 +161,9 @@ def _validation_curve_chart_from_source(
             name="point",
         )
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _cv_scores_chart_from_source(
@@ -192,7 +196,9 @@ def _cv_scores_chart_from_source(
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _alpha_selection_chart_from_source(
@@ -270,7 +276,9 @@ def _alpha_selection_chart_from_source(
                 name="best_alpha_text",
             ),
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------

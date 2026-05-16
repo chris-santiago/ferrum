@@ -16,7 +16,10 @@ def test_roc_single_curve_active_title():
 
 def test_roc_per_class_falls_back_to_descriptive_title():
     X, y = make_classification(
-        n_samples=200, n_classes=3, n_informative=3, random_state=0,
+        n_samples=200,
+        n_classes=3,
+        n_informative=3,
+        random_state=0,
     )
     model = LogisticRegression(max_iter=300).fit(X, y)
     chart = fm.roc_chart(model, X, y, per_class=True)

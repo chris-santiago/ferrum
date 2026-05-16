@@ -42,13 +42,20 @@ def _apply_overrides(
     each child chart via ``_rebuild_with_charts``.
     """
     from ferrum.chart import Chart
+
     if not isinstance(chart, Chart):
         try:
+
             def _apply(c: Any) -> Any:
                 return _apply_overrides(
-                    c, mark=mark, encode=encode, properties=properties, layers=layers,
+                    c,
+                    mark=mark,
+                    encode=encode,
+                    properties=properties,
+                    layers=layers,
                     _skip_unknown_mark_keys=True,
                 )
+
             return chart._rebuild_with_charts(_apply)
         except (NotImplementedError, AttributeError):
             if properties is not None and hasattr(chart, "properties"):
@@ -67,7 +74,10 @@ def _apply_overrides(
 
 
 def _apply_mark_overrides(
-    chart: "Chart", overrides: dict[str, Any], *, _skip_unknown: bool = False,
+    chart: "Chart",
+    overrides: dict[str, Any],
+    *,
+    _skip_unknown: bool = False,
 ) -> "Chart":
     resolved = chart._resolve_pending()
     names = resolved.layer_names
@@ -91,13 +101,12 @@ def _apply_mark_overrides(
             if _skip_unknown:
                 continue
             raise ValueError(
-                f"Unknown sub-layer {key!r}; "
-                f"valid names for this chart: {sorted(valid)}"
+                f"Unknown sub-layer {key!r}; valid names for this chart: {sorted(valid)}"
             )
 
     new = resolved._clone()
     new_layers: list = []
-    for ly in (new._layers or []):
+    for ly in new._layers or []:
         if ly.name is None or ly.name not in overrides:
             new_layers.append(ly)
             continue

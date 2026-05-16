@@ -7,6 +7,7 @@ plus 4 tricky composite cases. Goldens live under
 Run with ``FERRUM_UPDATE_GOLDENS=1`` to regenerate the on-disk goldens;
 the default behavior is byte-identical comparison.
 """
+
 from __future__ import annotations
 
 import os
@@ -32,12 +33,14 @@ UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
 def df_iris_like():
     """Fixed-seed iris-like 60-row dataset used by most goldens."""
     rng = np.random.default_rng(0)
-    return pl.DataFrame({
-        "sepal_length": rng.normal(5.0, 0.5, 60).tolist(),
-        "sepal_width":  rng.normal(3.0, 0.3, 60).tolist(),
-        "petal_length": rng.normal(3.5, 0.7, 60).tolist(),
-        "species":      ["setosa"] * 30 + ["versicolor"] * 30,
-    })
+    return pl.DataFrame(
+        {
+            "sepal_length": rng.normal(5.0, 0.5, 60).tolist(),
+            "sepal_width": rng.normal(3.0, 0.3, 60).tolist(),
+            "petal_length": rng.normal(3.5, 0.7, 60).tolist(),
+            "species": ["setosa"] * 30 + ["versicolor"] * 30,
+        }
+    )
 
 
 @pytest.fixture
@@ -53,33 +56,39 @@ def df_reg():
 @pytest.fixture
 def df_heat():
     """Small wide-form dataset for heatmap."""
-    return pl.DataFrame({
-        "row": ["r1", "r2", "r3", "r4"],
-        "A":   [1.0, 2.0, 3.0, 4.0],
-        "B":   [4.0, 3.0, 2.0, 1.0],
-        "C":   [2.5, 1.5, 3.5, 4.5],
-    })
+    return pl.DataFrame(
+        {
+            "row": ["r1", "r2", "r3", "r4"],
+            "A": [1.0, 2.0, 3.0, 4.0],
+            "B": [4.0, 3.0, 2.0, 1.0],
+            "C": [2.5, 1.5, 3.5, 4.5],
+        }
+    )
 
 
 @pytest.fixture
 def df_cluster():
     rng = np.random.default_rng(2)
-    return pl.DataFrame({
-        "row": [f"r{i}" for i in range(5)],
-        "A":   rng.normal(0, 1, 5).tolist(),
-        "B":   rng.normal(0, 1, 5).tolist(),
-        "C":   rng.normal(0, 1, 5).tolist(),
-        "D":   rng.normal(0, 1, 5).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "row": [f"r{i}" for i in range(5)],
+            "A": rng.normal(0, 1, 5).tolist(),
+            "B": rng.normal(0, 1, 5).tolist(),
+            "C": rng.normal(0, 1, 5).tolist(),
+            "D": rng.normal(0, 1, 5).tolist(),
+        }
+    )
 
 
 @pytest.fixture
 def df_joint():
     rng = np.random.default_rng(3)
-    return pl.DataFrame({
-        "x": rng.normal(0, 1, 50).tolist(),
-        "y": rng.normal(0, 1, 50).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0, 1, 50).tolist(),
+            "y": rng.normal(0, 1, 50).tolist(),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +112,7 @@ def _check_or_update(name: str, svg: str) -> None:
         return
     if not path.exists():
         pytest.fail(
-            f"golden {name!r} does not exist; rerun with "
-            f"FERRUM_UPDATE_GOLDENS=1 to generate it"
+            f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to generate it"
         )
     expected = path.read_text()
     # NOTE: do not use `assert svg == expected` — pytest's assertion
@@ -113,8 +121,11 @@ def _check_or_update(name: str, svg: str) -> None:
     # directly with a compact message. See
     # docs/superpowers/followups/2026-05-11-phase-9-render-perf.md.
     from tests._snapshots import assert_svg_eq
+
     assert_svg_eq(
-        svg, expected, name=name,
+        svg,
+        expected,
+        name=name,
         regen_hint="rerun with FERRUM_UPDATE_GOLDENS=1 to refresh",
     )
 
@@ -137,8 +148,11 @@ def test_displot_hist_golden(df_iris_like):
 def test_catplot_box_golden(df_iris_like):
     chart = fe.catplot(
         df_iris_like,
-        x="species", y="sepal_length",
-        hue="species", kind="box", dodge=True,
+        x="species",
+        y="sepal_length",
+        hue="species",
+        kind="box",
+        dodge=True,
     )
     _check_or_update("catplot_box.svg", chart.show_svg())
 
@@ -228,7 +242,9 @@ def test_pairplot_3x3_hue_golden(df_iris_like):
 def test_clustermap_row_col_dendrograms_golden(df_cluster):
     cm = fe.clustermap(
         df_cluster,
-        method="average", metric="cosine", z_score="rows",
+        method="average",
+        metric="cosine",
+        z_score="rows",
     )
     _check_or_update("clustermap_row_col_dendrograms.svg", cm.show_svg())
 
@@ -251,7 +267,9 @@ def test_jointplot_kde_marginals_golden(df_joint):
 def test_displot_stacked_hist_golden(df_iris_like):
     chart = fe.displot(
         df_iris_like,
-        x="sepal_length", hue="species",
-        kind="hist", multiple="stack",
+        x="sepal_length",
+        hue="species",
+        kind="hist",
+        multiple="stack",
     )
     _check_or_update("displot_stacked_hist.svg", chart.show_svg())

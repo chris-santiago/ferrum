@@ -1,4 +1,5 @@
 """Tests for Chart.coord() fluent method and coord.py classes."""
+
 import json
 
 import polars as pl
@@ -68,6 +69,7 @@ def test_coord_geo_spec_dict():
 
     # Round-trip through ChartSpec directly (mark_geoshape wired in Task 11d5).
     from ferrum import ChartSpec
+
     spec = ChartSpec(mark="point", x="a", y="b", coord=d)
     j = json.loads(spec.to_json())
     assert j["coord"]["kind"] == "geo"

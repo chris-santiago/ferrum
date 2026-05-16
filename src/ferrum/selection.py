@@ -460,7 +460,9 @@ def _hex_to_color_dict(hex_str: str) -> dict[str, int]:
 def _resolve_channel(enc: Any) -> str:
     from ferrum.encoding.appearance import Color, Opacity, Size
 
-    if isinstance(enc, Color) or (isinstance(enc, _LiteralValue) and isinstance(enc.val, str) and enc.val.startswith("#")):
+    if isinstance(enc, Color) or (
+        isinstance(enc, _LiteralValue) and isinstance(enc.val, str) and enc.val.startswith("#")
+    ):
         return "color"
     if isinstance(enc, Opacity):
         return "opacity"
@@ -478,6 +480,7 @@ def _resolve_encoding_value(enc: Any) -> dict:
             return {"kind": "opacity", "value": float(v)}
         return {"kind": "opacity", "value": 1.0}
     from ferrum.encoding.base import ChannelBase
+
     if isinstance(enc, ChannelBase):
         return {"kind": "field", "name": enc.field}
     raise TypeError(

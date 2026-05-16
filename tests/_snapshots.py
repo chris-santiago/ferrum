@@ -56,6 +56,7 @@ def assert_svg_eq(actual: str, expected: str, *, name: str, regen_hint: str) -> 
         f"  hint: {regen_hint}"
     )
 
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = _REPO_ROOT / "tests" / "snapshots"
 

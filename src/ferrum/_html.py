@@ -54,8 +54,7 @@ def assemble_html(
         wasm_init_block = "await __wbg_init();"
 
     escaped_json = (
-        scene_json
-        .replace("\\", "\\\\")
+        scene_json.replace("\\", "\\\\")
         .replace("</", "<\\/")
         .replace("`", "\\`")
         .replace("${", "\\${")

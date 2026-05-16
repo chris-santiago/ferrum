@@ -1,4 +1,5 @@
 """Phase 8b warn-once lift tests: verify warnings emit (or don't) at correct points."""
+
 import warnings
 import polars as pl
 import numpy as np
@@ -10,7 +11,9 @@ def test_mark_smooth_ci_no_longer_warns():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y").show_svg()
-    smooth_ci_warns = [x for x in w if "mark_smooth" in str(x.message) and "ci" in str(x.message).lower()]
+    smooth_ci_warns = [
+        x for x in w if "mark_smooth" in str(x.message) and "ci" in str(x.message).lower()
+    ]
     assert len(smooth_ci_warns) == 0
 
 
@@ -32,4 +35,6 @@ def test_mark_swarm_dodge_no_longer_warns():
         warnings.simplefilter("always")
         fe.Chart(df).mark_swarm(dodge="x").encode(x="g", y="v")
     dodge_warns = [x for x in w if "dodge" in str(x.message)]
-    assert len(dodge_warns) == 0, f"unexpected dodge warning: {[str(x.message) for x in dodge_warns]}"
+    assert len(dodge_warns) == 0, (
+        f"unexpected dodge warning: {[str(x.message) for x in dodge_warns]}"
+    )

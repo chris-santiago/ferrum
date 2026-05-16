@@ -4,6 +4,7 @@
 runtime. These tests validate that the Rust implementations match
 scipy on a sweep of distributions / sample sizes / tie densities.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -27,13 +28,13 @@ def _pearson_r_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     batch = _coerce_to_arrow_batch(combined)
     from ferrum._core import py_rank2d
     import polars as pl
+
     result = pl.from_arrow(py_rank2d(batch, "pearson"))
     # Extract correlation of each feature with the last column (y)
     y_col_name = f"f{p}"
     corrs = result.filter(pl.col("feature_y") == y_col_name).sort("feature_x")
     r_vals = [
-        float(corrs.filter(pl.col("feature_x") == f"f{j}")["correlation"][0])
-        for j in range(p)
+        float(corrs.filter(pl.col("feature_x") == f"f{j}")["correlation"][0]) for j in range(p)
     ]
     return np.array(r_vals)
 
@@ -44,12 +45,12 @@ def _spearman_rho_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     batch = _coerce_to_arrow_batch(combined)
     from ferrum._core import py_rank2d
     import polars as pl
+
     result = pl.from_arrow(py_rank2d(batch, "spearman"))
     y_col_name = f"f{p}"
     corrs = result.filter(pl.col("feature_y") == y_col_name).sort("feature_x")
     r_vals = [
-        float(corrs.filter(pl.col("feature_x") == f"f{j}")["correlation"][0])
-        for j in range(p)
+        float(corrs.filter(pl.col("feature_x") == f"f{j}")["correlation"][0]) for j in range(p)
     ]
     return np.array(r_vals)
 
@@ -97,9 +98,7 @@ def test_shapiro_parity_vs_scipy(n, dist, rng):
     x_arrow = pa.array(x, type=pa.float64())
     ours = py_shapiro_w(x_arrow)
     theirs = float(ss.shapiro(x).statistic)
-    assert abs(ours - theirs) < 1e-6, (
-        f"W mismatch n={n} dist={dist}: ours={ours}, scipy={theirs}"
-    )
+    assert abs(ours - theirs) < 1e-6, f"W mismatch n={n} dist={dist}: ours={ours}, scipy={theirs}"
 
 
 @pytest.mark.parametrize("n", [10, 100, 1000])

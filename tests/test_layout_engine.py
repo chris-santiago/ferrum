@@ -5,6 +5,7 @@ through the binding. Numeric arithmetic is exhaustively covered on the
 Rust side (`cargo test -p ferrum-core layout`); these tests only confirm
 the binding wires inputs and outputs correctly.
 """
+
 import pytest
 
 from ferrum._core import ChartSpec, compute_layout

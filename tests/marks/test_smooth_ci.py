@@ -1,4 +1,5 @@
 """Phase 8b Task 34: mark_smooth(ci=) emits a CI-band ribbon + line layer."""
+
 from __future__ import annotations
 
 import warnings
@@ -25,8 +26,7 @@ def test_smooth_with_ci_does_not_warn(df):
         warnings.simplefilter("always")
         fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y")._build_spec()
     smooth_ci_warns = [
-        w for w in caught
-        if "mark_smooth" in str(w.message) and "ci" in str(w.message).lower()
+        w for w in caught if "mark_smooth" in str(w.message) and "ci" in str(w.message).lower()
     ]
     assert smooth_ci_warns == [], (
         f"unexpected mark_smooth(ci=) warnings: {[str(w.message) for w in smooth_ci_warns]}"

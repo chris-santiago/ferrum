@@ -40,9 +40,7 @@ class _RenderMixin:
     """
 
     # Mark types eligible for automatic raster substitution.
-    _AUTO_RASTER_ELIGIBLE_MARKS = frozenset(
-        ["point", "bar", "rect", "tick", "rule", "segment"]
-    )
+    _AUTO_RASTER_ELIGIBLE_MARKS = frozenset(["point", "bar", "rect", "tick", "rule", "segment"])
 
     def _apply_auto_raster(self) -> "Chart":
         """Return *self* unchanged, or a substituted chart with ``mark_raster``.

@@ -1,4 +1,5 @@
 """Smoke test that the schwabish skill and judge agent files exist and parse."""
+
 from pathlib import Path
 
 import yaml

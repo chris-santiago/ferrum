@@ -1,4 +1,5 @@
 """Tests for Chart composition operators: +, |, &."""
+
 import polars as pl
 import pytest
 
@@ -35,6 +36,7 @@ def test_hconcat_two_charts(df):
     c2 = Chart(df).mark_line().encode(x="a", y="b")
     result = c1 | c2
     from ferrum.composition import HConcatChart
+
     assert isinstance(result, HConcatChart)
     assert len(result.charts) == 2
 
@@ -44,6 +46,7 @@ def test_vconcat_two_charts(df):
     c2 = Chart(df).mark_line().encode(x="a", y="b")
     result = c1 & c2
     from ferrum.composition import VConcatChart
+
     assert isinstance(result, VConcatChart)
 
 
@@ -54,6 +57,7 @@ def test_operator_precedence_and_tighter_than_or(df):
     # a | b & c should parse as a | (b & c), not (a | b) & c
     result = a | b & c
     from ferrum.composition import HConcatChart, VConcatChart
+
     assert isinstance(result, HConcatChart)
     # Inner (b & c) is the second item
     assert isinstance(result.charts[1], VConcatChart)
@@ -65,6 +69,7 @@ def test_explicit_parens_overrides_precedence(df):
     c = Chart(df).mark_bar().encode(x="a", y="b")
     result = (a | b) & c
     from ferrum.composition import VConcatChart
+
     assert isinstance(result, VConcatChart)
 
 
@@ -91,6 +96,7 @@ def test_hconcat_chaining_produces_flat_list(df):
     # (c1 | c2) | c3 → HConcatChart([HConcatChart([c1, c2]), c3])
     result = (c1 | c2) | c3
     from ferrum.composition import HConcatChart
+
     assert isinstance(result, HConcatChart)
     # Outer has 2 items: the inner HConcat and c3
     assert len(result.charts) == 2
@@ -105,6 +111,7 @@ def test_add_returns_notimplemented_for_non_chart(df):
 # ---------------------------------------------------------------------------
 # Test 2: compositor render integration (Phase 8a final review)
 # ---------------------------------------------------------------------------
+
 
 def test_hconcat_show_svg_produces_composed_output():
     """End-to-end: (c1 | c2).show_svg() actually composes through the Rust compositor."""

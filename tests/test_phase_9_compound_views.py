@@ -1,4 +1,5 @@
 """Phase 9 compound view + Repeat sentinel tests."""
+
 import pytest
 import polars as pl
 
@@ -21,6 +22,7 @@ class TestRepeatSentinel:
 
     def test_singleton_identity_across_imports(self):
         from ferrum.repeat import Repeat as Repeat2
+
         assert Repeat.column is Repeat2.column
 
     def test_immutable(self):
@@ -111,12 +113,14 @@ class TestJointChart:
 class TestRepeatChart:
     @pytest.fixture
     def iris_like(self):
-        return pl.DataFrame({
-            "sepal_length": [5.1, 4.9, 4.7, 5.0, 5.4],
-            "sepal_width":  [3.5, 3.0, 3.2, 3.6, 3.9],
-            "petal_length": [1.4, 1.4, 1.3, 1.4, 1.7],
-            "species":      ["a", "a", "b", "b", "a"],
-        })
+        return pl.DataFrame(
+            {
+                "sepal_length": [5.1, 4.9, 4.7, 5.0, 5.4],
+                "sepal_width": [3.5, 3.0, 3.2, 3.6, 3.9],
+                "petal_length": [1.4, 1.4, 1.3, 1.4, 1.7],
+                "species": ["a", "a", "b", "b", "a"],
+            }
+        )
 
     def test_construction_minimal(self, iris_like):
         template = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y=Repeat.row)
@@ -141,8 +145,9 @@ class TestRepeatChart:
 
     def test_expand_2x2_yields_4_charts(self, iris_like):
         off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y=Repeat.row)
-        rc = fe.RepeatChart(off, row=["sepal_length", "sepal_width"],
-                            column=["sepal_length", "sepal_width"])
+        rc = fe.RepeatChart(
+            off, row=["sepal_length", "sepal_width"], column=["sepal_length", "sepal_width"]
+        )
         cells = rc.expand()
         assert len(cells) == 4
         for row_field, col_field, chart in cells:
@@ -205,12 +210,8 @@ class TestRepeatChart:
             fe.RepeatChart(off, column=["a"], columns=0)
 
     def test_column_only_wrap_1d(self, iris_like):
-        off = fe.Chart(iris_like).mark_point().encode(
-            x=Repeat.column, y="sepal_width"
-        )
-        rc = fe.RepeatChart(
-            off, column=["sepal_length", "sepal_width", "petal_length"]
-        )
+        off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
+        rc = fe.RepeatChart(off, column=["sepal_length", "sepal_width", "petal_length"])
         cells = rc.expand()
         assert len(cells) == 3
         for row_field, col_field, chart in cells:
@@ -218,9 +219,7 @@ class TestRepeatChart:
             assert chart._encoding["x"].field == col_field
 
     def test_row_only_wrap_1d(self, iris_like):
-        off = fe.Chart(iris_like).mark_point().encode(
-            x="sepal_length", y=Repeat.row
-        )
+        off = fe.Chart(iris_like).mark_point().encode(x="sepal_length", y=Repeat.row)
         rc = fe.RepeatChart(off, row=["sepal_width", "petal_length"])
         cells = rc.expand()
         assert len(cells) == 2
@@ -231,9 +230,7 @@ class TestRepeatChart:
     def test_column_wrap_dimensions(self, iris_like):
         off = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
         # 5 cells, columns=2 → 3 rows × 2 cols
-        rc = fe.RepeatChart(
-            off, column=["a", "b", "c", "d", "e"], columns=2
-        )
+        rc = fe.RepeatChart(off, column=["a", "b", "c", "d", "e"], columns=2)
         n_cols, n_rows = rc._wrap_dimensions(len(rc.expand()))
         assert (n_cols, n_rows) == (2, 3)
 
@@ -282,8 +279,10 @@ class TestRepeatChart:
             assert len(chart._layers) == 2
 
     def test_layer_with_grid_produces_layered_cells(self, iris_like):
-        tpl = fe.Chart(iris_like).mark_point().encode(
-            x=Repeat.column, y=Repeat.row, color=Repeat.layer
+        tpl = (
+            fe.Chart(iris_like)
+            .mark_point()
+            .encode(x=Repeat.column, y=Repeat.row, color=Repeat.layer)
         )
         rc = fe.RepeatChart(
             tpl,
@@ -318,7 +317,8 @@ class TestRepeatChart:
         tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
         rc_a = fe.RepeatChart(tpl, column=["sepal_length", "sepal_width"])
         rc_b = fe.RepeatChart(
-            tpl, column=["sepal_length", "sepal_width"],
+            tpl,
+            column=["sepal_length", "sepal_width"],
             resolve={"x": "independent"},
         )
         # The encodings of both cell sets must match — independent is the
@@ -332,11 +332,13 @@ class TestRepeatChart:
     def test_resolve_shared_x_injects_union_domain(self):
         # Two columns with disjoint ranges; resolve={"x": "shared"} should
         # inject a scale dict with the union domain on every cell.
-        df = pl.DataFrame({
-            "small": [0.0, 1.0, 2.0, 3.0, 4.0],
-            "big":   [10.0, 12.0, 14.0, 18.0, 20.0],
-            "y":     [1, 2, 3, 4, 5],
-        })
+        df = pl.DataFrame(
+            {
+                "small": [0.0, 1.0, 2.0, 3.0, 4.0],
+                "big": [10.0, 12.0, 14.0, 18.0, 20.0],
+                "y": [1, 2, 3, 4, 5],
+            }
+        )
         tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
         rc = fe.RepeatChart(tpl, column=["small", "big"], resolve={"x": "shared"})
         cells = rc.expand()
@@ -351,11 +353,13 @@ class TestRepeatChart:
         # Each cell stacks two layers, each binding a different field on y.
         # The shared-y domain must span ALL layer fields, not just the
         # first.
-        df = pl.DataFrame({
-            "x":  [1, 2, 3, 4, 5],
-            "y1": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "y2": [50.0, 60.0, 70.0, 80.0, 90.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1, 2, 3, 4, 5],
+                "y1": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "y2": [50.0, 60.0, 70.0, 80.0, 90.0],
+            }
+        )
         tpl = fe.Chart(df).mark_line().encode(x="x", y=Repeat.layer)
         rc = fe.RepeatChart(tpl, layer=["y1", "y2"], resolve={"y": "shared"})
         cells = rc.expand()
@@ -370,11 +374,13 @@ class TestRepeatChart:
             assert scale["domain"] == [1.0, 90.0]
 
     def test_resolve_shared_categorical_color(self):
-        df = pl.DataFrame({
-            "x": [1, 2, 3, 4],
-            "c1": ["a", "b", "a", "b"],
-            "c2": ["b", "c", "c", "a"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1, 2, 3, 4],
+                "c1": ["a", "b", "a", "b"],
+                "c2": ["b", "c", "c", "a"],
+            }
+        )
         tpl = fe.Chart(df).mark_point().encode(x="x", y="x", color=Repeat.column)
         rc = fe.RepeatChart(tpl, column=["c1", "c2"], resolve={"color": "shared"})
         cells = rc.expand()
@@ -389,12 +395,14 @@ class TestRepeatChart:
 class TestClusterMapChart:
     @pytest.fixture
     def df_matrix(self):
-        return pl.DataFrame({
-            "row_id": [0, 1, 2, 3, 4],
-            "a": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "b": [5.0, 4.0, 3.0, 2.0, 1.0],
-            "c": [1.0, 1.0, 5.0, 5.0, 1.0],
-        })
+        return pl.DataFrame(
+            {
+                "row_id": [0, 1, 2, 3, 4],
+                "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "b": [5.0, 4.0, 3.0, 2.0, 1.0],
+                "c": [1.0, 1.0, 5.0, 5.0, 1.0],
+            }
+        )
 
     def test_construction_heatmap_only(self, df_matrix):
         heat = fe.Chart(df_matrix).mark_rect().encode(x="a", y="row_id", fill="b")
@@ -453,11 +461,13 @@ class TestShareScale:
         assert comp.share_scale(x="independent") is comp
 
     def test_hconcat_share_x(self):
-        df = pl.DataFrame({
-            "a": [0.0, 1.0, 2.0, 3.0],
-            "b": [10.0, 20.0, 30.0, 40.0],
-            "y": [1, 2, 3, 4],
-        })
+        df = pl.DataFrame(
+            {
+                "a": [0.0, 1.0, 2.0, 3.0],
+                "b": [10.0, 20.0, 30.0, 40.0],
+                "y": [1, 2, 3, 4],
+            }
+        )
         left = fe.Chart(df).mark_point().encode(x="a", y="y")
         right = fe.Chart(df).mark_point().encode(x="b", y="y")
         shared = (left | right).share_scale(x="shared")
@@ -470,11 +480,13 @@ class TestShareScale:
             assert scale["domain"] == [0.0, 40.0]
 
     def test_vconcat_share_y(self):
-        df = pl.DataFrame({
-            "x": [1, 2, 3, 4],
-            "low": [0.0, 1.0, 2.0, 3.0],
-            "high": [100.0, 200.0, 300.0, 400.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1, 2, 3, 4],
+                "low": [0.0, 1.0, 2.0, 3.0],
+                "high": [100.0, 200.0, 300.0, 400.0],
+            }
+        )
         top = fe.Chart(df).mark_point().encode(x="x", y="low")
         bot = fe.Chart(df).mark_point().encode(x="x", y="high")
         shared = (top & bot).share_scale(y="shared")
@@ -484,19 +496,23 @@ class TestShareScale:
             assert scale["domain"] == [0.0, 400.0]
 
     def test_joint_share_y_across_center_and_right_marginal(self):
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0, 4.0],
-            "y": [10.0, 50.0, 90.0, 30.0],
-            "y_marginal": [5.0, 25.0, 75.0, 100.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0],
+                "y": [10.0, 50.0, 90.0, 30.0],
+                "y_marginal": [5.0, 25.0, 75.0, 100.0],
+            }
+        )
         center = fe.Chart(df).mark_point().encode(x="x", y="y")
         right = fe.Chart(df).mark_point().encode(x="x", y="y_marginal")
         shared = fe.JointChart(center, right=right).share_scale(y="shared")
         assert shared.center._encoding["y"]._kwargs.get("scale") == {
-            "type": "linear", "domain": [5.0, 100.0]
+            "type": "linear",
+            "domain": [5.0, 100.0],
         }
         assert shared.right._encoding["y"]._kwargs.get("scale") == {
-            "type": "linear", "domain": [5.0, 100.0]
+            "type": "linear",
+            "domain": [5.0, 100.0],
         }
 
     def test_clustermap_share_x_across_heatmap_and_col_dendrogram(self):
@@ -505,18 +521,22 @@ class TestShareScale:
         col_d = fe.Chart(df).mark_rule().encode(x="b", y="r")
         shared = fe.ClusterMapChart(heat, col_dendrogram=col_d).share_scale(x="shared")
         assert shared.heatmap._encoding["x"]._kwargs.get("scale") == {
-            "type": "linear", "domain": [1.0, 30.0]
+            "type": "linear",
+            "domain": [1.0, 30.0],
         }
         assert shared.col_dendrogram._encoding["x"]._kwargs.get("scale") == {
-            "type": "linear", "domain": [1.0, 30.0]
+            "type": "linear",
+            "domain": [1.0, 30.0],
         }
 
     def test_repeat_share_scale_merges_into_resolve(self):
-        df = pl.DataFrame({
-            "small": [0.0, 1.0, 2.0],
-            "big": [10.0, 20.0, 30.0],
-            "y": [1, 2, 3],
-        })
+        df = pl.DataFrame(
+            {
+                "small": [0.0, 1.0, 2.0],
+                "big": [10.0, 20.0, 30.0],
+                "y": [1, 2, 3],
+            }
+        )
         tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
         rc = fe.RepeatChart(tpl, column=["small", "big"])
         shared = rc.share_scale(x="shared")
@@ -530,15 +550,15 @@ class TestShareScale:
             assert scale["domain"] == [0.0, 30.0]
 
     def test_repeat_share_scale_merges_with_existing_resolve(self):
-        df = pl.DataFrame({
-            "small": [0.0, 1.0, 2.0],
-            "big": [10.0, 20.0, 30.0],
-            "y": [1, 2, 3],
-        })
-        tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
-        rc = fe.RepeatChart(
-            tpl, column=["small", "big"], resolve={"y": "shared"}
+        df = pl.DataFrame(
+            {
+                "small": [0.0, 1.0, 2.0],
+                "big": [10.0, 20.0, 30.0],
+                "y": [1, 2, 3],
+            }
         )
+        tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
+        rc = fe.RepeatChart(tpl, column=["small", "big"], resolve={"y": "shared"})
         shared = rc.share_scale(x="shared")
         assert shared.resolve == {"y": "shared", "x": "shared"}
 

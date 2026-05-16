@@ -43,6 +43,7 @@ _RELPLOT_VALID_KINDS = {"scatter", "line"}
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _multiple_to_position(multiple: str, hue: Any):
     if multiple == "layer":
         return Identity()
@@ -58,6 +59,7 @@ def _multiple_to_position(multiple: str, hue: Any):
 # ---------------------------------------------------------------------------
 # displot
 # ---------------------------------------------------------------------------
+
 
 def displot(
     data: Any,
@@ -188,7 +190,9 @@ def displot(
     >>> fm.displot(df, x="tip", hue="sex", multiple="stack", rug=True)
     """
     if kind not in _DISPLOT_VALID_KINDS:
-        raise ValueError(f"displot: kind must be one of {sorted(_DISPLOT_VALID_KINDS)}; got {kind!r}")
+        raise ValueError(
+            f"displot: kind must be one of {sorted(_DISPLOT_VALID_KINDS)}; got {kind!r}"
+        )
     if multiple not in _DISPLOT_VALID_MULTIPLE:
         raise ValueError(
             f"displot: multiple must be one of {sorted(_DISPLOT_VALID_MULTIPLE)}; got {multiple!r}"
@@ -278,8 +282,13 @@ def displot(
     if chart._layers is not None:
         from dataclasses import replace as _dc_replace
 
-        _kind_names = {"bar": "histogram", "area": "kde", "line": "kde",
-                       "tick": "rug", "point": "scatter"}
+        _kind_names = {
+            "bar": "histogram",
+            "area": "kde",
+            "line": "kde",
+            "tick": "rug",
+            "point": "scatter",
+        }
         seen: dict[str, int] = {}
         named: list = []
         for ly in chart._layers:
@@ -314,12 +323,15 @@ def displot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
 # catplot
 # ---------------------------------------------------------------------------
+
 
 def catplot(
     data: Any,
@@ -454,7 +466,9 @@ def catplot(
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
     if kind not in _CATPLOT_VALID_KINDS:
-        raise ValueError(f"catplot: kind must be one of {sorted(_CATPLOT_VALID_KINDS)}; got {kind!r}")
+        raise ValueError(
+            f"catplot: kind must be one of {sorted(_CATPLOT_VALID_KINDS)}; got {kind!r}"
+        )
 
     if native_scale:
         raise ValueError(
@@ -576,12 +590,15 @@ def catplot(
         else:
             chart = chart.facet(row=row)
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
 # relplot
 # ---------------------------------------------------------------------------
+
 
 def relplot(
     data: Any,
@@ -715,4 +732,6 @@ def relplot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )

@@ -12,9 +12,7 @@ from ferrum import _core
 
 
 def _x_to_arrow(x_df: pl.DataFrame) -> pa.RecordBatch:
-    return pa.RecordBatch.from_pydict(
-        {c: x_df[c].to_arrow() for c in x_df.columns}
-    )
+    return pa.RecordBatch.from_pydict({c: x_df[c].to_arrow() for c in x_df.columns})
 
 
 class ClusteringMixin:
@@ -129,7 +127,9 @@ class ClusteringMixin:
         if method == "umap":
             x_arrow = _x_to_arrow(self._X)
             result = _core.umap_embedding(
-                x_arrow, n_components, seed,
+                x_arrow,
+                n_components,
+                seed,
                 method_kwargs.get("n_neighbors"),
                 method_kwargs.get("min_dist"),
                 method_kwargs.get("n_epochs"),
@@ -138,7 +138,9 @@ class ClusteringMixin:
         elif method == "tsne":
             x_arrow = _x_to_arrow(self._X)
             result = _core.tsne_embedding(
-                x_arrow, n_components, seed,
+                x_arrow,
+                n_components,
+                seed,
                 method_kwargs.get("perplexity"),
                 method_kwargs.get("learning_rate"),
                 method_kwargs.get("n_iter"),
@@ -192,10 +194,12 @@ class ClusteringMixin:
             )
             mds_batch = _core.mds_classical(centers_arrow, 2, "features", "euclidean")
             mds_df = pl.from_arrow(mds_batch)
-            xy = np.column_stack([
-                mds_df["dim_0"].to_numpy(),
-                mds_df["dim_1"].to_numpy(),
-            ])
+            xy = np.column_stack(
+                [
+                    mds_df["dim_0"].to_numpy(),
+                    mds_df["dim_1"].to_numpy(),
+                ]
+            )
         elif method == "tsne":
             if int(k) < 4:
                 raise ValueError(
@@ -207,13 +211,18 @@ class ClusteringMixin:
             )
             perplexity = float(max(1, min(5, int(k) - 1)))
             tsne_batch = _core.tsne_embedding(
-                centers_arrow, 2, seed, perplexity,
+                centers_arrow,
+                2,
+                seed,
+                perplexity,
             )
             tsne_df = pl.from_arrow(tsne_batch)
-            xy = np.column_stack([
-                tsne_df["dim_0"].to_numpy(),
-                tsne_df["dim_1"].to_numpy(),
-            ])
+            xy = np.column_stack(
+                [
+                    tsne_df["dim_0"].to_numpy(),
+                    tsne_df["dim_1"].to_numpy(),
+                ]
+            )
         else:
             raise ValueError(
                 f"ModelSource.intercluster_distance(method={method!r}) — expected 'mds' or 'tsne'."

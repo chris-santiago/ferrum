@@ -5,11 +5,13 @@ import ferrum as fe
 
 @pytest.fixture
 def df():
-    return pl.DataFrame({
-        "t": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "lo": [0.5, 1.5, 2.5, 3.5, 4.5],
-        "hi": [1.5, 2.5, 3.5, 4.5, 5.5],
-    })
+    return pl.DataFrame(
+        {
+            "t": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "lo": [0.5, 1.5, 2.5, 3.5, 4.5],
+            "hi": [1.5, 2.5, 3.5, 4.5, 5.5],
+        }
+    )
 
 
 def test_ribbon_basic(df):

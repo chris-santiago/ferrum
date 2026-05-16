@@ -94,32 +94,24 @@ class TestLmplotHue:
 
     def test_lmplot_hue_lm(self, grouped_data):
         """lmplot with method='lm' and hue renders per-group fit lines."""
-        chart = fm.lmplot(
-            grouped_data, x="x", y="y", hue="group", method="lm"
-        )
+        chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", method="lm")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_loess(self, grouped_data):
         """lmplot with method='loess' and hue renders per-group fit lines."""
-        chart = fm.lmplot(
-            grouped_data, x="x", y="y", hue="group", method="loess"
-        )
+        chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", method="loess")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_with_ci(self, grouped_data):
         """lmplot with hue and CI band renders."""
-        chart = fm.lmplot(
-            grouped_data, x="x", y="y", hue="group", ci=95
-        )
+        chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", ci=95)
         svg = chart.show_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_no_scatter(self, grouped_data):
         """lmplot with hue and scatter=False renders only fit lines."""
-        chart = fm.lmplot(
-            grouped_data, x="x", y="y", hue="group", scatter=False
-        )
+        chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", scatter=False)
         svg = chart.show_svg()
         assert svg.startswith("<svg")

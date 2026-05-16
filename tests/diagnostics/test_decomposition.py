@@ -16,9 +16,7 @@ from ferrum import _core
 
 
 def _make_arrow_batch(X: np.ndarray) -> pa.RecordBatch:
-    return pa.RecordBatch.from_pydict(
-        {f"f{j}": X[:, j].tolist() for j in range(X.shape[1])}
-    )
+    return pa.RecordBatch.from_pydict({f"f{j}": X[:, j].tolist() for j in range(X.shape[1])})
 
 
 def _make_labels_arrow(labels: np.ndarray) -> pa.Array:
@@ -157,10 +155,12 @@ class TestMDSClassical:
         x_arrow = _make_arrow_batch(X)
         result = _core.mds_classical(x_arrow, 2, "features", "euclidean")
         df = pl.from_arrow(result)
-        coords = np.column_stack([
-            df["dim_0"].to_numpy(),
-            df["dim_1"].to_numpy(),
-        ])
+        coords = np.column_stack(
+            [
+                df["dim_0"].to_numpy(),
+                df["dim_1"].to_numpy(),
+            ]
+        )
         from scipy.spatial.distance import pdist
 
         orig_dists = pdist(X, metric="euclidean")
@@ -173,10 +173,12 @@ class TestMDSClassical:
         x_arrow = _make_arrow_batch(X)
         result = _core.mds_classical(x_arrow, 2, "features", "euclidean")
         df = pl.from_arrow(result)
-        coords = np.column_stack([
-            df["dim_0"].to_numpy(),
-            df["dim_1"].to_numpy(),
-        ])
+        coords = np.column_stack(
+            [
+                df["dim_0"].to_numpy(),
+                df["dim_1"].to_numpy(),
+            ]
+        )
         from scipy.spatial.distance import pdist
 
         orig_dists = pdist(X)
@@ -185,18 +187,22 @@ class TestMDSClassical:
 
     def test_precomputed_distance_matrix(self):
         """MDS with input_type='distance' on a precomputed distance matrix."""
-        D = np.array([
-            [0.0, 3.0, 4.0],
-            [3.0, 0.0, 5.0],
-            [4.0, 5.0, 0.0],
-        ])
+        D = np.array(
+            [
+                [0.0, 3.0, 4.0],
+                [3.0, 0.0, 5.0],
+                [4.0, 5.0, 0.0],
+            ]
+        )
         d_arrow = _make_arrow_batch(D)
         result = _core.mds_classical(d_arrow, 2, "distance", "euclidean")
         df = pl.from_arrow(result)
-        coords = np.column_stack([
-            df["dim_0"].to_numpy(),
-            df["dim_1"].to_numpy(),
-        ])
+        coords = np.column_stack(
+            [
+                df["dim_0"].to_numpy(),
+                df["dim_1"].to_numpy(),
+            ]
+        )
         from scipy.spatial.distance import pdist
 
         embed_dists = pdist(coords)
@@ -218,9 +224,7 @@ class TestTsneEmbedding:
         x_arrow = _make_arrow_batch(X)
         result = _core.tsne_embedding(x_arrow, 2, 42)
         df = pl.from_arrow(result)
-        rust_coords = np.column_stack(
-            [df[f"dim_{i}"].to_numpy() for i in range(2)]
-        )
+        rust_coords = np.column_stack([df[f"dim_{i}"].to_numpy() for i in range(2)])
 
         # Measure k-NN preservation: fraction of true k-NN that remain neighbors
         # in the embedded space.
@@ -230,10 +234,7 @@ class TestTsneEmbedding:
         nn_emb = NearestNeighbors(n_neighbors=k).fit(rust_coords)
         emb_neighbors = nn_emb.kneighbors(rust_coords, return_distance=False)
         preservation = np.mean(
-            [
-                len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k
-                for i in range(len(X))
-            ]
+            [len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k for i in range(len(X))]
         )
         assert preservation > 0.3, f"k-NN preservation {preservation:.3f} too low"
 
@@ -280,9 +281,7 @@ class TestUmapEmbedding:
         x_arrow = _make_arrow_batch(X)
         result = _core.umap_embedding(x_arrow, 2, 42)
         df = pl.from_arrow(result)
-        rust_coords = np.column_stack(
-            [df[f"dim_{i}"].to_numpy() for i in range(2)]
-        )
+        rust_coords = np.column_stack([df[f"dim_{i}"].to_numpy() for i in range(2)])
 
         k = 10
         nn_orig = NearestNeighbors(n_neighbors=k).fit(X)
@@ -290,10 +289,7 @@ class TestUmapEmbedding:
         nn_emb = NearestNeighbors(n_neighbors=k).fit(rust_coords)
         emb_neighbors = nn_emb.kneighbors(rust_coords, return_distance=False)
         preservation = np.mean(
-            [
-                len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k
-                for i in range(len(X))
-            ]
+            [len(set(orig_neighbors[i]) & set(emb_neighbors[i])) / k for i in range(len(X))]
         )
         assert preservation > 0.3, f"k-NN preservation {preservation:.3f} too low"
 

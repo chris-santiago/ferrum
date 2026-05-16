@@ -255,7 +255,9 @@ def _roc_chart_from_source(
             position="end",
         )
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _pr_chart_from_source(
@@ -387,7 +389,9 @@ def _pr_chart_from_source(
             position="end",
         )
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _calibration_chart_from_source(
@@ -477,10 +481,14 @@ def _calibration_chart_from_source(
     if color is not None:
         point_enc["color"] = color
     chart = chart.layer(
-        _Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
+        _Layer(
+            mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point"
+        )
     )
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _gain_chart_from_source(
@@ -510,9 +518,16 @@ def _gain_chart_from_source(
     color_field = _color_field_for(df, "class")
     if color_field is not None:
         df = df.with_columns(
-            pl.col(color_field).cast(pl.Utf8).replace({
-                "0": "Class 0", "1": "Class 1", "baseline": "Baseline",
-            }).alias(color_field)
+            pl.col(color_field)
+            .cast(pl.Utf8)
+            .replace(
+                {
+                    "0": "Class 0",
+                    "1": "Class 1",
+                    "baseline": "Baseline",
+                }
+            )
+            .alias(color_field)
         )
     chart = ferrum.Chart(df)
     if color_field is not None:
@@ -532,7 +547,9 @@ def _gain_chart_from_source(
             x_col="percent_population",
             y_col="gain",
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _lift_chart_from_source(
@@ -558,9 +575,16 @@ def _lift_chart_from_source(
     color_field = _color_field_for(df, "class")
     if color_field is not None:
         df = df.with_columns(
-            pl.col(color_field).cast(pl.Utf8).replace({
-                "0": "Class 0", "1": "Class 1", "baseline": "Baseline",
-            }).alias(color_field)
+            pl.col(color_field)
+            .cast(pl.Utf8)
+            .replace(
+                {
+                    "0": "Class 0",
+                    "1": "Class 1",
+                    "baseline": "Baseline",
+                }
+            )
+            .alias(color_field)
         )
     chart = ferrum.Chart(df)
     if color_field is not None:
@@ -578,7 +602,9 @@ def _lift_chart_from_source(
             x_col="percent_population",
             y_col="lift",
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _confusion_chart_from_source(
@@ -605,7 +631,9 @@ def _confusion_chart_from_source(
         y=Y("actual", title="True label"),
     )
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _class_prediction_error_chart_from_source(
@@ -647,7 +675,9 @@ def _class_prediction_error_chart_from_source(
         y=Y("value", title="Number of predictions"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _discrimination_threshold_chart_from_source(
@@ -695,9 +725,7 @@ def _discrimination_threshold_chart_from_source(
         "f1": "F1",
         "queue_rate": "Queue rate",
     }
-    long_df = long_df.with_columns(
-        pl.col("metric").replace(_metric_labels).alias("metric")
-    )
+    long_df = long_df.with_columns(pl.col("metric").replace(_metric_labels).alias("metric"))
     chart = ferrum.Chart(long_df).mark_discrimination_threshold(
         metrics=metrics,
         n_thresholds=n_thresholds,
@@ -711,7 +739,9 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _classification_report_chart(
@@ -781,7 +811,9 @@ def _classification_report_chart(
             )
         )
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _class_balance_chart_from_dataframe(
@@ -813,7 +845,9 @@ def _class_balance_chart_from_dataframe(
         .sort("y")
     )
     chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count", color="y")
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1261,8 +1295,18 @@ def gain_chart(
 
     >>> fm.gain_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
-    return _gain_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    source = _resolve_source(
+        model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
+    )
+    return _gain_chart_from_source(
+        source,
+        subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 def lift_chart(
@@ -1345,8 +1389,18 @@ def lift_chart(
 
     >>> fm.lift_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
-    return _lift_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    source = _resolve_source(
+        model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
+    )
+    return _lift_chart_from_source(
+        source,
+        subtitle=subtitle,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 def confusion_matrix_chart(
@@ -1630,7 +1684,9 @@ def discrimination_threshold_chart(
 
     >>> fm.discrimination_threshold_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
-    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(
+        model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
+    )
     return _discrimination_threshold_chart_from_source(
         source,
         n_thresholds=n_thresholds,

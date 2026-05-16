@@ -81,6 +81,7 @@ __all__ = [
 # Channel-lookup helpers (extracted from chart.py)
 # ---------------------------------------------------------------------------
 
+
 @functools.cache
 def _channel_class_map() -> dict:
     """Build the channel-name -> channel-class mapping (cached; once-per-process)."""
@@ -157,9 +158,7 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
         stroke_ch = enc["stroke"]
         if "color" not in enc:
             enc["color"] = stroke_ch
-        elif stroke_ch.field is not None and not isinstance(
-            stroke_ch.field, _RepeatPlaceholder
-        ):
+        elif stroke_ch.field is not None and not isinstance(stroke_ch.field, _RepeatPlaceholder):
             # Can't map to a scale -- inject as a mark_style grouping hint.
             # mark_style.stroke expects a hex color, not a field name, so
             # this is a best-effort: when the user maps a field to stroke
@@ -170,9 +169,7 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     # Detail -> mark_style.detail
     if "detail" in enc:
         detail_ch = enc["detail"]
-        if detail_ch.field is not None and not isinstance(
-            detail_ch.field, _RepeatPlaceholder
-        ):
+        if detail_ch.field is not None and not isinstance(detail_ch.field, _RepeatPlaceholder):
             mk.setdefault("detail", detail_ch.field)
 
     return enc, mk

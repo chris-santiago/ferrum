@@ -1,4 +1,5 @@
 """Theme unknown-key validation at construction."""
+
 import pytest
 
 import ferrum as fm

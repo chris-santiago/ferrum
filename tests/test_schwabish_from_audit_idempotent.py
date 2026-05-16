@@ -5,6 +5,7 @@ requires the full Agent tool runtime, so we assert the agent's
 frontmatter and body document the contractual obligations the
 orchestrator relies on.
 """
+
 from pathlib import Path
 
 

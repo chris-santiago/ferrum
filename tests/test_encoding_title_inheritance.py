@@ -42,10 +42,12 @@ class TestMultiLayerTitleInheritance:
     """Multi-layer (composite) charts must inherit titles from chart-level encoding."""
 
     def test_boxplot_inherits_axis_titles(self) -> None:
-        df = pl.DataFrame({
-            "group": ["a"] * 20 + ["b"] * 20,
-            "value": [float(v) for v in range(20)] + [float(v) for v in range(5, 25)],
-        })
+        df = pl.DataFrame(
+            {
+                "group": ["a"] * 20 + ["b"] * 20,
+                "value": [float(v) for v in range(20)] + [float(v) for v in range(5, 25)],
+            }
+        )
         svg = (
             fm.Chart(df)
             .mark_boxplot()

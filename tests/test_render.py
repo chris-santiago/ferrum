@@ -10,11 +10,13 @@ def _df_3():
 
 
 def _df_color_3cat():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "species": ["a", "b", "c", "a", "b", "c"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "species": ["a", "b", "c", "a", "b", "c"],
+        }
+    )
 
 
 def test_render_svg_minimal():
@@ -81,7 +83,9 @@ def test_render_svg_pyarrow_table_works():
 def test_render_svg_render_config_kwargs_accepted():
     spec = fr.ChartSpec(mark="point", x="x", y="y")
     svg = fr.render_svg(
-        spec, _df_3(), viewport=(600.0, 400.0),
+        spec,
+        _df_3(),
+        viewport=(600.0, 400.0),
         config={"scale": 2.0, "embed_fonts": True, "background": "#000000"},
     )
     assert "<svg " in svg
@@ -92,11 +96,33 @@ def test_boxplot_structural_marks_use_label_color_not_mark_color():
     """Boxplot whisker rules, cap ticks, and median tick must render in
     theme.label_color (#6b7280 in default Paper Ink theme), not the accent
     mark_color (#2563eb), when a color encoding is present."""
-    df = pl.DataFrame({
-        "cat": ["a"] * 10 + ["b"] * 10,
-        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0,
-                3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-    })
+    df = pl.DataFrame(
+        {
+            "cat": ["a"] * 10 + ["b"] * 10,
+            "val": [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+            ],
+        }
+    )
     chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val", color="cat:N")
     svg = chart.show_svg()
     # Default Paper Ink label_color must appear as stroke on structural lines
@@ -112,11 +138,12 @@ def test_boxplot_whisker_is_solid_not_dashed():
     """Boxplot whisker rules must render as solid lines, not dashed.
     Rule marks default to reference_line_dash (dashed); composite.py must
     clear it via stroke_dash=[] so whiskers render solid."""
-    df = pl.DataFrame({
-        "cat": ["a"] * 8 + ["b"] * 8,
-        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0,
-                3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0],
-    })
+    df = pl.DataFrame(
+        {
+            "cat": ["a"] * 8 + ["b"] * 8,
+            "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0],
+        }
+    )
     chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val")
     svg = chart.show_svg()
     # Dashed lines use stroke-dasharray; solid lines must not have it for whiskers.

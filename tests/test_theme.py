@@ -55,21 +55,39 @@ def test_theme_hashable():
 
 
 def test_eight_builtins_exist():
-    from ferrum.themes import (default, minimal, dark, publication,
-                                 economist, fivethirtyeight,
-                                 solarized_light, solarized_dark)
-    for t in (default, minimal, dark, publication, economist,
-              fivethirtyeight, solarized_light, solarized_dark):
+    from ferrum.themes import (
+        default,
+        minimal,
+        dark,
+        publication,
+        economist,
+        fivethirtyeight,
+        solarized_light,
+        solarized_dark,
+    )
+
+    for t in (
+        default,
+        minimal,
+        dark,
+        publication,
+        economist,
+        fivethirtyeight,
+        solarized_light,
+        solarized_dark,
+    ):
         assert isinstance(t, Theme)
 
 
 def test_default_theme_has_no_props():
     from ferrum.themes import default
+
     assert default._props == {}
 
 
 def test_dark_theme_has_dark_background():
     from ferrum.themes import dark
+
     assert dark._props["background"] == "#1a1a2e"
 
 
@@ -113,6 +131,7 @@ def test_chart_theme_attaches_theme_to_chart():
     import polars as pl
     from ferrum import Chart
     from ferrum.themes import dark
+
     df = pl.DataFrame({"a": [1], "b": [2]})
     c = Chart(df).mark_point().encode(x="a", y="b").theme(dark)
     assert c._theme is dark
@@ -122,6 +141,7 @@ def test_chart_theme_per_chart_overrides_default():
     import polars as pl
     from ferrum import Chart, set_default_theme
     from ferrum.themes import dark, minimal, get_default_theme
+
     df = pl.DataFrame({"a": [1], "b": [2]})
     with set_default_theme(dark):
         c = Chart(df).mark_point().encode(x="a", y="b").theme(minimal)

@@ -6,6 +6,7 @@ a fitted estimator and should return ``estimator.score(X_test, y_test)``.
 Group B: visualizers where score() is a no-op — no test-set metric is
 computable. They must NOT raise NotImplementedError; they must return 0.0.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -18,6 +19,7 @@ from tests.fixtures import load_dataset, load_fixture
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def regression_data():
@@ -73,18 +75,14 @@ def test_learning_curve_visualizer_score_does_not_raise(regression_data):
 
 def test_validation_curve_visualizer_score_returns_float(regression_data):
     model, X, y = regression_data
-    viz = ferrum.ValidationCurveVisualizer(
-        model, "alpha", [0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.ValidationCurveVisualizer(model, "alpha", [0.1, 1.0, 10.0], cv=3).fit(X, y)
     result = viz.score(X, y)
     assert isinstance(result, float)
 
 
 def test_validation_curve_visualizer_score_matches_estimator(regression_data):
     model, X, y = regression_data
-    viz = ferrum.ValidationCurveVisualizer(
-        model, "alpha", [0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.ValidationCurveVisualizer(model, "alpha", [0.1, 1.0, 10.0], cv=3).fit(X, y)
     result = viz.score(X, y)
     expected = float(model.score(X, y))
     assert result == pytest.approx(expected)
@@ -92,9 +90,7 @@ def test_validation_curve_visualizer_score_matches_estimator(regression_data):
 
 def test_validation_curve_visualizer_score_does_not_raise(regression_data):
     model, X, y = regression_data
-    viz = ferrum.ValidationCurveVisualizer(
-        model, "alpha", [0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.ValidationCurveVisualizer(model, "alpha", [0.1, 1.0, 10.0], cv=3).fit(X, y)
     viz.score(X, y)
 
 
@@ -121,18 +117,14 @@ def test_cv_scores_visualizer_score_does_not_raise(regression_data):
 
 def test_alpha_selection_visualizer_score_returns_float(regression_data):
     model, X, y = regression_data
-    viz = ferrum.AlphaSelectionVisualizer(
-        model, [0.01, 0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.AlphaSelectionVisualizer(model, [0.01, 0.1, 1.0, 10.0], cv=3).fit(X, y)
     result = viz.score(X, y)
     assert isinstance(result, float)
 
 
 def test_alpha_selection_visualizer_score_matches_estimator(regression_data):
     model, X, y = regression_data
-    viz = ferrum.AlphaSelectionVisualizer(
-        model, [0.01, 0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.AlphaSelectionVisualizer(model, [0.01, 0.1, 1.0, 10.0], cv=3).fit(X, y)
     result = viz.score(X, y)
     expected = float(model.score(X, y))
     assert result == pytest.approx(expected)
@@ -140,9 +132,7 @@ def test_alpha_selection_visualizer_score_matches_estimator(regression_data):
 
 def test_alpha_selection_visualizer_score_does_not_raise(regression_data):
     model, X, y = regression_data
-    viz = ferrum.AlphaSelectionVisualizer(
-        model, [0.01, 0.1, 1.0, 10.0], cv=3
-    ).fit(X, y)
+    viz = ferrum.AlphaSelectionVisualizer(model, [0.01, 0.1, 1.0, 10.0], cv=3).fit(X, y)
     viz.score(X, y)
 
 
@@ -189,6 +179,7 @@ def test_silhouette_visualizer_score_does_not_raise(clustering_data):
 
 def test_elbow_visualizer_score_does_not_raise(clustering_data):
     from sklearn.cluster import KMeans
+
     _, df = clustering_data
     X = df.select([c for c in df.columns if c != "label"])
     viz = ferrum.ElbowVisualizer(KMeans, ks=range(2, 5)).fit(X)
@@ -198,6 +189,7 @@ def test_elbow_visualizer_score_does_not_raise(clustering_data):
 
 def test_shap_visualizer_score_does_not_raise(binary_data):
     import warnings
+
     model, X, y = binary_data
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)

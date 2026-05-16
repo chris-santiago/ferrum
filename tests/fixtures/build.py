@@ -5,6 +5,7 @@ Run with:
 
 Aborts if installed sklearn doesn't match tests/fixtures/SKLEARN_VERSION.
 """
+
 from __future__ import annotations
 
 import sys
@@ -17,6 +18,7 @@ DATASETS = FIXTURES / "datasets"
 
 def _check_sklearn_pin() -> None:
     import sklearn
+
     pinned = (FIXTURES / "SKLEARN_VERSION").read_text().strip()
     if sklearn.__version__ != pinned:
         print(
@@ -30,6 +32,7 @@ def _check_sklearn_pin() -> None:
 
 def _save(model, name: str) -> None:
     import skops.io as sio
+
     path = MODELS / f"{name}.skops"
     sio.dump(model, path)
     print(f"  wrote {path.name}")
@@ -44,6 +47,7 @@ def _save_dataset(df, name: str) -> None:
 def build_datasets() -> dict:
     import numpy as np
     import polars as pl
+
     rng = np.random.RandomState(0)
 
     # Binary classification — 200 rows, 4 features.
@@ -52,11 +56,15 @@ def build_datasets() -> dict:
     coef = np.array([1.5, -1.0, 0.5, 0.0])
     logits = X_bin @ coef + rng.randn(n) * 0.5
     y_bin = (logits > 0).astype(np.int64)
-    bin_df = pl.DataFrame({
-        "f0": X_bin[:, 0], "f1": X_bin[:, 1],
-        "f2": X_bin[:, 2], "f3": X_bin[:, 3],
-        "y": y_bin,
-    })
+    bin_df = pl.DataFrame(
+        {
+            "f0": X_bin[:, 0],
+            "f1": X_bin[:, 1],
+            "f2": X_bin[:, 2],
+            "f3": X_bin[:, 3],
+            "y": y_bin,
+        }
+    )
     _save_dataset(bin_df, "binary_classification")
 
     # Multiclass classification — 300 rows, 4 features, 3 classes.
@@ -65,22 +73,31 @@ def build_datasets() -> dict:
     class_means = np.array([[1.0, 0.0, 0.0, 0.0], [-1.0, 1.0, 0.0, 0.0], [0.0, -1.0, 1.0, 0.0]])
     y_mc = rng.randint(0, 3, size=n_mc)
     X_mc = X_mc + class_means[y_mc]
-    mc_df = pl.DataFrame({
-        "f0": X_mc[:, 0], "f1": X_mc[:, 1],
-        "f2": X_mc[:, 2], "f3": X_mc[:, 3],
-        "y": y_mc.astype(np.int64),
-    })
+    mc_df = pl.DataFrame(
+        {
+            "f0": X_mc[:, 0],
+            "f1": X_mc[:, 1],
+            "f2": X_mc[:, 2],
+            "f3": X_mc[:, 3],
+            "y": y_mc.astype(np.int64),
+        }
+    )
     _save_dataset(mc_df, "multiclass_classification")
 
     # Regression — 200 rows, 5 features.
     n_reg = 200
     X_reg = rng.randn(n_reg, 5)
     y_reg = X_reg @ np.array([2.0, -1.5, 0.5, 0.0, 0.0]) + rng.randn(n_reg) * 0.3
-    reg_df = pl.DataFrame({
-        "f0": X_reg[:, 0], "f1": X_reg[:, 1],
-        "f2": X_reg[:, 2], "f3": X_reg[:, 3], "f4": X_reg[:, 4],
-        "y": y_reg,
-    })
+    reg_df = pl.DataFrame(
+        {
+            "f0": X_reg[:, 0],
+            "f1": X_reg[:, 1],
+            "f2": X_reg[:, 2],
+            "f3": X_reg[:, 3],
+            "f4": X_reg[:, 4],
+            "y": y_reg,
+        }
+    )
     _save_dataset(reg_df, "regression")
 
     # Clustering — 200 rows, 3 features, 3 well-separated blobs.
@@ -88,9 +105,13 @@ def build_datasets() -> dict:
     centers = np.array([[0, 0, 0], [4, 0, 0], [0, 4, 0]])
     labels = rng.randint(0, 3, size=n_clu)
     X_clu = centers[labels] + rng.randn(n_clu, 3) * 0.5
-    clu_df = pl.DataFrame({
-        "f0": X_clu[:, 0], "f1": X_clu[:, 1], "f2": X_clu[:, 2],
-    })
+    clu_df = pl.DataFrame(
+        {
+            "f0": X_clu[:, 0],
+            "f1": X_clu[:, 1],
+            "f2": X_clu[:, 2],
+        }
+    )
     _save_dataset(clu_df, "clustering")
 
     return {

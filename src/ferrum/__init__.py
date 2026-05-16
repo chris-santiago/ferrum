@@ -261,6 +261,7 @@ def vconcat(*charts, spacing=10.0):
 
     return VConcatChart(list(charts), spacing=spacing)
 
+
 __all__ = [
     # Phase 1-7 core
     "Aggregate",

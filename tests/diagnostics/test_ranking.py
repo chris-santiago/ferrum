@@ -1,4 +1,5 @@
 """Phase 10g — feature ranking + parallel coordinates tests."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -19,7 +20,8 @@ _MULTICLASS_FEATURES = ["f0", "f1", "f2", "f3"]
 def test_rank1d_shapiro_schema():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     source = ferrum.ModelSource(
-        load_fixture("regression_ridge"), df,
+        load_fixture("regression_ridge"),
+        df,
         load_dataset("regression")["y"],
     )
     out = source.rank1d(algorithm="shapiro")
@@ -38,7 +40,8 @@ def test_rank1d_shapiro_schema():
 def test_rank1d_variance():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     source = ferrum.ModelSource(
-        load_fixture("regression_ridge"), df,
+        load_fixture("regression_ridge"),
+        df,
         load_dataset("regression")["y"],
     )
     out = source.rank1d(algorithm="variance")
@@ -49,7 +52,8 @@ def test_rank1d_variance():
 def test_rank1d_covariance_requires_y():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     source = ferrum.ModelSource(
-        load_fixture("regression_ridge"), df,
+        load_fixture("regression_ridge"),
+        df,
     )
     with pytest.raises(ValueError, match="requires y"):
         source.rank1d(algorithm="covariance")
@@ -86,15 +90,15 @@ def test_rank2d_kendall_parity_with_scipy():
         for fb in _REGRESSION_FEATURES:
             if fa == fb:
                 continue
-            ferrum_val = (
-                ours
-                .filter((pl.col("feature_x") == fa) & (pl.col("feature_y") == fb))
-                ["correlation"].item()
+            ferrum_val = ours.filter((pl.col("feature_x") == fa) & (pl.col("feature_y") == fb))[
+                "correlation"
+            ].item()
+            scipy_val = float(
+                ss.kendalltau(
+                    X_np[:, _REGRESSION_FEATURES.index(fa)],
+                    X_np[:, _REGRESSION_FEATURES.index(fb)],
+                ).statistic
             )
-            scipy_val = float(ss.kendalltau(
-                X_np[:, _REGRESSION_FEATURES.index(fa)],
-                X_np[:, _REGRESSION_FEATURES.index(fb)],
-            ).statistic)
             assert abs(ferrum_val - scipy_val) < 1e-12
 
 
@@ -120,7 +124,10 @@ def test_rank_chart_1d_shapiro_renders():
 def test_rank_chart_1d_variance_top_k():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart = ferrum.rank_chart(
-        df, rank="1d", algorithm="variance", top_k=3,
+        df,
+        rank="1d",
+        algorithm="variance",
+        top_k=3,
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -161,7 +168,10 @@ def test_rank_chart_invalid_rank():
 def test_parallel_coordinates_with_hue_renders():
     df = load_dataset("multiclass_classification")
     chart = ferrum.parallel_coordinates_chart(
-        df, features=_MULTICLASS_FEATURES, hue="y", rescale="minmax",
+        df,
+        features=_MULTICLASS_FEATURES,
+        hue="y",
+        rescale="minmax",
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -172,7 +182,10 @@ def test_parallel_coordinates_with_hue_renders():
 def test_parallel_coordinates_no_hue_renders():
     df = load_dataset("multiclass_classification")
     chart = ferrum.parallel_coordinates_chart(
-        df, features=_MULTICLASS_FEATURES, hue=None, alpha=0.3,
+        df,
+        features=_MULTICLASS_FEATURES,
+        hue=None,
+        alpha=0.3,
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -182,7 +195,10 @@ def test_parallel_coordinates_no_hue_renders():
 def test_parallel_coordinates_zscore_rescale():
     df = load_dataset("multiclass_classification")
     chart = ferrum.parallel_coordinates_chart(
-        df, features=_MULTICLASS_FEATURES, hue="y", rescale="zscore",
+        df,
+        features=_MULTICLASS_FEATURES,
+        hue="y",
+        rescale="zscore",
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -192,7 +208,9 @@ def test_parallel_coordinates_unknown_feature():
     df = load_dataset("multiclass_classification")
     with pytest.raises(ValueError, match="not in the data"):
         ferrum.parallel_coordinates_chart(
-            df, features=["f0", "nope_not_real"], hue="y",
+            df,
+            features=["f0", "nope_not_real"],
+            hue="y",
         )
 
 
@@ -200,7 +218,9 @@ def test_parallel_coordinates_invalid_rescale():
     df = load_dataset("multiclass_classification")
     with pytest.raises(ValueError, match="minmax"):
         ferrum.parallel_coordinates_chart(
-            df, features=_MULTICLASS_FEATURES, rescale="wat",
+            df,
+            features=_MULTICLASS_FEATURES,
+            rescale="wat",
         )
 
 
@@ -256,7 +276,8 @@ def test_rank2d_visualizer_pearson():
 def test_parallel_coordinates_visualizer():
     df = load_dataset("multiclass_classification")
     viz = ferrum.ParallelCoordinatesVisualizer(
-        features=_MULTICLASS_FEATURES, hue="y",
+        features=_MULTICLASS_FEATURES,
+        hue="y",
     ).fit(df)
     assert viz._fitted
     assert "n_samples=" in repr(viz)
@@ -285,12 +306,16 @@ def test_parallel_coordinates_alpha_reaches_svg():
     """Regression: alpha kwarg must produce opacity in SVG polylines."""
     df = load_dataset("multiclass_classification")
     chart = ferrum.parallel_coordinates_chart(
-        df, features=_MULTICLASS_FEATURES, hue="y", alpha=0.3,
+        df,
+        features=_MULTICLASS_FEATURES,
+        hue="y",
+        alpha=0.3,
     )
     svg = chart.show_svg()
     # Opacity is baked into the RGBA stroke color (e.g. rgba(37,99,235,0.302)).
     # Verify at least one polyline carries a stroke with alpha < 1.
     import re
+
     rgba_alphas = re.findall(r'stroke="rgba\(\d+,\d+,\d+,([\d.]+)\)"', svg)
     assert rgba_alphas, "no rgba stroke colors found in SVG"
     assert any(float(a) < 0.5 for a in rgba_alphas), (

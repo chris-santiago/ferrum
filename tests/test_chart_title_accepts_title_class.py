@@ -1,4 +1,5 @@
 """Schwabish SB1 — Chart accepts Title | str; ChartSpec receives dict form."""
+
 from __future__ import annotations
 
 import polars as pl
@@ -38,6 +39,7 @@ def test_properties_accepts_title_string(df):
 
 def test_chartspec_title_round_trips_as_dict(df):
     import json
+
     c = Chart(df, title=Title("foo", subtitle="bar")).encode(x="x", y="y").mark_point()
     spec = c.to_spec()
     payload = json.loads(spec.to_json())
@@ -47,6 +49,7 @@ def test_chartspec_title_round_trips_as_dict(df):
 
 def test_string_title_round_trips_with_text_field(df):
     import json
+
     c = Chart(df, title="just a string").encode(x="x", y="y").mark_point()
     spec = c.to_spec()
     payload = json.loads(spec.to_json())

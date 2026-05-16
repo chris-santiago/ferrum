@@ -5,11 +5,13 @@ from ferrum._direct_label import _direct_label_endpoint
 
 
 def test_direct_label_endpoint_emits_text_at_max_x_per_series():
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 1, 2, 3],
-        "y": [0.5, 0.6, 0.7, 0.4, 0.5, 0.5],
-        "split": ["train", "train", "train", "val", "val", "val"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 1, 2, 3],
+            "y": [0.5, 0.6, 0.7, 0.4, 0.5, 0.5],
+            "split": ["train", "train", "train", "val", "val", "val"],
+        }
+    )
     base = Chart(df).encode(x="x", y="y", color="split").mark_line()
     chart = _direct_label_endpoint(base, label_field="split")
     svg = chart.show_svg()

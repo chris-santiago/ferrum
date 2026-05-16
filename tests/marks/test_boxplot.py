@@ -5,10 +5,12 @@ import ferrum as fe
 
 @pytest.fixture
 def df():
-    return pl.DataFrame({
-        "group": ["a", "a", "a", "b", "b", "b"],
-        "value": [1.0, 2.0, 100.0, 4.0, 5.0, 6.0],
-    })
+    return pl.DataFrame(
+        {
+            "group": ["a", "a", "a", "b", "b", "b"],
+            "value": [1.0, 2.0, 100.0, 4.0, 5.0, 6.0],
+        }
+    )
 
 
 def test_boxplot_smoke_6_layers(df):
@@ -53,7 +55,9 @@ def test_boxplot_width_sets_box_band_size(df):
     # Should render without error.
     svg_narrow = chart_narrow.show_svg()
     svg_default = chart_default.show_svg()
-    assert "<svg" in svg_narrow or svg_narrow.startswith("<?xml"), "width=0.3 should produce valid SVG"
+    assert "<svg" in svg_narrow or svg_narrow.startswith("<?xml"), (
+        "width=0.3 should produce valid SVG"
+    )
 
     # The box layer uses band_size; narrow (0.3) should produce smaller box rects
     # than the default (0.6). Compare the minimum width of <rect> elements.

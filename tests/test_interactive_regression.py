@@ -25,6 +25,7 @@ from ferrum.selection import selection_point, value
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+
 def _render(chart: fm.Chart) -> dict:
     spec, data, viewport, theme = chart._render_inputs()
     result = render_interactive(spec, data, viewport=viewport, theme=theme)
@@ -42,6 +43,7 @@ def _simple_scatter(tooltip=None, **kwargs) -> fm.Chart:
 
 # ── multi-field tooltip ───────────────────────────────────────────────────────
 
+
 def test_multi_field_tooltip_three_fields():
     scene = _render(_simple_scatter(tooltip=fm.Tooltip("x", "y", "label")))
     batch = scene["panels"][0]["marks"][0]
@@ -54,10 +56,12 @@ def test_multi_field_tooltip_three_fields():
 
 def test_multi_field_tooltip_with_tooltip_field_format():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x="x:Q", y="y:Q",
-                     tooltip=fm.Tooltip(fm.TooltipField("x", format=".2f"), "y"))
-             .properties(width=300, height=200))
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip(fm.TooltipField("x", format=".2f"), "y"))
+        .properties(width=300, height=200)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert batch["tooltips"] is not None
@@ -82,9 +86,12 @@ def test_no_tooltip_produces_null_tooltips():
 
 def test_tooltip_values_are_formatted_correctly():
     df = pl.DataFrame({"x": [1.5], "y": [2.7], "label": ["hello"]})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip("x", "label"))
-             .properties(width=300, height=200))
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip("x", "label"))
+        .properties(width=300, height=200)
+    )
     scene = _render(chart)
     fields = scene["panels"][0]["marks"][0]["tooltips"][0]["fields"]
     field_map = {f["name"]: f["value"] for f in fields}
@@ -94,6 +101,7 @@ def test_tooltip_values_are_formatted_correctly():
 
 
 # ── computed axis domains for zoom ────────────────────────────────────────────
+
 
 def test_auto_scaled_chart_coord_has_x_domain():
     scene = _render(_simple_scatter())
@@ -116,10 +124,13 @@ def test_auto_scaled_chart_coord_has_y_domain():
 
 def test_explicit_domain_not_overwritten():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    chart = (fm.Chart(df).mark_point()
-             .encode(x="x:Q", y="y:Q")
-             .coord(fm.CoordCartesian(xlim=(0.0, 10.0)))
-             .properties(width=300, height=200))
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .coord(fm.CoordCartesian(xlim=(0.0, 10.0)))
+        .properties(width=300, height=200)
+    )
     scene = _render(chart)
     coord = scene["panels"][0]["coord"]
     xlo, xhi = coord["x_domain"]
@@ -130,15 +141,19 @@ def test_explicit_domain_not_overwritten():
 
 # ── interaction_config includes selections for JS click handler ───────────────
 
+
 def test_interaction_config_includes_selections():
     from ferrum._interactive import InteractiveChart
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "group": ["A", "B"]})
     sel = selection_point(fields=["group"], name="grp_sel")
-    chart = (fm.Chart(df).mark_point()
-             .encode(x="x:Q", y="y:Q", color="group:N", tooltip=fm.Tooltip("group"))
-             .add_selection(sel)
-             .properties(width=300, height=200))
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color="group:N", tooltip=fm.Tooltip("group"))
+        .add_selection(sel)
+        .properties(width=300, height=200)
+    )
 
     spec, data, viewport, theme = chart._render_inputs()
     scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
@@ -163,15 +178,19 @@ def test_interaction_config_empty_when_no_selections():
 
 # ── on_selection_change output routing ───────────────────────────────────────
 
+
 def test_on_selection_change_callback_fires_on_trait_update():
     from ferrum._interactive import InteractiveChart
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "group": ["A", "B"]})
     sel = selection_point(fields=["group"], name="cb_sel")
-    chart = (fm.Chart(df).mark_point()
-             .encode(x="x:Q", y="y:Q", color="group:N", tooltip=fm.Tooltip("group"))
-             .add_selection(sel)
-             .properties(width=300, height=200))
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color="group:N", tooltip=fm.Tooltip("group"))
+        .add_selection(sel)
+        .properties(width=300, height=200)
+    )
     ic = InteractiveChart(chart)
 
     received = []
@@ -196,8 +215,9 @@ def test_on_selection_change_creates_output_widget():
     assert ic._output_widget is None, "_output_widget must be None before any callback"
 
     ic.on_selection_change(lambda _: None)
-    assert isinstance(ic._output_widget, ipywidgets.Output), \
+    assert isinstance(ic._output_widget, ipywidgets.Output), (
         "on_selection_change must create an ipywidgets.Output widget"
+    )
 
 
 def test_repr_mimebundle_includes_output_widget_when_callback_registered():
@@ -225,12 +245,16 @@ def test_repr_mimebundle_includes_output_widget_when_callback_registered():
 
 # ── arc hit-test (pie tooltip) ────────────────────────────────────────────────
 
+
 def test_pie_chart_has_arc_nodes_with_path_type():
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     assert scene["panels"], "no panels in pie chart scene"
     batch = scene["panels"][0]["marks"][0]
@@ -244,10 +268,13 @@ def test_pie_chart_has_arc_nodes_with_path_type():
 
 def test_pie_chart_arc_nodes_have_path_commands():
     df = pl.DataFrame({"cat": ["A", "B"], "val": [40.0, 60.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N")
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     for node in batch["nodes"]:
@@ -261,10 +288,13 @@ def test_pie_chart_arc_nodes_have_path_commands():
 def test_arc_tooltip_count_equals_node_count():
     # Tooltip array must be 1-to-1 with rendered nodes (not 1-to-1 with raw rows).
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert len(batch["tooltips"]) == len(batch["nodes"]), "one tooltip entry per rendered node"
@@ -273,10 +303,13 @@ def test_arc_tooltip_count_equals_node_count():
 def test_arc_tooltip_excludes_zero_value_rows():
     # Rows with val=0 are skipped by the arc renderer; their tooltips must also be absent.
     df = pl.DataFrame({"cat": ["A", "B", "C", "D"], "val": [10.0, 0.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N", tooltip=fm.Tooltip("cat", "val"))
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert len(batch["nodes"]) == 3, "zero-value row must be excluded"
@@ -288,10 +321,13 @@ def test_arc_tooltip_excludes_zero_value_rows():
 def test_arc_no_tooltip_encoding_produces_null_tooltips():
     # Without tooltip encoding, arc marks must have no tooltip data.
     df = pl.DataFrame({"cat": ["A", "B"], "val": [40.0, 60.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N")
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert not batch.get("tooltips"), "no tooltips when encoding absent"
@@ -300,10 +336,13 @@ def test_arc_no_tooltip_encoding_produces_null_tooltips():
 def test_polar_chart_coord_kind_is_polar():
     # Polar coord kind must be present in scene so the GPU zoom guard can inspect it.
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N")
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     coord = scene["panels"][0]["coord"]
     assert coord.get("kind") == "polar", "polar chart must have coord.kind == 'polar'"
@@ -316,15 +355,18 @@ def test_polar_chart_coord_kind_is_polar():
 # Fixed by clustering axis text by shared coordinate instead.
 # These tests prove the preconditions that the clustering approach relies on.
 
+
 def _scatter_scene(width: int = 400, height: int = 300) -> dict:
     """
     A quantitative scatter with x in [100, 500] and y in [0.1, 0.5] so tick
     labels on the two axes are guaranteed non-overlapping (no shared strings).
     """
-    df = pl.DataFrame({
-        "x": [100.0, 200.0, 300.0, 400.0, 500.0],
-        "y": [0.1, 0.2, 0.3, 0.4, 0.5],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [100.0, 200.0, 300.0, 400.0, 500.0],
+            "y": [0.1, 0.2, 0.3, 0.4, 0.5],
+        }
+    )
     return _render(
         fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=width, height=height)
     )
@@ -388,14 +430,15 @@ def test_x_axis_tick_labels_share_y_coordinate():
 
     x_labels = {t["label"] for t in ptl["x_levels"][1]["ticks"]}
     x_tick_nodes = [
-        n for n in scene["panels"][0]["axes"]
+        n
+        for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in x_labels
     ]
     assert len(x_tick_nodes) >= 2, "need at least 2 x-axis tick labels to test clustering"
 
     ys = [n["y"] for n in x_tick_nodes]
     assert max(ys) - min(ys) < 2.0, (
-        f"x-axis tick labels must share a y-coordinate; spread={max(ys)-min(ys):.2f}"
+        f"x-axis tick labels must share a y-coordinate; spread={max(ys) - min(ys):.2f}"
     )
 
 
@@ -408,14 +451,15 @@ def test_y_axis_tick_labels_share_x_coordinate():
 
     y_labels = {t["label"] for t in ptl["y_levels"][1]["ticks"]}
     y_tick_nodes = [
-        n for n in scene["panels"][0]["axes"]
+        n
+        for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in y_labels
     ]
     assert len(y_tick_nodes) >= 2, "need at least 2 y-axis tick labels to test clustering"
 
     xs = [n["x"] for n in y_tick_nodes]
     assert max(xs) - min(xs) < 2.0, (
-        f"y-axis tick labels must share an x-coordinate; spread={max(xs)-min(xs):.2f}"
+        f"y-axis tick labels must share an x-coordinate; spread={max(xs) - min(xs):.2f}"
     )
 
 
@@ -433,16 +477,14 @@ def test_tick_data_pixels_differ_from_axis_text_positions():
     x_labels = set(td_px)
 
     x_tick_nodes = [
-        n for n in scene["panels"][0]["axes"]
+        n
+        for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in x_labels
     ]
 
     # At least some labels must have mismatched positions.  A perfect match
     # would mean the old approach worked, which we know it didn't.
-    mismatches = [
-        n for n in x_tick_nodes
-        if abs(n["x"] - td_px[n["content"]]) > 0.5
-    ]
+    mismatches = [n for n in x_tick_nodes if abs(n["x"] - td_px[n["content"]]) > 0.5]
     assert len(mismatches) > 0, (
         "Expected at least one label whose axis text x differs from tick_data pixel; "
         "if all match, the old pixel-match approach would have worked fine."
@@ -454,6 +496,7 @@ def test_tick_data_pixels_differ_from_axis_text_positions():
 # Regression for: JS tooltip hit-test used original mark positions after zoom.
 # Fixed by tracking a JS _zoom object and inverse-transforming the mouse before
 # _hitTest.  The math mirrors Rust ZoomPanState.  These tests prove correctness.
+
 
 def _zoom_identity():
     return {"sx": 1.0, "sy": 1.0, "tx": 0.0, "ty": 0.0}
@@ -562,16 +605,20 @@ def test_zoom_cursor_stays_fixed_under_wheel():
 
 # ── Polar/Geo coord kind guards (zoom/pan must not clear labels) ──────────
 
+
 def test_polar_coord_kind_blocks_zoom_domain_extraction():
     """Polar scene coord must NOT have x_domain/y_domain — the JS debounced
     handler checks `if (!xs || !ys) return` to skip the Python round-trip.
     If a polar chart accidentally exposes domains, the zoom handler will
     inject a CoordCartesian and destroy the polar layout."""
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N")
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     coord = scene["panels"][0]["coord"]
     assert coord["kind"] == "polar"
@@ -586,10 +633,13 @@ def test_geo_coord_kind_present_in_scene():
         "type": "Polygon",
         "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
     }
-    chart = (fm.Chart(bare_polygon).mark_geoshape()
-             .encode(color="__geometry__:N")
-             .coord(fm.CoordGeo(projection="equirectangular"))
-             .properties(width=400, height=300))
+    chart = (
+        fm.Chart(bare_polygon)
+        .mark_geoshape()
+        .encode(color="__geometry__:N")
+        .coord(fm.CoordGeo(projection="equirectangular"))
+        .properties(width=400, height=300)
+    )
     scene = _render(chart)
     coord = scene["panels"][0]["coord"]
     assert coord["kind"] == "geo", "geo chart must have coord.kind == 'geo'"
@@ -601,10 +651,13 @@ def test_polar_scene_has_text_nodes_for_labels():
     """Regression: polar pie chart must have text nodes (wedge labels or legend)
     that WASM must preserve on wheel/pan events instead of clearing."""
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
-    chart = (fm.Chart(df).mark_arc()
-             .encode(x="val:Q", color="cat:N")
-             .coord(fm.CoordPolar(theta="x"))
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_arc()
+        .encode(x="val:Q", color="cat:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     all_text = []
     for node in scene.get("legend", []):
@@ -620,14 +673,19 @@ def test_polar_scene_has_text_nodes_for_labels():
 
 # ── Hexbin and geoshape scene JSON well-formedness ────────────────────────
 
+
 def test_hexbin_scene_json_has_polygon_nodes():
     """Regression: hexbin interactive scene must contain polygon nodes."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
-    chart = (fm.Chart(df).mark_hex(aggregate="count")
-             .encode(x="x:Q", y="y:Q")
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_hex(aggregate="count")
+        .encode(x="x:Q", y="y:Q")
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert batch["kind"] == "polygon", "hex mark must produce polygon batch"
@@ -644,11 +702,15 @@ def test_hexbin_polygons_inside_plot_area():
     pixel space, they'll be near-zero and outside the plot area — which the WASM
     tessellator will render as invisible (clipped or off-canvas)."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     df = pl.DataFrame({"x": rng.normal(0, 2, 2000).tolist(), "y": rng.normal(0, 2, 2000).tolist()})
-    chart = (fm.Chart(df).mark_hex(aggregate="count")
-             .encode(x="x:Q", y="y:Q")
-             .properties(width=450, height=400))
+    chart = (
+        fm.Chart(df)
+        .mark_hex(aggregate="count")
+        .encode(x="x:Q", y="y:Q")
+        .properties(width=450, height=400)
+    )
     scene = _render(chart)
     clip = scene["panels"][0]["clip"]
     cx, cy, cw, ch = clip["x"], clip["y"], clip["w"], clip["h"]
@@ -663,7 +725,7 @@ def test_hexbin_polygons_inside_plot_area():
             outside += 1
     assert outside == 0, (
         f"{outside}/{len(nodes)} hex polygon centroids outside plot area "
-        f"[{cx:.0f},{cy:.0f},{cx+cw:.0f},{cy+ch:.0f}]"
+        f"[{cx:.0f},{cy:.0f},{cx + cw:.0f},{cy + ch:.0f}]"
     )
 
 
@@ -672,19 +734,30 @@ def test_hexbin_polygons_have_nonzero_area():
     vertices all collapse to a single point (area ≈ 0) will tessellate to zero
     triangles in the WASM renderer, producing invisible geometry."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
-    chart = (fm.Chart(df).mark_hex(aggregate="count")
-             .encode(x="x:Q", y="y:Q")
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_hex(aggregate="count")
+        .encode(x="x:Q", y="y:Q")
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     nodes = scene["panels"][0]["marks"][0]["nodes"]
     for i, node in enumerate(nodes):
         ring = node["rings"][0]
         xs = [p[0] for p in ring]
         ys = [p[1] for p in ring]
-        area = abs(sum(xs[j] * ys[(j+1) % len(xs)] - xs[(j+1) % len(xs)] * ys[j]
-                       for j in range(len(xs)))) / 2.0
+        area = (
+            abs(
+                sum(
+                    xs[j] * ys[(j + 1) % len(xs)] - xs[(j + 1) % len(xs)] * ys[j]
+                    for j in range(len(xs))
+                )
+            )
+            / 2.0
+        )
         assert area > 1.0, f"hex polygon {i} has degenerate area={area:.4f}"
 
 
@@ -692,11 +765,15 @@ def test_hexbin_polygons_have_fill_color():
     """Regression: hex polygons must have a non-null fill so the WASM tessellator
     actually emits triangles. A polygon with fill=null renders as invisible."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     df = pl.DataFrame({"x": rng.normal(0, 2, 500).tolist(), "y": rng.normal(0, 2, 500).tolist()})
-    chart = (fm.Chart(df).mark_hex(aggregate="count")
-             .encode(x="x:Q", y="y:Q")
-             .properties(width=300, height=300))
+    chart = (
+        fm.Chart(df)
+        .mark_hex(aggregate="count")
+        .encode(x="x:Q", y="y:Q")
+        .properties(width=300, height=300)
+    )
     scene = _render(chart)
     nodes = scene["panels"][0]["marks"][0]["nodes"]
     for i, node in enumerate(nodes):
@@ -710,10 +787,13 @@ def test_geoshape_scene_json_has_polygon_nodes():
         "type": "Polygon",
         "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
     }
-    chart = (fm.Chart(bare_polygon).mark_geoshape()
-             .encode(color="__geometry__:N")
-             .coord(fm.CoordGeo(projection="equirectangular"))
-             .properties(width=400, height=300))
+    chart = (
+        fm.Chart(bare_polygon)
+        .mark_geoshape()
+        .encode(color="__geometry__:N")
+        .coord(fm.CoordGeo(projection="equirectangular"))
+        .properties(width=400, height=300)
+    )
     scene = _render(chart)
     batch = scene["panels"][0]["marks"][0]
     assert batch["kind"] == "polygon", "geoshape must produce polygon batch"
@@ -730,17 +810,20 @@ def test_geoshape_polygon_inside_plot_area():
         "type": "Polygon",
         "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
     }
-    chart = (fm.Chart(bare_polygon).mark_geoshape()
-             .encode(color="__geometry__:N")
-             .coord(fm.CoordGeo(projection="equirectangular"))
-             .properties(width=400, height=300))
+    chart = (
+        fm.Chart(bare_polygon)
+        .mark_geoshape()
+        .encode(color="__geometry__:N")
+        .coord(fm.CoordGeo(projection="equirectangular"))
+        .properties(width=400, height=300)
+    )
     scene = _render(chart)
     clip = scene["panels"][0]["clip"]
     cx, cy, cw, ch = clip["x"], clip["y"], clip["w"], clip["h"]
     ring = scene["panels"][0]["marks"][0]["nodes"][0]["rings"][0]
     for pt in ring:
         assert cx - 5 <= pt[0] <= cx + cw + 5 and cy - 5 <= pt[1] <= cy + ch + 5, (
-            f"geoshape point {pt} outside plot area [{cx:.0f},{cy:.0f},{cx+cw:.0f},{cy+ch:.0f}]"
+            f"geoshape point {pt} outside plot area [{cx:.0f},{cy:.0f},{cx + cw:.0f},{cy + ch:.0f}]"
         )
     for pt in ring:
         assert 0 <= pt[0] <= 500 and 0 <= pt[1] <= 400, (
@@ -762,16 +845,20 @@ def _render_with_packed(chart: fm.Chart) -> tuple[dict, bytes]:
 def _packed_scatter(n: int = 2000, tooltips: bool = False) -> fm.Chart:
     """Create a scatter above the packing threshold (1000)."""
     import numpy as np
+
     rng = np.random.default_rng(42)
-    df = pl.DataFrame({
-        "x": rng.normal(0, 1, n).tolist(),
-        "y": rng.normal(0, 1, n).tolist(),
-    })
+    df = pl.DataFrame(
+        {
+            "x": rng.normal(0, 1, n).tolist(),
+            "y": rng.normal(0, 1, n).tolist(),
+        }
+    )
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     if tooltips:
         chart = chart.encode(tooltip=fm.Tooltip("x", "y"))
-    return chart.properties(width=300, height=200,
-                            render_config=fm.RenderConfig(raster_threshold=None))
+    return chart.properties(
+        width=300, height=200, render_config=fm.RenderConfig(raster_threshold=None)
+    )
 
 
 class TestPackedInstanceBridge:
@@ -783,9 +870,7 @@ class TestPackedInstanceBridge:
         JSON stays small. If nodes are accidentally left in, JSON bloats."""
         scene, packed = _render_with_packed(_packed_scatter(2000))
         batch = scene["panels"][0]["marks"][0]
-        assert len(batch.get("nodes", [])) == 0, (
-            "packed batch should have empty nodes in JSON"
-        )
+        assert len(batch.get("nodes", [])) == 0, "packed batch should have empty nodes in JSON"
 
     def test_packed_bytes_are_nonempty(self):
         """Regression: the packed sidecar must contain instance data. If empty,
@@ -797,6 +882,7 @@ class TestPackedInstanceBridge:
         """Regression: header must be 20 bytes (5 × u32) with flags field.
         The old 16-byte header caused the WASM unpacker to misalign."""
         import struct
+
         _, packed = _render_with_packed(_packed_scatter(2000))
         assert len(packed) >= 20, "packed data must have at least a 20-byte header"
         pi, bi, kind, count, flags = struct.unpack_from("<5I", packed)
@@ -809,6 +895,7 @@ class TestPackedInstanceBridge:
         """Regression: instance data must be count × 64 bytes (CircleInstance).
         Wrong size means the WASM bytemuck cast fails silently."""
         import struct
+
         _, packed = _render_with_packed(_packed_scatter(2000))
         _, _, kind, count, flags = struct.unpack_from("<5I", packed)
         instance_size = 64  # CircleInstance: 16 × f32
@@ -822,7 +909,8 @@ class TestPackedInstanceBridge:
         per-node JSON for JS hit-testing and tooltip lookup."""
         scene, packed = _render_with_packed(
             fm.Chart(pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}))
-            .mark_point().encode(x="x:Q", y="y:Q")
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
             .properties(width=200, height=200, render_config=fm.RenderConfig(raster_threshold=None))
         )
         batch = scene["panels"][0]["marks"][0]
@@ -855,29 +943,30 @@ class TestPackedTooltips:
         """Regression: tooltip string table must be in the sidecar. If missing,
         hover shows nothing on packed batches."""
         import struct
+
         _, packed = _render_with_packed(_packed_scatter(2000, tooltips=True))
         _, _, _, count, flags = struct.unpack_from("<5I", packed)
-        assert flags & 0x1 != 0, (
-            f"HAS_TOOLTIPS flag (0x1) must be set; got flags=0x{flags:x}"
-        )
+        assert flags & 0x1 != 0, f"HAS_TOOLTIPS flag (0x1) must be set; got flags=0x{flags:x}"
 
     def test_data_indices_in_packed_bytes(self):
         """Regression: data_indices must be packed for selection state to work
         on packed batches."""
         import struct
+
         _, packed = _render_with_packed(_packed_scatter(2000))
         _, _, _, count, flags = struct.unpack_from("<5I", packed)
-        assert flags & 0x2 != 0, (
-            f"HAS_DATA_INDICES flag (0x2) must be set; got flags=0x{flags:x}"
-        )
+        assert flags & 0x2 != 0, f"HAS_DATA_INDICES flag (0x2) must be set; got flags=0x{flags:x}"
 
     def test_small_chart_tooltips_in_json(self):
         """Regression: small charts (<1000 marks) must keep tooltips in JSON
         for the JS tooltip display path."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-        chart = (fm.Chart(df).mark_point()
-                 .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip("x", "y"))
-                 .properties(width=200, height=200))
+        chart = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip("x", "y"))
+            .properties(width=200, height=200)
+        )
         scene = _render(chart)
         batch = scene["panels"][0]["marks"][0]
         assert batch.get("tooltips") is not None, "small chart must keep tooltips in JSON"

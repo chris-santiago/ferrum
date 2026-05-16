@@ -119,15 +119,32 @@ def desugar_boxplot(
 
     layers = [
         _Layer(
-            name="whisker", mark="rule",
+            name="whisker",
+            mark="rule",
             encoding=enc("lower_whisker", "upper_whisker", title=val),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="box",
         ),
-        _Layer(name="lower_cap", mark="tick", encoding=enc("lower_whisker"), mark_kwargs={"band_size": 0.3, "stroke": "theme:label"}, data_source="box"),
-        _Layer(name="upper_cap", mark="tick", encoding=enc("upper_whisker"), mark_kwargs={"band_size": 0.3, "stroke": "theme:label"}, data_source="box"),
         _Layer(
-            name="box", mark="rect", encoding=enc("q1", "q3", title=val), mark_kwargs={"band_size": band}, data_source="box"
+            name="lower_cap",
+            mark="tick",
+            encoding=enc("lower_whisker"),
+            mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+            data_source="box",
+        ),
+        _Layer(
+            name="upper_cap",
+            mark="tick",
+            encoding=enc("upper_whisker"),
+            mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+            data_source="box",
+        ),
+        _Layer(
+            name="box",
+            mark="rect",
+            encoding=enc("q1", "q3", title=val),
+            mark_kwargs={"band_size": band},
+            data_source="box",
         ),
         _Layer(
             name="median",
@@ -138,14 +155,32 @@ def desugar_boxplot(
         ),
     ]
     if outliers:
-        layers.append(_Layer(name="outlier", mark="point", encoding=enc(val), mark_kwargs={"filled": False}, data_source="outliers"))
+        layers.append(
+            _Layer(
+                name="outlier",
+                mark="point",
+                encoding=enc(val),
+                mark_kwargs={"filled": False},
+                data_source="outliers",
+            )
+        )
 
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("boxplot", frozenset({
-    "whisker", "lower_cap", "upper_cap", "box", "median", "outlier",
-}))
+register_layer_names(
+    "boxplot",
+    frozenset(
+        {
+            "whisker",
+            "lower_cap",
+            "upper_cap",
+            "box",
+            "median",
+            "outlier",
+        }
+    ),
+)
 
 
 def desugar_errorbar(
@@ -241,9 +276,16 @@ def desugar_errorbar(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("errorbar", frozenset({
-    "rule", "lower_cap", "upper_cap",
-}))
+register_layer_names(
+    "errorbar",
+    frozenset(
+        {
+            "rule",
+            "lower_cap",
+            "upper_cap",
+        }
+    ),
+)
 
 
 def desugar_errorband(
@@ -318,16 +360,33 @@ def desugar_errorband(
     if borders:
         layers.extend(
             [
-                _Layer(name="lower_border", mark="line", encoding={"x": x_field, "y": "lower"}, data_source="err"),
-                _Layer(name="upper_border", mark="line", encoding={"x": x_field, "y": "upper"}, data_source="err"),
+                _Layer(
+                    name="lower_border",
+                    mark="line",
+                    encoding={"x": x_field, "y": "lower"},
+                    data_source="err",
+                ),
+                _Layer(
+                    name="upper_border",
+                    mark="line",
+                    encoding={"x": x_field, "y": "upper"},
+                    data_source="err",
+                ),
             ]
         )
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("errorband", frozenset({
-    "ribbon", "lower_border", "upper_border",
-}))
+register_layer_names(
+    "errorband",
+    frozenset(
+        {
+            "ribbon",
+            "lower_border",
+            "upper_border",
+        }
+    ),
+)
 
 
 def desugar_ribbon(
@@ -411,9 +470,14 @@ def desugar_ribbon(
     return MarkDesugarResult(layers=layers)
 
 
-register_layer_names("ribbon", frozenset({
+register_layer_names(
     "ribbon",
-}))
+    frozenset(
+        {
+            "ribbon",
+        }
+    ),
+)
 
 
 def desugar_boxen(
@@ -509,10 +573,21 @@ def desugar_boxen(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("boxen", frozenset({
-    "depth_1", "depth_2", "depth_3", "depth_4", "depth_5", "depth_6",
-    "median", "outlier",
-}))
+register_layer_names(
+    "boxen",
+    frozenset(
+        {
+            "depth_1",
+            "depth_2",
+            "depth_3",
+            "depth_4",
+            "depth_5",
+            "depth_6",
+            "median",
+            "outlier",
+        }
+    ),
+)
 
 
 def _extent_to_box(extent):

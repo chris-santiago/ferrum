@@ -10,6 +10,7 @@ Tests are marked with @pytest.mark.slow so they are skipped by default:
     uv run pytest -m slow      # run only scale tests
     uv run pytest -m ""        # run everything including scale tests
 """
+
 from __future__ import annotations
 
 import os
@@ -30,33 +31,40 @@ pytestmark = pytest.mark.slow
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _rng():
     return np.random.default_rng(42)
 
 
 def _df_quant(n: int) -> pl.DataFrame:
     rng = _rng()
-    return pl.DataFrame({
-        "x": rng.normal(0, 1, n).tolist(),
-        "y": rng.normal(0, 1, n).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0, 1, n).tolist(),
+            "y": rng.normal(0, 1, n).tolist(),
+        }
+    )
 
 
 def _df_grouped(n: int, n_groups: int = 5) -> pl.DataFrame:
     rng = _rng()
-    return pl.DataFrame({
-        "x": rng.normal(0, 1, n).tolist(),
-        "y": rng.normal(0, 1, n).tolist(),
-        "group": [f"g{i % n_groups}" for i in range(n)],
-    })
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0, 1, n).tolist(),
+            "y": rng.normal(0, 1, n).tolist(),
+            "group": [f"g{i % n_groups}" for i in range(n)],
+        }
+    )
 
 
 def _df_timeseries(n: int) -> pl.DataFrame:
     rng = _rng()
-    return pl.DataFrame({
-        "t": list(range(n)),
-        "y": np.cumsum(rng.normal(0, 1, n)).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "t": list(range(n)),
+            "y": np.cumsum(rng.normal(0, 1, n)).tolist(),
+        }
+    )
 
 
 def _render_svg(chart: fm.Chart) -> str:
@@ -77,7 +85,6 @@ def _distinct_fills(svg: str) -> set[str]:
 
 
 class TestScatterScale:
-
     def test_10k_renders(self):
         svg = _render_svg(fm.Chart(_df_quant(10_000)).mark_point().encode(x="x:Q", y="y:Q"))
         assert _count_elements(svg, "circle") == 10_000
@@ -109,7 +116,6 @@ class TestScatterScale:
 
 
 class TestLineScale:
-
     def test_10k_renders(self):
         svg = _render_svg(fm.Chart(_df_timeseries(10_000)).mark_line().encode(x="t:Q", y="y:Q"))
         assert "<svg" in svg
@@ -140,13 +146,14 @@ class TestLineScale:
 
 
 class TestBarScale:
-
     def test_500_categories(self):
         rng = _rng()
-        df = pl.DataFrame({
-            "cat": [f"c{i}" for i in range(500)],
-            "val": rng.uniform(0, 100, 500).tolist(),
-        })
+        df = pl.DataFrame(
+            {
+                "cat": [f"c{i}" for i in range(500)],
+                "val": rng.uniform(0, 100, 500).tolist(),
+            }
+        )
         svg = _render_svg(fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q"))
         rects = _count_elements(svg, "rect")
         assert rects >= 500, f"expected ≥500 rects; got {rects}"
@@ -154,14 +161,14 @@ class TestBarScale:
     def test_grouped_bar_200_categories_5_groups(self):
         rng = _rng()
         n = 1000
-        df = pl.DataFrame({
-            "cat": [f"c{i % 200}" for i in range(n)],
-            "group": [f"g{i % 5}" for i in range(n)],
-            "val": rng.uniform(0, 100, n).tolist(),
-        })
-        svg = _render_svg(
-            fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q", color="group:N")
+        df = pl.DataFrame(
+            {
+                "cat": [f"c{i % 200}" for i in range(n)],
+                "group": [f"g{i % 5}" for i in range(n)],
+                "val": rng.uniform(0, 100, n).tolist(),
+            }
         )
+        svg = _render_svg(fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q", color="group:N"))
         assert "<svg" in svg
         assert len(_distinct_fills(svg)) >= 5
 
@@ -172,7 +179,6 @@ class TestBarScale:
 
 
 class TestHistogramScale:
-
     def test_10k(self):
         svg = _render_svg(fm.displot(_df_quant(10_000), x="x"))
         assert "<svg" in svg
@@ -197,7 +203,6 @@ class TestHistogramScale:
 
 
 class TestHexbinScale:
-
     def test_10k(self):
         svg = _render_svg(
             fm.Chart(_df_quant(10_000)).mark_hex(aggregate="count").encode(x="x:Q", y="y:Q")
@@ -214,7 +219,12 @@ class TestHexbinScale:
 
     def test_50k_under_1_second(self):
         df = _df_quant(50_000)
-        chart = fm.Chart(df).mark_hex(aggregate="count").encode(x="x:Q", y="y:Q").properties(width=400, height=300)
+        chart = (
+            fm.Chart(df)
+            .mark_hex(aggregate="count")
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+        )
         t0 = time.monotonic()
         chart.show_svg()
         elapsed = time.monotonic() - t0
@@ -227,7 +237,6 @@ class TestHexbinScale:
 
 
 class TestAreaScale:
-
     def test_10k(self):
         svg = _render_svg(fm.Chart(_df_timeseries(10_000)).mark_area().encode(x="t:Q", y="y:Q"))
         assert "<svg" in svg
@@ -280,7 +289,13 @@ class TestMillionRows:
         SVG output. Must not crash or take unreasonably long."""
         df = _df_quant(1_000_000)
         t0 = time.monotonic()
-        svg = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300).show_svg()
+        svg = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .show_svg()
+        )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 5.0, f"1M scatter took {elapsed:.2f}s (limit 5.0s)"
@@ -288,16 +303,26 @@ class TestMillionRows:
     def test_scatter_1m_svg_size(self):
         """1M scatter SVG should be compact (<2MB) thanks to auto-raster
         substitution. Previously ~57MB (one circle per row)."""
-        svg = fm.Chart(_df_quant(1_000_000)).mark_point().encode(
-            x="x:Q", y="y:Q"
-        ).properties(width=400, height=300).show_svg()
+        svg = (
+            fm.Chart(_df_quant(1_000_000))
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .show_svg()
+        )
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 2, f"1M scatter SVG is {size_mb:.1f}MB (limit 2MB with auto-raster)"
 
     def test_line_1m_renders(self):
         df = _df_timeseries(1_000_000)
         t0 = time.monotonic()
-        svg = fm.Chart(df).mark_line().encode(x="t:Q", y="y:Q").properties(width=400, height=300).show_svg()
+        svg = (
+            fm.Chart(df)
+            .mark_line()
+            .encode(x="t:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .show_svg()
+        )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 5.0, f"1M line took {elapsed:.2f}s (limit 5.0s)"
@@ -317,9 +342,13 @@ class TestMillionRows:
         """Hexbin spatially bins 1M points — output is compact regardless of input."""
         df = _df_quant(1_000_000)
         t0 = time.monotonic()
-        svg = fm.Chart(df).mark_hex(aggregate="count").encode(
-            x="x:Q", y="y:Q"
-        ).properties(width=400, height=300).show_svg()
+        svg = (
+            fm.Chart(df)
+            .mark_hex(aggregate="count")
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .show_svg()
+        )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         size_mb = len(svg) / (1024 * 1024)
@@ -329,7 +358,13 @@ class TestMillionRows:
     def test_area_1m_renders(self):
         df = _df_timeseries(1_000_000)
         t0 = time.monotonic()
-        svg = fm.Chart(df).mark_area().encode(x="t:Q", y="y:Q").properties(width=400, height=300).show_svg()
+        svg = (
+            fm.Chart(df)
+            .mark_area()
+            .encode(x="t:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .show_svg()
+        )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 5.0, f"1M area took {elapsed:.2f}s (limit 5.0s)"
@@ -348,12 +383,7 @@ class TestAutoRaster:
         """1M mark_point with x:Q, y:Q triggers auto-raster: SVG < 2 MB and
         a UserWarning matching 'Auto-raster' is emitted."""
         df = _df_quant(1_000_000)
-        chart = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q")
-            .properties(width=400, height=300)
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300)
         with pytest.warns(UserWarning, match="Auto-raster"):
             svg = chart.show_svg()
         size_mb = len(svg) / (1024 * 1024)
@@ -376,9 +406,7 @@ class TestAutoRaster:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             svg = chart.show_svg()
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings, "Expected no auto-raster warning"
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb > 10, f"Expected full SVG >10MB; got {size_mb:.1f}MB"
@@ -411,9 +439,7 @@ class TestAutoRaster:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             svg = chart.show_svg()
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings, "silent mode should emit no warning"
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 2, f"Expected compact SVG <2MB; got {size_mb:.1f}MB"
@@ -432,14 +458,10 @@ class TestAutoRaster:
             warnings.simplefilter("always")
             svg = chart.show_svg()
         # Should NOT have auto-raster substitution warning
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings, "auto-raster should not fire with color encoding"
         # Should have guidance warning
-        guidance_warnings = [
-            w for w in caught if "mark_raster" in str(w.message)
-        ]
+        guidance_warnings = [w for w in caught if "mark_raster" in str(w.message)]
         assert guidance_warnings, "Expected guidance warning for large chart with color"
         # SVG should be large (no substitution)
         size_mb = len(svg) / (1024 * 1024)
@@ -448,36 +470,22 @@ class TestAutoRaster:
     def test_auto_raster_below_threshold_no_change(self):
         """Charts below the threshold are unaffected."""
         df = _df_quant(10_000)
-        chart = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q")
-            .properties(width=400, height=300)
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             svg = chart.show_svg()
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings
         assert _count_elements(svg, "circle") == 10_000
 
     def test_auto_raster_skips_line_marks(self):
         """Line marks are not eligible for auto-raster."""
         df = _df_timeseries(1_000_000)
-        chart = (
-            fm.Chart(df)
-            .mark_line()
-            .encode(x="t:Q", y="y:Q")
-            .properties(width=400, height=300)
-        )
+        chart = fm.Chart(df).mark_line().encode(x="t:Q", y="y:Q").properties(width=400, height=300)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             svg = chart.show_svg()
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings
         assert "<svg" in svg
 
@@ -493,21 +501,14 @@ class TestAutoRaster:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             svg = chart.show_svg()
-        auto_raster_warnings = [
-            w for w in caught if "Auto-raster" in str(w.message)
-        ]
+        auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings
         assert "<svg" in svg
 
     def test_auto_raster_save_png(self):
         """Auto-raster applies to save() as well (via _render_inputs)."""
         df = _df_quant(1_000_000)
-        chart = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q")
-            .properties(width=400, height=300)
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             path = f.name
         try:

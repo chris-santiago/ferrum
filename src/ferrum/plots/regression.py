@@ -166,7 +166,9 @@ def _residuals_chart_from_source(
         # ``_overlay_metrics_corner`` is a no-op when the injected
         # columns are absent, so the call is unconditional.
         chart = _overlay_metrics_corner(chart)
-        return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+        return _finalize_chart(
+            chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        )
 
     # Multi-panel path: each panel injects its own outlier columns with
     # the right x-axis encoding for that panel's coordinate system. The
@@ -182,7 +184,9 @@ def _residuals_chart_from_source(
     ]
     # _grid_panels applies theme internally; apply overrides before theme.
     chart = _grid_panels(charts)
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _residuals_panel(
@@ -340,7 +344,9 @@ def _prediction_error_chart_from_source(
         y=Y("y_true", title="True value"),
     )
     chart = chart.properties(title=ferrum.Title("Prediction Error"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +671,9 @@ def lmplot(
         else:
             out = out.facet(row=row)
 
-    return _finalize_chart(out, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        out, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def residplot(
@@ -853,7 +861,9 @@ def residplot(
         chart._layers = internal_layers
         chart._mark = None
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def regplot(
@@ -1177,8 +1187,11 @@ def prediction_error_chart(
     >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
     source = _resolve_source(
-        model, X, y,
-        y_true=y_true, y_pred=y_pred,
+        model,
+        X,
+        y,
+        y_true=y_true,
+        y_pred=y_pred,
         random_state=random_state,
     )
     return _prediction_error_chart_from_source(
@@ -1257,7 +1270,9 @@ def cooks_distance_chart(
     >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
     """
     source = _resolve_source(
-        model, X, y,
+        model,
+        X,
+        y,
         random_state=random_state,
     )
     return _residuals_chart_from_source(

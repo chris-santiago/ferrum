@@ -51,5 +51,3 @@ def require_shap(method_name: str) -> ModuleType:
             f"Install it with `pip install ferrum[shap]` or `pip install shap`."
         ) from e
     return shap
-
-

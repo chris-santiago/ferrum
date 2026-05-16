@@ -11,6 +11,4 @@ def test_confusion_matrix_default_renders_cell_text():
     model = LogisticRegression(max_iter=200).fit(X, y)
     chart = fm.confusion_matrix_chart(model, X, y)
     svg = chart.show_svg()
-    assert re.search(r"<text[^>]*>\s*\d", svg), (
-        "no numeric <text> in confusion matrix SVG"
-    )
+    assert re.search(r"<text[^>]*>\s*\d", svg), "no numeric <text> in confusion matrix SVG"

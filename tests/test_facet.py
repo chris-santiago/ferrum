@@ -1,4 +1,5 @@
 """Tests for Chart.facet() fluent method."""
+
 import polars as pl
 
 from ferrum import Chart
@@ -35,6 +36,7 @@ def test_facet_with_row_only_is_wrap():
 
 def test_facet_no_args_raises():
     import pytest
+
     df = pl.DataFrame({"a": [1]})
     chart = Chart(df).mark_point().encode(x="a", y="a")
     with pytest.raises(ValueError, match="facet"):
@@ -44,6 +46,7 @@ def test_facet_no_args_raises():
 def test_facet_to_spec_round_trips_wrap():
     """_build_facet_dict() produces JSON Rust can deserialize."""
     import json
+
     df = pl.DataFrame({"a": [1, 2, 3], "species": ["s1", "s2", "s1"]})
     c = Chart(df).mark_point().encode(x="a", y="a").facet(col="species", ncols=2)
     spec = c.to_spec()
@@ -68,17 +71,21 @@ def test_encode_facet_col_produces_panels():
     import pyarrow as pa
     from ferrum._core import render_svg
 
-    tbl = pa.table({
-        "x": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
-        "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
-        "species": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
-    })
+    tbl = pa.table(
+        {
+            "x": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "species": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
     df = pl.from_arrow(tbl)
     chart = Chart(df).mark_point().encode(x="x", y="y", facet_col="species:N")
     spec = chart.to_spec()
     svg = render_svg(spec, tbl, viewport=(600.0, 400.0), theme={})
     # 3 panels → ≥6 clipPath elements (2 per panel)
-    assert svg.count("clipPath") >= 6, f"Expected ≥6 clipPaths for 3 panels, got {svg.count('clipPath')}"
+    assert svg.count("clipPath") >= 6, (
+        f"Expected ≥6 clipPaths for 3 panels, got {svg.count('clipPath')}"
+    )
 
 
 def test_encode_facet_row_sets_facet():
@@ -114,7 +121,9 @@ def test_encode_facet_preserves_ncols_from_prior_facet_call():
     df = pl.DataFrame({"x": [1], "y": [2], "grp": ["a"]})
     # This is an unusual pattern but should not lose ncols.
     c = (
-        Chart(df).mark_point().encode(x="x", y="y")
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
         .facet(col="grp", ncols=3)
         .encode(facet_col="grp:N")
     )
@@ -132,11 +141,13 @@ def test_faceted_svg_contains_strip_titles():
     import pyarrow as pa
     from ferrum._core import render_svg
 
-    tbl = pa.table({
-        "a": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
-        "b": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
-        "species": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
-    })
+    tbl = pa.table(
+        {
+            "a": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "b": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "species": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
     # Build spec via Chart but pass the pyarrow table directly to render_svg
     df = pl.from_arrow(tbl)
     chart = Chart(df).mark_point().encode(x="a", y="b").facet(col="species")

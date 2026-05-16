@@ -1,15 +1,45 @@
 """Phase 8b cross-cutting drift tests: spec invariants and counts."""
+
 from pathlib import Path
 
 
 def test_transform_count_15_total():
     """Verify TransformSpec exposes 15 transforms (Phase 5: 5 + Phase 8b: 10)."""
-    from ferrum import (Bin, Kde, Smooth, Aggregate, Summary,
-                        Outliers, ErrorExtent, BoxStats, Violin, Kde2D,
-                        Contour, QQ, Raster, Hex, Swarm)
-    transforms = [Bin, Kde, Smooth, Aggregate, Summary,
-                  Outliers, ErrorExtent, BoxStats, Violin, Kde2D,
-                  Contour, QQ, Raster, Hex, Swarm]
+    from ferrum import (
+        Bin,
+        Kde,
+        Smooth,
+        Aggregate,
+        Summary,
+        Outliers,
+        ErrorExtent,
+        BoxStats,
+        Violin,
+        Kde2D,
+        Contour,
+        QQ,
+        Raster,
+        Hex,
+        Swarm,
+    )
+
+    transforms = [
+        Bin,
+        Kde,
+        Smooth,
+        Aggregate,
+        Summary,
+        Outliers,
+        ErrorExtent,
+        BoxStats,
+        Violin,
+        Kde2D,
+        Contour,
+        QQ,
+        Raster,
+        Hex,
+        Swarm,
+    ]
     assert all(t is not None for t in transforms)
     assert len(transforms) == 15
 

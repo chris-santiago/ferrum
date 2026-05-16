@@ -1,15 +1,18 @@
 """Legend title rendering (Themes-T2.5b)."""
+
 import polars as pl
 
 import ferrum as fm
 
 
 def test_legend_title_uses_field_name() -> None:
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "species": ["a", "a", "b", "b", "c", "c"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "species": ["a", "a", "b", "b", "c", "c"],
+        }
+    )
     svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="species").show_svg()
     assert ">species<" in svg
 
@@ -24,13 +27,18 @@ def test_no_color_encoding_has_no_legend_title() -> None:
 
 
 def test_legend_title_font_size_flows_through() -> None:
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [4.0, 5.0, 6.0],
-        "cat": ["a", "b", "c"],
-    })
-    chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").theme(
-        fm.Theme(legend_title_font_size=18.0)
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [4.0, 5.0, 6.0],
+            "cat": ["a", "b", "c"],
+        }
+    )
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", color="cat")
+        .theme(fm.Theme(legend_title_font_size=18.0))
     )
     svg = chart.show_svg()
     # Find the legend title text element specifically. ">cat<" identifies it.

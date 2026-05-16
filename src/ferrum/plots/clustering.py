@@ -53,7 +53,9 @@ def _silhouette_chart_from_source(
 
     df = source.silhouette(k=k)
     chart = ferrum.Chart(df).mark_silhouette()
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _pca_scree_chart_from_source(
@@ -87,7 +89,9 @@ def _pca_scree_chart_from_source(
                 name="point",
             )
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _pca_scree_chart_from_variance_df(
@@ -119,7 +123,9 @@ def _pca_scree_chart_from_variance_df(
                 name="point",
             )
         )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _intercluster_distance_chart_from_source(
@@ -171,7 +177,9 @@ def _intercluster_distance_chart_from_source(
         )
     )
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _cluster_diagnostics_chart(
@@ -311,7 +319,9 @@ def _cluster_diagnostics_chart(
         # forwarded (via _apply_overrides, which calls .properties() on the
         # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +412,7 @@ def pca_scree_chart(
     else:
         try:
             import pandas as pd
+
             if isinstance(model, pd.DataFrame):
                 is_raw_data = True
         except ImportError:
@@ -417,9 +428,7 @@ def pca_scree_chart(
         else:
             x_df = pl.from_pandas(model)
 
-        x_arrow = pa.RecordBatch.from_pydict(
-            {c: x_df[c].to_arrow() for c in x_df.columns}
-        )
+        x_arrow = pa.RecordBatch.from_pydict({c: x_df[c].to_arrow() for c in x_df.columns})
         var_batch = _core.pca_variance(x_arrow, n_components)
         df = pl.from_arrow(var_batch)
         return _pca_scree_chart_from_variance_df(
@@ -787,12 +796,10 @@ def manifold_chart(
 
     source = _resolve_source(model, X, None, random_state=random_state)
     emb = source.embeddings(method=method)
-    chart = (
-        ferrum.Chart(emb)
-        .mark_point()
-        .encode(x="dim_0", y="dim_1", color="label:N")
+    chart = ferrum.Chart(emb).mark_point().encode(x="dim_0", y="dim_1", color="label:N")
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def elbow_chart(
@@ -864,4 +871,6 @@ def elbow_chart(
     ).fit(X)
 
     chart = viz._chart
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+    )

@@ -8,6 +8,7 @@ Tests are structured as: model_path / precomputed_path pairs per function,
 plus binary-vs-multiclass parametrization for curve/matrix functions, and
 three ValueError branch tests.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -75,9 +76,9 @@ def binary_precomputed(binary_data):
     """Precomputed arrays derived from the pinned binary classifier."""
     model, X, y = binary_data
     y_true = np.asarray(y)
-    y_pred_1d = model.predict_proba(X)[:, 1]   # 1-D scores (positive class)
-    y_pred_2d = model.predict_proba(X)           # 2-D proba matrix
-    y_hard = model.predict(X)                    # hard labels
+    y_pred_1d = model.predict_proba(X)[:, 1]  # 1-D scores (positive class)
+    y_pred_2d = model.predict_proba(X)  # 2-D proba matrix
+    y_hard = model.predict(X)  # hard labels
     return y_true, y_pred_1d, y_pred_2d, y_hard
 
 

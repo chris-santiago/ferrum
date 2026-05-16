@@ -1067,6 +1067,7 @@ class ClusterMapChart(_ChartLike):
 # Layer-composition helpers (extracted from chart.py)
 # ---------------------------------------------------------------------------
 
+
 def _expand_layers(c) -> tuple[list, list]:
     """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
 
@@ -1111,8 +1112,7 @@ def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
             continue
         # Value dedup: unwrap _NamedTransform for the equality check.
         inner_t = t.transform if isinstance(t, _NamedTransform) else t
-        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e)
-               for e in existing):
+        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e) for e in existing):
             continue
         existing.append(t)
         existing_ids.add(id(t))

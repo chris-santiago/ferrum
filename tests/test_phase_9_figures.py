@@ -1,4 +1,5 @@
 """Phase 9e figure-level function tests."""
+
 import json
 import numpy as np
 import polars as pl
@@ -26,16 +27,19 @@ def test_plots_submodule_accessible():
 @pytest.fixture
 def iris_like():
     np.random.seed(0)
-    return pl.DataFrame({
-        "sepal_length": np.random.normal(5.0, 0.5, 60).tolist(),
-        "sepal_width":  np.random.normal(3.0, 0.3, 60).tolist(),
-        "species":      ["a"] * 30 + ["b"] * 30,
-    })
+    return pl.DataFrame(
+        {
+            "sepal_length": np.random.normal(5.0, 0.5, 60).tolist(),
+            "sepal_width": np.random.normal(3.0, 0.3, 60).tolist(),
+            "species": ["a"] * 30 + ["b"] * 30,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Task 28 — displot
 # ---------------------------------------------------------------------------
+
 
 class TestDisplot:
     def test_hist_default(self, iris_like):
@@ -63,12 +67,15 @@ class TestDisplot:
         d = json.loads(chart.to_spec().to_json())
         assert d["mark"] == "tick"
 
-    @pytest.mark.parametrize("multiple,expected_position_type", [
-        ("layer", "identity"),
-        ("dodge", "dodge"),
-        ("stack", "stack"),
-        ("fill", "stack"),    # normalize stack
-    ])
+    @pytest.mark.parametrize(
+        "multiple,expected_position_type",
+        [
+            ("layer", "identity"),
+            ("dodge", "dodge"),
+            ("stack", "stack"),
+            ("fill", "stack"),  # normalize stack
+        ],
+    )
     def test_multiple_param_sets_position(self, iris_like, multiple, expected_position_type):
         chart = fe.displot(iris_like, x="sepal_length", hue="species", multiple=multiple)
         d = json.loads(chart.to_spec().to_json())
@@ -108,8 +115,13 @@ class TestDisplot:
 
     def test_mark_density_groupby_passthrough(self, iris_like):
         # Direct API path mirrors the displot wiring.
-        chart = fe.Chart(iris_like).mark_density(groupby="species").encode(
-            x="sepal_length", color="species",
+        chart = (
+            fe.Chart(iris_like)
+            .mark_density(groupby="species")
+            .encode(
+                x="sepal_length",
+                color="species",
+            )
         )
         d = json.loads(chart.to_spec().to_json())
         kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
@@ -118,9 +130,9 @@ class TestDisplot:
     def test_mark_histogram_horizontal_orientation(self, iris_like):
         # JointChart's right-marginal pattern: bind the data column to y and
         # request horizontal orientation; encoding remap flips x ↔ y.
-        chart = fe.Chart(iris_like).mark_histogram(
-            orientation="horizontal"
-        ).encode(y="sepal_length")
+        chart = (
+            fe.Chart(iris_like).mark_histogram(orientation="horizontal").encode(y="sepal_length")
+        )
         resolved = chart._resolve_pending()
         # Bin is on the y field (the data dimension), output goes on y/y2/x.
         assert resolved._encoding["y"].field == "bin_start"
@@ -128,9 +140,7 @@ class TestDisplot:
         assert resolved._encoding["x"].field == "count"
 
     def test_mark_density_horizontal_orientation(self, iris_like):
-        chart = fe.Chart(iris_like).mark_density(
-            orientation="horizontal"
-        ).encode(y="sepal_length")
+        chart = fe.Chart(iris_like).mark_density(orientation="horizontal").encode(y="sepal_length")
         resolved = chart._resolve_pending()
         assert resolved._encoding["y"].field == "value"
         assert resolved._encoding["x"].field == "density"
@@ -140,14 +150,17 @@ class TestDisplot:
 # Task 29 — catplot
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def cat_data():
     np.random.seed(1)
-    return pl.DataFrame({
-        "group":    ["a"] * 20 + ["b"] * 20 + ["c"] * 20,
-        "subgroup": (["x", "y"] * 30),
-        "value":    np.random.normal(0, 1, 60).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "group": ["a"] * 20 + ["b"] * 20 + ["c"] * 20,
+            "subgroup": (["x", "y"] * 30),
+            "value": np.random.normal(0, 1, 60).tolist(),
+        }
+    )
 
 
 class TestCatplot:
@@ -201,8 +214,12 @@ class TestCatplot:
 
     def test_dodge_with_hue(self, cat_data):
         chart = fe.catplot(
-            cat_data, x="group", y="value", hue="subgroup",
-            kind="bar", dodge=True,
+            cat_data,
+            x="group",
+            y="value",
+            hue="subgroup",
+            kind="bar",
+            dodge=True,
         )
         d = json.loads(chart.to_spec().to_json())
         assert d.get("position", {}).get("type") == "dodge"
@@ -221,6 +238,7 @@ class TestCatplot:
 # ---------------------------------------------------------------------------
 # Task 30 — lmplot
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def reg_data():
@@ -322,20 +340,25 @@ class TestLmplot:
         chart = fe.lmplot(reg_data, x="x", y="y", scatter_kws={"opacity": 0.3})
         d = json.loads(chart.to_spec().to_json())
         point_layer = next(
-            (l for l in d["layers"] if l.get("mark") == "point"), None,
+            (l for l in d["layers"] if l.get("mark") == "point"),
+            None,
         )
         assert point_layer is not None
         assert point_layer.get("mark_style", {}).get("opacity") == 0.3
 
     def test_line_kws_forwarded(self, reg_data):
         chart = fe.lmplot(
-            reg_data, x="x", y="y",
-            line_kws={"stroke_width": 4}, show_metrics=False,
+            reg_data,
+            x="x",
+            y="y",
+            line_kws={"stroke_width": 4},
+            show_metrics=False,
         )
         d = json.loads(chart.to_spec().to_json())
         layers = d.get("layers", [])
         line_layer = next(
-            (l for l in layers if l.get("mark") == "line"), None,
+            (l for l in layers if l.get("mark") == "line"),
+            None,
         )
         assert line_layer is not None
         assert line_layer.get("mark_style", {}).get("stroke_width") == 4
@@ -350,6 +373,7 @@ class TestLmplot:
 # Task 31 — residplot
 # ---------------------------------------------------------------------------
 
+
 class TestResidplot:
     def test_default_legacy_transform_path(self, reg_data):
         # Schwabish SB-followup (2026-05-12): the default annotated path
@@ -357,8 +381,11 @@ class TestResidplot:
         # smooth transform. Opting out of both annotations restores the
         # legacy Smooth(output="residuals") transform path.
         chart = fe.residplot(
-            reg_data, x="x", y="y",
-            show_metrics=False, zero_line=False,
+            reg_data,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
         )
         d = json.loads(chart.to_spec().to_json())
         smooth_t = next(
@@ -372,8 +399,12 @@ class TestResidplot:
         # Robust path only available without annotations (raises
         # NotImplementedError when paired with show_metrics/zero_line).
         chart = fe.residplot(
-            reg_data, x="x", y="y", robust=True,
-            show_metrics=False, zero_line=False,
+            reg_data,
+            x="x",
+            y="y",
+            robust=True,
+            show_metrics=False,
+            zero_line=False,
         )
         d = json.loads(chart.to_spec().to_json())
         robust_t = next(
@@ -406,22 +437,28 @@ class TestResidplot:
         )
         n_nulls = data_with_nulls.filter(pl.col("y").is_null()).height
         assert n_nulls > 0
-        chart = fe.residplot(data_with_nulls, x="x", y="y", dropna=True,
-                             show_metrics=False, zero_line=False)
+        chart = fe.residplot(
+            data_with_nulls, x="x", y="y", dropna=True, show_metrics=False, zero_line=False
+        )
         # dropna=True should have removed the null rows before the chart
         # received them. The chart's internal data should have fewer rows.
         assert chart._data.height == reg_data.height - n_nulls
 
     def test_label_adds_color_encoding(self, reg_data):
-        chart = fe.residplot(reg_data, x="x", y="y", label="Residuals",
-                             show_metrics=False, zero_line=False)
+        chart = fe.residplot(
+            reg_data, x="x", y="y", label="Residuals", show_metrics=False, zero_line=False
+        )
         d = json.loads(chart.to_spec().to_json())
         assert d.get("encoding", {}).get("color", {}).get("field") == "_label"
 
     def test_no_lowess_legacy_single_layer(self, reg_data):
         chart = fe.residplot(
-            reg_data, x="x", y="y", lowess=False,
-            show_metrics=False, zero_line=False,
+            reg_data,
+            x="x",
+            y="y",
+            lowess=False,
+            show_metrics=False,
+            zero_line=False,
         )
         d = json.loads(chart.to_spec().to_json())
         assert d.get("layers") is None or len(d.get("layers", [])) <= 1
@@ -448,16 +485,19 @@ class TestResidplot:
 # Task 32 — pairplot
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def iris_pair():
     rng = np.random.default_rng(3)
     n = 20
-    return pl.DataFrame({
-        "a": rng.normal(0, 1, n).tolist(),
-        "b": rng.normal(0, 1, n).tolist(),
-        "c": rng.normal(0, 1, n).tolist(),
-        "species": (["x"] * 10 + ["y"] * 10),
-    })
+    return pl.DataFrame(
+        {
+            "a": rng.normal(0, 1, n).tolist(),
+            "b": rng.normal(0, 1, n).tolist(),
+            "c": rng.normal(0, 1, n).tolist(),
+            "species": (["x"] * 10 + ["y"] * 10),
+        }
+    )
 
 
 class TestPairplot:
@@ -517,14 +557,17 @@ class TestPairplot:
 # Task 33 — heatmap
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def heat_data():
-    return pl.DataFrame({
-        "row":  ["r1", "r2", "r3"],
-        "A":    [1.0, 2.0, 3.0],
-        "B":    [4.0, 5.0, 6.0],
-        "C":    [7.0, 8.0, 9.0],
-    })
+    return pl.DataFrame(
+        {
+            "row": ["r1", "r2", "r3"],
+            "A": [1.0, 2.0, 3.0],
+            "B": [4.0, 5.0, 6.0],
+            "C": [7.0, 8.0, 9.0],
+        }
+    )
 
 
 class TestHeatmap:
@@ -576,16 +619,19 @@ class TestHeatmap:
 # Task 34 — clustermap
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def cluster_data():
     rng = np.random.default_rng(4)
-    return pl.DataFrame({
-        "row":  [f"r{i}" for i in range(5)],
-        "A":    rng.normal(0, 1, 5).tolist(),
-        "B":    rng.normal(0, 1, 5).tolist(),
-        "C":    rng.normal(0, 1, 5).tolist(),
-        "D":    rng.normal(0, 1, 5).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "row": [f"r{i}" for i in range(5)],
+            "A": rng.normal(0, 1, 5).tolist(),
+            "B": rng.normal(0, 1, 5).tolist(),
+            "C": rng.normal(0, 1, 5).tolist(),
+            "D": rng.normal(0, 1, 5).tolist(),
+        }
+    )
 
 
 class TestClustermap:
@@ -666,6 +712,7 @@ class TestClustermap:
     def test_dendrogram_grid_false_preserved_with_user_theme(self, cluster_data):
         """User-supplied theme is merged with grid=False for dendrogram panels."""
         from ferrum.themes import Theme
+
         user_theme = Theme(mark_color="#ff0000")
         cm = fe.clustermap(cluster_data, theme=user_theme)
         assert cm.col_dendrogram._theme._props.get("grid") is False
@@ -682,12 +729,14 @@ class TestClustermap:
         ``clustermap(iris.drop("target"))``.
         """
         rng = np.random.default_rng(7)
-        all_numeric = pl.DataFrame({
-            "A": rng.normal(0, 1, 6).tolist(),
-            "B": rng.normal(0, 1, 6).tolist(),
-            "C": rng.normal(0, 1, 6).tolist(),
-            "D": rng.normal(0, 1, 6).tolist(),
-        })
+        all_numeric = pl.DataFrame(
+            {
+                "A": rng.normal(0, 1, 6).tolist(),
+                "B": rng.normal(0, 1, 6).tolist(),
+                "C": rng.normal(0, 1, 6).tolist(),
+                "D": rng.normal(0, 1, 6).tolist(),
+            }
+        )
         cm = fe.clustermap(all_numeric)
         svg = cm.show_svg()
         assert svg.startswith("<svg") or "<svg" in svg[:200]
@@ -697,14 +746,17 @@ class TestClustermap:
 # Task 35 — jointplot
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def joint_data():
     rng = np.random.default_rng(5)
-    return pl.DataFrame({
-        "x": rng.normal(0, 1, 50).tolist(),
-        "y": rng.normal(0, 1, 50).tolist(),
-        "g": (["a"] * 25 + ["b"] * 25),
-    })
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0, 1, 50).tolist(),
+            "y": rng.normal(0, 1, 50).tolist(),
+            "g": (["a"] * 25 + ["b"] * 25),
+        }
+    )
 
 
 class TestJointplot:
@@ -722,8 +774,7 @@ class TestJointplot:
         d = json.loads(jc.center.to_spec().to_json())
         # 2D kde routes through desugar_contour → layered output.
         assert d.get("layers") is not None or any(
-            t.get("type") in ("kde2d", "contour")
-            for t in d.get("transforms", [])
+            t.get("type") in ("kde2d", "contour") for t in d.get("transforms", [])
         )
 
     def test_hist_center_uses_bin2d(self, joint_data):

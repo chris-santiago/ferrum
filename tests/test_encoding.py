@@ -4,9 +4,27 @@ import pytest
 from ferrum._warn import reset_warnings
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding import (
-    X, Y, X2, Y2, XError, YError, XError2, YError2, Theta, Radius,
-    Color, Fill, Stroke, Opacity, FillOpacity, StrokeOpacity,
-    StrokeWidth, StrokeDash, Size, Shape, Angle,
+    X,
+    Y,
+    X2,
+    Y2,
+    XError,
+    YError,
+    XError2,
+    YError2,
+    Theta,
+    Radius,
+    Color,
+    Fill,
+    Stroke,
+    Opacity,
+    FillOpacity,
+    StrokeOpacity,
+    StrokeWidth,
+    StrokeDash,
+    Size,
+    Shape,
+    Angle,
 )
 
 
@@ -50,6 +68,7 @@ def test_to_implicit_transforms_with_bin_kwarg():
     assert len(transforms) == 1
     # First (and only) transform should be a Bin instance
     from ferrum import Bin
+
     assert isinstance(transforms[0], Bin)
 
 
@@ -63,6 +82,7 @@ def test_to_implicit_transforms_with_aggregate_kwarg():
     transforms = c.to_implicit_transforms()
     assert len(transforms) == 1
     from ferrum import Aggregate
+
     assert isinstance(transforms[0], Aggregate)
 
 
@@ -70,12 +90,19 @@ def test_to_implicit_transforms_with_aggregate_kwarg():
 # Task 16: positional channels
 # ---------------------------------------------------------------------------
 
+
 def test_x_construction_with_full_honored_kwargs():
     reset_warnings()
     from ferrum import LinearScale
-    c = X("price", type="Q", bin=True, aggregate="mean",
-          scale=LinearScale(domain=[0, 100], range=[0, 600]),
-          title="Price")
+
+    c = X(
+        "price",
+        type="Q",
+        bin=True,
+        aggregate="mean",
+        scale=LinearScale(domain=[0, 100], range=[0, 600]),
+        title="Price",
+    )
     assert c.field == "price"
     assert c._kwargs["type"] == "Q"
 
@@ -93,6 +120,7 @@ def test_x_honored_kwargs_no_warning():
 # ---------------------------------------------------------------------------
 # Task 17: appearance channels
 # ---------------------------------------------------------------------------
+
 
 def test_color_with_scheme_kwarg_no_warning():
     reset_warnings()
@@ -115,8 +143,10 @@ def test_stroke_with_field_warns_once_on_render_attempt():
 # Task 18: text/detail/tooltip classes
 # ---------------------------------------------------------------------------
 
+
 def test_tooltip_accepts_multiple_fields():
     from ferrum.encoding import Tooltip
+
     t = Tooltip("a", "b", "c")
     assert t._field_list == ["a", "b", "c"]
 
@@ -124,6 +154,7 @@ def test_tooltip_accepts_multiple_fields():
 # ---------------------------------------------------------------------------
 # Task 36: warn-once across multiple renders
 # ---------------------------------------------------------------------------
+
 
 def test_stroke_no_warning_across_renders():
     """Stroke is silently accepted (aliased to color when no color is set)."""
@@ -139,9 +170,7 @@ def test_stroke_no_warning_across_renders():
         for _ in range(3):
             Chart(df).mark_point().encode(x="a", y="b", stroke=Stroke("c"))
     # Stroke is now silently handled — no warnings expected.
-    stroke_channel_warnings = [
-        wi for wi in w if "stroke" in str(wi.message).lower()
-    ]
+    stroke_channel_warnings = [wi for wi in w if "stroke" in str(wi.message).lower()]
     assert len(stroke_channel_warnings) == 0, (
         f"Expected 0 stroke warnings, got {len(stroke_channel_warnings)}: "
         f"{[str(wi.message) for wi in stroke_channel_warnings]}"

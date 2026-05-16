@@ -5,6 +5,7 @@ deserialization refuses any type outside the documented allowlist.
 
 `load_fixture(name)` loads a `.skops` file from `tests/fixtures/models/`.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -58,9 +59,8 @@ def load_fixture(name: str) -> Any:
 def load_dataset(name: str):
     """Load a parquet dataset fixture (returns polars.DataFrame)."""
     import polars as pl
+
     path = _DATASETS_DIR / f"{name}.parquet"
     if not path.exists():
-        raise FileNotFoundError(
-            f"Missing dataset {path}. Run `python tests/fixtures/build.py`."
-        )
+        raise FileNotFoundError(f"Missing dataset {path}. Run `python tests/fixtures/build.py`.")
     return pl.read_parquet(path)

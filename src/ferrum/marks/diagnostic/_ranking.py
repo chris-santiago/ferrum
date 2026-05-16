@@ -11,6 +11,7 @@ from ferrum.marks._mark_kwargs import (
     validate_user_mark_kwargs as _validate,
 )
 
+
 def desugar_rank1d(
     x_field: str | None,
     y_field: str | None,

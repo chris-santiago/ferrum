@@ -1,4 +1,5 @@
 """axis_line=False suppresses axis stroke; tick_width / label_color flow to SVG."""
+
 import polars as pl
 
 import ferrum as fm

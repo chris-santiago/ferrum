@@ -1,6 +1,7 @@
 """Regression test for Phase 10 done-criterion:
 sklearn must NOT be imported by `import ferrum` or `ModelSource.__init__`.
 """
+
 from __future__ import annotations
 
 import sys
@@ -8,6 +9,7 @@ import sys
 
 class _DuckModel:
     """Non-sklearn duck-typed model with predict()."""
+
     def predict(self, X):
         return [0] * len(X)
 
@@ -23,9 +25,8 @@ def test_import_ferrum_does_not_load_sklearn():
     assert "sklearn" not in sys.modules
 
     import ferrum  # noqa: F401
-    assert "sklearn" not in sys.modules, (
-        "sklearn loaded as a side-effect of `import ferrum`"
-    )
+
+    assert "sklearn" not in sys.modules, "sklearn loaded as a side-effect of `import ferrum`"
 
 
 def test_modelsource_init_does_not_load_sklearn():
@@ -36,15 +37,14 @@ def test_modelsource_init_does_not_load_sklearn():
 
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0]})
     source = ferrum.ModelSource(_DuckModel(), df)
-    assert "sklearn" not in sys.modules, (
-        "sklearn loaded as a side-effect of ModelSource(...)"
-    )
+    assert "sklearn" not in sys.modules, "sklearn loaded as a side-effect of ModelSource(...)"
     assert source is not None
 
 
 def test_require_sklearn_raises_clear_message_when_missing(monkeypatch):
     """Simulates sklearn missing — ImportError must mention `ferrum[models]`."""
     import builtins
+
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
@@ -56,5 +56,6 @@ def test_require_sklearn_raises_clear_message_when_missing(monkeypatch):
 
     from ferrum._diagnostics.deps import require_sklearn
     import pytest
+
     with pytest.raises(ImportError, match=r"ferrum\[models\]|pip install scikit-learn"):
         require_sklearn("predictions")

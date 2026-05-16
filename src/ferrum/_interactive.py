@@ -123,6 +123,7 @@ class InteractiveChart:
     def _on_zoom_change(self, change: Any) -> None:
         """Rebuild the scene with updated domain when the JS zoom state changes."""
         import json as _json
+
         zoom = _json.loads(change.get("new", "{}"))
         if not zoom:
             return
@@ -140,6 +141,7 @@ class InteractiveChart:
     def _apply_zoom_domains(self, zoom: dict) -> "Chart":
         """Apply per-panel domain overrides from a zoom_state dict to a cloned chart."""
         from ferrum.coord import CoordCartesian
+
         new_chart = self._chart._clone()
         # zoom_state structure: {"0": {"x_domain": [lo, hi], "y_domain": [lo, hi]}, ...}
         panel_zoom = zoom.get("0", zoom)  # single-panel shorthand
@@ -162,6 +164,7 @@ class InteractiveChart:
         when a mark is clicked.
         """
         import json as _json
+
         try:
             scene = _json.loads(scene_json)
             config = dict(scene.get("interaction", {}))
@@ -226,6 +229,7 @@ class InteractiveChart:
         if self._output_widget is not None:
             try:
                 import ipywidgets as _ipy
+
                 box = _ipy.VBox([self._widget, self._output_widget])
                 return box._repr_mimebundle_(**kwargs)
             except ImportError:
@@ -247,5 +251,3 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
         w, h = viewport
         return _json.dumps({"panels": [], "width": w, "height": h}), b""
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
-
-

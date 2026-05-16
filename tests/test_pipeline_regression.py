@@ -40,6 +40,7 @@ import ferrum as fm
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
+
 def _simple_df() -> pl.DataFrame:
     return pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0], "g": ["a", "b", "c"]})
 
@@ -54,16 +55,19 @@ def _bar_df() -> pl.DataFrame:
 
 
 def _color_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "g": ["a", "b", "c", "a", "b", "c"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "g": ["a", "b", "c", "a", "b", "c"],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # B4: Scale.zero
 # ---------------------------------------------------------------------------
+
 
 class TestScaleZero:
     def test_bar_chart_scale_zero_forces_y_axis_to_start_at_zero(self):
@@ -94,6 +98,7 @@ class TestScaleZero:
 # ---------------------------------------------------------------------------
 # D1-D6: TitleSpec overrides
 # ---------------------------------------------------------------------------
+
 
 class TestTitleSpec:
     def test_title_anchor_middle_emits_text_anchor_middle(self):
@@ -157,10 +162,12 @@ class TestTitleSpec:
 # D7: EncodingSpec.axis — accepted + warns (not yet rendered)
 # ---------------------------------------------------------------------------
 
+
 class TestEncodingAxis:
     def test_axis_labels_false_accepted_and_honored(self):
         """axis= kwarg is accepted and honored — no UserWarning emitted."""
         from ferrum._warn import reset_warnings
+
         reset_warnings()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -182,6 +189,7 @@ class TestEncodingAxis:
 # D8: EncodingSpec.sort — accepted + warns (not yet rendered)
 # ---------------------------------------------------------------------------
 
+
 class TestEncodingSort:
     def test_sort_descending_accepted_without_crash(self):
         """sort kwarg is honored on X/Y — no warning emitted."""
@@ -198,10 +206,12 @@ class TestEncodingSort:
 # D12: EncodingSpec.format — accepted + warns (not yet rendered)
 # ---------------------------------------------------------------------------
 
+
 class TestEncodingFormat:
     def test_format_string_accepted_and_honored(self):
         """format= kwarg is accepted and honored — no UserWarning emitted."""
         from ferrum._warn import reset_warnings
+
         reset_warnings()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -223,17 +233,13 @@ class TestEncodingFormat:
 # D13: legend=False suppresses legend
 # ---------------------------------------------------------------------------
 
+
 class TestLegendDisabled:
     def test_color_legend_false_suppresses_legend(self):
         """Passing legend=False to Color should suppress the legend in the SVG."""
         df = _color_df()
         # With legend
-        svg_with = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x", y="y", color=fm.Color("g"))
-            .show_svg()
-        )
+        svg_with = fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("g")).show_svg()
         # Without legend
         svg_without = (
             fm.Chart(df)
@@ -263,6 +269,7 @@ class TestLegendDisabled:
 # D14: font_weight on body text
 # ---------------------------------------------------------------------------
 
+
 class TestFontWeightBodyText:
     def test_theme_font_weight_bold_appears_in_svg(self):
         """Theme font_weight='bold' should propagate to axis text elements."""
@@ -283,6 +290,7 @@ class TestFontWeightBodyText:
 # D15: diverging_scheme auto-detection
 # ---------------------------------------------------------------------------
 
+
 class TestDivergingScheme:
     def test_arctic_signal_theme_has_blue_to_violet_diverging_scheme(self):
         """arctic_signal built-in theme should use blue_to_violet as diverging scheme."""
@@ -290,11 +298,13 @@ class TestDivergingScheme:
 
     def test_heatmap_with_diverging_data_renders_with_arctic_signal(self):
         """Heatmap with data spanning negative to positive renders with arctic_signal."""
-        df = pl.DataFrame({
-            "row": ["A", "A", "B", "B"],
-            "col": ["X", "Y", "X", "Y"],
-            "val": [-1.0, 0.5, 0.5, -0.5],
-        })
+        df = pl.DataFrame(
+            {
+                "row": ["A", "A", "B", "B"],
+                "col": ["X", "Y", "X", "Y"],
+                "val": [-1.0, 0.5, 0.5, -0.5],
+            }
+        )
         svg = (
             fm.Chart(df)
             .mark_rect()
@@ -320,6 +330,7 @@ class TestDivergingScheme:
 # ---------------------------------------------------------------------------
 # D16-D17: reference_line_color
 # ---------------------------------------------------------------------------
+
 
 class TestReferenceLineColor:
     def test_reference_line_color_theme_key_appears_in_rule_stroke(self):
@@ -353,36 +364,33 @@ class TestReferenceLineColor:
 # D18: baseline on text mark
 # ---------------------------------------------------------------------------
 
+
 class TestBaselineOnText:
     def test_mark_text_baseline_top_emits_dominant_baseline(self):
         """mark_text(baseline='top') should emit dominant-baseline in the SVG."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0],
-            "y": [10.0, 20.0, 30.0],
-            "label": ["A", "B", "C"],
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_text(baseline="top")
-            .encode(x="x", y="y", text="label")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0],
+                "y": [10.0, 20.0, 30.0],
+                "label": ["A", "B", "C"],
+            }
         )
+        svg = fm.Chart(df).mark_text(baseline="top").encode(x="x", y="y", text="label").show_svg()
         assert "<svg" in svg
         assert "dominant-baseline" in svg, (
             "Expected 'dominant-baseline' attribute when baseline='top' is set"
         )
 
     def test_mark_text_baseline_middle_emits_dominant_baseline(self):
-        df = pl.DataFrame({
-            "x": [1.0, 2.0],
-            "y": [5.0, 10.0],
-            "label": ["X", "Y"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0],
+                "y": [5.0, 10.0],
+                "label": ["X", "Y"],
+            }
+        )
         svg = (
-            fm.Chart(df)
-            .mark_text(baseline="middle")
-            .encode(x="x", y="y", text="label")
-            .show_svg()
+            fm.Chart(df).mark_text(baseline="middle").encode(x="x", y="y", text="label").show_svg()
         )
         assert "dominant-baseline" in svg
 
@@ -391,18 +399,18 @@ class TestBaselineOnText:
 # B2-B3: Layer serialization — legend forwarding to layers (boxplot)
 # ---------------------------------------------------------------------------
 
+
 class TestLayerSerialization:
     def test_boxplot_with_legend_false_suppresses_legend(self):
         """color legend=False should be forwarded to boxplot layers."""
-        df = pl.DataFrame({
-            "g": ["a", "a", "a", "b", "b", "b"],
-            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        })
+        df = pl.DataFrame(
+            {
+                "g": ["a", "a", "a", "b", "b", "b"],
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            }
+        )
         svg_with_legend = (
-            fm.Chart(df)
-            .mark_boxplot()
-            .encode(x="g", y="y", color=fm.Color("g"))
-            .show_svg()
+            fm.Chart(df).mark_boxplot().encode(x="g", y="y", color=fm.Color("g")).show_svg()
         )
         svg_without_legend = (
             fm.Chart(df)
@@ -417,16 +425,13 @@ class TestLayerSerialization:
 
     def test_boxplot_renders_as_layered_chart(self):
         """mark_boxplot desugars into a layered chart (multiple SVG elements)."""
-        df = pl.DataFrame({
-            "g": ["a", "a", "b", "b"],
-            "y": [1.0, 3.0, 2.0, 4.0],
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_boxplot()
-            .encode(x="g", y="y")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "g": ["a", "a", "b", "b"],
+                "y": [1.0, 3.0, 2.0, 4.0],
+            }
         )
+        svg = fm.Chart(df).mark_boxplot().encode(x="g", y="y").show_svg()
         assert "<svg" in svg
         # Boxplot emits at least a rect and a rule, so multiple elements.
         assert "<rect" in svg or "<line" in svg
@@ -452,16 +457,16 @@ class TestLayerSerialization:
         chart = fm.Chart(df)
 
         def desugar_typed_layer(x_field, y_field, **_kw):
-            return MarkDesugarResult(layers=[
-                _Layer(
-                    mark="line",
-                    encoding={"x": x_field, "y": Y(y_field, type="quantitative")},
-                )
-            ])
+            return MarkDesugarResult(
+                layers=[
+                    _Layer(
+                        mark="line",
+                        encoding={"x": x_field, "y": Y(y_field, type="quantitative")},
+                    )
+                ]
+            )
 
-        chart._pending_stat_mark = _PendingMark(
-            "__typed_test__", {}, desugar_typed_layer
-        )
+        chart._pending_stat_mark = _PendingMark("__typed_test__", {}, desugar_typed_layer)
         resolved = chart.encode(x="x", y="y")._resolve_pending()
         layers_list = resolved._build_layers_list()
 
@@ -469,14 +474,14 @@ class TestLayerSerialization:
         y_enc = layers_list[0]["encoding"].get("y")
         assert y_enc is not None, "Expected 'y' key in first layer encoding dict"
         assert y_enc.get("type") == "quantitative", (
-            f"Expected encoding type 'quantitative' in layer JSON dict, "
-            f"got: {y_enc!r}"
+            f"Expected encoding type 'quantitative' in layer JSON dict, got: {y_enc!r}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Encoding title inheritance (roc_chart)
 # ---------------------------------------------------------------------------
+
 
 class TestEncodingTitleInheritance:
     def test_roc_chart_axis_labels_not_raw_field_names(self):
@@ -504,6 +509,7 @@ class TestEncodingTitleInheritance:
 # X1-X6: Desugar ValueError guards
 # ---------------------------------------------------------------------------
 
+
 class TestDesugarsRaiseValueError:
     def test_density_epanechnikov_kernel_raises_value_error(self):
         """mark_density(kernel='epanechnikov') should raise ValueError."""
@@ -522,79 +528,50 @@ class TestDesugarsRaiseValueError:
 # S1-S11: Mark kwargs
 # ---------------------------------------------------------------------------
 
+
 class TestMarkKwargs:
     def test_interpolate_step_emits_step_path(self):
         """mark_line(interpolate='step') should produce H or V commands in the path."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_line(interpolate="step")
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_line(interpolate="step").encode(x="x", y="y").show_svg()
         assert "<svg" in svg
         # Step interpolation produces horizontal (H) and vertical (V) path segments.
-        assert "H" in svg or "V" in svg, (
-            "Expected H or V path commands for step interpolation"
-        )
+        assert "H" in svg or "V" in svg, "Expected H or V path commands for step interpolation"
 
     def test_stroke_cap_round_emits_stroke_linecap(self):
         """mark_line(stroke_cap='round') should emit stroke-linecap='round'."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_line(stroke_cap="round")
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_line(stroke_cap="round").encode(x="x", y="y").show_svg()
         assert 'stroke-linecap="round"' in svg
 
     def test_stroke_join_bevel_emits_stroke_linejoin(self):
         """mark_line(stroke_join='bevel') should emit stroke-linejoin='bevel'."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_line(stroke_join="bevel")
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_line(stroke_join="bevel").encode(x="x", y="y").show_svg()
         assert 'stroke-linejoin="bevel"' in svg
 
     def test_filled_false_emits_fill_none_on_circles(self):
         """mark_point(filled=False) should emit fill='none' on circles."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_point(filled=False)
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y").show_svg()
         assert 'fill="none"' in svg
 
     def test_shape_square_emits_rect_elements(self):
         """mark_point(shape='square') should use <rect> instead of <circle>."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_point(shape="square")
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_point(shape="square").encode(x="x", y="y").show_svg()
         assert "<rect" in svg, "Expected <rect> elements for square shape"
 
     def test_limit_on_text_truncates_long_labels(self):
         """mark_text(limit=5) should truncate long text and add ellipsis."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0],
-            "y": [5.0, 10.0],
-            "label": ["Hello World", "Short"],
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_text(limit=5)
-            .encode(x="x", y="y", text="label")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0],
+                "y": [5.0, 10.0],
+                "label": ["Hello World", "Short"],
+            }
         )
+        svg = fm.Chart(df).mark_text(limit=5).encode(x="x", y="y", text="label").show_svg()
         assert "<svg" in svg
         # Truncated text should include an ellipsis character.
         assert "…" in svg, "Expected ellipsis '…' in SVG when limit is exceeded"
@@ -602,23 +579,13 @@ class TestMarkKwargs:
     def test_band_size_on_tick_renders(self):
         """mark_tick(band_size=0.5) should render without error."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-        svg = (
-            fm.Chart(df)
-            .mark_tick(band_size=0.5)
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_tick(band_size=0.5).encode(x="x", y="y").show_svg()
         assert "<svg" in svg
 
     def test_area_with_line_true_has_multiple_paths(self):
         """mark_area(line=True) should produce at least two <path> elements."""
         df = _numeric_df()
-        svg = (
-            fm.Chart(df)
-            .mark_area(line=True)
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_area(line=True).encode(x="x", y="y").show_svg()
         assert "<svg" in svg
         path_count = svg.count("<path ")
         assert path_count >= 2, (
@@ -635,12 +602,7 @@ class TestMarkKwargs:
         """mark_bar(orient='horizontal') should produce a valid SVG."""
         # Use two numeric columns — the coord flip swaps axes in the renderer.
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        svg = (
-            fm.Chart(df)
-            .mark_bar(orient="horizontal")
-            .encode(x="x", y="y")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_bar(orient="horizontal").encode(x="x", y="y").show_svg()
         assert "<svg" in svg
         assert "<rect" in svg
 
@@ -649,32 +611,25 @@ class TestMarkKwargs:
 # W1-W18: Encoding channels
 # ---------------------------------------------------------------------------
 
+
 class TestEncodingChannels:
     def test_tooltip_channel_accepted_and_emits_title_elements(self):
         """encode(tooltip=Tooltip('g')) should produce <title> elements in SVG."""
         df = _simple_df()
-        svg = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x", y="y", tooltip=fm.Tooltip("g"))
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", tooltip=fm.Tooltip("g")).show_svg()
         assert "<svg" in svg
         assert "<title>" in svg, "Expected <title> elements for tooltip encoding"
 
     def test_href_channel_accepted_and_emits_anchor_elements(self):
         """encode(href=Href('url')) should produce <a> elements in SVG."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0],
-            "y": [10.0, 20.0, 30.0],
-            "url": ["http://a.com", "http://b.com", "http://c.com"],
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x", y="y", href=fm.Href("url"))
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0],
+                "y": [10.0, 20.0, 30.0],
+                "url": ["http://a.com", "http://b.com", "http://c.com"],
+            }
         )
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", href=fm.Href("url")).show_svg()
         assert "<svg" in svg
         assert "<a" in svg, "Expected <a> elements for href encoding"
 
@@ -686,6 +641,7 @@ class TestEncodingChannels:
         no warning, not a <desc> assertion.
         """
         from ferrum._warn import reset_warnings
+
         reset_warnings()
         df = _simple_df()
         with warnings.catch_warnings(record=True) as caught:
@@ -698,63 +654,50 @@ class TestEncodingChannels:
             )
         assert "<svg" in svg
         user_warnings = [
-            w for w in caught
-            if issubclass(w.category, UserWarning)
-            and "description" in str(w.message).lower()
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning) and "description" in str(w.message).lower()
         ]
-        assert not user_warnings, (
-            f"Unexpected UserWarning for Description channel: {user_warnings}"
-        )
+        assert not user_warnings, f"Unexpected UserWarning for Description channel: {user_warnings}"
 
     def test_fill_channel_aliased_to_color_no_user_warning(self):
         """encode(fill=Fill('g')) should alias to color encoding without UserWarning."""
         from ferrum._warn import reset_warnings
+
         reset_warnings()
         df = _simple_df()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            svg = (
-                fm.Chart(df)
-                .mark_point()
-                .encode(x="x", y="y", fill=fm.Fill("g"))
-                .show_svg()
-            )
+            svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill=fm.Fill("g")).show_svg()
         assert "<svg" in svg
         fill_warnings = [
-            w for w in caught
-            if issubclass(w.category, UserWarning)
-            and "fill" in str(w.message).lower()
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning) and "fill" in str(w.message).lower()
         ]
-        assert not fill_warnings, (
-            f"Unexpected UserWarning for Fill channel: {fill_warnings}"
-        )
+        assert not fill_warnings, f"Unexpected UserWarning for Fill channel: {fill_warnings}"
 
     def test_detail_channel_accepted_without_user_warning(self):
         """encode(detail=Detail('g')) is accepted without UserWarning."""
         from ferrum._warn import reset_warnings
+
         reset_warnings()
         df = _simple_df()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            svg = (
-                fm.Chart(df)
-                .mark_line()
-                .encode(x="x", y="y", detail=fm.Detail("g"))
-                .show_svg()
-            )
+            svg = fm.Chart(df).mark_line().encode(x="x", y="y", detail=fm.Detail("g")).show_svg()
         assert "<svg" in svg
         detail_warnings = [
-            w for w in caught
-            if issubclass(w.category, UserWarning)
-            and "detail" in str(w.message).lower()
+            w
+            for w in caught
+            if issubclass(w.category, UserWarning) and "detail" in str(w.message).lower()
         ]
-        assert not detail_warnings, (
-            f"Unexpected UserWarning for Detail channel: {detail_warnings}"
-        )
+        assert not detail_warnings, f"Unexpected UserWarning for Detail channel: {detail_warnings}"
 
     def test_theta_channel_with_coord_polar_remaps_to_x(self):
         """Phase 11d: theta remaps to x when CoordPolar(theta='x') is set."""
         import json
+
         df = _numeric_df()
         spec = (
             fm.Chart(df)
@@ -771,6 +714,7 @@ class TestEncodingChannels:
     def test_radius_channel_with_coord_polar_remaps_to_y(self):
         """Phase 11d: radius remaps to y when CoordPolar(theta='x') is set."""
         import json
+
         df = _numeric_df()
         spec = (
             fm.Chart(df)
@@ -796,10 +740,12 @@ import json as _json
 def _bivariate_df(n: int = 50, seed: int = 42) -> pl.DataFrame:
     """Small bivariate normal DataFrame for contour / raster tests."""
     rng = __import__("numpy").random.default_rng(seed)
-    return pl.DataFrame({
-        "x": rng.normal(0.0, 1.0, n).tolist(),
-        "y": rng.normal(0.0, 1.0, n).tolist(),
-    })
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0.0, 1.0, n).tolist(),
+            "y": rng.normal(0.0, 1.0, n).tolist(),
+        }
+    )
 
 
 def _group_df(n_per_group: int = 15, seed: int = 42) -> pl.DataFrame:
@@ -890,9 +836,7 @@ class TestRound2Fixes:
         """mark_raster(cmap='plasma') produces SVG different from default cmap."""
         df = _bivariate_df()
         svg_default = fm.Chart(df).mark_raster().encode(x="x", y="y").show_svg()
-        svg_plasma = (
-            fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y").show_svg()
-        )
+        svg_plasma = fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y").show_svg()
         assert "<image" in svg_plasma, "Expected <image> element in plasma raster SVG"
         assert svg_default != svg_plasma, (
             "cmap='plasma' should produce different raster output than default"
@@ -907,12 +851,7 @@ class TestRound2Fixes:
         categorical grouping column maps to y.
         """
         df = _group_df()
-        svg = (
-            fm.Chart(df)
-            .mark_swarm(orient="horizontal")
-            .encode(x="val", y="group")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_swarm(orient="horizontal").encode(x="val", y="group").show_svg()
         assert "<svg" in svg, "Expected valid SVG for horizontal swarm"
 
     # --- Errorbar cap width (V3) -----------------------------------------
@@ -924,12 +863,7 @@ class TestRound2Fixes:
         guard is that the chart renders at all after the V3 band_size fix.
         """
         df = _group_df()
-        svg = (
-            fm.Chart(df)
-            .mark_errorbar(extent="ci")
-            .encode(x="group", y="val")
-            .show_svg()
-        )
+        svg = fm.Chart(df).mark_errorbar(extent="ci").encode(x="group", y="val").show_svg()
         assert "<svg" in svg, "Expected valid SVG for errorbar chart"
 
     # --- Histogram axis label (V4-V5) ------------------------------------
@@ -938,12 +872,8 @@ class TestRound2Fixes:
         """mark_histogram().encode(x='my_variable') must show 'my_variable' in
         the SVG, not the internal bin column name 'bin_start'."""
         df = pl.DataFrame({"my_variable": [float(i) for i in range(1, 21)]})
-        svg = (
-            fm.Chart(df).mark_histogram().encode(x="my_variable").show_svg()
-        )
-        assert "my_variable" in svg, (
-            "Expected original field name 'my_variable' in histogram SVG"
-        )
+        svg = fm.Chart(df).mark_histogram().encode(x="my_variable").show_svg()
+        assert "my_variable" in svg, "Expected original field name 'my_variable' in histogram SVG"
         assert "bin_start" not in svg, (
             "Internal column name 'bin_start' must not appear in histogram SVG"
         )
@@ -953,10 +883,12 @@ class TestRound2Fixes:
     def test_catplot_box_axis_does_not_expose_lower_whisker(self):
         """catplot(kind='box') SVG must not contain the raw column name
         'lower_whisker' — the y-axis should show the original variable name."""
-        df = pl.DataFrame({
-            "group": ["a"] * 10 + ["b"] * 10,
-            "value": [float(i) for i in range(20)],
-        })
+        df = pl.DataFrame(
+            {
+                "group": ["a"] * 10 + ["b"] * 10,
+                "value": [float(i) for i in range(20)],
+            }
+        )
         svg = fm.catplot(df, x="group", y="value", kind="box").show_svg()
         assert "<svg" in svg, "Expected valid SVG for catplot box"
         assert "lower_whisker" not in svg, (
@@ -976,9 +908,7 @@ class TestRound2Fixes:
         from sklearn.ensemble import RandomForestClassifier
         import pandas as pd
 
-        X, y = make_classification(
-            n_samples=30, n_features=5, n_informative=3, random_state=42
-        )
+        X, y = make_classification(n_samples=30, n_features=5, n_informative=3, random_state=42)
         feature_names = ["feat_a", "feat_b", "feat_c", "feat_d", "feat_e"]
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=5, random_state=42).fit(X_df, y)
@@ -1009,17 +939,13 @@ class TestRound2Fixes:
         from sklearn.datasets import make_classification
         from sklearn.ensemble import RandomForestClassifier
 
-        X, y = make_classification(
-            n_samples=50, n_features=5, n_informative=3, random_state=42
-        )
+        X, y = make_classification(n_samples=50, n_features=5, n_informative=3, random_state=42)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X, y)
 
         svg_arctic = fm.confusion_matrix_chart(
             model, X, y, theme=fm.themes.arctic_signal
         ).show_svg()
-        svg_paper = fm.confusion_matrix_chart(
-            model, X, y, theme=fm.themes.paper_ink
-        ).show_svg()
+        svg_paper = fm.confusion_matrix_chart(model, X, y, theme=fm.themes.paper_ink).show_svg()
         assert "<svg" in svg_arctic
         assert svg_arctic != svg_paper, (
             "arctic_signal and paper_ink themes must produce different confusion matrix SVGs"
@@ -1034,12 +960,18 @@ class TestRound2Fixes:
         from sklearn.ensemble import RandomForestClassifier
         import pandas as pd
 
-        X, y = make_classification(
-            n_samples=50, n_features=10, n_informative=5, random_state=42
-        )
+        X, y = make_classification(n_samples=50, n_features=10, n_informative=5, random_state=42)
         feature_names = [
-            "feat_a", "feat_b", "feat_c", "feat_d", "feat_e",
-            "feat_f", "feat_g", "feat_h", "feat_i", "feat_j",
+            "feat_a",
+            "feat_b",
+            "feat_c",
+            "feat_d",
+            "feat_e",
+            "feat_f",
+            "feat_g",
+            "feat_h",
+            "feat_i",
+            "feat_j",
         ]
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X_df, y)
@@ -1060,12 +992,18 @@ class TestRound2Fixes:
         from sklearn.ensemble import RandomForestClassifier
         import pandas as pd
 
-        X, y = make_classification(
-            n_samples=50, n_features=10, n_informative=5, random_state=42
-        )
+        X, y = make_classification(n_samples=50, n_features=10, n_informative=5, random_state=42)
         feature_names = [
-            "feat_a", "feat_b", "feat_c", "feat_d", "feat_e",
-            "feat_f", "feat_g", "feat_h", "feat_i", "feat_j",
+            "feat_a",
+            "feat_b",
+            "feat_c",
+            "feat_d",
+            "feat_e",
+            "feat_f",
+            "feat_g",
+            "feat_h",
+            "feat_i",
+            "feat_j",
         ]
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X_df, y)
@@ -1087,19 +1025,14 @@ class TestRound2Fixes:
         from sklearn.ensemble import RandomForestClassifier
         import re
 
-        X, y = make_classification(
-            n_samples=50, n_features=5, n_informative=3, random_state=42
-        )
+        X, y = make_classification(n_samples=50, n_features=5, n_informative=3, random_state=42)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X, y)
 
         svg = fm.confusion_matrix_chart(model, X, y).show_svg()
         text_matches = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
         # Proportions are formatted as decimals (e.g. "1.00", "0.00"); find at
         # least one cell value that is neither a pure integer nor a colorbar tick.
-        decimal_cell_values = [
-            t for t in text_matches
-            if "." in t and any(c.isdigit() for c in t)
-        ]
+        decimal_cell_values = [t for t in text_matches if "." in t and any(c.isdigit() for c in t)]
         assert decimal_cell_values, (
             "Expected decimal cell values in default (normalize='true') confusion matrix SVG; "
             f"all text elements: {text_matches}"
@@ -1134,16 +1067,13 @@ class TestRound3Fixes:
 
     def test_tick_ordinal_y_renders_without_error(self):
         """mark_tick() with ordinal y + quantitative x renders a valid SVG."""
-        df = pl.DataFrame({
-            "cat": ["a", "b", "c", "a", "b", "c", "a", "b", "c", "a"],
-            "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8],
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_tick()
-            .encode(x="val", y="cat")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "cat": ["a", "b", "c", "a", "b", "c", "a", "b", "c", "a"],
+                "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8],
+            }
         )
+        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
         assert "<svg" in svg, "Expected valid SVG for tick strip plot"
         # Tick marks render as <line> elements.
         assert "<line" in svg, "Expected <line> elements in tick strip plot SVG"
@@ -1176,17 +1106,13 @@ class TestRound3Fixes:
         <circle> elements and the smooth <polyline> must be present.
         """
         rng = __import__("numpy").random.default_rng(42)
-        df = pl.DataFrame({
-            "x": rng.uniform(0.0, 10.0, 30).tolist(),
-            "y": (rng.uniform(0.0, 10.0, 30) + rng.normal(0.0, 1.0, 30)).tolist(),
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_point()
-            .mark_smooth()
-            .encode(x="x", y="y")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "x": rng.uniform(0.0, 10.0, 30).tolist(),
+                "y": (rng.uniform(0.0, 10.0, 30) + rng.normal(0.0, 1.0, 30)).tolist(),
+            }
         )
+        svg = fm.Chart(df).mark_point().mark_smooth().encode(x="x", y="y").show_svg()
         assert "<circle" in svg, "Expected <circle> elements (scatter layer) in scatter+smooth SVG"
         has_line = "<path" in svg or "<polyline" in svg
         assert has_line, (
@@ -1198,19 +1124,14 @@ class TestRound3Fixes:
     def test_violin_y_axis_shows_field_name_not_violin_y(self):
         """mark_violin() y-axis must show the user's field name, not 'violin_y'."""
         rng = __import__("numpy").random.default_rng(42)
-        df = pl.DataFrame({
-            "cat": ["a"] * 15 + ["b"] * 15,
-            "measurement": rng.normal(0.0, 1.0, 30).tolist(),
-        })
-        svg = (
-            fm.Chart(df)
-            .mark_violin()
-            .encode(x="cat", y="measurement")
-            .show_svg()
+        df = pl.DataFrame(
+            {
+                "cat": ["a"] * 15 + ["b"] * 15,
+                "measurement": rng.normal(0.0, 1.0, 30).tolist(),
+            }
         )
-        assert "measurement" in svg, (
-            "Expected user field name 'measurement' in violin SVG y-axis"
-        )
+        svg = fm.Chart(df).mark_violin().encode(x="cat", y="measurement").show_svg()
+        assert "measurement" in svg, "Expected user field name 'measurement' in violin SVG y-axis"
         assert "violin_y" not in svg, (
             "Internal column name 'violin_y' must not appear in violin SVG"
         )
@@ -1262,9 +1183,7 @@ class TestRound3Fixes:
         from sklearn.datasets import make_classification
         from sklearn.ensemble import RandomForestClassifier
 
-        X, y = make_classification(
-            n_samples=30, n_features=5, n_informative=3, random_state=42
-        )
+        X, y = make_classification(n_samples=30, n_features=5, n_informative=3, random_state=42)
         feature_names = ["feat_a", "feat_b", "feat_c", "feat_d", "feat_e"]
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=5, random_state=42).fit(X_df, y)
@@ -1278,8 +1197,7 @@ class TestRound3Fixes:
             if isinstance(layer.get("encoding", {}).get("x"), dict)
         ]
         assert "Mean |SHAP value|" in x_titles, (
-            f"Expected x encoding title 'Mean |SHAP value|' in shap_bar_chart spec; "
-            f"got: {x_titles}"
+            f"Expected x encoding title 'Mean |SHAP value|' in shap_bar_chart spec; got: {x_titles}"
         )
 
     # --- M8: QQ plot axis titles are human-readable -------------------------
@@ -1295,9 +1213,7 @@ class TestRound3Fixes:
         assert "Theoretical Quantiles" in svg, (
             "Expected 'Theoretical Quantiles' axis label in QQ plot SVG"
         )
-        assert "Sample Quantiles" in svg, (
-            "Expected 'Sample Quantiles' axis label in QQ plot SVG"
-        )
+        assert "Sample Quantiles" in svg, "Expected 'Sample Quantiles' axis label in QQ plot SVG"
 
 
 class TestTickRug:
@@ -1311,14 +1227,19 @@ class TestTickRug:
     def _rug_lines(self, svg: str):
         """Extract (x1, y1, x2, y2) tuples from all SVG <line> elements."""
         import re
+
         lines = []
-        for m in re.finditer(r'<line([^/]+)/>', svg):
+        for m in re.finditer(r"<line([^/]+)/>", svg):
             attrs = dict(re.findall(r'(\w+)="([^"]+)"', m.group(1)))
             try:
-                lines.append((
-                    float(attrs["x1"]), float(attrs["y1"]),
-                    float(attrs["x2"]), float(attrs["y2"]),
-                ))
+                lines.append(
+                    (
+                        float(attrs["x1"]),
+                        float(attrs["y1"]),
+                        float(attrs["x2"]),
+                        float(attrs["y2"]),
+                    )
+                )
             except (KeyError, ValueError):
                 pass
         return lines
@@ -1369,10 +1290,12 @@ class TestTickRug:
 
     def test_both_axes_encoded_still_works(self):
         """mark_tick().encode(x=..., y=...) (strip plot) must still work after the fix."""
-        df = pl.DataFrame({
-            "cat": ["a", "b", "a", "b", "a"],
-            "val": [1.0, 2.0, 1.5, 2.5, 1.2],
-        })
+        df = pl.DataFrame(
+            {
+                "cat": ["a", "b", "a", "b", "a"],
+                "val": [1.0, 2.0, 1.5, 2.5, 1.2],
+            }
+        )
         svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
         assert "<svg" in svg
         assert "<line" in svg

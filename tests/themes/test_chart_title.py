@@ -1,4 +1,5 @@
 """Chart-level title rendering (Themes-T2.5a)."""
+
 import polars as pl
 
 import ferrum as fm
@@ -13,9 +14,7 @@ def test_title_renders_as_text_element() -> None:
 
 def test_no_title_renders_no_extra_text() -> None:
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    svg_with = (
-        fm.Chart(df).mark_point().encode(x="x", y="y").properties(title="X").show_svg()
-    )
+    svg_with = fm.Chart(df).mark_point().encode(x="x", y="y").properties(title="X").show_svg()
     svg_no = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
     # Title-bearing SVG has more <text> elements.
     assert svg_with.count("<text") > svg_no.count("<text")

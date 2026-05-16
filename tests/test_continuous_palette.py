@@ -1,4 +1,5 @@
 """Phase 8b Task 37: continuous_palette() lookup + Gradient factory."""
+
 from __future__ import annotations
 
 import pytest

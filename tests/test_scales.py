@@ -9,12 +9,18 @@ import math
 import pytest
 
 from ferrum import (
-    LinearScale, LogScale, TimeScale, SymlogScale,
-    OrdinalScale, QuantileScale, ThresholdScale,
+    LinearScale,
+    LogScale,
+    TimeScale,
+    SymlogScale,
+    OrdinalScale,
+    QuantileScale,
+    ThresholdScale,
 )
 
 
 # ---------- construction smoke ----------
+
 
 def test_linear_construct_and_basic_scale():
     s = LinearScale(domain=[0.0, 10.0], range=[0.0, 1.0])
@@ -75,6 +81,7 @@ def test_quantile_basic():
 
 # ---------- inversion round trips ----------
 
+
 def test_continuous_inversion_round_trip():
     for cls, kwargs in [
         (LinearScale, dict(domain=[0.0, 100.0], range=[-1.0, 1.0])),
@@ -83,13 +90,20 @@ def test_continuous_inversion_round_trip():
         (SymlogScale, dict(domain=[-100.0, 100.0], range=[0.0, 1.0])),
     ]:
         s = cls(**kwargs)
-        for x in [kwargs["domain"][0], (kwargs["domain"][0] + kwargs["domain"][1]) / 2, kwargs["domain"][1]]:
+        for x in [
+            kwargs["domain"][0],
+            (kwargs["domain"][0] + kwargs["domain"][1]) / 2,
+            kwargs["domain"][1],
+        ]:
             y = s.scale(x)
             back = s.invert(y)
-            assert math.isclose(back, x, rel_tol=1e-6, abs_tol=1e-6), f"{cls.__name__}: x={x} -> y={y} -> back={back}"
+            assert math.isclose(back, x, rel_tol=1e-6, abs_tol=1e-6), (
+                f"{cls.__name__}: x={x} -> y={y} -> back={back}"
+            )
 
 
 # ---------- nan propagation ----------
+
 
 def test_scale_nan_propagates():
     s = LinearScale(domain=[0.0, 10.0], range=[0.0, 1.0])
@@ -110,6 +124,7 @@ def test_scale_clamp_clamps_output():
 
 
 # ---------- constructor errors ----------
+
 
 def test_linear_rejects_wrong_domain_length():
     with pytest.raises(ValueError, match="domain must have length 2"):
@@ -173,6 +188,7 @@ def test_quantile_rejects_short_domain():
 
 # ---------- ticks ----------
 
+
 def test_linear_ticks_default_count():
     s = LinearScale(domain=[0.0, 10.0], range=[0.0, 1.0])
     t = s.ticks()
@@ -194,6 +210,7 @@ def test_threshold_ticks_returns_thresholds():
 
 
 # ---------- nice ----------
+
 
 def test_linear_nice_extends_domain():
     s = LinearScale(domain=[0.13, 9.7], range=[0.0, 1.0]).nice()

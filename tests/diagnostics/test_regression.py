@@ -1,4 +1,5 @@
 """Phase 10a regression-domain mark + builder + visualizer tests."""
+
 from __future__ import annotations
 
 import ferrum
@@ -83,6 +84,7 @@ def test_chart_mark_prediction_error_sorts_by_y_true():
 
 def test_residuals_chart_from_source_builder():
     from ferrum.plots.regression import _residuals_chart_from_source
+
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source)
     svg = chart.show_svg()
@@ -91,6 +93,7 @@ def test_residuals_chart_from_source_builder():
 
 def test_residuals_chart_from_source_raw_kind():
     from ferrum.plots.regression import _residuals_chart_from_source
+
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source, kind="raw")
     svg = chart.show_svg()
@@ -99,6 +102,7 @@ def test_residuals_chart_from_source_raw_kind():
 
 def test_prediction_error_chart_from_source_builder():
     from ferrum.plots.regression import _prediction_error_chart_from_source
+
     source, _ = _ridge_source()
     chart = _prediction_error_chart_from_source(source)
     svg = chart.show_svg()
@@ -171,7 +175,8 @@ def test_cooks_distance_visualizer_threshold_overlays_outliers():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
 
     viz = ferrum.CooksDistanceVisualizer(model, threshold="auto").fit(
-        X, df["y"],
+        X,
+        df["y"],
     )
     svg = viz.show().show_svg()
     assert "<svg" in svg
@@ -188,7 +193,8 @@ def test_cooks_distance_visualizer_explicit_threshold():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
 
     viz = ferrum.CooksDistanceVisualizer(model, threshold=0.01).fit(
-        X, df["y"],
+        X,
+        df["y"],
     )
     svg = viz.show().show_svg()
     assert "<svg" in svg
@@ -196,6 +202,7 @@ def test_cooks_distance_visualizer_explicit_threshold():
 
 def test_visualizer_show_before_fit_errors():
     import pytest
+
     viz = ferrum.ResidualsVisualizer(model=None)
     with pytest.raises(RuntimeError, match="must be fit"):
         viz.show()
@@ -212,7 +219,8 @@ def test_mark_residuals_cook_threshold_highlights_outliers():
     """
     source, df_full = _ridge_source()
     chart = ferrum.residuals_chart(
-        source, cook_threshold="auto",
+        source,
+        cook_threshold="auto",
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -226,7 +234,8 @@ def test_mark_residuals_cook_threshold_explicit_float():
     so the regression fixture is guaranteed to surface outliers."""
     source, _ = _ridge_source()
     svg = ferrum.residuals_chart(
-        source, cook_threshold=0.001,
+        source,
+        cook_threshold=0.001,
     ).show_svg()
     assert "#e15759" in svg
 
@@ -236,13 +245,18 @@ def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
     Cook's D. NaN > threshold is False so no outliers highlight; chart
     still renders cleanly."""
     from sklearn.ensemble import RandomForestRegressor
+
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     model = RandomForestRegressor(n_estimators=5, random_state=0).fit(
-        X.to_numpy(), df["y"].to_numpy(),
+        X.to_numpy(),
+        df["y"].to_numpy(),
     )
     svg = ferrum.residuals_chart(
-        model, X, df["y"], cook_threshold="auto",
+        model,
+        X,
+        df["y"],
+        cook_threshold="auto",
     ).show_svg()
     assert "<svg" in svg
     # No red outlier overlay since Cook's D is NaN for every row.
@@ -257,7 +271,8 @@ def test_mark_prediction_error_ci_renders_quantile_ribbon():
     """
     source, _ = _ridge_source()
     viz = ferrum.PredictionErrorVisualizer(source._model, ci=0.95).fit(
-        source._X, source._y,
+        source._X,
+        source._y,
     )
     svg = viz.show().show_svg()
     assert "<svg" in svg
@@ -269,7 +284,8 @@ def test_mark_prediction_error_reference_band_renders_rmse_band():
     """reference_band=True (without ci) draws ±1 RMSE around y=x."""
     source, _ = _ridge_source()
     viz = ferrum.PredictionErrorVisualizer(
-        source._model, reference_band=True,
+        source._model,
+        reference_band=True,
     ).fit(source._X, source._y)
     svg = viz.show().show_svg()
     assert "<path " in svg
@@ -278,6 +294,7 @@ def test_mark_prediction_error_reference_band_renders_rmse_band():
 def test_mark_prediction_error_ci_out_of_range_raises():
     """ci must be in (0, 1); 0.0 or 1.5 raises ValueError, not silent."""
     import pytest
+
     source, _ = _ridge_source()
     viz = ferrum.PredictionErrorVisualizer(source._model, ci=1.5)
     with pytest.raises(ValueError, match="0, 1"):
@@ -292,6 +309,7 @@ def test_mark_prediction_error_ci_out_of_range_raises():
 def test_has_score_false_on_base():
     """FerrumVisualizer base class must have has_score = False."""
     from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+
     assert FerrumVisualizer.has_score is False
 
 

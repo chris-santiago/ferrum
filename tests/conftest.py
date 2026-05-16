@@ -1,4 +1,5 @@
 """Test-suite-wide fixtures."""
+
 from __future__ import annotations
 
 import importlib
@@ -29,6 +30,7 @@ def _require_phase_10_extras():
 
     # Verify sklearn version matches the fixture pin.
     import sklearn
+
     pin_file = Path(__file__).parent / "fixtures" / "SKLEARN_VERSION"
     pinned = pin_file.read_text().strip()
     if sklearn.__version__ != pinned:

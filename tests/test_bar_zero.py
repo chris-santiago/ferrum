@@ -1,4 +1,5 @@
 """Bar chart y-axis zero-anchoring default."""
+
 import json
 
 import polars as pl
@@ -24,11 +25,7 @@ def test_bar_default_zero_anchor():
 def test_bar_explicit_domain_no_zero():
     """User-supplied domain suppresses the zero injection."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10, 20, 15]})
-    chart = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y=fm.Y("val", scale={"domain": [5, 25]}))
-    )
+    chart = fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale={"domain": [5, 25]}))
     scale = _enc(chart, "y").get("scale", {})
     assert "zero" not in scale or scale.get("zero") is not True
     assert scale.get("domain") == [5, 25]
@@ -37,11 +34,7 @@ def test_bar_explicit_domain_no_zero():
 def test_bar_explicit_zero_false():
     """User can opt out of zero-anchoring."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10, 20, 15]})
-    chart = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y=fm.Y("val", scale={"zero": False}))
-    )
+    chart = fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale={"zero": False}))
     scale = _enc(chart, "y").get("scale", {})
     assert scale.get("zero") is False
 

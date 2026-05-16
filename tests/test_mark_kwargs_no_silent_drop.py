@@ -20,6 +20,7 @@ remove ``**kwargs`` (preferred) or wire up validation via
 The guarantee applies to every module that contributes desugars:
 ``composite.py``, ``diagnostic.py``, ``heavy_stat.py``, ``statistical.py``.
 """
+
 from __future__ import annotations
 
 import ast
@@ -75,7 +76,8 @@ def _calls_validator(fn: ast.FunctionDef) -> bool:
         target = node.func
         # Direct call: validate_user_mark_kwargs(...) or alias _validate(...).
         if isinstance(target, ast.Name) and target.id in {
-            "validate_user_mark_kwargs", "_validate",
+            "validate_user_mark_kwargs",
+            "_validate",
         }:
             return True
         # Attribute call: _mark_kwargs.validate_user_mark_kwargs(...).
@@ -125,17 +127,11 @@ def test_meta_test_rejects_silent_drop_function():
     test would silently let everything through). Verifying both arms of
     the discriminator on a controlled input keeps the test honest.
     """
-    silent_drop = ast.parse(
-        "def desugar_evil(*, x, **kwargs):\n    return ()\n"
-    ).body[0]
+    silent_drop = ast.parse("def desugar_evil(*, x, **kwargs):\n    return ()\n").body[0]
     explicit_validate = ast.parse(
-        "def desugar_good(*, x, **kwargs):\n"
-        "    _validate('good', kwargs)\n"
-        "    return ()\n"
+        "def desugar_good(*, x, **kwargs):\n    _validate('good', kwargs)\n    return ()\n"
     ).body[0]
-    no_kwargs = ast.parse(
-        "def desugar_clean(*, x):\n    return ()\n"
-    ).body[0]
+    no_kwargs = ast.parse("def desugar_clean(*, x):\n    return ()\n").body[0]
 
     assert _has_var_kwargs(silent_drop) and not _calls_validator(silent_drop)
     assert _has_var_kwargs(explicit_validate) and _calls_validator(explicit_validate)

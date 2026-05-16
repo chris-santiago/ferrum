@@ -1,4 +1,5 @@
 """Phase 10b tests: classification curve marks + figure functions + visualizers."""
+
 from __future__ import annotations
 
 import pytest
@@ -49,7 +50,8 @@ def test_mark_roc_annotate_auc_renders_text_label(binary_source):
     # text layer will render zero labels. The figure-function path is
     # the canonical entry: build via ferrum.roc_chart(annotate_auc=True).
     svg = ferrum.roc_chart(
-        binary_source, annotate_auc=True,
+        binary_source,
+        annotate_auc=True,
     ).show_svg()
     assert "<svg" in svg
     assert "<text" in svg
@@ -86,7 +88,9 @@ def test_mark_pr_annotate_ap_and_iso_lines_compose(binary_source):
     """The two annotation features compose: AP labels + iso curves
     render in the same chart without collision."""
     svg = ferrum.pr_chart(
-        binary_source, annotate_ap=True, iso_lines=True,
+        binary_source,
+        annotate_ap=True,
+        iso_lines=True,
     ).show_svg()
     assert "AP = 0." in svg
     assert "F=0.6" in svg
@@ -130,7 +134,9 @@ def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
     exactly one vertical span there.
     """
     svg = ferrum.discrimination_threshold_chart(
-        binary_source, threshold_line=True, n_thresholds=20,
+        binary_source,
+        threshold_line=True,
+        n_thresholds=20,
     ).show_svg()
     assert "<svg" in svg
     # mark_rule emits an SVG <line> element for the vertical span.
@@ -149,7 +155,9 @@ def test_roc_chart_from_model():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     svg = ferrum.roc_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     ).show_svg()
     assert "<svg" in svg
 
@@ -215,7 +223,8 @@ def test_lift_chart_figure_function(binary_source):
 
 def test_discrimination_threshold_chart_figure_function(binary_source):
     svg = ferrum.discrimination_threshold_chart(
-        binary_source, n_thresholds=20,
+        binary_source,
+        n_thresholds=20,
     ).show_svg()
     assert "<svg" in svg
 
@@ -227,7 +236,8 @@ def test_roc_visualizer():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     viz = ferrum.ROCVisualizer(model).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "auc_mean=" in repr(viz)
     assert 0.0 <= viz._metrics["auc_mean"] <= 1.0
@@ -247,7 +257,8 @@ def test_pr_visualizer():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     viz = ferrum.PRVisualizer(model).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "ap_mean=" in repr(viz)
     assert 0.0 <= viz._metrics["ap_mean"] <= 1.0
@@ -258,7 +269,8 @@ def test_calibration_visualizer():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     viz = ferrum.CalibrationVisualizer(model, n_bins=5).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "calibration_error=" in repr(viz)
     assert viz._metrics["calibration_error"] >= 0.0
@@ -282,7 +294,8 @@ def test_discrimination_threshold_visualizer():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     viz = ferrum.DiscriminationThresholdVisualizer(
-        model, n_thresholds=20,
+        model,
+        n_thresholds=20,
     ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
     assert "best_threshold=" in repr(viz)
     assert 0.0 <= viz._metrics["best_threshold"] <= 1.0
@@ -298,7 +311,9 @@ def test_discrimination_threshold_visualizer_threshold_line():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     viz = ferrum.DiscriminationThresholdVisualizer(
-        model, n_thresholds=20, threshold_line=True,
+        model,
+        n_thresholds=20,
+        threshold_line=True,
     ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
     svg = viz.show().show_svg()
     # mark_rule emits an SVG <line> for the vertical span.
@@ -322,14 +337,10 @@ def test_confusion_matrix_schema(binary_source):
 
 def test_confusion_matrix_normalized(binary_source):
     import polars as pl
+
     cm = binary_source.confusion_matrix(normalize="true")
     assert cm.height == 4
-    row_sums = (
-        cm.group_by("actual")
-        .agg(pl.col("value").sum())
-        .sort("actual")["value"]
-        .to_list()
-    )
+    row_sums = cm.group_by("actual").agg(pl.col("value").sum()).sort("actual")["value"].to_list()
     for s in row_sums:
         assert abs(s - 1.0) < 1e-9
 
@@ -361,7 +372,9 @@ def test_confusion_matrix_chart_binary():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     chart = ferrum.confusion_matrix_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "<svg" in chart.show_svg()
 
@@ -370,7 +383,9 @@ def test_confusion_matrix_chart_multiclass():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     chart = ferrum.confusion_matrix_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
         normalize="true",
     )
     assert "<svg" in chart.show_svg()
@@ -389,7 +404,9 @@ def test_class_prediction_error_chart_multiclass():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     chart = ferrum.class_prediction_error_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "<svg" in chart.show_svg()
 
@@ -398,7 +415,9 @@ def test_class_prediction_error_chart_normalized():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     chart = ferrum.class_prediction_error_chart(
-        model, df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        model,
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
         normalize=True,
     )
     assert "<svg" in chart.show_svg()
@@ -411,7 +430,8 @@ def test_confusion_matrix_visualizer():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     viz = ferrum.ConfusionMatrixVisualizer(model).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "accuracy=" in repr(viz)
     assert 0.0 <= viz._metrics["accuracy"] <= 1.0
@@ -422,7 +442,8 @@ def test_classification_report_visualizer():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     viz = ferrum.ClassificationReportVisualizer(model).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "f1_macro=" in repr(viz)
     assert 0.0 <= viz._metrics["f1_macro"] <= 1.0
@@ -433,7 +454,8 @@ def test_class_prediction_error_visualizer():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     viz = ferrum.ClassPredictionErrorVisualizer(model).fit(
-        df.select(["f0", "f1", "f2", "f3"]), df["y"],
+        df.select(["f0", "f1", "f2", "f3"]),
+        df["y"],
     )
     assert "accuracy=" in repr(viz)
     assert "<svg" in viz.show().show_svg()
@@ -484,6 +506,7 @@ def test_class_balance_chart_accepts_list():
 def test_class_balance_chart_bars_colored_by_class():
     """Regression: bars must use distinct colors per class, not a single fill."""
     import re
+
     chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
     svg = chart.show_svg()
     fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))

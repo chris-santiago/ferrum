@@ -141,8 +141,7 @@ def desugar_density(
         )
     if multiple not in ("layer", "stack", "fill", "dodge"):
         raise ValueError(
-            f"mark_density(multiple={multiple!r}) must be one of "
-            "'layer', 'stack', 'fill', 'dodge'"
+            f"mark_density(multiple={multiple!r}) must be one of 'layer', 'stack', 'fill', 'dodge'"
         )
 
     if orientation not in ("vertical", "horizontal"):
@@ -173,9 +172,11 @@ def desugar_density(
     # multiple="dodge": Rust KDE normalize_mode handles per-group normalization.
     if multiple == "stack":
         from ferrum.position import Stack
+
         position = Stack(offset="zero")
     elif multiple == "fill":
         from ferrum.position import Stack
+
         position = Stack(offset="normalize")
     elif multiple == "dodge":
         # For density plots, "dodge" produces overlapping curves (same as "layer").
@@ -184,7 +185,9 @@ def desugar_density(
     else:
         position = None
 
-    return MarkDesugarResult(mark=mark, transforms=transforms, remap=encoding_remap, position=position)
+    return MarkDesugarResult(
+        mark=mark, transforms=transforms, remap=encoding_remap, position=position
+    )
 
 
 def desugar_histogram(
@@ -283,7 +286,11 @@ def desugar_histogram(
             f"'horizontal'; got {orientation!r}"
         )
     bin_kwargs: dict = dict(
-        bin_count=bin_count, bin_width=bin_width, extent=extent, nice=nice, cumulative=cumulative,
+        bin_count=bin_count,
+        bin_width=bin_width,
+        extent=extent,
+        nice=nice,
+        cumulative=cumulative,
         # shared_extent=True forces a global bin-edge range across all groups so
         # that multiple="stack" / "fill" always produces aligned bars that
         # apply_stack can match on x-key pairs.
@@ -304,16 +311,20 @@ def desugar_histogram(
     position = None
     if multiple == "stack":
         from ferrum.position import Stack
+
         position = Stack(offset="zero")
     elif multiple == "fill":
         from ferrum.position import Stack
+
         position = Stack(offset="normalize")
     elif multiple == "dodge":
         from ferrum.position import Dodge
+
         position = Dodge()
 
-    return MarkDesugarResult(mark="bar", transforms=transforms, remap=encoding_remap,
-                             position=position)
+    return MarkDesugarResult(
+        mark="bar", transforms=transforms, remap=encoding_remap, position=position
+    )
 
 
 def desugar_smooth(
@@ -479,9 +490,16 @@ def desugar_smooth(
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 
-register_layer_names("smooth", frozenset({
-    "ribbon", "line", "metrics",
-}))
+register_layer_names(
+    "smooth",
+    frozenset(
+        {
+            "ribbon",
+            "line",
+            "metrics",
+        }
+    ),
+)
 
 
 # ---- Resolve adapters ---------------------------------------------------

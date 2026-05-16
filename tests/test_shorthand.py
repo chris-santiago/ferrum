@@ -34,11 +34,13 @@ def test_field_name_with_underscores_and_digits():
 
 def test_invalid_type_raises():
     import pytest
+
     with pytest.raises(ValueError, match="unknown type"):
         parse_shorthand("price:Z")
 
 
 def test_unbalanced_parens_raises():
     import pytest
+
     with pytest.raises(ValueError, match="unbalanced"):
         parse_shorthand("mean(price")

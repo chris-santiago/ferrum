@@ -5,21 +5,28 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_RENDERED_HONORED = frozenset([
-    "type", "bin", "aggregate", "scale", "title",
-    # Sort — honored by scale_resolve.rs ordinal domain builder.
-    "sort",
-    # Axis dict — honored by prepare.rs AxisInput construction.
-    "axis",
-    # Stack — honored by position.rs Stack strategy selection.
-    "stack",
-    # Impute dict — honored by prepare.rs apply_impute.
-    "impute",
-    # Format string and type — honored by prepare.rs apply_tick_format.
-    "format", "format_type",
-    # Legend dict — honored by prepare.rs legend_orient_override / title.
-    "legend",
-])
+_RENDERED_HONORED = frozenset(
+    [
+        "type",
+        "bin",
+        "aggregate",
+        "scale",
+        "title",
+        # Sort — honored by scale_resolve.rs ordinal domain builder.
+        "sort",
+        # Axis dict — honored by prepare.rs AxisInput construction.
+        "axis",
+        # Stack — honored by position.rs Stack strategy selection.
+        "stack",
+        # Impute dict — honored by prepare.rs apply_impute.
+        "impute",
+        # Format string and type — honored by prepare.rs apply_tick_format.
+        "format",
+        "format_type",
+        # Legend dict — honored by prepare.rs legend_orient_override / title.
+        "legend",
+    ]
+)
 
 
 class X(ChannelBase):

@@ -52,6 +52,7 @@ def test_chart_encode_with_shorthand_aggregate():
 
 def test_chart_encode_with_explicit_channel_class():
     from ferrum.encoding import X, Y
+
     df = pl.DataFrame({"a": [1], "b": [2]})
     c = Chart(df).mark_point().encode(x=X("a", type="Q"), y=Y("b"))
     assert c._encoding["x"].field == "a"
@@ -60,6 +61,7 @@ def test_chart_encode_with_explicit_channel_class():
 
 def test_chart_to_spec_returns_chartspec():
     from ferrum import ChartSpec
+
     df = pl.DataFrame({"a": [1], "b": [2]})
     c = Chart(df).mark_point().encode(x="a", y="b")
     spec = c.to_spec()
@@ -72,7 +74,7 @@ def test_chart_to_json_round_trip():
     c = Chart(df).mark_point().encode(x="a", y="b")
     j = c.to_json()
     assert "point" in j
-    assert "\"x\":" in j
+    assert '"x":' in j
 
 
 def test_chart_data_input_pyarrow_table():
@@ -138,6 +140,7 @@ def test_chart_immutability_chain_independence():
 
 # ---- BUG-1: to_json(indent=) regression ----
 
+
 def test_to_json_indent_none_is_compact():
     df = pl.DataFrame({"x": [1], "y": [2]})
     j = Chart(df).mark_point().encode(x="x", y="y").to_json()
@@ -152,6 +155,7 @@ def test_to_json_indent_produces_multiline():
 
 
 # ---- BUG-3: __add__ always layers (redesigned) ----
+
 
 def test_add_differing_data_produces_layered_chart():
     """+ with different data auto null-pad merges and layers."""
@@ -184,6 +188,7 @@ def test_add_differing_columns_null_pad_merges():
 
 # ---- BUG-5: mark_smooth transforms lost when layered via + ----
 
+
 def test_layered_smooth_renders_paths():
     """points + smooth via + must render <path> elements for the trend line.
 
@@ -192,10 +197,12 @@ def test_layered_smooth_renders_paths():
     (chart-level); layer.transforms is stored but never executed, so the Smooth
     output batch was never produced and zero <path> elements appeared in the SVG.
     """
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-        "y": [2.1, 3.9, 6.0, 8.2, 10.1, 12.0, 13.8, 16.1, 18.0, 20.2],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            "y": [2.1, 3.9, 6.0, 8.2, 10.1, 12.0, 13.8, 16.1, 18.0, 20.2],
+        }
+    )
     points = Chart(df).mark_point().encode(x="x", y="y")
     trend = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
     chart = points + trend
@@ -210,6 +217,7 @@ def test_layered_smooth_renders_paths():
 
 # ---- BUG-5b: scatter layer reads smooth output instead of original data ----
 
+
 def test_layered_smooth_scatter_count_matches_original_data():
     """Scatter circle count must equal the original row count, not the smooth grid size.
 
@@ -218,15 +226,18 @@ def test_layered_smooth_scatter_count_matches_original_data():
     original data (60 rows), not from FINAL_OUTPUT_KEY after the smooth runs.
     """
     import numpy as np
+
     rng = np.random.default_rng(0)
     n = 60
-    df = pl.DataFrame({
-        "x": np.linspace(1.0, 10.0, n),
-        "y": np.linspace(2.0, 12.0, n) + rng.normal(0, 0.8, n),
-    })
+    df = pl.DataFrame(
+        {
+            "x": np.linspace(1.0, 10.0, n),
+            "y": np.linspace(2.0, 12.0, n) + rng.normal(0, 0.8, n),
+        }
+    )
     points = Chart(df).mark_point().encode(x="x", y="y")
-    trend  = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
-    svg    = (points + trend).show_svg()
+    trend = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
+    svg = (points + trend).show_svg()
     circle_count = svg.count("<circle")
     assert circle_count == n, (
         f"Expected {n} scatter circles (original row count), got {circle_count}.\n"
@@ -243,18 +254,19 @@ def test_layered_smooth_real_column_names_do_not_crash():
     output — causing a ValueError at render time.
     """
     import numpy as np
+
     rng = np.random.default_rng(0)
     n = 50
-    df = pl.DataFrame({
-        "sepal_length": np.linspace(4.0, 8.0, n),
-        "petal_length": np.linspace(1.0, 7.0, n) + rng.normal(0, 0.3, n),
-    })
-    points = Chart(df).mark_point().encode(x="sepal_length", y="petal_length")
-    trend  = Chart(df).mark_smooth(method="lm").encode(x="sepal_length", y="petal_length")
-    svg    = (points + trend).show_svg()  # must not raise
-    assert svg.count("<circle") == n, (
-        f"Expected {n} scatter circles, got {svg.count('<circle')}."
+    df = pl.DataFrame(
+        {
+            "sepal_length": np.linspace(4.0, 8.0, n),
+            "petal_length": np.linspace(1.0, 7.0, n) + rng.normal(0, 0.3, n),
+        }
     )
+    points = Chart(df).mark_point().encode(x="sepal_length", y="petal_length")
+    trend = Chart(df).mark_smooth(method="lm").encode(x="sepal_length", y="petal_length")
+    svg = (points + trend).show_svg()  # must not raise
+    assert svg.count("<circle") == n, f"Expected {n} scatter circles, got {svg.count('<circle')}."
     assert svg.count("<polyline") > 0, "Expected at least one smooth trend line."
 
 
@@ -264,26 +276,37 @@ def test_layered_smooth_grouped_by_color_correct_counts():
     150 rows across 3 species → 150 scatter circles + 3 smooth polylines.
     """
     import numpy as np
+
     rng = np.random.default_rng(0)
     n_per_group = 50
-    df = pl.DataFrame({
-        "x": np.tile(np.linspace(1.0, 10.0, n_per_group), 3),
-        "y": np.concatenate([
-            np.linspace(1.0, 10.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
-            np.linspace(2.0, 14.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
-            np.linspace(0.5, 6.0,  n_per_group) + rng.normal(0, 0.5, n_per_group),
-        ]),
-        "species": ["setosa"] * n_per_group + ["versicolor"] * n_per_group + ["virginica"] * n_per_group,
-    })
+    df = pl.DataFrame(
+        {
+            "x": np.tile(np.linspace(1.0, 10.0, n_per_group), 3),
+            "y": np.concatenate(
+                [
+                    np.linspace(1.0, 10.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
+                    np.linspace(2.0, 14.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
+                    np.linspace(0.5, 6.0, n_per_group) + rng.normal(0, 0.5, n_per_group),
+                ]
+            ),
+            "species": ["setosa"] * n_per_group
+            + ["versicolor"] * n_per_group
+            + ["virginica"] * n_per_group,
+        }
+    )
     total = n_per_group * 3
     points = Chart(df).mark_point().encode(x="x", y="y", color="species:N")
     # groupby must be set explicitly on mark_smooth for per-species fitting.
-    trend  = Chart(df).mark_smooth(method="lm", groupby="species").encode(x="x", y="y", color="species:N")
-    svg    = (points + trend).show_svg()
+    trend = (
+        Chart(df)
+        .mark_smooth(method="lm", groupby="species")
+        .encode(x="x", y="y", color="species:N")
+    )
+    svg = (points + trend).show_svg()
     # The SVG also contains 3 legend circles (one per group), so total
     # circles = data circles + legend circles.
     n_groups = 3
-    assert svg.count("<circle")   == total + n_groups, (
+    assert svg.count("<circle") == total + n_groups, (
         f"Expected {total + n_groups} circles ({total} data + {n_groups} legend), "
         f"got {svg.count('<circle')}."
     )
@@ -293,6 +316,7 @@ def test_layered_smooth_grouped_by_color_correct_counts():
 
 
 # ---- BUG-4: mark_shap_waterfall(sample_idx=-1) sentinel regression ----
+
 
 def test_mark_shap_waterfall_default_raises_immediately():
     df = pl.DataFrame({"x": [1], "y": [2]})
@@ -309,9 +333,11 @@ def test_mark_shap_waterfall_explicit_idx_does_not_raise():
 
 # ---- BUG-5: mark_segment redundant _position assignment regression ----
 
+
 def test_mark_segment_position_set_once():
     """_set_mark handles position; mark_segment must not double-assign."""
     from ferrum.position import Identity
+
     df = pl.DataFrame({"x": [1], "y": [2], "x2": [3], "y2": [4]})
     pos = Identity()
     c = Chart(df).mark_segment(position=pos)

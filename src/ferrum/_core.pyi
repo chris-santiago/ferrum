@@ -528,6 +528,7 @@ def compute_layout(
     >>> layout = fm.compute_layout(chart_spec_json, viewport_json)
     """
     ...
+
 def render_svg(
     spec: ChartSpec,
     data: Any,
@@ -545,6 +546,7 @@ def render_svg(
     >>> svg = fm.render_svg(chart_spec_json, layout_json, data_batch)
     """
     ...
+
 def render_png(
     spec: ChartSpec,
     data: Any,
@@ -580,6 +582,7 @@ def compose_svg_horizontal(
     >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
     """
     ...
+
 def compose_svg_vertical(
     svgs: list[str],
     *,
@@ -595,6 +598,7 @@ def compose_svg_vertical(
     >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
     """
     ...
+
 def compose_svg_grid(
     cells: list[str | None],
     *,

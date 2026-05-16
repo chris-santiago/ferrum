@@ -1,4 +1,5 @@
 """Schwabish SB1 — subtitle renders as a second text line in the title band."""
+
 from __future__ import annotations
 
 import polars as pl

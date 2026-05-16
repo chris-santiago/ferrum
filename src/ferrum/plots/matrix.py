@@ -297,7 +297,9 @@ def pairplot(
         diagonal=diagonal,
         corner=corner,
     )
-    rc = _finalize_chart(rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
+    rc = _finalize_chart(
+        rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+    )
     return rc
 
 
@@ -455,20 +457,10 @@ def heatmap(
         if isinstance(mask, str):
             if mask == "upper":
                 # Keep upper triangle + diagonal: row_idx <= col_idx.
-                keep = [
-                    (r, c)
-                    for r in range(n_rows)
-                    for c in range(n_cols)
-                    if r <= c
-                ]
+                keep = [(r, c) for r in range(n_rows) for c in range(n_cols) if r <= c]
             elif mask == "lower":
                 # Keep lower triangle + diagonal: row_idx >= col_idx.
-                keep = [
-                    (r, c)
-                    for r in range(n_rows)
-                    for c in range(n_cols)
-                    if r >= c
-                ]
+                keep = [(r, c) for r in range(n_rows) for c in range(n_cols) if r >= c]
             else:
                 raise ValueError(
                     f"heatmap: mask must be 'upper', 'lower', or array-like; got {mask!r}"
@@ -483,22 +475,19 @@ def heatmap(
                     f"heatmap: mask shape {mask_arr.shape} does not match data "
                     f"shape ({n_rows}, {n_cols})"
                 )
-            keep = [
-                (r, c)
-                for r in range(n_rows)
-                for c in range(n_cols)
-                if not mask_arr[r, c]
-            ]
+            keep = [(r, c) for r in range(n_rows) for c in range(n_cols) if not mask_arr[r, c]]
 
         # Build the filtered long-form DataFrame.
         row_labels = pdf[id_col].to_list()
         rows_long: list[dict] = []
         for r, c in keep:
-            rows_long.append({
-                id_col: row_labels[r],
-                "column": value_cols[c],
-                "value": pdf[value_cols[c]][r],
-            })
+            rows_long.append(
+                {
+                    id_col: row_labels[r],
+                    "column": value_cols[c],
+                    "value": pdf[value_cols[c]][r],
+                }
+            )
         melted_data = pl.DataFrame(rows_long)
 
     # Build the chart: Unpivot to long format, then mark_rect.
@@ -567,7 +556,9 @@ def heatmap(
             )
         chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
 
-    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +797,9 @@ def clustermap(
         col_dendrogram=col_dendro,
         dendrogram_ratio=dendrogram_ratio,
     )
-    cm = _finalize_chart(cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
+    cm = _finalize_chart(
+        cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+    )
     return cm
 
 
@@ -964,10 +957,7 @@ def jointplot(
         if ylim is not None:
             hist_enc["y"] = _Y("bin_y_start", scale={"domain": list(ylim)})
         center = (
-            Chart(data)
-            .transform(Bin2D(x=x, y=y, **bin2d_kwargs))
-            .mark_rect()
-            .encode(**hist_enc)
+            Chart(data).transform(Bin2D(x=x, y=y, **bin2d_kwargs)).mark_rect().encode(**hist_enc)
         )
     elif kind == "hex":
         center = Chart(data).mark_hex(**jk).encode(**enc_center)
@@ -1034,5 +1024,7 @@ def jointplot(
         ratio=ratio,
         spacing=space,
     )
-    result = _finalize_chart(result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
+    result = _finalize_chart(
+        result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
+    )
     return result

@@ -1,4 +1,5 @@
 """Schwabish SB1 — Title value class basic behavior."""
+
 from __future__ import annotations
 
 import pytest

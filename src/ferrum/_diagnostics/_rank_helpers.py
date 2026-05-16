@@ -17,17 +17,17 @@ def _coerce_to_arrow_batch(X) -> pa.RecordBatch:
     if isinstance(X, pa.Table):
         return X.to_batches()[0] if X.num_rows > 0 else pa.RecordBatch.from_pydict({})
     if isinstance(X, pl.DataFrame):
-        return pa.RecordBatch.from_pydict(
-            {c: X[c].to_arrow() for c in X.columns}
-        )
+        return pa.RecordBatch.from_pydict({c: X[c].to_arrow() for c in X.columns})
     if hasattr(X, "to_numpy") and hasattr(X, "columns"):
         cols = list(X.columns)
         import numpy as np
+
         arr = np.asarray(X, dtype=np.float64)
         return pa.RecordBatch.from_pydict(
             {str(c): pa.array(arr[:, i], type=pa.float64()) for i, c in enumerate(cols)}
         )
     import numpy as np
+
     arr = np.asarray(X, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError(f"X must be 2D; got shape {arr.shape}")
@@ -59,6 +59,7 @@ def rank1d_compute_with_y(
     from ferrum._core import py_rank1d_with_y
 
     import numpy as np
+
     batch = _coerce_to_arrow_batch(X)
     y_arrow = pa.array(np.asarray(y, dtype=np.float64), type=pa.float64())
     result = py_rank1d_with_y(batch, y_arrow, algorithm, top_k)

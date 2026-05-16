@@ -1,4 +1,5 @@
 """Phase 10d feature-importance / SHAP / PDP visualizer tests."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -50,7 +51,9 @@ def test_importances_builtin_coef_path(ridge_source):
 
 def test_importances_permutation_populates_std(rf_source):
     imp = rf_source.importances(
-        method="permutation", n_repeats=5, random_state=0,
+        method="permutation",
+        n_repeats=5,
+        random_state=0,
     )
     assert imp.height == 5
     # At least one feature should have non-zero std after a real permutation run.
@@ -121,10 +124,16 @@ def test_importance_chart_vertical_orient():
 
 
 def test_mark_importance_invalid_orient():
-    df = pl.DataFrame({
-        "feature": ["a", "b"], "importance": [0.5, 0.3], "std": [0.0, 0.0],
-        "imp_lower": [0.5, 0.3], "imp_upper": [0.5, 0.3], "rank": [1, 2],
-    })
+    df = pl.DataFrame(
+        {
+            "feature": ["a", "b"],
+            "importance": [0.5, 0.3],
+            "std": [0.0, 0.0],
+            "imp_lower": [0.5, 0.3],
+            "imp_upper": [0.5, 0.3],
+            "rank": [1, 2],
+        }
+    )
     with pytest.raises(ValueError, match="orient="):
         ferrum.Chart(df).mark_importance(orient="diagonal").show_svg()
 
@@ -154,7 +163,9 @@ def test_feature_importances_visualizer_permutation():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     viz = ferrum.FeatureImportancesVisualizer(
-        model, method="permutation", random_state=0,
+        model,
+        method="permutation",
+        random_state=0,
     ).fit(X, df["y"])
     chart = viz.show()
     assert "<svg" in chart.show_svg()
@@ -174,8 +185,11 @@ def test_shap_values_schema():
     source, _X, _y = _ridge_source()
     sv = source.shap_values()
     assert set(sv.columns) == {
-        "sample_id", "feature", "shap_value",
-        "feature_value", "feature_value_normalized",
+        "sample_id",
+        "feature",
+        "shap_value",
+        "feature_value",
+        "feature_value_normalized",
         "class_label",
     }
     assert sv["feature"].n_unique() == 5
@@ -192,8 +206,11 @@ def test_shap_values_multiclass_schema():
     source = ferrum.ModelSource(model, X, df["y"], random_state=0)
     sv = source.shap_values()
     assert set(sv.columns) == {
-        "sample_id", "feature", "shap_value",
-        "feature_value", "feature_value_normalized",
+        "sample_id",
+        "feature",
+        "shap_value",
+        "feature_value",
+        "feature_value_normalized",
         "class_label",
     }
     n_features = sv["feature"].n_unique()
@@ -290,9 +307,14 @@ def test_mark_shap_waterfall_requires_sample_idx():
     """Calling mark_shap_waterfall without sample_idx (left at -1 sentinel)
     raises ValueError — the guard lives in Chart.mark_shap_waterfall before
     the desugar is invoked."""
-    df = pl.DataFrame({
-        "feature": ["a"], "x0": [0.0], "x1": [1.0], "shap_sign": ["positive"],
-    })
+    df = pl.DataFrame(
+        {
+            "feature": ["a"],
+            "x0": [0.0],
+            "x1": [1.0],
+            "shap_sign": ["positive"],
+        }
+    )
     with pytest.raises(ValueError, match="sample_idx"):
         ferrum.Chart(df).mark_shap_waterfall().show_svg()
 
@@ -341,10 +363,12 @@ def test_shap_visualizer_order_affects_bar_and_waterfall():
 
     # --- bar: aggregation values must change with `order` ----------------
     bar_mean = ferrum.SHAPVisualizer(model, kind="bar", order="abs_mean").fit(
-        X, df["y"],
+        X,
+        df["y"],
     )
     bar_max = ferrum.SHAPVisualizer(model, kind="bar", order="max").fit(
-        X, df["y"],
+        X,
+        df["y"],
     )
     bar_mean_vals = bar_mean.show()._data["abs_mean_shap"].to_list()
     bar_max_vals = bar_max.show()._data["abs_mean_shap"].to_list()
@@ -359,7 +383,10 @@ def test_shap_visualizer_order_affects_bar_and_waterfall():
     # per-sample ordering ('f2','f1','f0','f4','f3') diverges from the
     # global mean ordering ('f0','f1','f2','f4','f3').
     wf = ferrum.SHAPVisualizer(
-        model, kind="waterfall", sample_idx=6, order="abs_mean",
+        model,
+        kind="waterfall",
+        sample_idx=6,
+        order="abs_mean",
     ).fit(X, df["y"])
     wf_features = wf.show()._data["feature"].to_list()
     source = ferrum.ModelSource(model, X, df["y"], random_state=0)
@@ -392,18 +419,15 @@ def test_shap_visualizer_waterfall_top_abs_shap_is_per_sample():
     sv = source.shap_values()
     # Per-sample max(|shap|) for sample 3 should differ from the global
     # mean(|shap|) max used in the legacy implementation.
-    sample_max = float(
-        sv.filter(pl.col("sample_id") == 3)["shap_value"].abs().max()
-    )
+    sample_max = float(sv.filter(pl.col("sample_id") == 3)["shap_value"].abs().max())
     global_mean_max = float(
-        sv.group_by("feature")
-        .agg(pl.col("shap_value").abs().mean().alias("v"))["v"]
-        .max()
+        sv.group_by("feature").agg(pl.col("shap_value").abs().mean().alias("v"))["v"].max()
     )
     assert sample_max != pytest.approx(global_mean_max)
 
     viz = ferrum.SHAPVisualizer(model, kind="waterfall", sample_idx=3).fit(
-        X, df["y"],
+        X,
+        df["y"],
     )
     assert viz._metrics["top_abs_shap"] == pytest.approx(sample_max)
 
@@ -423,7 +447,10 @@ def test_partial_dependence_schema():
     src = ferrum.ModelSource(model, X, y, random_state=0)
     pd_df = src.partial_dependence(["f0", "f1"], grid_resolution=20)
     assert set(pd_df.columns) == {
-        "feature", "feature_value", "pd_value", "sample_id",
+        "feature",
+        "feature_value",
+        "pd_value",
+        "sample_id",
     }
     assert set(pd_df["feature"].unique().to_list()) == {"f0", "f1"}
     # sample_id is -1 for kind="average" (marginal curve, not per-sample).
@@ -480,7 +507,11 @@ def test_pdp_chart_single_feature():
 def test_pdp_chart_multiple_features():
     model, X, y = _rf_xy()
     chart = ferrum.pdp_chart(
-        model, X, y, features=["f0", "f1", "f2"], grid_resolution=20,
+        model,
+        X,
+        y,
+        features=["f0", "f1", "f2"],
+        grid_resolution=20,
     )
     svg = chart.show_svg()
     # One polyline per feature.
@@ -498,7 +529,12 @@ def test_pdp_chart_individual_renders_ice_per_sample():
     per feature panel via mark_style.detail routing on sample_id."""
     model, X, y = _rf_xy()
     chart = ferrum.pdp_chart(
-        model, X, y, features=["f0"], grid_resolution=10, kind="individual",
+        model,
+        X,
+        y,
+        features=["f0"],
+        grid_resolution=10,
+        kind="individual",
     )
     svg = chart.show_svg()
     # n_samples polylines for the single feature panel.
@@ -510,7 +546,12 @@ def test_pdp_chart_both_renders_ice_plus_average():
     on top of the per-sample ICE bundle."""
     model, X, y = _rf_xy()
     chart = ferrum.pdp_chart(
-        model, X, y, features=["f0", "f1"], grid_resolution=10, kind="both",
+        model,
+        X,
+        y,
+        features=["f0", "f1"],
+        grid_resolution=10,
+        kind="both",
     )
     svg = chart.show_svg()
     # 2 features * (n_samples ICE + 1 average) polylines.
@@ -521,19 +562,21 @@ def test_pdp_chart_center_starts_at_zero():
     """center=True subtracts the value at min(feature_value) per
     (feature, sample_id) so every polyline starts at 0 at the left."""
     import numpy as np
+
     model, X, y = _rf_xy()
     from ferrum.plots.explanation import _pdp_chart_from_source
+
     source = ferrum.ModelSource(model, X, y)
     chart = _pdp_chart_from_source(
-        source, features=["f0"], grid_resolution=10,
-        kind="individual", center=True,
+        source,
+        features=["f0"],
+        grid_resolution=10,
+        kind="individual",
+        center=True,
     )
     # Pull the underlying data and assert all per-sample first values are 0.
     df = chart._data
-    first = (
-        df.group_by(["feature", "sample_id"])
-          .agg(pl.col("pd_value").first().alias("first"))
-    )
+    first = df.group_by(["feature", "sample_id"]).agg(pl.col("pd_value").first().alias("first"))
     assert np.allclose(first["first"].to_numpy(), 0.0)
 
 
@@ -541,7 +584,11 @@ def test_pdp_chart_kind_invalid_raises():
     model, X, y = _rf_xy()
     with pytest.raises(ValueError, match="'average', 'individual', or 'both'"):
         ferrum.pdp_chart(
-            model, X, y, features=["f0"], kind="not_a_kind",
+            model,
+            X,
+            y,
+            features=["f0"],
+            kind="not_a_kind",
         )
 
 
@@ -554,12 +601,14 @@ def test_shap_order_features_unknown_order_raises():
     """_shap_order_features must raise ValueError for unknown order strings."""
     from ferrum.plots.explanation import _shap_order_features
 
-    sv = pl.DataFrame({
-        "feature": ["a", "a", "b", "b"],
-        "shap_value": [0.1, -0.2, 0.3, 0.4],
-        "feature_value": [1.0, 2.0, 3.0, 4.0],
-        "sample": [0, 1, 0, 1],
-    })
+    sv = pl.DataFrame(
+        {
+            "feature": ["a", "a", "b", "b"],
+            "shap_value": [0.1, -0.2, 0.3, 0.4],
+            "feature_value": [1.0, 2.0, 3.0, 4.0],
+            "sample": [0, 1, 0, 1],
+        }
+    )
     with pytest.raises(ValueError, match="abs_max"):
         _shap_order_features(sv, order="abs_max", max_display=5)
     with pytest.raises(ValueError, match="Accepted values"):
@@ -570,12 +619,14 @@ def test_shap_order_features_accepted_orders_work():
     """Accepted order values must not raise."""
     from ferrum.plots.explanation import _shap_order_features
 
-    sv = pl.DataFrame({
-        "feature": ["a", "a", "b", "b"],
-        "shap_value": [0.1, -0.2, 0.3, 0.4],
-        "feature_value": [1.0, 2.0, 3.0, 4.0],
-        "sample": [0, 1, 0, 1],
-    })
+    sv = pl.DataFrame(
+        {
+            "feature": ["a", "a", "b", "b"],
+            "shap_value": [0.1, -0.2, 0.3, 0.4],
+            "feature_value": [1.0, 2.0, 3.0, 4.0],
+            "sample": [0, 1, 0, 1],
+        }
+    )
     result_mean = _shap_order_features(sv, order="abs_mean", max_display=5)
     result_max = _shap_order_features(sv, order="max", max_display=5)
     assert set(result_mean) == {"a", "b"}

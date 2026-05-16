@@ -161,7 +161,11 @@ def desugar_validation_curve(
         )
     layers = [
         ci_layer,
-        _Layer(name="line", mark="line", encoding={"x": "param_value", "y": "mean_score", "color": color_field}),
+        _Layer(
+            name="line",
+            mark="line",
+            encoding={"x": "param_value", "y": "mean_score", "color": color_field},
+        ),
     ]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 
