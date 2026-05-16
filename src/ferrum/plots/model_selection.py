@@ -12,13 +12,16 @@ produces a fully-formed ``Chart``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+if TYPE_CHECKING:
+    from ferrum import Chart
+
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _dedupe_aggregated
+from ferrum.plots._helpers import _dedupe_aggregated, _finalize_chart
 from ferrum.plots._helpers import _resolve_source, _require
 
 
@@ -84,10 +87,7 @@ def _learning_curve_chart_from_source(
             name="point",
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _validation_curve_chart_from_source(
@@ -159,10 +159,7 @@ def _validation_curve_chart_from_source(
             name="point",
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _cv_scores_chart_from_source(
@@ -195,10 +192,7 @@ def _cv_scores_chart_from_source(
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _alpha_selection_chart_from_source(
@@ -276,10 +270,7 @@ def _alpha_selection_chart_from_source(
                 name="best_alpha_text",
             ),
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +279,7 @@ def _alpha_selection_chart_from_source(
 
 
 def learning_curve_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -303,7 +294,7 @@ def learning_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Learning curve chart showing score vs. training set size.
 
     Plots cross-validated train and validation scores as training size
@@ -312,14 +303,14 @@ def learning_curve_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     cv : int, default 5
         Number of cross-validation folds.
@@ -339,6 +330,17 @@ def learning_curve_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -351,7 +353,7 @@ def learning_curve_chart(
     >>> from sklearn.svm import SVC
     >>> fm.learning_curve_chart(SVC(), X_train, y_train, cv=5)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _learning_curve_chart_from_source(
         source,
         cv=cv,
@@ -368,7 +370,7 @@ def learning_curve_chart(
 
 
 def validation_curve_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -385,7 +387,7 @@ def validation_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Plot score vs. a single hyperparameter value.
 
     Sweeps one hyperparameter over a supplied value range and plots
@@ -396,14 +398,14 @@ def validation_curve_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     param : str, default "alpha"
         Name of the hyperparameter to sweep, passed to
@@ -428,6 +430,17 @@ def validation_curve_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -451,7 +464,7 @@ def validation_curve_chart(
         values,
         hint="pass an explicit list of values to sweep for the given param",
     )
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
         source,
         param,
@@ -470,7 +483,7 @@ def validation_curve_chart(
 
 
 def cv_scores_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -484,7 +497,7 @@ def cv_scores_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Per-fold cross-validation score distribution chart.
 
     Visualizes the distribution of scores across folds for train and/or
@@ -493,14 +506,14 @@ def cv_scores_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible estimator or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     cv : int, default 5
         Number of cross-validation folds.
@@ -518,6 +531,17 @@ def cv_scores_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -530,7 +554,7 @@ def cv_scores_chart(
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.cv_scores_chart(RandomForestClassifier(), X_train, y_train, cv=10)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _cv_scores_chart_from_source(
         source,
         cv=cv,
@@ -546,7 +570,7 @@ def cv_scores_chart(
 
 
 def alpha_selection_chart(
-    model_or_source: Any,
+    model: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -561,7 +585,7 @@ def alpha_selection_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Regularization-strength (alpha) selection chart.
 
     Plots cross-validated mean score as a function of regularization
@@ -570,15 +594,15 @@ def alpha_selection_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted (or unfitted) sklearn-compatible penalized estimator or
         an explicit ``ferrum.ModelSource``. The estimator must accept an
         ``alpha`` constructor parameter.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator.
     alphas : array-like, required
         Regularization-strength values to sweep. Must be provided;
@@ -597,6 +621,17 @@ def alpha_selection_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -620,7 +655,7 @@ def alpha_selection_chart(
         alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
     )
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(
         source,
         alphas,

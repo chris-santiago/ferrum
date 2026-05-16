@@ -322,11 +322,3 @@ def _attach_hue_from_y(X: Any, y: Any) -> Any:
     return df.with_columns(pl.Series("_hue", hue_vals))
 
 
-def _columns_and_array(X: Any) -> tuple[list[str], np.ndarray]:
-    """Coerce X (polars / pandas DataFrame / 2D numpy) to (cols, ndarray)."""
-    if hasattr(X, "to_numpy") and hasattr(X, "columns"):
-        return list(X.columns), np.asarray(X, dtype=np.float64)
-    arr = np.asarray(X, dtype=np.float64)
-    if arr.ndim != 2:
-        raise ValueError(f"X must be 2D; got shape {arr.shape}")
-    return [f"f{j}" for j in range(arr.shape[1])], arr

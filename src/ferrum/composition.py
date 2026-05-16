@@ -1061,3 +1061,76 @@ class ClusterMapChart(_ChartLike):
             f"col_dendrogram={'set' if self.col_dendrogram else 'None'}, "
             f"ratio={self.dendrogram_ratio})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Layer-composition helpers (extracted from chart.py)
+# ---------------------------------------------------------------------------
+
+def _expand_layers(c) -> tuple[list, list]:
+    """Return ``(layers, top_level_transforms)`` for one side of ``Chart + Chart``.
+
+    Composite-mark charts arrive pre-layered (``_layers`` is set, ``_mark`` is
+    ``None``) -- splat their layers as-is and carry their top-level transforms
+    across.  Plain single-mark charts wrap into a one-element ``_Layer`` list.
+
+    Transforms are returned as plain PyO3 objects.  The named-transform path
+    (routing a layer's output to a specific ``data_source``) is handled in
+    ``__add__`` when the LHS chart has no transforms and the RHS does.
+    """
+    from ferrum._layer import _Layer
+
+    if c._layers is not None:
+        return list(c._layers), list(c._transforms or [])
+    return [
+        _Layer(
+            mark=c._mark,
+            encoding=dict(c._encoding),
+            transforms=[],
+            mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
+            position=c._position,
+        )
+    ], list(c._transforms or [])
+
+
+def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
+    """Merge RHS top-level transforms into the combined chart's pipeline.
+
+    Deduplicates by identity first (fast), then by value equality
+    (PyO3 transform classes implement ``__eq__`` via ``#[pyclass(eq, ...)]``;
+    ``_NamedTransform`` defers to its inner transform for equality checks).
+    Value deduplication prevents the same logical transform from running
+    twice when both sides of ``+`` use an identical transform object.
+    """
+    from ferrum.chart import _NamedTransform
+
+    existing = list(new._transforms or [])
+    existing_ids = {id(t) for t in existing}
+    for t in rhs_top_xforms:
+        if id(t) in existing_ids:
+            continue
+        # Value dedup: unwrap _NamedTransform for the equality check.
+        inner_t = t.transform if isinstance(t, _NamedTransform) else t
+        if any(inner_t == (e.transform if isinstance(e, _NamedTransform) else e)
+               for e in existing):
+            continue
+        existing.append(t)
+        existing_ids.add(id(t))
+    new._transforms = existing
+
+
+def _warn_on_layer_conflicts(lhs, rhs) -> None:
+    """Warn when layered chart ``+`` would silently discard RHS theme/facet/coord."""
+    if (
+        (rhs._theme is not None and rhs._theme != lhs._theme)
+        or rhs._facet != lhs._facet
+        or rhs._coord != lhs._coord
+    ):
+        import warnings
+
+        warnings.warn(
+            "Layered chart `+`: secondary layer's theme/facet/coord is ignored; "
+            "primary layer wins.",
+            UserWarning,
+            stacklevel=3,
+        )

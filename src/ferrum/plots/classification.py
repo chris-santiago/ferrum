@@ -19,13 +19,16 @@ function today.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+if TYPE_CHECKING:
+    from ferrum import Chart
+
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides, register_layer_names
-from ferrum.plots._helpers import _color_field_for
+from ferrum.plots._helpers import _color_field_for, _finalize_chart, _resolve_source
 
 # Register the calibration layer-name catalog entry.
 register_layer_names("calibration", frozenset({"line", "reference", "point"}))
@@ -203,7 +206,7 @@ def _roc_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _trapezoid_auc
+    from ferrum._metric_labels import _apply_metric_label_explicit, _trapezoid_auc
 
     df = source.roc_curve(average=None if per_class else average)
     color_field = _color_field_for(df, "class")
@@ -252,10 +255,7 @@ def _roc_chart_from_source(
             position="end",
         )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _pr_chart_from_source(
@@ -282,7 +282,7 @@ def _pr_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _ap_step
+    from ferrum._metric_labels import _apply_metric_label_explicit, _ap_step
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
@@ -387,10 +387,7 @@ def _pr_chart_from_source(
             position="end",
         )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _calibration_chart_from_source(
@@ -415,7 +412,7 @@ def _calibration_chart_from_source(
     import numpy as np
 
     import ferrum
-    from ferrum.annotations import _apply_metric_label_explicit, _brier_score
+    from ferrum._metric_labels import _apply_metric_label_explicit, _brier_score
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
@@ -483,10 +480,7 @@ def _calibration_chart_from_source(
         _Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
     )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _gain_chart_from_source(
@@ -538,10 +532,7 @@ def _gain_chart_from_source(
             x_col="percent_population",
             y_col="gain",
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _lift_chart_from_source(
@@ -587,10 +578,7 @@ def _lift_chart_from_source(
             x_col="percent_population",
             y_col="lift",
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _confusion_chart_from_source(
@@ -617,10 +605,7 @@ def _confusion_chart_from_source(
         y=Y("actual", title="True label"),
     )
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _class_prediction_error_chart_from_source(
@@ -662,10 +647,7 @@ def _class_prediction_error_chart_from_source(
         y=Y("value", title="Number of predictions"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _discrimination_threshold_chart_from_source(
@@ -729,10 +711,7 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _classification_report_chart(
@@ -802,10 +781,7 @@ def _classification_report_chart(
             )
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _class_balance_chart_from_dataframe(
@@ -837,10 +813,7 @@ def _class_balance_chart_from_dataframe(
         .sort("y")
     )
     chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count", color="y")
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -848,32 +821,8 @@ def _class_balance_chart_from_dataframe(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    y_true: Any = None,
-    y_pred: Any = None,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
-    or _PrecomputedSource.
-
-    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(
-        model_or_source, X_data, y,
-        y_true=y_true, y_pred=y_pred,
-        random_state=random_state, compare=compare,
-    )
-
-
 def roc_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -890,7 +839,7 @@ def roc_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """ROC curve chart for a classifier.
 
     Plots true-positive rate vs. false-positive rate, one curve per
@@ -899,20 +848,20 @@ def roc_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator, optional
+    model : estimator, ModelSource, or dict of str -> estimator, optional
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.  When a dict is passed, each estimator is evaluated
         and curves are overlaid.  Mutually exclusive with ``y_true``/``y_pred``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
     y_true : array-like, optional
         Ground-truth class labels for the precomputed path.  Must be
-        paired with ``y_pred``; mutually exclusive with ``model_or_source``.
+        paired with ``y_pred``; mutually exclusive with ``model``.
     y_pred : array-like, optional
         Soft scores / probabilities for the precomputed path.  1-D for
         binary classifiers (positive-class scores); 2-D
@@ -932,12 +881,23 @@ def roc_chart(
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -955,7 +915,7 @@ def roc_chart(
     >>> fm.roc_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -978,7 +938,7 @@ def roc_chart(
 
 
 def pr_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -996,7 +956,7 @@ def pr_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Precision-recall curve chart for a classifier.
 
     Plots precision vs. recall, one curve per class (default) or a single
@@ -1007,16 +967,23 @@ def pr_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator
+    model : estimator, ModelSource, or dict of str -> estimator
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     per_class : bool, default True
         When ``True``, one PR curve per class is drawn using the
         one-vs-rest scheme.  When ``False``, a single curve averaged per
@@ -1039,12 +1006,23 @@ def pr_chart(
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1063,7 +1041,7 @@ def pr_chart(
     >>> fm.pr_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -1087,7 +1065,7 @@ def pr_chart(
 
 
 def calibration_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1104,7 +1082,7 @@ def calibration_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Calibration (reliability) curve for one or more classifiers.
 
     Plots mean predicted probability vs. fraction of positives in each
@@ -1113,17 +1091,24 @@ def calibration_chart(
 
     Parameters
     ----------
-    model_or_source : estimator, ModelSource, or dict of str -> estimator
+    model : estimator, ModelSource, or dict of str -> estimator
         Fitted sklearn-compatible classifier, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators for
         comparison.  When a dict is passed, each estimator is evaluated
         and curves are overlaid.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True binary labels.  Required when ``model_or_source`` is a raw
+        True binary labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     n_bins : int, default 10
         Number of probability bins for the reliability diagram.
     strategy : {"uniform", "quantile"}, default "uniform"
@@ -1138,12 +1123,23 @@ def calibration_chart(
         Optional one-line subtitle drawn beneath the chart title.
     compare : dict of str -> estimator or None, default None
         Additional estimators to overlay.  Keys become model labels.
-        ``model_or_source`` is treated as the base model (label
+        ``model`` is treated as the base model (label
         ``"base"``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1162,7 +1158,7 @@ def calibration_chart(
     >>> fm.calibration_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
     source = _resolve_source(
-        model_or_source,
+        model,
         X,
         y,
         y_true=y_true,
@@ -1185,7 +1181,7 @@ def calibration_chart(
 
 
 def gain_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1199,7 +1195,7 @@ def gain_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Cumulative-gain curve for a classifier.
 
     Plots the fraction of positive cases captured vs. the fraction of
@@ -1212,15 +1208,22 @@ def gain_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
@@ -1231,6 +1234,17 @@ def gain_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1247,12 +1261,12 @@ def gain_chart(
 
     >>> fm.gain_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _gain_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def lift_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1266,7 +1280,7 @@ def lift_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Lift curve for a classifier.
 
     Plots the ratio of positive-hit rate in the scored top-n vs. random
@@ -1278,15 +1292,22 @@ def lift_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
@@ -1297,6 +1318,17 @@ def lift_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1313,12 +1345,12 @@ def lift_chart(
 
     >>> fm.lift_chart(y_true=y_test, y_pred=clf.predict_proba(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _lift_chart_from_source(source, subtitle=subtitle, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def confusion_matrix_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1332,7 +1364,7 @@ def confusion_matrix_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Confusion matrix heatmap for a classifier.
 
     Renders an ordinal heatmap of (actual class, predicted class) cell
@@ -1341,15 +1373,20 @@ def confusion_matrix_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted class labels for the precomputed path.
     normalize : {"true", "pred", "all"} or None, default "true"
         Normalization scheme for cell values.  ``None`` shows raw
         counts; ``"true"`` normalizes over actual classes (rows);
@@ -1362,6 +1399,17 @@ def confusion_matrix_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1378,7 +1426,7 @@ def confusion_matrix_chart(
 
     >>> fm.confusion_matrix_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _confusion_chart_from_source(
         source,
         normalize=normalize,
@@ -1392,7 +1440,7 @@ def confusion_matrix_chart(
 
 
 def class_prediction_error_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1406,7 +1454,7 @@ def class_prediction_error_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Class prediction-error stacked bar chart for a classifier.
 
     One bar per predicted class, stacked by actual class so misclassified
@@ -1415,15 +1463,20 @@ def class_prediction_error_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True class labels.  Required when ``model_or_source`` is a raw
+        True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted class labels for the precomputed path.
     normalize : bool, default False
         When ``True``, each bar is normalized to 100% (relative
         composition).  When ``False``, bars show raw sample counts.
@@ -1435,6 +1488,17 @@ def class_prediction_error_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1451,7 +1515,7 @@ def class_prediction_error_chart(
 
     >>> fm.class_prediction_error_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _class_prediction_error_chart_from_source(
         source,
         normalize=normalize,
@@ -1465,7 +1529,7 @@ def class_prediction_error_chart(
 
 
 def discrimination_threshold_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1484,7 +1548,7 @@ def discrimination_threshold_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Discrimination-threshold sweep chart for a binary classifier.
 
     Plots multiple classification metrics (precision, recall, F1,
@@ -1495,15 +1559,22 @@ def discrimination_threshold_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         Fitted sklearn-compatible binary classifier or an explicit
         ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix.  Required when ``model_or_source`` is a raw
+        Feature matrix.  Required when ``model`` is a raw
         estimator.
     y : array-like, optional
-        True binary labels.  Required when ``model_or_source`` is a raw
+        True binary labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     n_thresholds : int, default 50
         Number of evenly spaced threshold values in ``[0, 1]`` to
         evaluate.
@@ -1525,10 +1596,23 @@ def discrimination_threshold_chart(
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
         ``ComparedModelSource``.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1546,7 +1630,7 @@ def discrimination_threshold_chart(
 
     >>> fm.discrimination_threshold_chart(y_true=y_test, y_pred=clf.predict_proba(X_test)[:, 1])
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare)
     return _discrimination_threshold_chart_from_source(
         source,
         n_thresholds=n_thresholds,
@@ -1564,7 +1648,7 @@ def discrimination_threshold_chart(
 
 
 def classification_report_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1574,7 +1658,7 @@ def classification_report_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Per-class precision / recall / F1 heatmap for a classifier.
 
     Renders a rect-plus-text heatmap where rows are class labels, columns
@@ -1584,19 +1668,30 @@ def classification_report_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible classifier that exposes ``predict``,
         or an explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        True labels. Required when ``model_or_source`` is a raw estimator;
+        True labels. Required when ``model`` is a raw estimator;
         ignored when it is already a ``ModelSource``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1608,7 +1703,7 @@ def classification_report_chart(
     >>> import ferrum as fm
     >>> fm.classification_report_chart(clf, X_test, y_test)
     """
-    source = _resolve_source(model_or_source, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, random_state=random_state)
     return _classification_report_chart(
         source,
         mark=mark,
@@ -1627,7 +1722,7 @@ def class_balance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Bar chart of per-class label counts.
 
     Computes the count of each unique class label and renders a vertical
@@ -1640,6 +1735,17 @@ def class_balance_chart(
         arrays, and any iterable convertible to a flat list.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------

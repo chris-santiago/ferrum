@@ -64,13 +64,13 @@ def test_chart_mark_prediction_error_renders():
 def test_chart_mark_prediction_error_no_identity():
     source, _ = _ridge_source()
     pred = source.predictions()
-    chart = ferrum.Chart(pred).mark_prediction_error(identity_line=False)
+    chart = ferrum.Chart(pred).mark_prediction_error(reference_line=False)
     svg = chart.show_svg()
     assert "<svg" in svg
 
 
 def test_chart_mark_prediction_error_sorts_by_y_true():
-    """identity_line=True sorts the data so the diagonal renders monotonically."""
+    """reference_line=True sorts the data so the diagonal renders monotonically."""
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_prediction_error()

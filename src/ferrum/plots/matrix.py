@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ferrum import Bin2D, Chart, JointChart, RepeatChart, Repeat
+from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._overrides import _apply_overrides
+from ferrum.plots._helpers import _finalize_chart
 from ferrum.plots.regression import _merge_layers
 
 
@@ -140,6 +141,17 @@ def pairplot(
         variable columns before building the pairplot.
     theme : Theme, optional
         Visual theme applied to all panels.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         every panel template.
@@ -285,7 +297,7 @@ def pairplot(
         diagonal=diagonal,
         corner=corner,
     )
-    rc = _apply_overrides(rc, mark=mark, encode=encode, properties=properties, layers=layers)
+    rc = _finalize_chart(rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return rc
 
 
@@ -359,6 +371,17 @@ def heatmap(
         ``data``), cells where the mask is ``True`` are hidden.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -544,11 +567,7 @@ def heatmap(
             )
         chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +591,7 @@ def clustermap(
     layers: list | None = None,
     theme: Any = None,
     **encode_kwargs: Any,
-) -> Any:
+) -> "ClusterMapChart":
     """Clustered heatmap with row and column dendrograms.
 
     Returns a ``ClusterMapChart`` composed of:
@@ -613,6 +632,17 @@ def clustermap(
         panel, forwarded to ``ClusterMapChart``.
     theme : Theme, optional
         Visual theme applied to the center and dendrogram charts.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         the center heatmap chart.
@@ -776,7 +806,7 @@ def clustermap(
         col_dendrogram=col_dendro,
         dendrogram_ratio=dendrogram_ratio,
     )
-    cm = _apply_overrides(cm, mark=mark, encode=encode, properties=properties, layers=layers)
+    cm = _finalize_chart(cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return cm
 
 
@@ -851,6 +881,17 @@ def jointplot(
         Height and width of the square central panel in pixels.
     theme : Theme, optional
         Visual theme applied to all three panels via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         the center chart.
@@ -993,5 +1034,5 @@ def jointplot(
         ratio=ratio,
         spacing=space,
     )
-    result = _apply_overrides(result, mark=mark, encode=encode, properties=properties, layers=layers)
+    result = _finalize_chart(result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return result

@@ -59,7 +59,7 @@ class SelectionMark:
     stroke_width: float = 1.0
     stroke_dash: list[float] | None = None
 
-    def to_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Serialize to a dict matching the Rust ``SelectionMarkStyle`` shape."""
         d: dict[str, Any] = {
             "fill_opacity": self.fill_opacity,
@@ -324,7 +324,7 @@ def selection_interval(
     if encodings is not None:
         params["encodings"] = [e.lower() for e in encodings]
     if mark is not None:
-        params["mark"] = mark.to_dict()
+        params["mark"] = mark.to_spec_dict()
     return Selection(name=sel_name, kind="interval", params=params)
 
 

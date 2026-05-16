@@ -423,15 +423,15 @@ def test_facet_row_only_is_wrap_mode():
 
 
 def test_coord_flip_to_spec_dict_returns_flip():
-    """CoordFlip._to_spec_dict returns the string 'flip'."""
+    """CoordFlip.to_spec_dict returns the string 'flip'."""
     flip = fr.CoordFlip()
-    assert flip._to_spec_dict() == "flip"
+    assert flip.to_spec_dict() == "flip"
 
 
 def test_coord_cartesian_no_xlim_no_x_domain():
     """CoordCartesian with no xlim does not emit x_domain in spec dict."""
     cart = fr.CoordCartesian()
-    d = cart._to_spec_dict()
+    d = cart.to_spec_dict()
     assert "x_domain" not in d
     assert d["kind"] == "cartesian"
 
@@ -439,7 +439,7 @@ def test_coord_cartesian_no_xlim_no_x_domain():
 def test_coord_cartesian_ylim_emits_y_domain():
     """CoordCartesian with ylim emits y_domain as list in spec dict."""
     cart = fr.CoordCartesian(ylim=(0.0, 100.0))
-    d = cart._to_spec_dict()
+    d = cart.to_spec_dict()
     assert d["y_domain"] == [0.0, 100.0]
 
 
@@ -447,29 +447,29 @@ def test_coord_fixed_negative_ratio_accepted():
     """CoordFixed does not reject negative ratio at construction (validation deferred)."""
     # No ValueError expected here; the spec just stores what is given
     fixed = fr.CoordFixed(ratio=-1.0)
-    d = fixed._to_spec_dict()
+    d = fixed.to_spec_dict()
     assert d["ratio"] == -1.0
 
 
 def test_coord_polar_spec_dict_direction():
     """CoordPolar direction=1 emits 'clockwise', -1 emits 'counter_clockwise'."""
     cw = fr.CoordPolar(direction=1)
-    assert cw._to_spec_dict()["direction"] == "clockwise"
+    assert cw.to_spec_dict()["direction"] == "clockwise"
     ccw = fr.CoordPolar(direction=-1)
-    assert ccw._to_spec_dict()["direction"] == "counter_clockwise"
+    assert ccw.to_spec_dict()["direction"] == "counter_clockwise"
 
 
 def test_coord_polar_no_outer_radius_key_absent():
     """CoordPolar with no outer_radius does not emit outer_radius key."""
     polar = fr.CoordPolar()
-    d = polar._to_spec_dict()
+    d = polar.to_spec_dict()
     assert "outer_radius" not in d
 
 
 def test_coord_polar_outer_radius_emitted():
     """CoordPolar with outer_radius emits outer_radius as float."""
     polar = fr.CoordPolar(outer_radius=100.0)
-    d = polar._to_spec_dict()
+    d = polar.to_spec_dict()
     assert d["outer_radius"] == 100.0
 
 

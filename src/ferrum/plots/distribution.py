@@ -25,6 +25,7 @@ from ferrum import (
     Stack,
 )
 from ferrum._overrides import _apply_overrides
+from ferrum.plots._helpers import _finalize_chart
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,17 @@ def displot(
         Aspect ratio (width = height * aspect).  Requires ``height``.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -302,12 +314,7 @@ def displot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +408,17 @@ def catplot(
         Random seed forwarded to ``Jitter`` for reproducible strip positions.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -558,12 +576,7 @@ def catplot(
         else:
             chart = chart.facet(row=row)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +636,17 @@ def relplot(
         Aspect ratio (width = height * aspect).  Requires ``height``.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -691,9 +715,4 @@ def relplot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)

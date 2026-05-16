@@ -30,7 +30,7 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = True,
     cmap: str | None = None,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Bivariate-density contour mark desugar.
 
     Converts ``chart.mark_contour(...)`` into a ``Kde2D`` → ``Contour``
@@ -149,7 +149,7 @@ def desugar_violin(
     *,
     bandwidth: str | float = "scott",
     inner: Optional[str] = "box",
-) -> tuple:
+) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
     Converts ``chart.mark_violin(...)`` into a ``Violin`` transform plus a
@@ -273,7 +273,7 @@ def desugar_qq(
     distribution: str = "normal",
     dequantize: bool = False,
     line: bool = True,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Q-Q (quantile-quantile) plot mark desugar.
 
     Converts ``chart.mark_qq(...)`` into a ``QQ`` transform plus a point
@@ -384,7 +384,7 @@ def desugar_raster(
     blend: str = "alpha",
     min_count: Optional[int] = None,
     log_scale: bool = False,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Datashader-style raster aggregation mark desugar.
 
     Converts ``chart.mark_raster(...)`` into a ``Raster`` transform plus an
@@ -498,7 +498,7 @@ def desugar_hex(
     cmap: str | None = None,
     stroke: Optional[str] = None,
     stroke_width: float = 0,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Hexagonal-bin mark desugar.
 
     Converts ``chart.mark_hex(...)`` into a ``Hex`` transform plus a polygon
@@ -606,7 +606,7 @@ def desugar_swarm(
     spacing: float = 1.0,
     side: str = "both",
     dodge: Optional[str] = None,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Beeswarm plot mark desugar.
 
     Converts ``chart.mark_swarm(...)`` into a ``Swarm`` transform plus a
@@ -729,7 +729,7 @@ def desugar_function(
     domain: Optional[tuple] = None,
     n: int = 200,
     clip: bool = True,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Arbitrary-function line mark desugar — the only synthetic-data desugar.
 
     Materializes a new Arrow table by evaluating ``fn`` over ``n`` evenly

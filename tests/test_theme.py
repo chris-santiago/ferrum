@@ -39,10 +39,10 @@ def test_theme_eq_when_props_match():
     assert t1 == t2
 
 
-def test_theme_to_theme_inputs_dict_passes_through_props():
+def test_theme_to_spec_dict_passes_through_props():
     # "background" is normalised to "background_color" for the Rust binding.
     t = Theme(background="#1a1a2e", font_color="#e6e6e6")
-    d = t.to_theme_inputs_dict()
+    d = t.to_spec_dict()
     assert d["background_color"] == "#1a1a2e", "background must be renamed to background_color"
     assert "background" not in d, "raw 'background' key must not remain after normalisation"
     assert d["font_color"] == "#e6e6e6"

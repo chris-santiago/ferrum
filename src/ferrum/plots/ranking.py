@@ -20,13 +20,16 @@ _build_decision_boundary_grid, _build_decision_boundary_unified.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+if TYPE_CHECKING:
+    from ferrum import Chart
+
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _coerce_to_polars
+from ferrum.plots._helpers import _coerce_to_polars, _finalize_chart
 from ferrum.plots._helpers import _resolve_source
 
 
@@ -36,7 +39,7 @@ from ferrum.plots._helpers import _resolve_source
 
 
 def rank_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -52,7 +55,7 @@ def rank_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Feature-ranking chart: univariate bar or pairwise heatmap.
 
     Computes a ranking score for each feature (or each feature pair)
@@ -63,14 +66,14 @@ def rank_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is
         supplied, the feature matrix is taken from the bound data.
         When a DataFrame or 2D array is supplied, ``X`` is used as
         the feature matrix if provided.
     X : array-like, optional
-        Feature matrix. Used when ``data_or_source`` is a raw estimator
-        (not a ``ModelSource``) or when ``data_or_source`` is a raw
+        Feature matrix. Used when ``source`` is a raw estimator
+        (not a ``ModelSource``) or when ``source`` is a raw
         DataFrame and ``X`` overrides it.
     y : array-like, optional
         Target vector. Required only for
@@ -98,6 +101,17 @@ def rank_chart(
         ``None``, a single color is used.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -132,7 +146,7 @@ def rank_chart(
     )
     if rank == "1d":
         return rank1d_chart(
-            data_or_source,
+            source,
             X,
             y,
             algorithm=algorithm,
@@ -148,7 +162,7 @@ def rank_chart(
         )
     if rank == "2d":
         return rank2d_chart(
-            data_or_source,
+            source,
             X,
             y,
             algorithm=algorithm,
@@ -169,7 +183,7 @@ def rank_chart(
 
 
 def rank1d_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -183,7 +197,7 @@ def rank1d_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Univariate feature-ranking bar chart.
 
     Computes a per-feature ranking score and renders a horizontal (or
@@ -193,16 +207,36 @@ def rank1d_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is supplied,
         the feature matrix is taken from the bound data.
     X, y : optional
         Feature matrix / target -- forwarded to ``_resolve_source`` when
-        ``data_or_source`` is a raw estimator.
+        ``source`` is a raw estimator.
     algorithm : str or None, default None
         Ranking algorithm. ``None`` selects ``"shapiro"``.
-    top_k, orient, color_field, random_state, theme : forwarded to the
-        chart builder.
+    top_k : int or None, optional
+        Limit the chart to the top-k features by score.  ``None`` shows
+        all features.
+    orient : {"horizontal", "vertical"}, default "horizontal"
+        Bar orientation.
+    color_field : str or None, optional
+        Column name to map to bar color.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -217,21 +251,21 @@ def rank1d_chart(
     import ferrum
 
     algo = algorithm or "shapiro"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank1d(algorithm=algo)
+    if isinstance(source, ferrum.ModelSource):
+        df = source.rank1d(algorithm=algo)
     elif algo == "covariance":
-        source = _resolve_source(
-            data_or_source,
+        ms = _resolve_source(
+            source,
             X,
             y,
             random_state=random_state,
         )
-        df = source.rank1d(algorithm=algo)
+        df = ms.rank1d(algorithm=algo)
     else:
         from ferrum._diagnostics._rank_helpers import rank1d_compute
 
-        data = data_or_source if X is None else X
-        df = rank1d_compute(data, algorithm=algo)
+        input_data = source if X is None else X
+        df = rank1d_compute(input_data, algorithm=algo)
     return _rank1d_chart_from_dataframe(
         df,
         algorithm=algo,
@@ -252,7 +286,7 @@ def rank1d_chart(
 
 
 def rank2d_chart(
-    data_or_source: Any,
+    source: Any,
     X: Any = None,
     y: Any = None,
     *,
@@ -264,7 +298,7 @@ def rank2d_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Pairwise feature-correlation heatmap.
 
     Computes pairwise feature correlation (or covariance) and renders a
@@ -273,7 +307,7 @@ def rank2d_chart(
 
     Parameters
     ----------
-    data_or_source : estimator, ModelSource, DataFrame, or array-like
+    source : estimator, ModelSource, DataFrame, or array-like
         Input data.
     X, y : optional
         Feature matrix / target.
@@ -281,7 +315,21 @@ def rank2d_chart(
         Ranking algorithm. ``None`` selects ``"pearson"``.
     annot : bool, default True
         Overlay the correlation value (2 decimals) on each cell.
-    random_state, theme : optional.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -296,13 +344,13 @@ def rank2d_chart(
     import ferrum
 
     algo = algorithm or "pearson"
-    if isinstance(data_or_source, ferrum.ModelSource):
-        df = data_or_source.rank2d(algorithm=algo)
+    if isinstance(source, ferrum.ModelSource):
+        df = source.rank2d(algorithm=algo)
     else:
         from ferrum._diagnostics._rank_helpers import rank2d_compute
 
-        data = data_or_source if X is None else X
-        df = rank2d_compute(data, algorithm=algo)
+        input_data = source if X is None else X
+        df = rank2d_compute(input_data, algorithm=algo)
     return _rank2d_chart_from_dataframe(
         df,
         algorithm=algo,
@@ -332,7 +380,7 @@ def parallel_coordinates_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Parallel coordinates chart for multivariate data.
 
     Renders one polyline per sample, with each feature mapped to a
@@ -359,6 +407,17 @@ def parallel_coordinates_chart(
     alpha : float, default 0.5
         Opacity of individual polylines; lower values reduce overplot
         in dense datasets.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -414,7 +473,7 @@ def decision_boundary_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Decision-boundary heatmap for a classifier over a 2D feature slice.
 
     Builds a ``grid_resolution x grid_resolution`` grid over two
@@ -452,6 +511,17 @@ def decision_boundary_chart(
         per the ``ChartSpec`` one-batch contract.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -552,10 +622,7 @@ def _rank1d_chart_from_dataframe(
             x=X("feature"),
             y=Y("score", scale={"type": "linear", "domain": x_domain}),
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _rank2d_chart_from_dataframe(
@@ -590,10 +657,7 @@ def _rank2d_chart_from_dataframe(
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     chart = chart.properties(title=ferrum.Title("Feature Correlation"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -717,10 +781,7 @@ def _parallel_coords_chart_from_dataframe(
         color_field=hue,
     )
     chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -797,10 +858,9 @@ def _decision_boundary_chart_from_source(
             )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
-        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-        if theme is not None:
-            chart = chart.theme(theme)
-        return chart
+        return _finalize_chart(
+            chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        )
 
     from ferrum._layer import _Layer
 
@@ -821,10 +881,9 @@ def _decision_boundary_chart_from_source(
         )
     )
     chart = chart.properties(title=ferrum.Title("Decision Boundary"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _resolve_decision_boundary_features(

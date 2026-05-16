@@ -37,45 +37,18 @@ from ferrum import (
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
+    _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
     _inject_metrics_corner,
     _overlay_metrics_corner,
     _r2_score,
+    _resolve_source,
     _sort_by,
 )
 
 
 _VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
-
-
-# ---------------------------------------------------------------------------
-# _resolve_source — transitional thin wrapper
-# ---------------------------------------------------------------------------
-
-
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    y_true: Any = None,
-    y_pred: Any = None,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
-    or _PrecomputedSource.
-
-    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(
-        model_or_source, X_data, y,
-        y_true=y_true, y_pred=y_pred,
-        random_state=random_state, compare=compare,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +166,7 @@ def _residuals_chart_from_source(
         # ``_overlay_metrics_corner`` is a no-op when the injected
         # columns are absent, so the call is unconditional.
         chart = _overlay_metrics_corner(chart)
-        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-        if theme is not None:
-            chart = chart.theme(theme)
-        return chart
+        return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
     # Multi-panel path: each panel injects its own outlier columns with
     # the right x-axis encoding for that panel's coordinate system. The
@@ -212,10 +182,7 @@ def _residuals_chart_from_source(
     ]
     # _grid_panels applies theme internally; apply overrides before theme.
     chart = _grid_panels(charts)
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _residuals_panel(
@@ -323,7 +290,7 @@ def _residuals_panel(
 def _prediction_error_chart_from_source(
     source: Any,
     *,
-    identity_line: bool = True,
+    reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
     mark: dict | None = None,
@@ -364,7 +331,7 @@ def _prediction_error_chart_from_source(
             (pl.col("y_true") + q_hi).alias("_pe_band_hi"),
         )
     chart = ferrum.Chart(df).mark_prediction_error(
-        identity_line=identity_line,
+        reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
     )
@@ -373,10 +340,7 @@ def _prediction_error_chart_from_source(
         y=Y("y_true", title="True value"),
     )
     chart = chart.properties(title=ferrum.Title("Prediction Error"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +443,17 @@ def lmplot(
         space) or when ``hue`` is set (per-group corners would crowd).
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -690,12 +665,7 @@ def lmplot(
         else:
             out = out.facet(row=row)
 
-    out = _apply_overrides(out, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        out = out.theme(theme)
-
-    return out
+    return _finalize_chart(out, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def residplot(
@@ -763,6 +733,17 @@ def residplot(
         Column name or constant color forwarded to ``Chart.encode(color=)``.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -872,11 +853,7 @@ def residplot(
         chart._layers = internal_layers
         chart._mark = None
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def regplot(
@@ -937,6 +914,17 @@ def regplot(
         scatter layer.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -985,7 +973,7 @@ def regplot(
 
 
 def residuals_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1002,7 +990,7 @@ def residuals_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Residuals diagnostic chart for a regression estimator.
 
     Plots residuals vs. fitted values. Optional Cook's distance
@@ -1013,15 +1001,20 @@ def residuals_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator, an explicit
         ``ferrum.ModelSource``, or a dict of named estimators.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
+    y_true : array-like, optional
+        Ground-truth target values for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted target values for the precomputed path.
     kind : {"studentized", "raw"}, default "studentized"
         Residual type to plot on the y axis. ``"studentized"`` uses
         internally studentized residuals; ``"raw"`` uses raw residuals.
@@ -1049,6 +1042,17 @@ def residuals_chart(
         residuals computation.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1068,7 +1072,7 @@ def residuals_chart(
 
     >>> fm.residuals_chart(y_true=y_test, y_pred=reg.predict(X_test))
     """
-    source = _resolve_source(model_or_source, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     if panels in (None, "single"):
         panel_list: Any = None
     elif panels == "auto":
@@ -1096,13 +1100,13 @@ def residuals_chart(
 
 
 def prediction_error_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
     y_true: Any = None,
     y_pred: Any = None,
-    identity_line: bool = True,
+    reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
     random_state: int | None = None,
@@ -1111,24 +1115,24 @@ def prediction_error_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Actual-vs-predicted scatter for a regression estimator.
 
     Plots ``y_true`` on the y axis against ``y_pred`` on the x axis with
-    an optional identity line (``y = x`` diagonal) and an optional
+    an optional reference line (``y = x`` diagonal) and an optional
     residual-based confidence ribbon.
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator, an explicit
         ``ferrum.ModelSource``, or ``None`` when pre-computed arrays are
         supplied via ``y_true`` / ``y_pred``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y_true : array-like, optional
         Pre-computed true labels. Use with ``y_pred`` to bypass model
@@ -1136,39 +1140,50 @@ def prediction_error_chart(
     y_pred : array-like, optional
         Pre-computed predictions. Use with ``y_true`` to bypass model
         inference entirely.
-    identity_line : bool, default True
+    reference_line : bool, default True
         Overlay the dashed ``y = x`` diagonal.
     ci : float or None, default None
         Confidence level in ``(0, 1)``. When set, overlays a ribbon
         spanning the central ``ci`` fraction of residuals around the
-        identity line. Raises ``ValueError`` if not in ``(0, 1)``.
+        reference line. Raises ``ValueError`` if not in ``(0, 1)``.
     reference_band : bool, default False
         When ``True`` (and ``ci`` is ``None``), overlays a ±1 RMSE
-        ribbon around the identity line.
+        ribbon around the reference line.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
     Chart
-        Actual-vs-predicted scatter with optional identity line and
+        Actual-vs-predicted scatter with optional reference line and
         confidence ribbon.
 
     Examples
     --------
     >>> import ferrum as fm
-    >>> fm.prediction_error_chart(model, X_test, y_test, identity_line=True)
+    >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
     source = _resolve_source(
-        model_or_source, X, y,
+        model, X, y,
         y_true=y_true, y_pred=y_pred,
         random_state=random_state,
     )
     return _prediction_error_chart_from_source(
         source,
-        identity_line=identity_line,
+        reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
         mark=mark,
@@ -1180,7 +1195,7 @@ def prediction_error_chart(
 
 
 def cooks_distance_chart(
-    model_or_source: Any = None,
+    model: Any = None,
     X: Any = None,
     y: Any = None,
     *,
@@ -1191,7 +1206,7 @@ def cooks_distance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart":
     """Cook's distance / residuals-vs-leverage diagnostic for a linear estimator.
 
     Renders the residuals-vs-leverage panel with optional Cook's-distance
@@ -1200,15 +1215,15 @@ def cooks_distance_chart(
 
     Parameters
     ----------
-    model_or_source : estimator or ModelSource
+    model : estimator or ModelSource
         A fitted sklearn-compatible regression estimator that exposes
         ``coef_`` (required for leverage-aware Cook's distance), or an
         explicit ``ferrum.ModelSource``.
     X : array-like, optional
-        Feature matrix. Required when ``model_or_source`` is a raw
+        Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     y : array-like, optional
-        Target vector. Required when ``model_or_source`` is a raw
+        Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
     threshold : float, "auto", or None, default None
         Cook's-distance threshold for outlier highlighting. A float is
@@ -1218,6 +1233,17 @@ def cooks_distance_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1231,7 +1257,7 @@ def cooks_distance_chart(
     >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
     """
     source = _resolve_source(
-        model_or_source, X, y,
+        model, X, y,
         random_state=random_state,
     )
     return _residuals_chart_from_source(

@@ -6,6 +6,10 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._mark_kwargs import (
+    apply_user_mark_kwargs as _apply,
+    validate_user_mark_kwargs as _validate,
+)
 
 # --- 10b: classification curves --------------------------------------
 
@@ -18,6 +22,7 @@ def desugar_roc(
     reference_line: bool = True,
     annotate_auc: bool = False,
     color_field: str | None = "class",
+    **mark_kwargs: Any,
 ) -> tuple:
     """ROC curve mark.
 
@@ -36,6 +41,7 @@ def desugar_roc(
     constructing the chart.
     """
     _ = average  # informational at the mark layer
+    user_kw = _validate("roc", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -65,7 +71,7 @@ def desugar_roc(
                 mark_kwargs={"align": "left"},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("roc", frozenset({"line", "reference", "auc_label"}))
@@ -79,6 +85,7 @@ def desugar_pr(
     annotate_ap: bool = False,
     iso_lines: bool = False,
     color_field: str | None = "class",
+    **mark_kwargs: Any,
 ) -> tuple:
     """Precision-recall curve mark.
 
@@ -98,6 +105,7 @@ def desugar_pr(
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
     """
     _ = average  # informational at the mark layer
+    user_kw = _validate("pr", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
         line_enc["color"] = color_field
@@ -146,7 +154,7 @@ def desugar_pr(
                 mark_kwargs={"align": "left"},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("pr", frozenset({"line", "iso_line", "iso_label", "ap_label"}))
@@ -160,6 +168,7 @@ def desugar_calibration(
     strategy: str = "uniform",
     reference_line: bool = True,
     color_field: str | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Calibration (reliability) curve mark.
 
@@ -180,6 +189,7 @@ def desugar_calibration(
     # (source.calibration_curve(n_bins=..., strategy=...)); informational
     # at the mark layer — the data is already binned.
     _ = n_bins, strategy
+    user_kw = _validate("calibration", mark_kwargs)
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
         "y": "fraction_positive",
@@ -209,7 +219,7 @@ def desugar_calibration(
                 data_source="calibration_ref",
             )
         )
-    return MarkDesugarResult(transforms=transforms, layers=layers)
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names("calibration", frozenset({"line", "reference"}))
@@ -219,25 +229,24 @@ def desugar_gain(
     x_field: str | None,
     y_field: str | None,
     *,
-    reference_lines: bool = True,
+    reference_line: bool = True,
     color_field: str | None = "class",
+    **mark_kwargs: Any,
 ) -> tuple:
     """Cumulative-gain mark.
 
     Data contract: ``percent_population``, ``gain``, ``class`` per
     ``ModelSource.cumulative_gain()``. The data already carries
     ``class='baseline'`` rows that render as the diagonal reference when
-    ``color_field='class'``; ``reference_lines`` is informational.
+    ``color_field='class'``; ``reference_line`` is informational.
     """
-    _ = reference_lines  # baseline already in data
+    _ = reference_line  # baseline already in data
+    user_kw = _validate("gain", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
         line_enc["color"] = color_field
-    return MarkDesugarResult(
-        layers=[
-            _Layer(name="line", mark="line", encoding=line_enc),
-        ],
-    )
+    layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("gain", frozenset({"line"}))
@@ -249,6 +258,7 @@ def desugar_lift(
     *,
     reference_line: bool = True,
     color_field: str | None = "class",
+    **mark_kwargs: Any,
 ) -> tuple:
     """Lift curve mark.
 
@@ -258,14 +268,12 @@ def desugar_lift(
     ``reference_line`` is informational.
     """
     _ = reference_line  # baseline already in data
+    user_kw = _validate("lift", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
         line_enc["color"] = color_field
-    return MarkDesugarResult(
-        layers=[
-            _Layer(name="line", mark="line", encoding=line_enc),
-        ],
-    )
+    layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("lift", frozenset({"line"}))
@@ -279,6 +287,7 @@ def desugar_discrimination_threshold(
     n_thresholds: int = 50,
     threshold_line: bool = False,
     optimum_label: bool = True,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Discrimination-threshold sweep mark.
 
@@ -301,6 +310,7 @@ def desugar_discrimination_threshold(
     (Schwabish C7 audit-rework, 2026-05-12).
     """
     _ = metrics, n_thresholds  # informational; data is pre-melted
+    user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
         _Layer(name="line", mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}),
     ]
@@ -322,7 +332,7 @@ def desugar_discrimination_threshold(
                 mark_kwargs={"align": "left", "dx": 4, "dy": -4},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("discrimination_threshold", frozenset({"line", "threshold", "optimum_label"}))
@@ -339,6 +349,7 @@ def desugar_confusion(
     annotate: bool = True,
     color_field: str = "value",
     cmap: str | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
@@ -358,6 +369,7 @@ def desugar_confusion(
     from ferrum.encoding import Color
 
     del x_field, y_field
+    user_kw = _validate("confusion", mark_kwargs)
     color_enc = Color(color_field, scheme=cmap) if cmap is not None else Color(color_field)
     layers: list = [
         _Layer(
@@ -374,7 +386,7 @@ def desugar_confusion(
                 encoding={"x": "predicted", "y": "actual", "text": "value_fmt"},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("confusion", frozenset({"rect", "label"}))
@@ -387,6 +399,7 @@ def desugar_class_prediction_error(
     normalize: bool = False,
     color_field: str = "predicted",
     show_counts: bool = True,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Stacked-bar diagnostic of predicted-class composition.
 
@@ -411,6 +424,7 @@ def desugar_class_prediction_error(
     del x_field, y_field
     from ferrum.position import Stack
 
+    user_kw = _validate("class_prediction_error", mark_kwargs)
     offset = "normalize" if normalize else "zero"
     bar_stack = Stack(by=color_field, offset=offset)  # anchor="top" by default
     text_stack = Stack(by=color_field, offset=offset, anchor="mid")
@@ -431,7 +445,7 @@ def desugar_class_prediction_error(
                 position=text_stack,
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("class_prediction_error", frozenset({"bar", "label"}))

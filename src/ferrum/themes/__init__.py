@@ -192,7 +192,7 @@ area_opacity, opacity : optional
         "label_font_family": "font_family",
     }
 
-    def to_theme_inputs_dict(self) -> dict:
+    def to_spec_dict(self) -> dict:
         """Return a dict suitable for ``ferrum._core.render_svg(theme=...)``.
 
         Resolves spec-defined fallbacks (e.g. ``title_color`` falls back to
