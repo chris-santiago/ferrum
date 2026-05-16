@@ -8,6 +8,8 @@ Covers:
 - interaction_config includes selections array for JS click handler
 - Polar/Geo coord kind guards for zoom/pan (labels must not vanish)
 - Hex and geoshape scene JSON well-formedness
+- Binary packed instances produce GPU data for high-cardinality batches
+- Packed tooltips/data_indices travel as binary sidecar, not JSON
 """
 
 from __future__ import annotations
@@ -789,3 +791,140 @@ def test_geoshape_polygon_inside_plot_area():
         assert 0 <= pt[0] <= 500 and 0 <= pt[1] <= 400, (
             f"projected polygon point {pt} must be in pixel space"
         )
+
+
+# ── Binary packed instance bridge regression tests ────────────────────
+
+
+def _render_with_packed(chart: fm.Chart) -> tuple[dict, bytes]:
+    """Return (scene_dict, packed_bytes) for a chart."""
+    spec, data, viewport, theme = chart._render_inputs()
+    result = render_interactive(spec, data, viewport=viewport, theme=theme)
+    json_str, packed = result
+    return json.loads(json_str), packed
+
+
+def _packed_scatter(n: int = 2000, tooltips: bool = False) -> fm.Chart:
+    """Create a scatter above the packing threshold (1000)."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    df = pl.DataFrame({
+        "x": rng.normal(0, 1, n).tolist(),
+        "y": rng.normal(0, 1, n).tolist(),
+    })
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    if tooltips:
+        chart = chart.encode(tooltip=fm.Tooltip("x", "y"))
+    return chart.properties(width=300, height=200,
+                            render_config=fm.RenderConfig(raster_threshold=None))
+
+
+class TestPackedInstanceBridge:
+    """Regression: packed batches (>1000 marks) must produce GPU instance data
+    via the binary sidecar, not per-node JSON."""
+
+    def test_packed_batch_has_empty_nodes_in_json(self):
+        """Regression: nodes are cleared from JSON for packed batches so the
+        JSON stays small. If nodes are accidentally left in, JSON bloats."""
+        scene, packed = _render_with_packed(_packed_scatter(2000))
+        batch = scene["panels"][0]["marks"][0]
+        assert len(batch.get("nodes", [])) == 0, (
+            "packed batch should have empty nodes in JSON"
+        )
+
+    def test_packed_bytes_are_nonempty(self):
+        """Regression: the packed sidecar must contain instance data. If empty,
+        the WASM renderer has no circles to draw (blank chart)."""
+        _, packed = _render_with_packed(_packed_scatter(2000))
+        assert len(packed) > 0, "packed bytes must be non-empty for >1000 marks"
+
+    def test_packed_header_has_20_bytes(self):
+        """Regression: header must be 20 bytes (5 × u32) with flags field.
+        The old 16-byte header caused the WASM unpacker to misalign."""
+        import struct
+        _, packed = _render_with_packed(_packed_scatter(2000))
+        assert len(packed) >= 20, "packed data must have at least a 20-byte header"
+        pi, bi, kind, count, flags = struct.unpack_from("<5I", packed)
+        assert pi == 0, "panel_idx should be 0"
+        assert bi == 0, "batch_idx should be 0"
+        assert kind == 0, "kind should be 0 (circle)"
+        assert count == 2000, f"count should be 2000; got {count}"
+
+    def test_packed_instance_bytes_correct_size(self):
+        """Regression: instance data must be count × 64 bytes (CircleInstance).
+        Wrong size means the WASM bytemuck cast fails silently."""
+        import struct
+        _, packed = _render_with_packed(_packed_scatter(2000))
+        _, _, kind, count, flags = struct.unpack_from("<5I", packed)
+        instance_size = 64  # CircleInstance: 16 × f32
+        expected_bytes = 20 + count * instance_size  # header + instances
+        assert len(packed) >= expected_bytes, (
+            f"packed data too small: {len(packed)} < {expected_bytes}"
+        )
+
+    def test_small_chart_not_packed(self):
+        """Regression: charts with <1000 marks must NOT be packed. They keep
+        per-node JSON for JS hit-testing and tooltip lookup."""
+        scene, packed = _render_with_packed(
+            fm.Chart(pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]}))
+            .mark_point().encode(x="x:Q", y="y:Q")
+            .properties(width=200, height=200, render_config=fm.RenderConfig(raster_threshold=None))
+        )
+        batch = scene["panels"][0]["marks"][0]
+        assert len(batch.get("nodes", [])) == 3, "small chart should keep nodes in JSON"
+        assert len(packed) == 0, "small chart should have no packed bytes"
+
+    def test_packed_json_size_under_1mb(self):
+        """Regression: the whole point of packing is compact JSON. A 2000-point
+        scatter's JSON should be tiny (axes + legend only), not 200KB+."""
+        scene_str = json.dumps(_render_with_packed(_packed_scatter(2000))[0])
+        size_kb = len(scene_str) / 1024
+        assert size_kb < 100, f"packed scene JSON should be <100KB; got {size_kb:.0f}KB"
+
+
+class TestPackedTooltips:
+    """Regression: tooltip data for packed batches must travel as binary in the
+    sidecar and be cleared from JSON."""
+
+    def test_tooltips_cleared_from_json_for_packed_batch(self):
+        """Regression: if tooltips stay in JSON for a packed batch, JSON bloats
+        back to megabytes (the original bottleneck)."""
+        scene, _ = _render_with_packed(_packed_scatter(2000, tooltips=True))
+        batch = scene["panels"][0]["marks"][0]
+        tooltips = batch.get("tooltips")
+        assert tooltips is None or len(tooltips) == 0, (
+            "packed batch should have tooltips cleared from JSON"
+        )
+
+    def test_packed_bytes_contain_tooltip_data(self):
+        """Regression: tooltip string table must be in the sidecar. If missing,
+        hover shows nothing on packed batches."""
+        import struct
+        _, packed = _render_with_packed(_packed_scatter(2000, tooltips=True))
+        _, _, _, count, flags = struct.unpack_from("<5I", packed)
+        assert flags & 0x1 != 0, (
+            f"HAS_TOOLTIPS flag (0x1) must be set; got flags=0x{flags:x}"
+        )
+
+    def test_data_indices_in_packed_bytes(self):
+        """Regression: data_indices must be packed for selection state to work
+        on packed batches."""
+        import struct
+        _, packed = _render_with_packed(_packed_scatter(2000))
+        _, _, _, count, flags = struct.unpack_from("<5I", packed)
+        assert flags & 0x2 != 0, (
+            f"HAS_DATA_INDICES flag (0x2) must be set; got flags=0x{flags:x}"
+        )
+
+    def test_small_chart_tooltips_in_json(self):
+        """Regression: small charts (<1000 marks) must keep tooltips in JSON
+        for the JS tooltip display path."""
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        chart = (fm.Chart(df).mark_point()
+                 .encode(x="x:Q", y="y:Q", tooltip=fm.Tooltip("x", "y"))
+                 .properties(width=200, height=200))
+        scene = _render(chart)
+        batch = scene["panels"][0]["marks"][0]
+        assert batch.get("tooltips") is not None, "small chart must keep tooltips in JSON"
+        assert len(batch["tooltips"]) == 3
+        assert len(batch["tooltips"][0]["fields"]) == 2
