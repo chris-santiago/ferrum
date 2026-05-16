@@ -119,7 +119,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let is_stacked = stack_bases.is_some();
 
     // Stacked areas use opaque fills so each band is visually distinct.
-    let effective_opacity = if is_stacked { 1.0 } else { ctx.mark_style.opacity };
+    let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.opacity };
+
+    // Per-row opacity/fill_opacity channels — sampled at the first row of each group.
+    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let fill_opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let interpolate = ctx.mark_style.interpolate.as_deref();
 
@@ -156,6 +162,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }
         if top.len() < 2 { continue; }
 
+        // Sample opacity and fill_opacity from the first row of the group.
+        let first = row_indices.first().copied().unwrap_or(0);
+        let effective_opacity = opacity_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(base_opacity);
+        let group_fill_opacity = fill_opacity_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
         let cmds = if is_stacked {
             build_stacked_area_cmds(&top, &bottom, interpolate)
         } else {
@@ -172,13 +191,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.fill,
         };
-        let style = to_scene_fill_stroke(
+        let mut style = to_scene_fill_stroke(
             Some(fill),
             ctx.mark_style.stroke,
             ctx.mark_style.stroke_width,
             1.0,
             None,
         );
+        style.fill_opacity = group_fill_opacity;
         nodes.push(ferrum_scene::SceneNode::Path {
             commands: cmds,
             style,

@@ -398,11 +398,20 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
 
+        // When stroke_width encoding produces a positive value but no explicit
+        // stroke color exists, use the fill color as the stroke so the width is
+        // visible in SVG (stroke-width is only emitted when stroke is Some).
+        let effective_stroke_for_row = if row_stroke_width > 0.0 && effective_stroke.is_none() && stroke_width_values.is_some() {
+            effective_fill
+        } else {
+            effective_stroke
+        };
+
         let shape_nodes = emit_shape_nodes(
             shape_kind, cx, cy, radius,
             ShapeStyle {
                 fill: effective_fill,
-                stroke: effective_stroke,
+                stroke: effective_stroke_for_row,
                 stroke_width: row_stroke_width,
                 opacity: row_opacity,
                 stroke_opacity: row_stroke_opacity,

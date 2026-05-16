@@ -325,6 +325,17 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
+    // Per-row encoding channels: opacity, fill_opacity, stroke_width.
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
     // Optional text annotation channel for heatmap cells.
     let text_enc = spec.encoding.text.as_ref();
     let text_field = text_enc.map(|e| e.field.as_str());
@@ -366,20 +377,55 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
             _ => ctx.mark_style.fill,
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        // Resolve per-row opacity (through scale if present).
+        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+
+        let fill = with_opacity(fill, row_opacity);
+
+        let row_fill_opacity = fill_opacity_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
+        let row_stroke_width = stroke_width_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(ctx.mark_style.stroke_width);
+
+        // When stroke_width encoding produces a positive value but no explicit
+        // stroke color exists, use the fill color as the stroke so the width is
+        // visible in SVG (stroke-width is only emitted when stroke is Some).
+        let effective_stroke = if row_stroke_width > 0.0 && ctx.mark_style.stroke.is_none() && stroke_width_values.is_some() {
+            Some(fill)
+        } else {
+            ctx.mark_style.stroke
+        };
+
+        let mut style = to_scene_fill_stroke(
+            Some(fill),
+            effective_stroke,
+            row_stroke_width,
+            row_opacity,
+            ctx.mark_style.stroke_dash.as_deref(),
+        );
+        style.fill_opacity = row_fill_opacity;
 
         nodes.push(SceneNode::Rect {
             x: cx - cell_w / 2.0,
             y: cy - cell_h / 2.0,
             w: cell_w,
             h: cell_h,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
+            style,
             corner_radius: ctx.mark_style.corner_radius,
         });
         indices.push(i);

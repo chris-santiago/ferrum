@@ -107,8 +107,22 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let dx = ctx.mark_style.dx.unwrap_or(0.0);
     let dy = ctx.mark_style.dy.unwrap_or(0.0);
-    let font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size);
-    let angle = ctx.mark_style.angle.unwrap_or(0.0);
+    let base_font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size);
+    let base_angle = ctx.mark_style.angle.unwrap_or(0.0);
+    let base_opacity = ctx.mark_style.opacity;
+
+    // Per-row encoding channels (same pattern as point.rs).
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -176,19 +190,41 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             raw_label
         };
 
+        // Resolve per-row opacity (fill-opacity on text).
+        let row_opacity = opacity_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(base_opacity);
+
+        // Resolve per-row font-size from size encoding.
+        let row_font_size = size_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| *v > 0.0 && v.is_finite())
+            .unwrap_or(base_font_size);
+
+        // Resolve per-row angle (rotation) from angle encoding.
+        let row_angle = angle_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .unwrap_or(base_angle);
+
         nodes.push(SceneNode::Text {
             x: px + dx,
             y: py + dy,
             content: label,
             style: to_scene_text_style(
                 ctx.theme.font_color,
-                font_size,
+                row_font_size,
                 anchor,
-                angle,
+                row_angle,
                 &ctx.theme.font_family,
                 ctx.mark_style.font_weight.as_deref(),
                 ctx.mark_style.baseline.as_deref(),
-                ctx.mark_style.opacity,
+                row_opacity,
             ),
         });
         indices.push(i);

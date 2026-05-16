@@ -17,14 +17,27 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Common setup shared by all four tick modes.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
-    let stroke_style = to_scene_stroke(
-        stroke_color,
-        ctx.mark_style.stroke_width.max(1.0),
-        ctx.mark_style.opacity,
-        None,
-        None,
-        None,
-    );
+    let default_opacity = ctx.mark_style.opacity;
+    let default_stroke_width = ctx.mark_style.stroke_width.max(1.0);
+
+    // Per-row opacity and stroke_width encoding columns.
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let row_stroke = |i: usize| -> ferrum_scene::StrokeStyle {
+        let opacity = opacity_values.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .unwrap_or(default_opacity);
+        let width = stroke_width_values.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .unwrap_or(default_stroke_width);
+        to_scene_stroke(stroke_color, width, opacity, None, None, None)
+    };
+
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
     let mut nodes = Vec::new();
@@ -52,7 +65,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 nodes.push(SceneNode::Line {
                     x1: bx, y1: py,
                     x2: bx + tick_len, y2: py,
-                    style: stroke_style.clone(),
+                    style: row_stroke(i),
                 });
                 indices.push(i);
             }
@@ -94,7 +107,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py,
                     x2: cx + tick_half,
                     y2: py,
-                    style: stroke_style.clone(),
+                    style: row_stroke(i),
                 });
                 indices.push(i);
             }
@@ -137,7 +150,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: cy - tick_half,
                     x2: px,
                     y2: cy + tick_half,
-                    style: stroke_style.clone(),
+                    style: row_stroke(i),
                 });
                 indices.push(i);
             }
@@ -168,7 +181,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             y1: by,
             x2: px,
             y2: by - tick_len,
-            style: stroke_style.clone(),
+            style: row_stroke(i),
         });
         indices.push(i);
     }

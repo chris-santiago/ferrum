@@ -19,6 +19,7 @@ struct BarBaseStyle<'a> {
 
 /// Per-row stroke and fill encoding column vectors loaded from a batch.
 struct StrokeChannels {
+    general_opacity: Option<Vec<Option<f64>>>,
     opacity: Option<Vec<Option<f64>>>,
     width: Option<Vec<Option<f64>>>,
     dash: Option<Vec<Option<f64>>>,
@@ -29,6 +30,8 @@ struct StrokeChannels {
 impl StrokeChannels {
     fn load(ctx: &DrawCtx) -> Self {
         Self {
+            general_opacity: ctx.spec.encoding.opacity.as_ref()
+                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             opacity: ctx.spec.encoding.stroke_opacity.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             width: ctx.spec.encoding.stroke_width.as_ref()
@@ -75,15 +78,30 @@ impl StrokeChannels {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
 
+        let general_opacity = self.general_opacity.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0));
+
         let fill_opacity = self.fill_opacity.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .filter(|v| v.is_finite())
             .map(|v| v.clamp(0.0, 1.0))
+            .or(general_opacity)
             .unwrap_or(1.0);
+
+        // When stroke_width encoding produces a positive value but no explicit
+        // stroke color exists, use the fill color as the stroke so the width is
+        // visible in SVG (stroke-width is only emitted when stroke is Some).
+        let effective_stroke = if stroke_width > 0.0 && stroke.is_none() && self.width.is_some() {
+            fill
+        } else {
+            stroke
+        };
 
         let fs = ferrum_scene::FillStroke {
             fill,
-            stroke,
+            stroke: effective_stroke,
             stroke_width,
             opacity,
             stroke_dash: effective_dash,

@@ -174,6 +174,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -211,12 +213,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(resolve_stroke_dash);
         let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
 
+        // Sample opacity encoding from the first row of the group.
+        let group_opacity = opacity_vals.as_ref()
+            .and_then(|v| v.get(first).copied().flatten())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(ctx.mark_style.opacity);
+
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
                 scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
         };
-        let stroke_color = with_opacity(stroke_color, ctx.mark_style.opacity);
+        let stroke_color = with_opacity(stroke_color, group_opacity);
 
         if use_path {
             let cmds = build_line_cmds(&points, interpolate);

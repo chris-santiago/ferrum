@@ -26,14 +26,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
     let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
 
-    let stroke_style = to_scene_stroke(
-        ctx.mark_style.fill,
-        ctx.mark_style.stroke_width,
-        ctx.mark_style.opacity,
-        ctx.mark_style.stroke_dash.as_deref(),
-        None,
-        None,
-    );
+    // Per-row opacity and stroke_width from encoding columns (if mapped).
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
@@ -57,12 +57,29 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let p2y = match ctx.scales.y.to_pixel_f64(y2v) { Some(p) => p, None => continue };
         let xo = x_offsets.get(i).copied().unwrap_or(0.0);
         let yo = y_offsets.get(i).copied().unwrap_or(0.0);
+
+        let row_opacity = opacity_values.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .unwrap_or(ctx.mark_style.opacity);
+        let row_stroke_width = stroke_width_values.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .unwrap_or(ctx.mark_style.stroke_width);
+
+        let row_style = to_scene_stroke(
+            ctx.mark_style.fill,
+            row_stroke_width,
+            row_opacity,
+            ctx.mark_style.stroke_dash.as_deref(),
+            None,
+            None,
+        );
+
         nodes.push(SceneNode::Line {
             x1: p1x + xo,
             y1: p1y + yo,
             x2: p2x + xo,
             y2: p2y + yo,
-            style: stroke_style.clone(),
+            style: row_style,
         });
         indices.push(i);
     }

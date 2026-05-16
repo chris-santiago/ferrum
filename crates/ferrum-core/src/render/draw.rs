@@ -396,7 +396,7 @@ pub fn to_scene_stroke(
         width,
         opacity,
         dash: dash.map(|d| d.to_vec()),
-        stroke_opacity: 1.0,
+        stroke_opacity: opacity,
         stroke_cap: cap.and_then(|s| match s {
             "round" => Some(ferrum_scene::StrokeCap::Round),
             "square" => Some(ferrum_scene::StrokeCap::Square),

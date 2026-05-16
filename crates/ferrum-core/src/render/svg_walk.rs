@@ -310,8 +310,10 @@ fn emit_text(svg: &mut SvgBuffer, x: f64, y: f64, content: &str, s: &FsText) {
         ferrum_scene::TextBaseline::Custom(v) => Some(v.clone()),
         ferrum_scene::TextBaseline::Alphabetic => None,
     };
+    let effective_alpha = ((s.color.a as f64 / 255.0) * s.opacity).clamp(0.0, 1.0);
+    let alpha_byte = (effective_alpha * 255.0).round() as u8;
     let ts = TextStyle {
-        fill: from_rgba(s.color.r, s.color.g, s.color.b, s.color.a),
+        fill: from_rgba(s.color.r, s.color.g, s.color.b, alpha_byte),
         font_size: s.font_size,
         anchor,
         angle: s.angle,

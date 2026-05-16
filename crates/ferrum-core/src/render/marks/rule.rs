@@ -13,7 +13,9 @@ fn rule_stroke_style(
     so_vals: &Option<Vec<Option<f64>>>,
     sw_vals: &Option<Vec<Option<f64>>>,
     sd_vals: &Option<Vec<Option<f64>>>,
+    opacity_vals: &Option<Vec<Option<f64>>>,
 ) -> ferrum_scene::StrokeStyle {
+    use crate::render::color::with_opacity;
     use crate::render::draw::to_scene_stroke;
 
     let stroke_opacity = so_vals.as_ref()
@@ -21,6 +23,11 @@ fn rule_stroke_style(
         .filter(|v| v.is_finite())
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(1.0);
+    let opacity = opacity_vals.as_ref()
+        .and_then(|v| v.get(i).copied().flatten())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(ctx.mark_style.opacity);
     let stroke_width = sw_vals.as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| *v >= 0.0 && v.is_finite())
@@ -30,7 +37,8 @@ fn rule_stroke_style(
         .filter(|v| v.is_finite())
         .and_then(resolve_stroke_dash);
     let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
-    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
+    let base_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
+    let stroke_color = with_opacity(base_color, opacity);
     let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);
     style.stroke_opacity = stroke_opacity;
     style
@@ -49,6 +57,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
@@ -90,7 +100,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py + y_offsets[i],
                     x2: px,
                     y2: py2 + y_offsets[i],
-                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
+                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals),
                 });
                 indices.push(i);
             }
@@ -122,7 +132,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py,
                     x2: px2 + x_offsets[i],
                     y2: py,
-                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
+                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals),
                 });
                 indices.push(i);
             }
@@ -154,7 +164,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                         y1: py,
                         x2: panel.x + panel.w,
                         y2: py,
-                        style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
+                        style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals),
                     });
                     indices.push(i);
                 }
@@ -181,7 +191,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 y1: panel.y,
                 x2: px,
                 y2: panel.y + panel.h,
-                style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals),
+                style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals),
             });
             indices.push(i);
         }
