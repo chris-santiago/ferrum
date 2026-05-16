@@ -540,9 +540,25 @@ def importance_chart(
     error_bars : bool, default True
         When ``True``, draws +/-1 std error bars around each bar. Has no
         visual effect when ``method="builtin"`` (``std=0``).
+    show_values : bool, default True
+        When ``True``, overlays the numeric importance value as a text
+        label on each bar.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource`` and to
         ``permutation_importance`` when ``method="permutation"``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -598,18 +614,45 @@ def shap_beeswarm_chart(
     class. ``per_class=False`` (default) renders a single panel using
     the first class (the only group on regression and binary).
 
-    See :func:`shap_chart` for the shared parameter docstring
-    (``model``, ``X``, ``y``, ``max_display``, ``order``,
-    ``background``, ``per_class``, ``random_state``, ``theme``) — this
-    function is the dedicated sibling for ``kind="beeswarm"``.
-
     Parameters
     ----------
+    model : estimator or ModelSource
+        Fitted sklearn-compatible estimator or an explicit
+        ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix.  Required when ``model`` is a raw estimator.
+    y : array-like, optional
+        Target vector.  Required when ``model`` is a raw estimator.
+    max_display : int, default 20
+        Maximum number of features to display.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
+        SHAP value; ``"max"`` by max absolute SHAP value.
+    background : array-like or None, default None
+        Background dataset for kernel SHAP explainers.  Ignored for
+        tree SHAP.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers.
     zero_line : bool, default True
         Overlay a dashed vertical reference rule at ``shap_value = 0``
         so the sign of each feature's contribution is immediately
         legible.  Automatically skipped on the multi-panel ``per_class``
         path.  Pass ``False`` to suppress.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -660,15 +703,45 @@ def shap_bar_chart(
     class. ``per_class=False`` (default) renders a single panel using
     the first class.
 
-    See :func:`shap_chart` for the full shared parameter docstring
-    (``model``, ``X``, ``y``, ``max_display``, ``order``,
-    ``background``, ``per_class``, ``random_state``, ``theme``) — this
-    function is the dedicated sibling for ``kind="bar"``.
+    Parameters
+    ----------
+    model : estimator or ModelSource
+        Fitted sklearn-compatible estimator or an explicit
+        ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix.  Required when ``model`` is a raw estimator.
+    y : array-like, optional
+        Target vector.  Required when ``model`` is a raw estimator.
+    max_display : int, default 20
+        Maximum number of features to display.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
+        SHAP value; ``"max"`` by max absolute SHAP value.
+    background : array-like or None, default None
+        Background dataset for kernel SHAP explainers.  Ignored for
+        tree SHAP.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
     Chart
-        SHAP bar chart (features × mean |SHAP|).
+        SHAP bar chart (features x mean |SHAP|).
 
     Examples
     --------
@@ -715,15 +788,42 @@ def shap_waterfall_chart(
     ``per_class=False`` (default) renders a single panel using the first
     class.
 
-    See :func:`shap_chart` for the full shared parameter docstring
-    (``model``, ``X``, ``y``, ``max_display``, ``order``,
-    ``background``, ``per_class``, ``random_state``, ``theme``) — this
-    function is the dedicated sibling for ``kind="waterfall"``.
-
     Parameters
     ----------
+    model : estimator or ModelSource
+        Fitted sklearn-compatible estimator or an explicit
+        ``ferrum.ModelSource``.
+    X : array-like, optional
+        Feature matrix.  Required when ``model`` is a raw estimator.
+    y : array-like, optional
+        Target vector.  Required when ``model`` is a raw estimator.
     sample_idx : int
         Row index (0-based) of the sample to explain.  Required.
+    max_display : int, default 20
+        Maximum number of features to display.
+    order : {"abs_mean", "max"}, default "abs_mean"
+        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
+        SHAP value; ``"max"`` by max absolute SHAP value.
+    background : array-like or None, default None
+        Background dataset for kernel SHAP explainers.  Ignored for
+        tree SHAP.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -816,6 +916,17 @@ def shap_chart(
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; SHAP computation itself is
         deterministic for tree explainers.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -945,6 +1056,17 @@ def pdp_chart(
         features directly comparable.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 

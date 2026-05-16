@@ -101,6 +101,17 @@ def rank_chart(
         ``None``, a single color is used.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -204,8 +215,28 @@ def rank1d_chart(
         ``source`` is a raw estimator.
     algorithm : str or None, default None
         Ranking algorithm. ``None`` selects ``"shapiro"``.
-    top_k, orient, color_field, random_state, theme : forwarded to the
-        chart builder.
+    top_k : int or None, optional
+        Limit the chart to the top-k features by score.  ``None`` shows
+        all features.
+    orient : {"horizontal", "vertical"}, default "horizontal"
+        Bar orientation.
+    color_field : str or None, optional
+        Column name to map to bar color.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -284,7 +315,21 @@ def rank2d_chart(
         Ranking algorithm. ``None`` selects ``"pearson"``.
     annot : bool, default True
         Overlay the correlation value (2 decimals) on each cell.
-    random_state, theme : optional.
+    random_state : int or None, default None
+        Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
+    theme : Theme or None, default None
+        Ferrum theme to apply to the returned chart.
 
     Returns
     -------
@@ -362,6 +407,17 @@ def parallel_coordinates_chart(
     alpha : float, default 0.5
         Opacity of individual polylines; lower values reduce overplot
         in dense datasets.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -455,6 +511,17 @@ def decision_boundary_chart(
         per the ``ChartSpec`` one-batch contract.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 

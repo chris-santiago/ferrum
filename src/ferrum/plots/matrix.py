@@ -141,6 +141,17 @@ def pairplot(
         variable columns before building the pairplot.
     theme : Theme, optional
         Visual theme applied to all panels.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         every panel template.
@@ -360,6 +371,17 @@ def heatmap(
         ``data``), cells where the mask is ``True`` are hidden.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -610,6 +632,17 @@ def clustermap(
         panel, forwarded to ``ClusterMapChart``.
     theme : Theme, optional
         Visual theme applied to the center and dendrogram charts.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         the center heatmap chart.
@@ -848,6 +881,17 @@ def jointplot(
         Height and width of the square central panel in pixels.
     theme : Theme, optional
         Visual theme applied to all three panels via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()`` on
         the center chart.

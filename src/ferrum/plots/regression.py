@@ -443,6 +443,17 @@ def lmplot(
         space) or when ``hue`` is set (per-group corners would crowd).
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -722,6 +733,17 @@ def residplot(
         Column name or constant color forwarded to ``Chart.encode(color=)``.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -892,6 +914,17 @@ def regplot(
         scatter layer.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     **encode_kwargs
         Additional keyword arguments forwarded to ``Chart.encode()``.
 
@@ -977,6 +1010,11 @@ def residuals_chart(
     y : array-like, optional
         Target vector. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
+    y_true : array-like, optional
+        Ground-truth target values for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted target values for the precomputed path.
     kind : {"studentized", "raw"}, default "studentized"
         Residual type to plot on the y axis. ``"studentized"`` uses
         internally studentized residuals; ``"raw"`` uses raw residuals.
@@ -1004,6 +1042,17 @@ def residuals_chart(
         residuals computation.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1104,6 +1153,17 @@ def prediction_error_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1173,6 +1233,17 @@ def cooks_distance_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------

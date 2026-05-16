@@ -887,6 +887,17 @@ def roc_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -966,6 +977,13 @@ def pr_chart(
     y : array-like, optional
         True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     per_class : bool, default True
         When ``True``, one PR curve per class is drawn using the
         one-vs-rest scheme.  When ``False``, a single curve averaged per
@@ -994,6 +1012,17 @@ def pr_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1073,6 +1102,13 @@ def calibration_chart(
     y : array-like, optional
         True binary labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     n_bins : int, default 10
         Number of probability bins for the reliability diagram.
     strategy : {"uniform", "quantile"}, default "uniform"
@@ -1093,6 +1129,17 @@ def calibration_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1170,6 +1217,13 @@ def gain_chart(
     y : array-like, optional
         True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
@@ -1180,6 +1234,17 @@ def gain_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1236,6 +1301,13 @@ def lift_chart(
     y : array-like, optional
         True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
@@ -1246,6 +1318,17 @@ def lift_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1299,6 +1382,11 @@ def confusion_matrix_chart(
     y : array-like, optional
         True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted class labels for the precomputed path.
     normalize : {"true", "pred", "all"} or None, default "true"
         Normalization scheme for cell values.  ``None`` shows raw
         counts; ``"true"`` normalizes over actual classes (rows);
@@ -1311,6 +1399,17 @@ def confusion_matrix_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1373,6 +1472,11 @@ def class_prediction_error_chart(
     y : array-like, optional
         True class labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted class labels for the precomputed path.
     normalize : bool, default False
         When ``True``, each bar is normalized to 100% (relative
         composition).  When ``False``, bars show raw sample counts.
@@ -1384,6 +1488,17 @@ def class_prediction_error_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1453,6 +1568,13 @@ def discrimination_threshold_chart(
     y : array-like, optional
         True binary labels.  Required when ``model`` is a raw
         estimator.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path.  Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Soft scores / probabilities for the precomputed path.  1-D for
+        binary classifiers (positive-class scores); 2-D
+        ``(n_samples, n_classes)`` for multiclass.
     n_thresholds : int, default 50
         Number of evenly spaced threshold values in ``[0, 1]`` to
         evaluate.
@@ -1474,10 +1596,23 @@ def discrimination_threshold_chart(
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->
         ``ComparedModelSource``.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1546,6 +1681,17 @@ def classification_report_chart(
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------
@@ -1589,6 +1735,17 @@ def class_balance_chart(
         arrays, and any iterable convertible to a flat list.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
 
     Returns
     -------

@@ -361,6 +361,17 @@ def pca_scree_chart(
         of variance is explained). Pass ``None`` to omit the rule.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -493,6 +504,17 @@ def cluster_diagnostics(
         Random seed for KMeans initialisation. When ``None``, defaults
         to seed 0 for deterministic results. Ignored for hierarchical
         clustering.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -586,6 +608,17 @@ def intercluster_distance_chart(
         ``min(5, k-1)`` for small cluster counts).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -658,6 +691,17 @@ def silhouette_chart(
         estimator; ignored when it is already a ``ModelSource``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -714,6 +758,17 @@ def manifold_chart(
         and ``"pca"``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource`` for stochastic embeddings.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
@@ -773,6 +828,17 @@ def elbow_chart(
         and ``"calinski_harabasz"`` are maximized.
     random_state : int or None, default None
         Seed passed to every per-k model instantiation.
+    mark : dict, optional
+        Per-layer mark overrides.  For composite-mark charts, keys are
+        layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
+        single-mark charts, a flat dict of mark properties.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``
+        (e.g. ``{"width": 400, "title": "My chart"}``).
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, default None
         Ferrum theme to apply to the returned chart.
 
