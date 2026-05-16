@@ -206,7 +206,8 @@ pub(crate) fn apply_with_context(
         .column(val_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_swarm: expected Float64Array for value column '{}'", spec.value)))?;
 
     // 2. Compute value range for radius_data.
     let mut vmin = f64::INFINITY;
@@ -263,7 +264,8 @@ pub(crate) fn apply_with_context(
                 .column(cat_idx)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .unwrap();
+                .ok_or_else(|| PyValueError::new_err(format!(
+                    "stat_swarm: expected StringArray for category column '{}'", spec.category)))?;
             (0..n)
                 .map(|i| {
                     if arr.is_null(i) {
@@ -279,7 +281,8 @@ pub(crate) fn apply_with_context(
                 .column(cat_idx)
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap();
+                .ok_or_else(|| PyValueError::new_err(format!(
+                    "stat_swarm: expected Float64Array for category column '{}'", spec.category)))?;
             (0..n)
                 .map(|i| {
                     if arr.is_null(i) {

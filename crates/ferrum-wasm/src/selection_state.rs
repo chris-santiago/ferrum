@@ -278,28 +278,6 @@ fn toggle_points(sel: &mut SelectionState, indices: &[usize]) {
     }
 }
 
-#[allow(dead_code)]
-fn toggle_point(sel: &mut SelectionState, data_idx: usize) {
-    match sel {
-        SelectionState::Point { indices, .. } => {
-            if let Some(pos) = indices.iter().position(|&i| i == data_idx) {
-                indices.remove(pos);
-                if indices.is_empty() {
-                    *sel = SelectionState::Empty;
-                }
-            } else {
-                indices.push(data_idx);
-            }
-        }
-        _ => {
-            *sel = SelectionState::Point {
-                indices: vec![data_idx],
-                field_values: Vec::new(),
-            };
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

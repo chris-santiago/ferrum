@@ -180,7 +180,9 @@ fn apply_grouped(
         return Err(PyValueError::new_err(format!(
             "stat_smooth: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
     }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_smooth: expected StringArray for groupby column '{}'", group_col)))?;
 
     // Group row indices by first-appearance order of the group value.
     let mut group_order: Vec<String> = Vec::new();
@@ -198,7 +200,9 @@ fn apply_grouped(
     // Collect per-group outputs and stack them.
     let mut per_group_batches: Vec<(String, RecordBatch)> = Vec::new();
     for g in &group_order {
-        let ixs = group_idx_map.get(g).unwrap();
+        let ixs = group_idx_map.get(g)
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "stat_smooth: missing group key '{g}' in index map")))?;
         let out = apply_one_group(spec, batch, Some(ixs))?;
         per_group_batches.push((g.clone(), out));
     }
@@ -222,7 +226,8 @@ fn apply_grouped(
             DataType::Float64 => {
                 let mut vals = Vec::with_capacity(total_rows);
                 for (_, b) in &per_group_batches {
-                    let arr = b.column(fi).as_any().downcast_ref::<Float64Array>().unwrap();
+                    let arr = b.column(fi).as_any().downcast_ref::<Float64Array>()
+                        .ok_or_else(|| PyValueError::new_err("stat_smooth: expected Float64Array in grouped output"))?;
                     for i in 0..arr.len() {
                         if arr.is_null(i) { vals.push(f64::NAN); } else { vals.push(arr.value(i)); }
                     }
@@ -232,7 +237,8 @@ fn apply_grouped(
             DataType::Utf8 => {
                 let mut vals: Vec<Option<String>> = Vec::with_capacity(total_rows);
                 for (_, b) in &per_group_batches {
-                    let arr = b.column(fi).as_any().downcast_ref::<StringArray>().unwrap();
+                    let arr = b.column(fi).as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyValueError::new_err("stat_smooth: expected StringArray in grouped output"))?;
                     for i in 0..arr.len() {
                         if arr.is_null(i) { vals.push(None); } else { vals.push(Some(arr.value(i).to_string())); }
                     }
@@ -321,7 +327,7 @@ fn pre_aggregate_xy(
 
 fn median(v: &[f64]) -> f64 {
     let mut s = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = s.len();
     if n == 0 { return f64::NAN; }
     if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
@@ -437,8 +443,10 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
     if schema.field(yi).data_type() != &DataType::Float64 {
         return Err(PyValueError::new_err(format!("stat_smooth: '{}' must be Float64", spec.y)));
     }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>().unwrap();
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>().unwrap();
+    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.x)))?;
+    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.y)))?;
     let mut xs = Vec::with_capacity(xa.len());
     let mut ys = Vec::with_capacity(ya.len());
     let push = |i: usize, xs: &mut Vec<f64>, ys: &mut Vec<f64>| {
@@ -737,7 +745,7 @@ fn loess_bootstrap_ci(
             lo_out.push(f64::NAN); hi_out.push(f64::NAN);
             continue;
         }
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         lo_out.push(percentile_sorted(s, lo_q));
         hi_out.push(percentile_sorted(s, hi_q));
     }

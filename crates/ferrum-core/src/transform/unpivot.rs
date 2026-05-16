@@ -70,7 +70,7 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
     // Cast each value column to the unified dtype.
     let value_columns_cast: Vec<ArrayRef> = value_var_names.iter()
         .map(|n| {
-            let i = schema.index_of(n).unwrap();
+            let i = schema.index_of(n).expect("invariant: value_var columns validated above");
             cast(&batch.column(i), &unified_dtype)
                 .map_err(|e| PyValueError::new_err(format!("stat_unpivot: cast '{n}': {e}")))
         })
@@ -110,7 +110,7 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
 
     // Assemble output schema: id_vars... + var_name + value_name.
     let mut fields: Vec<Field> = spec.id_vars.iter().map(|n| {
-        let i = schema.index_of(n).unwrap();
+        let i = schema.index_of(n).expect("invariant: id_var columns validated above");
         let f = schema.field(i);
         Field::new(f.name(), f.data_type().clone(), f.is_nullable())
     }).collect();

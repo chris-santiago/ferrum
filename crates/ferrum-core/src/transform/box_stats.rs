@@ -83,14 +83,14 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
         .column(v_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected Float64Array for value column"))?;
 
     // Bucket rows by group key (BTreeMap → deterministic ordering).
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     let group_arrays: Vec<&dyn arrow::array::Array> = spec
         .groupby
         .iter()
-        .map(|g| batch.column(schema.index_of(g).unwrap()).as_ref())
+        .map(|g| batch.column(schema.index_of(g).expect("invariant: groupby columns validated above")).as_ref())
         .collect();
 
     for row in 0..n_rows {
@@ -98,7 +98,8 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
         for (gi, arr) in group_arrays.iter().enumerate() {
             match group_dtypes[gi] {
                 DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                    let a = arr.as_any().downcast_ref::<Float64Array>()
+                        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected Float64Array for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Float(f64::NAN.to_bits()));
                     } else {
@@ -106,7 +107,8 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
                     }
                 }
                 DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>().unwrap();
+                    let a = arr.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected StringArray for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Str(String::new()));
                     } else {
@@ -220,7 +222,7 @@ fn compute_stats(
     let median = quartile(vals, 0.5);
     let q3 = quartile(vals, 0.75);
     let mut sorted: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let data_min = sorted[0];
     let data_max = sorted[sorted.len() - 1];
 
@@ -252,7 +254,7 @@ fn compute_stats(
 /// Type-7 quantile (linear interpolation) — matches numpy/scipy default.
 fn quartile(values: &[f64], p: f64) -> f64 {
     let mut sorted: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
     if n == 0 {
         return f64::NAN;

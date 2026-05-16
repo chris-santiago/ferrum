@@ -218,7 +218,9 @@ fn apply_grouped(
         return Err(PyValueError::new_err(format!(
             "stat_bin: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
     }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_bin: expected StringArray for groupby column '{}'", group_col)))?;
 
     // Group row indices by first-appearance order of the group value.
     let mut group_order: Vec<String> = Vec::new();
@@ -246,7 +248,9 @@ fn apply_grouped(
         // Cast to Float64 to handle integer columns (same cast as apply_one_group).
         let col_cast;
         let farr: &Float64Array = match col.data_type() {
-            DataType::Float64 => col.as_any().downcast_ref::<Float64Array>().unwrap(),
+            DataType::Float64 => col.as_any().downcast_ref::<Float64Array>()
+                .ok_or_else(|| PyValueError::new_err(format!(
+                    "stat_bin: expected Float64Array for column '{}'", spec.field)))?,
             DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
             | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
             | DataType::Float32 => {
@@ -254,7 +258,9 @@ fn apply_grouped(
                     .map_err(|e| PyValueError::new_err(format!(
                         "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
                     )))?;
-                col_cast.as_any().downcast_ref::<Float64Array>().unwrap()
+                col_cast.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| PyValueError::new_err(format!(
+                        "stat_bin: cast to Float64 failed for column '{}'", spec.field)))?
             }
             _ => {
                 return Err(PyValueError::new_err(format!(
@@ -290,13 +296,19 @@ fn apply_grouped(
     let mut all_densities: Vec<f64> = Vec::new();
     let mut all_groups: Vec<String> = Vec::new();
     for g in &group_order {
-        let ixs = group_idx_map.get(g).unwrap();
+        let ixs = group_idx_map.get(g)
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "stat_bin: missing group key '{g}' in index map")))?;
         let out = apply_one_group(spec_ref, batch, Some(ixs))?;
         let n = out.num_rows();
-        let starts = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-        let ends = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
-        let counts = out.column(2).as_any().downcast_ref::<UInt64Array>().unwrap();
-        let densities = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let starts = out.column(0).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for bin_start"))?;
+        let ends = out.column(1).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for bin_end"))?;
+        let counts = out.column(2).as_any().downcast_ref::<UInt64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_bin: expected UInt64Array for count"))?;
+        let densities = out.column(3).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_bin: expected Float64Array for density"))?;
         for i in 0..n {
             all_starts.push(starts.value(i));
             all_ends.push(ends.value(i));

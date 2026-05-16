@@ -8,6 +8,8 @@
 use faer::prelude::*;
 use faer::linalg::solvers::Llt;
 use faer::Side;
+use pyo3::exceptions::PyValueError;
+use pyo3::PyResult;
 
 // ---- Fixed-size helpers (shared across glm, logistic, robust, smooth) ----
 
@@ -180,17 +182,22 @@ pub(crate) fn corrcoef(x: &Mat<f64>) -> Mat<f64> {
 
 /// Build a faer Mat<f64> from a flat row-major slice and dimensions.
 ///
-/// # Panics
-/// Panics if `data.len() != nrows * ncols`.
-pub(crate) fn mat_from_flat(data: &[f64], nrows: usize, ncols: usize) -> Mat<f64> {
-    assert_eq!(data.len(), nrows * ncols, "mat_from_flat: data length mismatch");
+/// # Errors
+/// Returns `PyValueError` if `data.len() != nrows * ncols`.
+pub(crate) fn mat_from_flat(data: &[f64], nrows: usize, ncols: usize) -> PyResult<Mat<f64>> {
+    if data.len() != nrows * ncols {
+        return Err(PyValueError::new_err(format!(
+            "mat_from_flat: data length mismatch — expected {} ({}×{}), got {}",
+            nrows * ncols, nrows, ncols, data.len()
+        )));
+    }
     let mut m = Mat::zeros(nrows, ncols);
     for i in 0..nrows {
         for j in 0..ncols {
             m[(i, j)] = data[i * ncols + j];
         }
     }
-    m
+    Ok(m)
 }
 
 #[cfg(test)]

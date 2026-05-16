@@ -286,7 +286,7 @@ pub fn hat_matrix_stats(
             flat[i * p_with_intercept + j + 1] = col[i];
         }
     }
-    let x_mat = linalg::mat_from_flat(&flat, n, p_with_intercept);
+    let x_mat = linalg::mat_from_flat(&flat, n, p_with_intercept)?;
     let h = linalg::hat_diagonal(&x_mat);
 
     let stud = studentized_residual_vec(yt, yp, Some(&h));
@@ -444,7 +444,7 @@ pub fn py_rank2d(
 
     let c_flat: Vec<f64> = match algorithm {
         "pearson" => {
-            let mat = linalg::mat_from_flat(&flat, n, p);
+            let mat = linalg::mat_from_flat(&flat, n, p)?;
             let c = linalg::corrcoef(&mat);
             let mut out = vec![0.0; p * p];
             for i in 0..p {
@@ -464,7 +464,7 @@ pub fn py_rank2d(
                     ranked_flat[i * p + j] = ranks[i];
                 }
             }
-            let mat = linalg::mat_from_flat(&ranked_flat, n, p);
+            let mat = linalg::mat_from_flat(&ranked_flat, n, p)?;
             let c = linalg::corrcoef(&mat);
             let mut out = vec![0.0; p * p];
             for i in 0..p {
@@ -581,7 +581,7 @@ fn pca_svd(
         return Err(PyValueError::new_err("pca: n_components must be >= 1"));
     }
 
-    let mut x_mat = linalg::mat_from_flat(&flat, n, p);
+    let mut x_mat = linalg::mat_from_flat(&flat, n, p)?;
     for j in 0..p {
         let mean: f64 = (0..n).map(|i| x_mat[(i, j)]).sum::<f64>() / n as f64;
         for i in 0..n {
@@ -753,7 +753,7 @@ pub fn mds_classical(
         }
     }
 
-    let b_mat = linalg::mat_from_flat(&b_flat, n, n);
+    let b_mat = linalg::mat_from_flat(&b_flat, n, n)?;
     let eigen = b_mat.self_adjoint_eigen(Side::Lower)
         .map_err(|e| PyValueError::new_err(format!("mds_classical eigendecomposition failed: {e:?}")))?;
 
@@ -1409,7 +1409,7 @@ mod tests {
                 b_flat[i * n + j] = -0.5 * (d_sq[i * n + j] - row_means[i] - col_means[j] + grand_mean);
             }
         }
-        let b_mat = linalg::mat_from_flat(&b_flat, n, n);
+        let b_mat = linalg::mat_from_flat(&b_flat, n, n).unwrap();
         let eigen = b_mat.self_adjoint_eigen(Side::Lower).unwrap();
         let eigvals: Vec<f64> = eigen.S().column_vector().iter().copied().collect();
         let eigvecs = eigen.U();

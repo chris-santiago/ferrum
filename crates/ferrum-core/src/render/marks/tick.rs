@@ -63,7 +63,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
     }
 
-    let xf = xf_opt.unwrap();
+    let xf = xf_opt.expect("invariant: xf_opt is Some — None case returned above");
 
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {

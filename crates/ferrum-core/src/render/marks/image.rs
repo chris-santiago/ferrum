@@ -245,7 +245,7 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Decode f64 values and map through colormap to produce RGBA8 pixels.
     let mut rgba: Vec<u8> = Vec::with_capacity(n_cells * 4);
     for chunk in pixel_bytes.chunks_exact(8) {
-        let v = f64::from_le_bytes(chunk.try_into().unwrap());
+        let v = f64::from_le_bytes(chunk.try_into().expect("invariant: chunks_exact(8) guarantees 8-byte slices"));
         if v.is_nan() {
             rgba.extend_from_slice(&[0, 0, 0, 0]);
         } else {

@@ -58,7 +58,9 @@ pub(crate) fn apply_with_outputs(
             "stat_reorder: '{}' must be Int64 (got {:?})",
             spec.by, schema.field(idx).data_type())));
     }
-    let idx_arr = index_batch.column(idx).as_any().downcast_ref::<Int64Array>().unwrap();
+    let idx_arr = index_batch.column(idx).as_any().downcast_ref::<Int64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_reorder: expected Int64Array for index column '{}'", spec.by)))?;
     let n = idx_arr.len();
     if spec.from.is_some() && n != batch.num_rows() {
         return Err(PyValueError::new_err(format!(

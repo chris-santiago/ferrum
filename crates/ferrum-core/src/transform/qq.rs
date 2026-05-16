@@ -176,7 +176,7 @@ fn compute_theoretical(
                 let mut jittered: Vec<f64> = (0..run)
                     .map(|_| lo + rng.gen::<f64>() * (hi - lo))
                     .collect();
-                jittered.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                jittered.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 for (k, val) in jittered.into_iter().enumerate() {
                     p[i + k] = val;
                 }
@@ -210,7 +210,8 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
         .column(v_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_qq: expected Float64Array for column '{}'", spec.field)))?;
 
     // Filter null/NaN sample values.
     let mut samples: Vec<f64> = (0..v_arr.len())
@@ -231,7 +232,7 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
         return Err(PyValueError::new_err("stat_qq: empty input after filter"));
     }
 
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let theoretical =
         compute_theoretical(&samples, &spec.distribution, spec.dequantize, spec.seed)?;
 

@@ -4,7 +4,7 @@
 //!   ordinal y + x + x2 → ranged horizontal segment (Phase 10d-pre,
 //!     feature-importance error bars).
 
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, resolve_stroke_dash, x_field, y_field, DrawCtx};
 
 /// Build a per-row stroke style for rule segments, applying encoding column values.
 fn rule_stroke_style(
@@ -28,15 +28,7 @@ fn rule_stroke_style(
     let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| v.is_finite())
-        .and_then(|idx| {
-            let idx = (idx.round() as i64).clamp(0, 3);
-            match idx {
-                1 => Some(vec![6.0, 3.0]),
-                2 => Some(vec![2.0, 3.0]),
-                3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
-                _ => None,
-            }
-        });
+        .and_then(resolve_stroke_dash);
     let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
     let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
     let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);

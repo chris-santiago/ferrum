@@ -127,7 +127,8 @@ pub(crate) fn apply_with_context(
                     .column(fi)
                     .as_any()
                     .downcast_ref::<Float64Array>()
-                    .unwrap(),
+                    .ok_or_else(|| PyValueError::new_err(format!(
+                        "stat_raster: expected Float64Array for field column '{}'", name)))?,
             )
         }
     };
@@ -162,12 +163,14 @@ pub(crate) fn apply_with_context(
         .column(xi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_raster: expected Float64Array for column '{}'", spec.x)))?;
     let ya = batch
         .column(yi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_raster: expected Float64Array for column '{}'", spec.y)))?;
 
     // 5. Filter to (x, y) pairs that are non-null, non-NaN. Capture field values
     // in lockstep when present.

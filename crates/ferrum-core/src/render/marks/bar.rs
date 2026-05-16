@@ -7,7 +7,7 @@
 
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 struct BarBaseStyle<'a> {
@@ -67,15 +67,7 @@ impl StrokeChannels {
         let dash_vec: Option<Vec<f64>> = self.dash.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .filter(|v| v.is_finite())
-            .and_then(|idx| {
-                let idx = (idx.round() as i64).clamp(0, 3);
-                match idx {
-                    1 => Some(vec![6.0, 3.0]),
-                    2 => Some(vec![2.0, 3.0]),
-                    3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
-                    _ => None,
-                }
-            });
+            .and_then(resolve_stroke_dash);
         let effective_dash = dash_vec.as_deref().or(base_dash).map(|d| d.to_vec());
 
         let angle = self.angle.as_ref()

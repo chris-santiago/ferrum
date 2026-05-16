@@ -78,7 +78,7 @@ fn resolve_bin_count(spec: &BinSpec2DAxis, vals: &[f64], lo: f64, hi: f64) -> Py
         BinSpec2DAxis::Sturges => Ok(sturges_floor(vals.len())),
         BinSpec2DAxis::FreedmanDiaconis => {
             let mut sorted = vals.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let iqr_val = iqr_sorted(&sorted);
             let h = 2.0 * iqr_val * (vals.len() as f64).powf(-1.0 / 3.0);
             if h > 0.0 && h.is_finite() {

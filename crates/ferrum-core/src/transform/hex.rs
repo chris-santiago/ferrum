@@ -144,7 +144,8 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
                     .column(fi)
                     .as_any()
                     .downcast_ref::<Float64Array>()
-                    .unwrap(),
+                    .ok_or_else(|| PyValueError::new_err(format!(
+                        "stat_hex: expected Float64Array for field column '{}'", name)))?,
             )
         }
     };
@@ -153,12 +154,14 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         .column(xi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_hex: expected Float64Array for column '{}'", spec.x)))?;
     let ya = batch
         .column(yi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_hex: expected Float64Array for column '{}'", spec.y)))?;
 
     // Filter (x, y) pairs: drop null/NaN. Capture field in lockstep when present.
     // For "mean"/"sum", drop rows where field is null/NaN as well.

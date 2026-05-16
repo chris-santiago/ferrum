@@ -72,12 +72,14 @@ pub(crate) fn apply(spec: &Kde2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
         .column(xi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_kde_2d: expected Float64Array for column '{}'", spec.x)))?;
     let ya = batch
         .column(yi)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_kde_2d: expected Float64Array for column '{}'", spec.y)))?;
 
     let mut xs: Vec<f64> = Vec::with_capacity(xa.len());
     let mut ys: Vec<f64> = Vec::with_capacity(ya.len());

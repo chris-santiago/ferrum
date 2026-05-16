@@ -358,8 +358,10 @@ fn extract_xy(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f6
     if schema.field(yi).data_type() != &DataType::Float64 {
         return Err(PyValueError::new_err(format!("Glm: '{}' must be Float64", spec.y)));
     }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>().unwrap();
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>().unwrap();
+    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!("Glm: expected Float64Array for '{}'", spec.x)))?;
+    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!("Glm: expected Float64Array for '{}'", spec.y)))?;
     let mut xs = Vec::with_capacity(xa.len());
     let mut ys = Vec::with_capacity(ya.len());
     for i in 0..xa.len() {

@@ -17,7 +17,7 @@
 //! - Otherwise: one polyline over all rows in batch order.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -208,15 +208,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| v.is_finite())
-            .and_then(|idx| {
-                let idx = (idx.round() as i64).clamp(0, 3);
-                match idx {
-                    1 => Some(vec![6.0, 3.0]),
-                    2 => Some(vec![2.0, 3.0]),
-                    3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
-                    _ => None,
-                }
-            });
+            .and_then(resolve_stroke_dash);
         let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {

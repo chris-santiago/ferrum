@@ -63,7 +63,8 @@ fn apply_one_group(
         .column(idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_kde: expected Float64Array for column '{}'", spec.field)))?;
     let mut clean: Vec<f64> = Vec::new();
     let push = |i: usize, clean: &mut Vec<f64>| {
         if arr.is_null(i) { return; }
@@ -145,7 +146,9 @@ fn apply_grouped(
         return Err(PyValueError::new_err(format!(
             "stat_kde: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
     }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap();
+    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_kde: expected StringArray for groupby column '{}'", group_col)))?;
 
     // Group row indices by first-appearance order of the group value.
     let mut group_order: Vec<String> = Vec::new();
@@ -187,11 +190,15 @@ fn apply_grouped(
     let mut all_density: Vec<f64> = Vec::new();
     let mut all_groups: Vec<String> = Vec::new();
     for g in &group_order {
-        let ixs = group_idx_map.get(g).unwrap();
+        let ixs = group_idx_map.get(g)
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "stat_kde: missing group key '{g}' in index map")))?;
         let out = apply_one_group(&shared_spec, batch, Some(ixs))?;
         let n = out.num_rows();
-        let values = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-        let density = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let values = out.column(0).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'value' output column"))?;
+        let density = out.column(1).as_any().downcast_ref::<Float64Array>()
+            .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'density' output column"))?;
         for i in 0..n {
             all_values.push(values.value(i));
             all_density.push(if density.is_null(i) { f64::NAN } else { density.value(i) });
@@ -222,7 +229,7 @@ pub(crate) fn bandwidth(x: &[f64], spec: &BandwidthSpec) -> PyResult<f64> {
         BandwidthSpec::Scott => sigma * n.powf(-0.2),
         BandwidthSpec::Silverman => {
             let mut sorted = x.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let q25 = percentile(&sorted, 0.25);
             let q75 = percentile(&sorted, 0.75);
             let iqr = q75 - q25;

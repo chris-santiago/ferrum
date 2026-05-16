@@ -131,14 +131,14 @@ pub(crate) fn apply_with_context(
         .column(v_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for value column"))?;
 
     // Bucket rows by group key (BTreeMap → deterministic ordering).
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     let group_arrays: Vec<&dyn arrow::array::Array> = spec
         .groupby
         .iter()
-        .map(|g| batch.column(schema.index_of(g).unwrap()).as_ref())
+        .map(|g| batch.column(schema.index_of(g).expect("invariant: groupby columns validated above")).as_ref())
         .collect();
 
     for row in 0..n_rows {
@@ -146,7 +146,8 @@ pub(crate) fn apply_with_context(
         for (gi, arr) in group_arrays.iter().enumerate() {
             match group_dtypes[gi] {
                 DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                    let a = arr.as_any().downcast_ref::<Float64Array>()
+                        .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Float(f64::NAN.to_bits()));
                     } else {
@@ -154,7 +155,8 @@ pub(crate) fn apply_with_context(
                     }
                 }
                 DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>().unwrap();
+                    let a = arr.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyValueError::new_err("stat_violin: expected StringArray for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Str(String::new()));
                     } else {
@@ -246,16 +248,18 @@ pub(crate) fn apply_with_context(
         };
         let kde_out = kde::apply(&kde_spec, &synth_batch)?;
         let value_col = kde_out
-            .column(kde_out.schema().index_of("value").unwrap())
+            .column(kde_out.schema().index_of("value")
+                .map_err(|_| PyValueError::new_err("stat_violin: KDE output missing 'value' column"))?)
             .as_any()
             .downcast_ref::<Float64Array>()
-            .unwrap()
+            .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for KDE 'value' column"))?
             .clone();
         let density_col = kde_out
-            .column(kde_out.schema().index_of("density").unwrap())
+            .column(kde_out.schema().index_of("density")
+                .map_err(|_| PyValueError::new_err("stat_violin: KDE output missing 'density' column"))?)
             .as_any()
             .downcast_ref::<Float64Array>()
-            .unwrap()
+            .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for KDE 'density' column"))?
             .clone();
 
         // Find max density (ignore NaN).

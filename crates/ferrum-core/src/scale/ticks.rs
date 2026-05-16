@@ -1,7 +1,5 @@
 //! Shared tick-generation and binning helpers.
 
-#![allow(dead_code)]
-
 pub(crate) fn sturges_floor(n: usize) -> usize {
     if n == 0 {
         return 1;

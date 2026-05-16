@@ -83,7 +83,9 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     // Build a per-row group key, then collect row indices per key.
     let n_rows = batch.num_rows();
     let group_arrays: Vec<&dyn arrow::array::Array> =
-        spec.groupby.iter().map(|g| batch.column(schema.index_of(g).unwrap()).as_ref()).collect();
+        spec.groupby.iter().map(|g| batch.column(
+            schema.index_of(g).expect("invariant: groupby columns validated above")
+        ).as_ref()).collect();
 
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     for row in 0..n_rows {
@@ -91,7 +93,8 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
         for (gi, arr) in group_arrays.iter().enumerate() {
             match group_dtypes[gi] {
                 DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                    let a = arr.as_any().downcast_ref::<Float64Array>()
+                        .ok_or_else(|| PyValueError::new_err("stat_aggregate: expected Float64Array for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Float(f64::NAN.to_bits()));
                     } else {
@@ -99,7 +102,8 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
                     }
                 }
                 DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>().unwrap();
+                    let a = arr.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyValueError::new_err("stat_aggregate: expected StringArray for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Str(String::new()));
                     } else {
@@ -128,10 +132,12 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
         group_keys_out.push(key.clone());
         for (op_i, op) in spec.ops.iter().enumerate() {
             let arr = batch
-                .column(schema.index_of(&op.field).unwrap())
+                .column(schema.index_of(&op.field).expect("invariant: op fields validated above"))
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap();
+                .ok_or_else(|| PyValueError::new_err(format!(
+                    "stat_aggregate: expected Float64Array for op field '{}'", op.field
+                )))?;
             // Filter to non-null, non-NaN values within this group.
             let vals: Vec<f64> = rows.iter().filter_map(|&r| {
                 if arr.is_null(r) { return None; }
@@ -202,7 +208,7 @@ fn aggregate(vals: &[f64], fn_: AggFn, group_size_including_nulls: usize) -> f64
         AggFn::Max => vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
         AggFn::Median => {
             let mut sorted = vals.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = sorted.len();
             if n % 2 == 1 { sorted[n / 2] }
             else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) }

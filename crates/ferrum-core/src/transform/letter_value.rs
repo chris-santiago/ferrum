@@ -115,7 +115,9 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(
             "stat_letter_value: column '{}' must be Float64", spec.value
         )));
     }
-    let varr = batch.column(vi).as_any().downcast_ref::<Float64Array>().unwrap();
+    let varr = batch.column(vi).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_letter_value: expected Float64Array for column '{}'", spec.value)))?;
 
     let g_arr_opt = if let Some(g) = &spec.group {
         let gi = schema.index_of(g.as_str())
@@ -126,7 +128,9 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(
                 "stat_letter_value: group column '{g}' must be Utf8; got {dt:?}"
             )));
         }
-        Some(batch.column(gi).as_any().downcast_ref::<StringArray>().unwrap())
+        Some(batch.column(gi).as_any().downcast_ref::<StringArray>()
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "stat_letter_value: expected StringArray for group column '{g}'")))?)
     } else {
         None
     };
@@ -169,7 +173,7 @@ fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Ve
     let mut rows = Vec::new();
     for (g, vs) in groups.iter_mut() {
         if vs.is_empty() { continue; }
-        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let k = k_for_depth(&spec.k_depth, vs.len());
         for depth in 1..=k {
             let p = 0.5_f64.powi(depth as i32);
@@ -222,10 +226,14 @@ pub(crate) fn secondary_outputs(
     input_batch: &RecordBatch,
     primary_batch: &RecordBatch,
 ) -> PyResult<Vec<(String, RecordBatch)>> {
-    let groups_col = primary_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-    let depths_col = primary_batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
-    let lowers_col = primary_batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
-    let uppers_col = primary_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+    let groups_col = primary_batch.column(0).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'group' column"))?;
+    let depths_col = primary_batch.column(1).as_any().downcast_ref::<Int32Array>()
+        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Int32Array for 'depth' column"))?;
+    let lowers_col = primary_batch.column(2).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Float64Array for 'lower' column"))?;
+    let uppers_col = primary_batch.column(3).as_any().downcast_ref::<Float64Array>()
+        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected Float64Array for 'upper' column"))?;
 
     // Per-group max-depth (lower, upper) extents — the outermost letter value.
     let mut tail: BTreeMap<Option<String>, (i32, f64, f64)> = BTreeMap::new();
@@ -283,7 +291,8 @@ pub(crate) fn secondary_outputs(
         Field::new("upper", DataType::Float64, false),
         Field::new("level", DataType::Utf8, false),
     ]));
-    let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+    let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'level' column"))?;
     let mut by_depth: BTreeMap<i32, (Vec<Option<String>>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
     for i in 0..primary_batch.num_rows() {
         let d = depths_col.value(i);

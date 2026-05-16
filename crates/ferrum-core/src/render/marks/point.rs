@@ -3,7 +3,7 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`. Unknown values fall back to `Circle`.
@@ -48,16 +48,7 @@ fn emit_shape_nodes(
     use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
-    let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(|idx| {
-        // Map palette index to the canonical dash pattern vector.
-        let idx = (idx.round() as i64).clamp(0, 3);
-        match idx {
-            1 => Some(vec![6.0, 3.0]),
-            2 => Some(vec![2.0, 3.0]),
-            3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
-            _ => None, // 0 = solid
-        }
-    });
+    let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(resolve_stroke_dash);
     let dash_ref: Option<&[f64]> = dash_vec.as_deref();
 
     match kind {

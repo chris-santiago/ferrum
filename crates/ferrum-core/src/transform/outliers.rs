@@ -40,7 +40,8 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
         .column(val_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_outliers: expected Float64Array for column '{}'", spec.field)))?;
 
     // Validate groupby columns.
     for g in &spec.groupby {
@@ -67,7 +68,7 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
             .groupby
             .iter()
             .map(|g| {
-                let i = schema.index_of(g).unwrap();
+                let i = schema.index_of(g).expect("invariant: groupby columns validated above");
                 let dt = schema.field(i).data_type().clone();
                 (batch.column(i).as_ref(), dt)
             })
@@ -77,7 +78,8 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
             for (arr, dt) in &arrs {
                 match dt {
                     DataType::Float64 => {
-                        let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let a = arr.as_any().downcast_ref::<Float64Array>()
+                            .expect("invariant: dtype validated as Float64 above");
                         key.push(if a.is_null(row) {
                             "__null__".to_string()
                         } else {
@@ -85,7 +87,8 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
                         });
                     }
                     DataType::Utf8 => {
-                        let a = arr.as_any().downcast_ref::<StringArray>().unwrap();
+                        let a = arr.as_any().downcast_ref::<StringArray>()
+                            .expect("invariant: dtype validated as Utf8 above");
                         key.push(if a.is_null(row) {
                             "__null__".to_string()
                         } else {
@@ -146,7 +149,7 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
 /// Type-7 quartile (linear interpolation) — matches numpy/scipy default.
 fn quartiles_q1_q3(values: &[f64]) -> (f64, f64) {
     let mut sorted: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
     if n == 0 {
         return (f64::NAN, f64::NAN);

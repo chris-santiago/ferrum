@@ -74,14 +74,15 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
         .column(v_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
+        .ok_or_else(|| PyValueError::new_err(format!(
+            "stat_summary: expected Float64Array for column '{}'", spec.field)))?;
 
     // Collect rows per group key.
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     let group_arrays: Vec<&dyn arrow::array::Array> = spec
         .groupby
         .iter()
-        .map(|g| batch.column(schema.index_of(g).unwrap()).as_ref())
+        .map(|g| batch.column(schema.index_of(g).expect("invariant: groupby columns validated above")).as_ref())
         .collect();
 
     for row in 0..n_rows {
@@ -89,7 +90,8 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
         for (gi, arr) in group_arrays.iter().enumerate() {
             match group_dtypes[gi] {
                 DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                    let a = arr.as_any().downcast_ref::<Float64Array>()
+                        .ok_or_else(|| PyValueError::new_err("stat_summary: expected Float64Array for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Float(f64::NAN.to_bits()));
                     } else {
@@ -97,7 +99,8 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
                     }
                 }
                 DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>().unwrap();
+                    let a = arr.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| PyValueError::new_err("stat_summary: expected StringArray for groupby column"))?;
                     if a.is_null(row) {
                         key.push(KeyValue::Str(String::new()));
                     } else {
@@ -232,7 +235,7 @@ fn bootstrap_ci(vals: &[f64], level: f64, n_boot: usize, seed: u64) -> (f64, f64
         let m = sample.iter().sum::<f64>() / n as f64;
         boot_means.push(m);
     }
-    boot_means.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    boot_means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let alpha = 1.0 - level;
     let lo_q = alpha / 2.0;
     let hi_q = 1.0 - alpha / 2.0;

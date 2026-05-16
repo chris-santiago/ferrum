@@ -446,6 +446,23 @@ pub fn to_scene_text_style(
     }
 }
 
+/// Map a stroke-dash palette index to its canonical SVG dasharray pattern.
+///
+/// The index is rounded and clamped to `[0, 3]` before lookup:
+/// - `0` → solid (returns `None`)
+/// - `1` → long dash `[6, 3]`
+/// - `2` → short dash / dot `[2, 3]`
+/// - `3` → long-short dash `[6, 3, 2, 3]`
+pub(crate) fn resolve_stroke_dash(idx: f64) -> Option<Vec<f64>> {
+    let idx = (idx.round() as i64).clamp(0, 3);
+    match idx {
+        1 => Some(vec![6.0, 3.0]),
+        2 => Some(vec![2.0, 3.0]),
+        3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_stroke_cap(s: &str) -> Option<ferrum_scene::StrokeCap> {
     match s {
         "round" => Some(ferrum_scene::StrokeCap::Round),
