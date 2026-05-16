@@ -29,6 +29,8 @@ Examples: `/release 0.9.0`, `/release minor`, `/release patch`
 - If arg is an explicit version string (e.g., `0.9.0`): validate it is valid semver and greater than current.
 - If no arg provided: ask the user what version to release.
 
+**Confirm the computed version with the user before modifying any files.** Show: current version, bump type, proposed new version. Do NOT proceed until confirmed.
+
 ### 2. Version consistency — bump all locations
 
 Update the version string in **both** of these files:

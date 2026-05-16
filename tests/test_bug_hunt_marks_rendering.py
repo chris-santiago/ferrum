@@ -60,18 +60,16 @@ def test_point_null_y_rows_skipped_no_nan_in_output():
     assert svg.count("<circle") == 2
 
 
-def test_point_all_nan_x_raises_value_error():
-    """All-NaN float x column raises ValueError (scale resolution fails with no usable values)."""
+def test_point_all_nan_x_renders_gracefully():
+    """All-NaN float x column renders an empty chart gracefully (no crash)."""
     df = pl.DataFrame(
         {
             "x": [float("nan"), float("nan")],
             "y": [1.0, 2.0],
         }
     )
-    # NaN floats in x cause scale resolution to fail → ValueError raised.
-    # This is the current behavior; null values (pl.Null) are silently skipped instead.
-    with pytest.raises(ValueError):
-        _svg_point(df)
+    svg = _svg_point(df)
+    assert "<svg" in svg
 
 
 def test_line_nan_in_middle_drops_that_segment():

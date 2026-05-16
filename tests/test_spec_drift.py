@@ -45,7 +45,7 @@ def test_transform_count_15_total():
 
 
 def test_ferrum_phases_8b_done_criteria_lists_10_transforms():
-    phases_path = Path(__file__).parent.parent / "docs" / "superpowers" / "ferrum-phases.md"
+    phases_path = Path(__file__).parent.parent / "design-docs" / "superpowers" / "ferrum-phases.md"
     phases = phases_path.read_text()
     section = phases.split("Phase 8b")[1].split("Phase 9")[0]
     assert "10" in section and "Kde2D" in section
