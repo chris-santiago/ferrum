@@ -60,6 +60,8 @@ the TODO.md as the recipe.
 | 36_classification_report | Classification report | **WIRED** | 2 panels (ferrum + yellowbrick). Precision/recall/F1 per-class heatmap. |
 | 37_class_balance | Class balance | **WIRED** | 2 panels (ferrum + yellowbrick). Per-class label count bars. |
 | 38_catplot | Categorical strip | **WIRED** | 2 panels (ferrum + seaborn). Default `kind="strip"` (box/bar covered by rows 09/12). |
+| 39_shap_bar | SHAP bar | **WIRED** | 2 panels (ferrum + shap). Mean |SHAP| importance bar chart. |
+| 40_shap_waterfall | SHAP waterfall | **WIRED** | 2 panels (ferrum + shap). Single-observation waterfall explanation. |
 
 ## Resume protocol
 

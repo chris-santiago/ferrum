@@ -1,0 +1,7 @@
+plot_type = "SHAP waterfall (single observation)"
+dataset = "make_classification(n_samples=200, n_features=8), RandomForestClassifier(n_estimators=20)"
+width = 700
+height = 500
+panels = ["ferrum", "shap"]
+ferrum_status = "READY"
+ferrum_notes = "ferrum.shap_waterfall_chart available; default sample_idx=0, max_display=20."
