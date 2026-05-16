@@ -43,6 +43,28 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 ---
 
+## Nox sessions
+
+| Session | Command | What it does |
+|---|---|---|
+| Lint | `nox -s lint` | Runs `ruff check --fix` + `ruff format` on `src/` and `tests/` (current env) |
+| Test | `nox -s test` | `uv sync --all-extras --all-groups` then `pytest` (isolated) |
+| Build | `nox -s build` | `uv build` — produces wheel + sdist in `dist/` (isolated) |
+
+Pass extra pytest args via `nox -s test -- -k test_name`.
+
+---
+
+## Releasing
+
+Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.toml`, generates a changelog from conventional commits, updates `docs/site/changelog.md`, and creates a GitHub release after confirmation. The `publish.yaml` workflow then builds manylinux/macOS/Windows wheels via `maturin-action` and publishes to PyPI via trusted OIDC publishing.
+
+- **PyPI package name:** `ferrum-viz` (import name stays `ferrum`)
+- **Version lives in:** `pyproject.toml` + `Cargo.toml` (workspace root)
+- **Workflow:** `.github/workflows/publish.yaml` — triggers on release or `workflow_dispatch`
+
+---
+
 ## Hard constraints (never violate)
 
 - **No matplotlib.** Not as a dependency, not as a dev dependency, not as an optional extra. Ever.
@@ -100,6 +122,9 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
 | **Code archaeology report** | **`docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
+| Release skill | `.claude/skills/release/` |
+| Nox sessions | `noxfile.py` |
+| Publish workflow | `.github/workflows/publish.yaml` |
 | Automations index | `.claude/README.md` |
 
 ---
