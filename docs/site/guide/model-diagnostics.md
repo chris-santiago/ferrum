@@ -116,6 +116,48 @@ The boundary `ModelSource` enforces is the load-bearing one: it computes the der
 
 `ModelSource` also lazy-imports sklearn, shap, and umap as needed: `import ferrum` does not pull those packages into your process. They load only when you actually compute a diagnostic that requires them.
 
+## Precomputed scores (no model required)
+
+Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization:
+
+```python
+import ferrum as fm
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, random_state=0)
+model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
+
+# Predict once, visualize many ways
+y_proba = model.predict_proba(X_test)
+y_pred = model.predict(X_test)
+
+roc = fm.roc_chart(y_true=y_test, y_pred=y_proba)
+cm = fm.confusion_matrix_chart(y_true=y_test, y_pred=y_pred)
+report = roc | cm
+assert report.show_svg().startswith("<svg")
+```
+
+The two paths are mutually exclusive — pass either `model, X, y` or `y_true=, y_pred=`, not both.
+
+### What `y_pred` means
+
+The interpretation of `y_pred` depends on the chart:
+
+| Chart needs | What to pass as `y_pred` | Helpers |
+|---|---|---|
+| Soft scores / probabilities | `predict_proba(X)` (1-D binary or 2-D multiclass) | `roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `discrimination_threshold_chart` |
+| Hard class labels | `predict(X)` (1-D) | `confusion_matrix_chart`, `class_prediction_error_chart` |
+| Fitted values | `predict(X)` (1-D continuous) | `residuals_chart`, `prediction_error_chart` |
+
+### Limitations of the precomputed path
+
+- **No `compare=`** — multi-model comparison requires fitted models so each can be re-predicted on the same data.
+- **No `cv=`** — cross-validation helpers (`learning_curve_chart`, `validation_curve_chart`, `cv_scores_chart`) need a model to re-fit across folds.
+- **No feature-based helpers** — `importance_chart`, `shap_chart`, `pdp_chart`, and clustering helpers require a model or `ModelSource`.
+
 ## sklearn-protocol visualizers
 
 For lifecycle control or yellowbrick-style ergonomics, every diagnostic also has a visualizer class. The visualizer takes the model at construction time, runs through `.fit()` / `.score()`, and exposes `.show()` which returns a `Chart`:
