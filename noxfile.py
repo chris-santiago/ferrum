@@ -13,14 +13,11 @@ def lint(session: nox.Session) -> None:
 @nox.session
 def test(session: nox.Session) -> None:
     """Run the test suite in an isolated venv."""
-    session.install("maturin>=1.7,<2.0")
-    session.run("maturin", "develop")
-    session.install(".[all]", "pytest>=8", "scipy>=1.10", "skops>=0.9", "resvg-py>=0.3")
-    session.run("pytest", *session.posargs)
+    session.run("uv", "sync", "--all-extras", "--all-groups", external=True)
+    session.run("uv", "run", "pytest", *session.posargs, external=True)
 
 
-@nox.session
+@nox.session()
 def build(session: nox.Session) -> None:
-    """Build the Rust extension in an isolated venv."""
-    session.install("maturin>=1.7,<2.0")
-    session.run("maturin", "develop", "--release")
+    """Build the ferrum package in an isolated environment."""
+    session.run("uv", "build", external=True)
