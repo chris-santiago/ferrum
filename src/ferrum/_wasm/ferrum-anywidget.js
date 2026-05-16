@@ -255,7 +255,16 @@ async function _render(container, sceneJson, model) {
     await _ensureWasm();
     renderer = await WasmRenderer.create(canvas);
     const packedData = model.get('packed_data');
-    const packedArr = packedData instanceof Uint8Array ? packedData : new Uint8Array(packedData || []);
+    let packedArr;
+    if (packedData instanceof Uint8Array) {
+      packedArr = packedData;
+    } else if (packedData && packedData.buffer instanceof ArrayBuffer) {
+      packedArr = new Uint8Array(packedData.buffer, packedData.byteOffset, packedData.byteLength);
+    } else if (packedData instanceof ArrayBuffer) {
+      packedArr = new Uint8Array(packedData);
+    } else {
+      packedArr = new Uint8Array(packedData || []);
+    }
     const textJson = renderer.loadScene(sceneJson, packedArr);
     _placeText(ov, JSON.parse(textJson));
   } catch (e) {
