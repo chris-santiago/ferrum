@@ -25,17 +25,18 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-[project.urls]
-Homepage = "https://ferrumviz.com"
-Documentation = "https://ferrumviz.com"
-Repository = "https://github.com/chris-santiago/ferrum"
-Issues = "https://github.com/chris-santiago/ferrum/issues"
 dependencies = [
     "polars>=1.0",
     "pyarrow>=15.0",
     "narwhals>=1.0,<2",
     "numpy>=1.20",
 ]
+
+[project.urls]
+Homepage = "https://ferrumviz.com"
+Documentation = "https://ferrumviz.com"
+Repository = "https://github.com/chris-santiago/ferrum"
+Issues = "https://github.com/chris-santiago/ferrum/issues"
 
 [project.optional-dependencies]
 models = ["scikit-learn>=1.3"]
