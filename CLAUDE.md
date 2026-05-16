@@ -6,7 +6,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 ## Start every session here
 
-1. **Read `docs/superpowers/ferrum-phases.md`** — it lists all 12 implementation phases, their dependency order, done criteria, and the current status of each. Find the first phase that is not `done` and start there.
+1. **Read `design-docs/superpowers/ferrum-phases.md`** — it lists all 12 implementation phases, their dependency order, done criteria, and the current status of each. Find the first phase that is not `done` and start there.
 
 2. **Read the phase's spec doc** (linked in the phases table) before writing any code. If no spec exists yet, run `superpowers:brainstorming` before touching anything.
 
@@ -119,10 +119,10 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 | Artifact | Path |
 |---|---|
-| Implementation phases & roadmap | `docs/superpowers/ferrum-phases.md` |
+| Implementation phases & roadmap | `design-docs/superpowers/ferrum-phases.md` |
 | Concept + API specification | `ferrum-spec.md` |
-| Per-phase design specs | `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md` |
-| Per-phase implementation plans | `docs/superpowers/plans/YYYY-MM-DD-<slug>-plan.md` |
+| Per-phase design specs | `design-docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md` |
+| Per-phase implementation plans | `design-docs/superpowers/plans/YYYY-MM-DD-<slug>-plan.md` |
 | Python package source | `src/ferrum/` |
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
@@ -139,7 +139,7 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
-| **Code archaeology report** | **`docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
+| **Code archaeology report** | **`design-docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
 | Docs audit skill | `.claude/skills/docs-audit/` |
 | Regression test skill | `.claude/skills/regression-test/` |
 | Release skill | `.claude/skills/release/` |
@@ -151,7 +151,7 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 ## Known open gaps (code archaeology)
 
-**Read `docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
+**Read `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
 
 - **Channels:** `Description`/`Key` encoding (TODO G1 chart-level done, but `Key` is interactive-only), `Href` encoding already works
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
@@ -206,7 +206,7 @@ The single sanctioned exception is documentation-only changes (`*.md`, `docs/**`
 
 The lite agents gate every commit; the heavyweight skills (`python-review` / `rust-review`) are subsystem-level audits that produce a six-section report and a refactor roadmap. They are deliberate interventions — not appropriate for every diff. The orchestrator should **offer the heavyweight skill proactively, without waiting for the user to type `/python-review` or `/rust-review`**, when any of these conditions hold:
 
-1. **A phase is about to be marked done.** Before transitioning a phase in `docs/superpowers/ferrum-phases.md` from in-progress to done, run the matching heavyweight skill on the subsystems that phase modified. The lite agent sees one commit at a time; the heavy skill sees how the subsystem hangs together after a phase's worth of accumulated work.
+1. **A phase is about to be marked done.** Before transitioning a phase in `design-docs/superpowers/ferrum-phases.md` from in-progress to done, run the matching heavyweight skill on the subsystems that phase modified. The lite agent sees one commit at a time; the heavy skill sees how the subsystem hangs together after a phase's worth of accumulated work.
 2. **The lite agent has escalated 2+ times on the same module within the session.** Repeated escalation means the band-aid pattern is broken — lite is treating diff-level symptoms while the structural issue lives in the module. Escalate to a heavy review scoped to that module.
 3. **A new public-API surface is added to an existing family.** A new `*_chart` in `src/ferrum/figures.py`, a new mark in `src/ferrum/marks/`, a new transform in `crates/ferrum-core/src/transform/`, a new encoding channel, or a new visualizer subclass all warrant a heavy review of the whole family afterwards to catch sibling drift (signature mismatches, naming drift, inconsistent return shapes, parallel-API mismatch) before the new member becomes entrenched. The `calibration_chart` signature drift caught in May 2026 is the canonical example: it lived for a phase before anyone audited the family.
 4. **The user expresses a coherence smell in natural language.** "This feels off", "sibling drift", "X drifted from Y", "utility module sprawl", "inconsistent return shapes", "parallel-API mismatch", "this module feels overgrown" — the heavyweight skill descriptions already list these triggers. Offer the heavyweight review immediately rather than waiting for the slash command.
