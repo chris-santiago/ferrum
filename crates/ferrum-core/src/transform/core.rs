@@ -26,6 +26,7 @@ use crate::transform::linkage::LinkageSpec;
 use crate::transform::letter_value::LetterValueSpec;
 use crate::transform::logistic::LogisticSpec;
 use crate::transform::glm::GlmSpec;
+use crate::transform::identity::IdentitySpec;
 use crate::transform::robust::RobustSpec;
 use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
@@ -59,6 +60,7 @@ pub(crate) enum TransformSpec {
     Logistic(LogisticSpec),
     Glm(GlmSpec),
     Robust(RobustSpec),
+    Identity(IdentitySpec),
 }
 
 /// Single source of truth for the 24 `TransformSpec` variants. Dispatchers
@@ -105,6 +107,7 @@ macro_rules! for_each_transform {
             Logistic      => logistic       : PyLogistic,
             Glm           => glm            : PyGlm,
             Robust        => robust         : PyRobust,
+            Identity      => identity       : PyIdentity,
         }
     };
 }

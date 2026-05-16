@@ -137,9 +137,10 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
     out = {}
     for ch, val in encoding.items():
         if isinstance(val, ChannelBase):
-            old_field = val.field
-            if old_field in renames:
-                val = val._replace_field(renames[old_field])
+            if val.field in renames:
+                import copy
+                val = copy.copy(val)
+                val.field = renames[val.field]
         elif isinstance(val, str):
             bare, _, suffix = val.partition(":")
             if bare in renames:
@@ -3931,44 +3932,48 @@ class Chart(_RenderMixin):
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-        # When data differs, null-pad merge into a unified DataFrame.
-        # If column names overlap between LHS and RHS, rename the RHS
-        # columns with a unique suffix so that each layer reads only its
-        # own rows (the null-padding invariant requires disjoint names).
-        rhs_col_renames: dict[str, str] = {}
+        lhs_layers, _ = _expand_layers(lhs)
+        rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+
+        # Data merging: when data differs, decide whether to diagonal-concat
+        # or route the RHS through a named Identity transform.
         if not self._shares_data_with(other):
             import polars as pl
 
             lhs_df = _to_polars(self._data)
             rhs_df = _to_polars(other._data)
             overlap = set(lhs_df.columns) & set(rhs_df.columns)
+
             if overlap:
+                # Column names collide — rename RHS columns so diagonal
+                # concat produces disjoint null-padded columns, AND route
+                # RHS layers through a named Identity transform with
+                # data_source so inherit_non_positional prevents the Rust
+                # renderer from injecting chart-level positional channels.
+                from ferrum._core import PyIdentity as _RustIdentity
+                from dataclasses import replace as _dc_replace
+
                 suffix = f"__rhs_{id(other) & 0xFFFFFFFF:08x}"
-                rhs_col_renames = {c: f"{c}{suffix}" for c in overlap}
-                rhs_df = rhs_df.rename(rhs_col_renames)
-            new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
-        lhs_layers, _ = _expand_layers(lhs)  # lhs top xforms already in `new` via _clone()
-        rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+                col_renames = {c: f"{c}{suffix}" for c in overlap}
+                rhs_df = rhs_df.rename(col_renames)
 
-        # When RHS columns were renamed, update RHS layer encodings to
-        # reference the renamed column names.
-        if rhs_col_renames:
-            from dataclasses import replace as _dc_replace
+                auto_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
+                identity_xform = _NamedTransform(_RustIdentity(auto_name), auto_name)
+                rhs_layers = [
+                    _dc_replace(
+                        l,
+                        encoding=_rename_encoding_fields(l.encoding, col_renames),
+                        data_source=auto_name,
+                    )
+                    for l in rhs_layers
+                ]
+                new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
+                _merge_top_transforms(new, [identity_xform])
+            else:
+                new._data = pl.concat([lhs_df, rhs_df], how="diagonal")
 
-            rhs_layers = [
-                _dc_replace(l, encoding=_rename_encoding_fields(l.encoding, rhs_col_renames))
-                for l in rhs_layers
-            ]
-
-        # Named-transform routing: when the LHS contributes no chart-level
-        # transforms (new._transforms is empty after clone) but the RHS does,
-        # wrap the RHS transforms as _NamedTransform so the Rust pipeline
-        # publishes them under a named key without advancing FINAL_OUTPUT_KEY.
-        # Layers without data_source then continue to read the original input
-        # batch (the LHS scatter points), while the RHS layers read their
-        # named output (the smooth curve / fit).  When the LHS already has
-        # transforms we keep the existing behaviour: both sides share the same
-        # pipeline tail via FINAL_OUTPUT_KEY.
+        # Named-transform routing for RHS transforms (smooth, etc.):
+        # wrap as _NamedTransform so FINAL_OUTPUT_KEY stays the LHS batch.
         if not new._transforms and rhs_top_xforms:
             auto_name = f"_auto_{id(rhs_top_xforms[-1]) & 0xFFFFFFFF:08x}"
             named_xforms = [_NamedTransform(t, auto_name) for t in rhs_top_xforms]

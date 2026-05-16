@@ -160,3 +160,82 @@ class TestRuleLayerColumnRename:
         columns = layered._data.columns
         assert columns == ["x", "y"], f"Expected unchanged columns, got: {columns}"
         assert layered._data.shape == df.shape
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 (extended): chained 3+ layer `+` operations with overlapping columns
+# ---------------------------------------------------------------------------
+
+
+class TestChainedLayerFix:
+    """Verify that chaining 3+ layers with overlapping column names produces correct SVG.
+
+    Previously, chaining `scatter + hline + vline + label` where each layer's
+    DataFrame shared column names (e.g., "x", "y") caused the renderer to
+    duplicate lines from other layers. The fix ensures each rule layer draws
+    exactly one line and scatter points are preserved.
+    """
+
+    @pytest.fixture()
+    def four_layer_chart(self):
+        """Build a 4-layer chart: scatter + hline + vline + text label."""
+        rng = np.random.default_rng(42)
+        df = pl.DataFrame(
+            {"x": rng.standard_normal(50).tolist(), "y": rng.standard_normal(50).tolist()}
+        )
+        scatter = fm.Chart(df).mark_point(opacity=0.6).encode(x="x", y="y")
+        hline = (
+            fm.Chart(pl.DataFrame({"y": [0.0]}))
+            .mark_rule(stroke="red", stroke_dash=[4, 2])
+            .encode(y="y")
+        )
+        vline = (
+            fm.Chart(pl.DataFrame({"x": [0.0]}))
+            .mark_rule(stroke="blue", stroke_dash=[4, 2])
+            .encode(x="x")
+        )
+        label = (
+            fm.Chart(pl.DataFrame({"x": [1.5], "y": [2.0], "label": ["outlier"]}))
+            .mark_text(fill="gray")
+            .encode(x="x", y="y", text="label")
+        )
+        return scatter, hline, vline, label, df
+
+    def test_chained_3_layer_hline_vline(self, four_layer_chart):
+        """scatter + hline + vline should produce exactly 2 dashed rule lines."""
+        scatter, hline, vline, _, _ = four_layer_chart
+
+        layered = scatter + hline + vline
+        svg = layered.show_svg()
+
+        assert svg.strip().startswith("<svg")
+        dashed_lines = len(re.findall(r"<line[^>]*stroke-dasharray[^>]*>", svg))
+        assert dashed_lines == 2, (
+            f"Expected exactly 2 dashed <line elements (hline + vline), got {dashed_lines}"
+        )
+
+    def test_chained_4_layer_with_text(self, four_layer_chart):
+        """scatter + hline + vline + text should render valid SVG with exactly 2 dashed lines."""
+        scatter, hline, vline, label, _ = four_layer_chart
+
+        layered = scatter + hline + vline + label
+        svg = layered.show_svg()
+
+        assert svg.strip().startswith("<svg")
+        assert len(svg) > 100
+        dashed_lines = len(re.findall(r"<line[^>]*stroke-dasharray[^>]*>", svg))
+        assert dashed_lines == 2, (
+            f"Expected exactly 2 dashed <line elements (hline + vline), got {dashed_lines}"
+        )
+
+    def test_chained_preserves_scatter_points(self, four_layer_chart):
+        """4-layer chart should preserve scatter <circle elements matching input row count."""
+        scatter, hline, vline, label, df = four_layer_chart
+
+        layered = scatter + hline + vline + label
+        svg = layered.show_svg()
+
+        circles = len(re.findall(r"<circle", svg))
+        assert circles == len(df), (
+            f"Expected {len(df)} <circle elements for scatter points, got {circles}"
+        )
