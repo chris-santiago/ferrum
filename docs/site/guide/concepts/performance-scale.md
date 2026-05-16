@@ -49,18 +49,23 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 !!! tip "Auto-raster in practice"
     A 1M-point scatter that would produce a **57 MB** SVG with one `<circle>` per mark becomes a **606 KB** SVG when auto-raster kicks in — same chart, same spec, two orders of magnitude smaller output.
 
-### 1M-point scatter: Ferrum vs. Altair
+### 1M-point scatter: Ferrum vs. Altair vs. seaborn
 
-| Metric | Ferrum | Altair |
-|---|---|---|
-| SVG render time | 745 ms | OOM crash |
-| SVG file size | 606 KB | OOM crash |
-| Interactive HTML render + save | 1.50 s | OOM crash |
-| Interactive HTML file size | 5.0 MB | OOM crash |
+| Metric | Ferrum | Altair | seaborn |
+|---|---|---|---|
+| SVG render time | 741 ms | OOM crash | 8.80 s |
+| SVG file size | 607 KB | OOM crash | 162.9 MB |
+| PNG render time | — | — | 467 ms |
+| PNG file size | — | — | 163 KB |
+| Interactive HTML | 1.50 s / 5.0 MB | OOM crash | N/A |
 
-Altair crashed on every operation — vl-convert's embedded V8 engine hit the heap limit trying to serialize 1M points through the Vega-Lite runtime (exit code 133 = SIGKILL from the OOM handler). Altair has no auto-raster equivalent; it pushes all rows through V8 as JSON.
+Ferrum's SVG is **275x smaller** than seaborn's. Seaborn emits 1M individual `<circle>` path elements (162.9 MB); ferrum's auto-raster substitutes an embedded PNG within the SVG (607 KB). Ferrum renders SVG **12x faster** (741 ms vs. 8.8 s).
 
-Ferrum's auto-raster threshold (500k marks) substituted `mark_raster` for `mark_point`, rasterizing the scatter into an embedded PNG inside the SVG rather than emitting 1M individual `<circle>` elements. The SVG at 1M points is actually *faster and smaller* than at 200k (which produced 20.9 MB of individual SVG elements before the threshold kicked in). Interactive HTML output (`.interactive().save()`) stayed at 5.0 MB — the WASM GPU renderer and packed scene data are largely size-invariant.
+Seaborn's PNG path (467 ms, 163 KB) is its strong suit — matplotlib's Agg backend rasterizes efficiently. Ferrum's auto-raster is doing essentially the same thing but wrapped in an SVG container, landing at a comparable size.
+
+Altair can't participate at 1M points — vl-convert's embedded V8 engine hits the heap limit trying to serialize 1M rows through the Vega-Lite runtime (exit code 133 = SIGKILL from the OOM handler). Altair has no auto-raster equivalent.
+
+Interactive HTML output (`.interactive().save()`) stayed at 5.0 MB — the WASM GPU renderer and packed scene data are largely size-invariant.
 
 ## SHAP and ICE at full sample size
 
