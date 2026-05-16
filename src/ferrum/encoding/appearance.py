@@ -47,7 +47,7 @@ class Color(ChannelBase):
     # palette.rs::categorical_palette into the renderer's color-scale construction).
     # All other channels treat `scheme` as deferred → warn-once.
     _channel_name = "color"
-    _renders_in_phase_8a = True
+
     # ``legend`` honored in Schwabish SB3 (2026-05-11): passing
     # ``legend=None`` (or ``False``) suppresses the categorical color legend
     # at the renderer level. Used by direct-label diagnostic charts to
@@ -84,7 +84,7 @@ class Size(ChannelBase):
     """
 
     _channel_name = "size"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = _RENDERED_HONORED
 
 
@@ -118,7 +118,7 @@ class Shape(ChannelBase):
     """
 
     _channel_name = "shape"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = _RENDERED_HONORED
 
 
@@ -151,7 +151,7 @@ class Opacity(ChannelBase):
     """
 
     _channel_name = "opacity"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = _RENDERED_HONORED
 
 
@@ -183,7 +183,7 @@ class Fill(ChannelBase):
     """
 
     _channel_name = "fill"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
 
 
@@ -212,7 +212,7 @@ class Stroke(ChannelBase):
     """
 
     _channel_name = "stroke"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
 
 
@@ -242,7 +242,7 @@ class FillOpacity(ChannelBase):
     """
 
     _channel_name = "fill_opacity"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "scale", "title", "legend"])
 
 
@@ -272,7 +272,7 @@ class StrokeOpacity(ChannelBase):
     """
 
     _channel_name = "stroke_opacity"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "legend"])
 
 
@@ -301,7 +301,7 @@ class StrokeWidth(ChannelBase):
     """
 
     _channel_name = "stroke_width"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "legend"])
 
 
@@ -331,7 +331,7 @@ class StrokeDash(ChannelBase):
     """
 
     _channel_name = "stroke_dash"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "legend"])
 
 
@@ -361,5 +361,5 @@ class Angle(ChannelBase):
     """
 
     _channel_name = "angle"
-    _renders_in_phase_8a = True
+
     _honored_kwargs = frozenset(["type", "legend"])

@@ -6,7 +6,7 @@ Encoding-driven overrides come through .encode(size=Size("col")).
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 
 _VALID_MARK_KWARGS = frozenset(
@@ -155,7 +155,9 @@ class MarkBase:
             "line",
             # S10: borders on area/errorband
             "borders",
-            # S11: leader_line (label)
+            # S11: blend mode (layer blend)
+            "blend",
+            # S12: leader_line (label)
             "leader_line",
         ):
             if k in self._kwargs:

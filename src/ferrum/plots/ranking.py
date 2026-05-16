@@ -26,7 +26,7 @@ import polars as pl
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _coerce_to_polars
+from ferrum.plots._helpers import _coerce_to_polars, _finalize_chart
 from ferrum.plots._helpers import _resolve_source
 
 
@@ -552,10 +552,7 @@ def _rank1d_chart_from_dataframe(
             x=X("feature"),
             y=Y("score", scale={"type": "linear", "domain": x_domain}),
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _rank2d_chart_from_dataframe(
@@ -590,10 +587,7 @@ def _rank2d_chart_from_dataframe(
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
     chart = chart.properties(title=ferrum.Title("Feature Correlation"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -717,10 +711,7 @@ def _parallel_coords_chart_from_dataframe(
         color_field=hue,
     )
     chart = chart.properties(title=ferrum.Title("Parallel Coordinates"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -797,10 +788,9 @@ def _decision_boundary_chart_from_source(
             )
         chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
-        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-        if theme is not None:
-            chart = chart.theme(theme)
-        return chart
+        return _finalize_chart(
+            chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+        )
 
     from ferrum._layer import _Layer
 
@@ -821,10 +811,9 @@ def _decision_boundary_chart_from_source(
         )
     )
     chart = chart.properties(title=ferrum.Title("Decision Boundary"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
 
 
 def _resolve_decision_boundary_features(

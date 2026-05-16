@@ -18,7 +18,7 @@ import polars as pl
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _dedupe_aggregated
+from ferrum.plots._helpers import _dedupe_aggregated, _finalize_chart
 from ferrum.plots._helpers import _resolve_source, _require
 
 
@@ -84,10 +84,7 @@ def _learning_curve_chart_from_source(
             name="point",
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _validation_curve_chart_from_source(
@@ -159,10 +156,7 @@ def _validation_curve_chart_from_source(
             name="point",
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _cv_scores_chart_from_source(
@@ -195,10 +189,7 @@ def _cv_scores_chart_from_source(
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _alpha_selection_chart_from_source(
@@ -276,10 +267,7 @@ def _alpha_selection_chart_from_source(
                 name="best_alpha_text",
             ),
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------

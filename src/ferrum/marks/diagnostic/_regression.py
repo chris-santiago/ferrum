@@ -6,6 +6,10 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._mark_kwargs import (
+    apply_user_mark_kwargs as _apply,
+    validate_user_mark_kwargs as _validate,
+)
 
 def desugar_residuals(
     x_field: str | None,
@@ -15,6 +19,7 @@ def desugar_residuals(
     reference_line: bool = True,
     cook_threshold: float | None = None,
     color_field: str | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Residuals diagnostic: scatter of (y_pred, residual) plus optional y=0 rule.
 
@@ -37,6 +42,7 @@ def desugar_residuals(
     ``ModelSource.predictions()`` step has already filled
     ``cooks_distance`` with NaN for non-linear estimators).
     """
+    user_kw = _validate("residuals", mark_kwargs)
     y_col = "studentized_residual" if kind in ("studentized", "scaled") else "residual"
     point_enc: dict[str, Any] = {"x": "y_pred", "y": y_col}
     if color_field is not None:
@@ -68,7 +74,7 @@ def desugar_residuals(
                 },
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("residuals", frozenset({"point", "reference", "outlier"}))
@@ -78,15 +84,16 @@ def desugar_prediction_error(
     x_field: str | None,
     y_field: str | None,
     *,
-    identity_line: bool = True,
+    reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
     color_field: str | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Actual vs predicted: scatter of (y_true, y_pred) + optional identity line.
 
     Data contract: columns ``y_true`` and ``y_pred``. When
-    ``identity_line=True`` the data must be sorted ascending by ``y_true`` so
+    ``reference_line=True`` the data must be sorted ascending by ``y_true`` so
     the line layer renders as a clean y=x diagonal (handled by
     ``Chart.mark_prediction_error``).
 
@@ -96,6 +103,7 @@ def desugar_prediction_error(
     line), and this desugar emits a ``ribbon`` layer between those bounds with
     ``opacity=0.2`` so the underlying scatter remains visible.
     """
+    user_kw = _validate("prediction_error", mark_kwargs)
     point_enc: dict[str, Any] = {"x": "y_true", "y": "y_pred"}
     if color_field is not None:
         point_enc["color"] = color_field
@@ -117,7 +125,7 @@ def desugar_prediction_error(
                 mark_kwargs={"opacity": 0.2},
             )
         )
-    if identity_line:
+    if reference_line:
         layers.append(
             _Layer(
                 name="identity",
@@ -126,7 +134,7 @@ def desugar_prediction_error(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("prediction_error", frozenset({"point", "band", "identity"}))

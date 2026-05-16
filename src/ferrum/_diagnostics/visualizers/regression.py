@@ -83,15 +83,15 @@ class PredictionErrorVisualizer(FerrumVisualizer):
     ----------
     model : Any
         Fitted regression estimator.
-    identity_line : bool, default True
+    reference_line : bool, default True
         Overlay the dashed ``y = x`` diagonal.
     ci : float, optional
         Confidence level in ``(0, 1)``. When set, overlays a ribbon
         spanning the central ``ci`` fraction of residuals around the
-        identity line. Raises ``ValueError`` if not in ``(0, 1)``.
+        reference line. Raises ``ValueError`` if not in ``(0, 1)``.
     reference_band : bool, default False
         When ``True`` (and ``ci`` is None), overlays a ±1 RMSE ribbon
-        around the identity line.
+        around the reference line.
     random_state : int, optional
     theme : Theme, optional
 
@@ -106,14 +106,14 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         self,
         model: Any,
         *,
-        identity_line: bool = True,
+        reference_line: bool = True,
         ci: float | None = None,
         reference_band: bool = False,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
-        self.identity_line = identity_line
+        self.reference_line = reference_line
         self.ci = ci
         self.reference_band = reference_band
 
@@ -127,7 +127,7 @@ class PredictionErrorVisualizer(FerrumVisualizer):
     def _build_chart(self) -> Any:
         return _prediction_error_chart_from_source(
             self._source,
-            identity_line=self.identity_line,
+            reference_line=self.reference_line,
             ci=self.ci,
             reference_band=self.reference_band,
             theme=self.theme,

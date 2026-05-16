@@ -25,6 +25,7 @@ from ferrum import (
     Stack,
 )
 from ferrum._overrides import _apply_overrides
+from ferrum.plots._helpers import _finalize_chart
 
 
 # ---------------------------------------------------------------------------
@@ -302,12 +303,7 @@ def displot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -558,12 +554,7 @@ def catplot(
         else:
             chart = chart.facet(row=row)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -691,9 +682,4 @@ def relplot(
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)

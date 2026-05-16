@@ -24,30 +24,7 @@ import polars as pl
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-
-
-# ---------------------------------------------------------------------------
-# _resolve_source — transitional thin wrapper
-# ---------------------------------------------------------------------------
-
-
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource or ComparedModelSource.
-
-    Thin wrapper that imports from ``ferrum.figures`` -- the canonical
-    location of ``_resolve_source`` -- so this module does not duplicate
-    the dispatch logic.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(model_or_source, X_data, y, random_state=random_state, compare=compare)
+from ferrum.plots._helpers import _finalize_chart, _resolve_source
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +50,7 @@ def _silhouette_chart_from_source(
 
     df = source.silhouette(k=k)
     chart = ferrum.Chart(df).mark_silhouette()
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _pca_scree_chart_from_source(
@@ -110,10 +84,7 @@ def _pca_scree_chart_from_source(
                 name="point",
             )
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _pca_scree_chart_from_variance_df(
@@ -145,10 +116,7 @@ def _pca_scree_chart_from_variance_df(
                 name="point",
             )
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _intercluster_distance_chart_from_source(
@@ -200,10 +168,7 @@ def _intercluster_distance_chart_from_source(
         )
     )
     chart = chart.properties(title=ferrum.Title("Intercluster Distance Map"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _cluster_diagnostics_chart(
@@ -343,10 +308,7 @@ def _cluster_diagnostics_chart(
         # forwarded (via _apply_overrides, which calls .properties() on the
         # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -772,10 +734,7 @@ def manifold_chart(
         .mark_point()
         .encode(x="dim_0", y="dim_1", color="label:N")
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def elbow_chart(
@@ -836,5 +795,4 @@ def elbow_chart(
     ).fit(X)
 
     chart = viz._chart
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)

@@ -86,13 +86,12 @@ def _scale_to_dict(scale: Any) -> Any:
 class ChannelBase:
     """Base class for all encoding-channel value objects.
 
-    Subclasses set _channel_name, _renders_in_phase_8a, and _honored_kwargs.
+    Subclasses set _channel_name and _honored_kwargs.
     Constructor accepts a `field` positional arg + arbitrary keyword arguments;
     unknown kwargs trigger warn_once.
     """
 
     _channel_name: ClassVar[str] = "_unknown_"
-    _renders_in_phase_8a: ClassVar[bool] = False
     _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type", "condition"])
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:

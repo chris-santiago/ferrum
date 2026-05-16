@@ -22,6 +22,7 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, JointChart, RepeatChart, Repeat
 from ferrum._overrides import _apply_overrides
+from ferrum.plots._helpers import _finalize_chart
 from ferrum.plots.regression import _merge_layers
 
 
@@ -285,7 +286,7 @@ def pairplot(
         diagonal=diagonal,
         corner=corner,
     )
-    rc = _apply_overrides(rc, mark=mark, encode=encode, properties=properties, layers=layers)
+    rc = _finalize_chart(rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return rc
 
 
@@ -544,11 +545,7 @@ def heatmap(
             )
         chart = _merge_layers(chart, text_layer, scatter_name="cells", fit_name="label")
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +773,7 @@ def clustermap(
         col_dendrogram=col_dendro,
         dendrogram_ratio=dendrogram_ratio,
     )
-    cm = _apply_overrides(cm, mark=mark, encode=encode, properties=properties, layers=layers)
+    cm = _finalize_chart(cm, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return cm
 
 
@@ -993,5 +990,5 @@ def jointplot(
         ratio=ratio,
         spacing=space,
     )
-    result = _apply_overrides(result, mark=mark, encode=encode, properties=properties, layers=layers)
+    result = _finalize_chart(result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None)
     return result

@@ -22,7 +22,7 @@ def desugar_boxplot(
     size: Optional[float] = None,
     color_field: Optional[str] = None,
     horizontal: bool = False,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Box-plot composite mark desugar.
 
     Converts ``chart.mark_boxplot(...)`` into a ``BoxStats`` transform plus
@@ -154,7 +154,7 @@ def desugar_errorbar(
     *,
     extent: str = "ci",
     ticks: bool = True,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Error-bar composite mark desugar.
 
     Converts ``chart.mark_errorbar(...)`` into an ``ErrorExtent`` transform
@@ -252,7 +252,7 @@ def desugar_errorband(
     *,
     extent: str = "ci",
     borders: bool = False,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Error-band (shaded CI ribbon) composite mark desugar.
 
     Converts ``chart.mark_errorband(...)`` into an ``ErrorExtent`` transform
@@ -337,7 +337,7 @@ def desugar_ribbon(
     y2_field: str | None = None,
     opacity: float = 0.2,
     interpolate: str = "linear",
-) -> tuple:
+) -> "MarkDesugarResult":
     """Primitive ribbon (shaded band) mark desugar — no transform.
 
     Emits a single ribbon layer directly.  Unlike ``desugar_errorband``,
@@ -426,7 +426,7 @@ def desugar_boxen(
     palette=None,
     horizontal: bool = False,
     color_field: str | None = None,
-) -> tuple:
+) -> "MarkDesugarResult":
     """Letter-value (boxen) composite mark.
 
     Desugars into a `LetterValue` transform plus N nested rect bands (one per

@@ -527,7 +527,7 @@ class Chart:
                     new._data = new._data.with_columns(
                         pl.col(value_field).cast(pl.Float64)
                     )
-            except Exception:
+            except (ImportError, TypeError, AttributeError, ValueError):
                 pass
 
         # Build a scatter layer from the prior mark if present.
@@ -2019,7 +2019,7 @@ class Chart:
                 tbl = to_arrow_table(data_source)
                 if x_field_name in tbl.column_names:
                     parent_x_data = tbl[x_field_name]
-            except Exception:
+            except (ImportError, TypeError, ValueError, KeyError):
                 pass
         elif x_enc is None and data_source is not None and domain is None:
             # Encoding not set yet (mark_function called before .encode()).
@@ -2034,7 +2034,7 @@ class Chart:
                     if pa.types.is_floating(_col.type) or pa.types.is_integer(_col.type):
                         parent_x_data = _col
                         break
-            except Exception:
+            except (ImportError, TypeError, ValueError, KeyError):
                 pass
 
         result = desugar_function(
@@ -2157,7 +2157,7 @@ class Chart:
     def mark_prediction_error(
         self,
         *,
-        identity_line: bool = True,
+        reference_line: bool = True,
         ci: float | None = None,
         reference_band: bool = False,
         color_field: str | None = None,
@@ -2167,14 +2167,14 @@ class Chart:
         """Render an actual-vs-predicted plot.
 
         Plots ``y_true`` on x against ``y_pred`` on y as scatter points.
-        When ``identity_line=True`` the data is pre-sorted ascending by
+        When ``reference_line=True`` the data is pre-sorted ascending by
         ``y_true`` so the downstream ``mark_line`` renders a monotonic y=x
         diagonal.  Data must carry ``y_true`` and ``y_pred`` columns (schema
         from ``ModelSource.predictions()``).
 
         Parameters
         ----------
-        identity_line : bool, optional
+        reference_line : bool, optional
             Whether to overlay a y=x identity reference line.  Default is
             ``True``.
         ci : float or None, optional
@@ -2209,7 +2209,7 @@ class Chart:
             "prediction_error",
             desugar_prediction_error,
             {
-                "identity_line": identity_line,
+                "reference_line": reference_line,
                 "ci": ci,
                 "reference_band": reference_band,
                 "color_field": color_field,
@@ -2217,7 +2217,7 @@ class Chart:
             },
             placeholder="point",
             position=position,
-            data_transform=((lambda df: _sort_by(df, "y_true")) if identity_line else None),
+            data_transform=((lambda df: _sort_by(df, "y_true")) if reference_line else None),
         )
 
     def mark_roc(
@@ -2422,7 +2422,7 @@ class Chart:
     def mark_gain(
         self,
         *,
-        reference_lines: bool = True,
+        reference_line: bool = True,
         color_field: str | None = "class",
         position=None,
         **mark_kwargs,
@@ -2437,7 +2437,7 @@ class Chart:
 
         Parameters
         ----------
-        reference_lines : bool, optional
+        reference_line : bool, optional
             Whether to draw the no-skill baseline diagonal.  Default is
             ``True``.
         color_field : str or None, optional
@@ -2465,7 +2465,7 @@ class Chart:
             "gain",
             desugar_gain,
             {
-                "reference_lines": reference_lines,
+                "reference_line": reference_line,
                 "color_field": color_field,
                 **mark_kwargs,
             },

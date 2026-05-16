@@ -37,45 +37,18 @@ from ferrum import (
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
+    _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
     _inject_metrics_corner,
     _overlay_metrics_corner,
     _r2_score,
+    _resolve_source,
     _sort_by,
 )
 
 
 _VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
-
-
-# ---------------------------------------------------------------------------
-# _resolve_source — transitional thin wrapper
-# ---------------------------------------------------------------------------
-
-
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    y_true: Any = None,
-    y_pred: Any = None,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
-    or _PrecomputedSource.
-
-    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(
-        model_or_source, X_data, y,
-        y_true=y_true, y_pred=y_pred,
-        random_state=random_state, compare=compare,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +166,7 @@ def _residuals_chart_from_source(
         # ``_overlay_metrics_corner`` is a no-op when the injected
         # columns are absent, so the call is unconditional.
         chart = _overlay_metrics_corner(chart)
-        chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-        if theme is not None:
-            chart = chart.theme(theme)
-        return chart
+        return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
     # Multi-panel path: each panel injects its own outlier columns with
     # the right x-axis encoding for that panel's coordinate system. The
@@ -212,10 +182,7 @@ def _residuals_chart_from_source(
     ]
     # _grid_panels applies theme internally; apply overrides before theme.
     chart = _grid_panels(charts)
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _residuals_panel(
@@ -323,7 +290,7 @@ def _residuals_panel(
 def _prediction_error_chart_from_source(
     source: Any,
     *,
-    identity_line: bool = True,
+    reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
     mark: dict | None = None,
@@ -364,7 +331,7 @@ def _prediction_error_chart_from_source(
             (pl.col("y_true") + q_hi).alias("_pe_band_hi"),
         )
     chart = ferrum.Chart(df).mark_prediction_error(
-        identity_line=identity_line,
+        reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
     )
@@ -373,10 +340,7 @@ def _prediction_error_chart_from_source(
         y=Y("y_true", title="True value"),
     )
     chart = chart.properties(title=ferrum.Title("Prediction Error"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -690,12 +654,7 @@ def lmplot(
         else:
             out = out.facet(row=row)
 
-    out = _apply_overrides(out, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        out = out.theme(theme)
-
-    return out
+    return _finalize_chart(out, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def residplot(
@@ -872,11 +831,7 @@ def residplot(
         chart._layers = internal_layers
         chart._mark = None
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def regplot(
@@ -1102,7 +1057,7 @@ def prediction_error_chart(
     *,
     y_true: Any = None,
     y_pred: Any = None,
-    identity_line: bool = True,
+    reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
     random_state: int | None = None,
@@ -1115,7 +1070,7 @@ def prediction_error_chart(
     """Actual-vs-predicted scatter for a regression estimator.
 
     Plots ``y_true`` on the y axis against ``y_pred`` on the x axis with
-    an optional identity line (``y = x`` diagonal) and an optional
+    an optional reference line (``y = x`` diagonal) and an optional
     residual-based confidence ribbon.
 
     Parameters
@@ -1136,15 +1091,15 @@ def prediction_error_chart(
     y_pred : array-like, optional
         Pre-computed predictions. Use with ``y_true`` to bypass model
         inference entirely.
-    identity_line : bool, default True
+    reference_line : bool, default True
         Overlay the dashed ``y = x`` diagonal.
     ci : float or None, default None
         Confidence level in ``(0, 1)``. When set, overlays a ribbon
         spanning the central ``ci`` fraction of residuals around the
-        identity line. Raises ``ValueError`` if not in ``(0, 1)``.
+        reference line. Raises ``ValueError`` if not in ``(0, 1)``.
     reference_band : bool, default False
         When ``True`` (and ``ci`` is ``None``), overlays a ±1 RMSE
-        ribbon around the identity line.
+        ribbon around the reference line.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1153,13 +1108,13 @@ def prediction_error_chart(
     Returns
     -------
     Chart
-        Actual-vs-predicted scatter with optional identity line and
+        Actual-vs-predicted scatter with optional reference line and
         confidence ribbon.
 
     Examples
     --------
     >>> import ferrum as fm
-    >>> fm.prediction_error_chart(model, X_test, y_test, identity_line=True)
+    >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
     source = _resolve_source(
         model_or_source, X, y,
@@ -1168,7 +1123,7 @@ def prediction_error_chart(
     )
     return _prediction_error_chart_from_source(
         source,
-        identity_line=identity_line,
+        reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
         mark=mark,

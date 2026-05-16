@@ -9,6 +9,8 @@ from typing import Any
 
 import polars as pl
 
+from ferrum._overrides import _apply_overrides
+
 
 def _inject_cook_outliers(
     df: pl.DataFrame,
@@ -191,6 +193,18 @@ def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
             f"{func_name}({arg_name}=...) is required — {hint}.",
         )
     return value
+
+
+def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=None, theme=None):
+    """Apply overrides and optional theme to a chart, then return it.
+
+    Encapsulates the identical 3-4 line closing pattern shared by every
+    ``_*_from_source`` builder across the ``ferrum.plots.*`` domain modules.
+    """
+    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
+    if theme is not None:
+        chart = chart.theme(theme)
+    return chart
 
 
 def _resolve_source(

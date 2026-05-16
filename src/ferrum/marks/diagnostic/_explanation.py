@@ -6,6 +6,10 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._mark_kwargs import (
+    apply_user_mark_kwargs as _apply,
+    validate_user_mark_kwargs as _validate,
+)
 
 # --- 10d: feature importance / SHAP / PDP -----------------------------
 
@@ -19,6 +23,7 @@ def desugar_importance(
     top_k: int | None = None,
     color_field: str | None = None,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Feature-importance mark: bars (per feature) + optional error bars.
 
@@ -45,6 +50,7 @@ def desugar_importance(
     # top_k is wired via data_transform in mark_importance; informational
     # at the desugar layer.
     _ = top_k
+    user_kw = _validate("importance", mark_kwargs)
     if orient not in ("horizontal", "vertical"):
         raise ValueError(
             f"mark_importance(orient={orient!r}) — expected 'horizontal' or 'vertical'."
@@ -81,7 +87,7 @@ def desugar_importance(
         }
         layers.append(_Layer(name="errorbar", mark="rule", encoding=err_enc))
 
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("importance", frozenset({"bar", "errorbar"}))
@@ -96,6 +102,7 @@ def desugar_shap_beeswarm(
     order: str = "abs_mean",
     zero_line: bool = True,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """SHAP beeswarm mark: categorical scatter of per-sample shap values.
 
@@ -124,6 +131,7 @@ def desugar_shap_beeswarm(
     # max_display is wired via data_transform in mark_shap_beeswarm;
     # color_bar and order are consumed upstream by the chart builder.
     _ = max_display, color_bar, order
+    user_kw = _validate("shap_beeswarm", mark_kwargs)
 
     def _x_channel(field: str) -> Any:
         if x_scale_domain is None:
@@ -161,7 +169,7 @@ def desugar_shap_beeswarm(
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4]},
             )
         )
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("shap_beeswarm", frozenset({"point", "reference"}))
@@ -173,6 +181,7 @@ def desugar_shap_bar(
     *,
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """Aggregated-SHAP bar mark: mean(|shap_value|) per feature.
 
@@ -183,6 +192,7 @@ def desugar_shap_bar(
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_bar.
     _ = max_display
+    user_kw = _validate("shap_bar", mark_kwargs)
 
     def _x_channel(field: str, title: str | None = None) -> Any:
         from ferrum.encoding import X
@@ -196,18 +206,17 @@ def desugar_shap_bar(
             return X(field, **kw)
         return field
 
-    return MarkDesugarResult(
-        layers=[
-            _Layer(
-                name="bar",
-                mark="bar",
-                encoding={
-                    "x": _x_channel("abs_mean_shap", title="Mean |SHAP value|"),
-                    "y": "feature",
-                },
-            ),
-        ],
-    )
+    layers: list = [
+        _Layer(
+            name="bar",
+            mark="bar",
+            encoding={
+                "x": _x_channel("abs_mean_shap", title="Mean |SHAP value|"),
+                "y": "feature",
+            },
+        ),
+    ]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("shap_bar", frozenset({"bar"}))
@@ -220,6 +229,7 @@ def desugar_shap_waterfall(
     sample_idx: int = -1,
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
+    **mark_kwargs: Any,
 ) -> tuple:
     """SHAP waterfall mark: per-feature contribution segments for one sample.
 
@@ -232,6 +242,7 @@ def desugar_shap_waterfall(
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_waterfall.
     _ = max_display
+    user_kw = _validate("shap_waterfall", mark_kwargs)
     if sample_idx < 0:
         raise ValueError(
             "mark_shap_waterfall(sample_idx=...) is required. Pass an "
@@ -250,20 +261,19 @@ def desugar_shap_waterfall(
             return X(field, **kw)
         return field
 
-    return MarkDesugarResult(
-        layers=[
-            _Layer(
-                name="bar",
-                mark="bar",
-                encoding={
-                    "x": _x_channel("x0", title="SHAP value"),
-                    "x2": "x1",
-                    "y": "feature",
-                    "color": "shap_sign",
-                },
-            ),
-        ],
-    )
+    layers: list = [
+        _Layer(
+            name="bar",
+            mark="bar",
+            encoding={
+                "x": _x_channel("x0", title="SHAP value"),
+                "x2": "x1",
+                "y": "feature",
+                "color": "shap_sign",
+            },
+        ),
+    ]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("shap_waterfall", frozenset({"bar"}))
@@ -277,6 +287,7 @@ def desugar_pdp(
     ice_alpha: float = 0.2,
     center: bool = False,
     color_field: str | None = "feature",
+    **mark_kwargs: Any,
 ) -> tuple:
     """Partial-dependence mark.
 
@@ -303,17 +314,15 @@ def desugar_pdp(
     every polyline starts at 0.
     """
     del x_field, y_field
+    user_kw = _validate("pdp", mark_kwargs)
 
     if kind == "average":
         # Single polyline per feature, color-coded by feature when faceted.
         line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
         if color_field is not None:
             line_enc["color"] = color_field
-        return MarkDesugarResult(
-            layers=[
-                _Layer(name="line", mark="line", encoding=line_enc),
-            ],
-        )
+        layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
+        return MarkDesugarResult(layers=_apply(layers, user_kw))
 
     from ferrum.encoding import Y as _Y
 
@@ -327,19 +336,18 @@ def desugar_pdp(
         }
         if color_field is not None:
             line_enc["color"] = color_field
-        return MarkDesugarResult(
-            layers=[
-                _Layer(
-                    name="ice",
-                    mark="line",
-                    encoding=line_enc,
-                    mark_kwargs={
-                        "detail": "_sample_id_str",
-                        "opacity": float(ice_alpha),
-                    },
-                ),
-            ],
-        )
+        layers = [
+            _Layer(
+                name="ice",
+                mark="line",
+                encoding=line_enc,
+                mark_kwargs={
+                    "detail": "_sample_id_str",
+                    "opacity": float(ice_alpha),
+                },
+            ),
+        ]
+        return MarkDesugarResult(layers=_apply(layers, user_kw))
 
     if kind == "both":
         # ICE layer: y = _pd_ice_value (null on average row → skipped).
@@ -357,25 +365,24 @@ def desugar_pdp(
         }
         if color_field is not None:
             avg_enc["color"] = color_field
-        return MarkDesugarResult(
-            layers=[
-                _Layer(
-                    name="ice",
-                    mark="line",
-                    encoding=ice_enc,
-                    mark_kwargs={
-                        "detail": "_sample_id_str",
-                        "opacity": float(ice_alpha),
-                    },
-                ),
-                _Layer(
-                    name="average",
-                    mark="line",
-                    encoding=avg_enc,
-                    mark_kwargs={"stroke_width": 2.5},
-                ),
-            ],
-        )
+        layers = [
+            _Layer(
+                name="ice",
+                mark="line",
+                encoding=ice_enc,
+                mark_kwargs={
+                    "detail": "_sample_id_str",
+                    "opacity": float(ice_alpha),
+                },
+            ),
+            _Layer(
+                name="average",
+                mark="line",
+                encoding=avg_enc,
+                mark_kwargs={"stroke_width": 2.5},
+            ),
+        ]
+        return MarkDesugarResult(layers=_apply(layers, user_kw))
 
     raise ValueError(f"mark_pdp(kind={kind!r}) — expected 'average', 'individual', or 'both'.")
 

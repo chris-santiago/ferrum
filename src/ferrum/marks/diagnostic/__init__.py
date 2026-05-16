@@ -30,11 +30,11 @@ from ferrum.marks.diagnostic._selection import (
     desugar_validation_curve,
     desugar_cv_scores,
     desugar_alpha_selection,
-    desugar_pca_scree,
-    desugar_pca_scree_with_threshold,
 )
 from ferrum.marks.diagnostic._clustering import (
     desugar_silhouette,
+    desugar_pca_scree,
+    desugar_pca_scree_with_threshold,
     desugar_intercluster_distance,
     desugar_decision_boundary,
 )

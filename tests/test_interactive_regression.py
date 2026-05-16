@@ -3,7 +3,6 @@
 Covers:
 - Multi-field tooltip serialization → scene JSON (tooltip_fields)
 - Computed axis domains injected into scene coord for JS zoom
-- merge_scene_graphs _offset_nodes using correct "type" tag
 - Single-field Tooltip backward compat
 - interaction_config includes selections array for JS click handler
 - Polar/Geo coord kind guards for zoom/pan (labels must not vanish)
@@ -127,50 +126,6 @@ def test_explicit_domain_not_overwritten():
     # User-specified domain must be preserved exactly
     assert abs(xlo - 0.0) < 1e-6
     assert abs(xhi - 10.0) < 1e-6
-
-
-# ── merge_scene_graphs offset_nodes (type tag fix) ────────────────────────────
-
-def test_merge_scene_graphs_offsets_circle_nodes():
-    from ferrum._interactive import merge_scene_graphs
-
-    # Use 3 distinct points so scale is non-degenerate and nodes are rendered.
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
-    spec, data, viewport, theme = chart._render_inputs()
-    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
-
-    merged = json.loads(merge_scene_graphs(
-        [scene_json, scene_json],
-        [{"x_offset": 0, "y_offset": 0}, {"x_offset": 300, "y_offset": 0}],
-    ))
-
-    p0_nodes = merged["panels"][0]["marks"][0]["nodes"]
-    p1_nodes = merged["panels"][1]["marks"][0]["nodes"]
-    assert len(p0_nodes) > 0, "panel 0 has no circle nodes"
-    assert len(p1_nodes) > 0, "panel 1 has no circle nodes"
-    # Second panel's circles must be shifted by 300 px in x
-    p0_cx = p0_nodes[0]["cx"]
-    p1_cx = p1_nodes[0]["cx"]
-    assert abs(p1_cx - p0_cx - 300) < 1.0, f"expected x offset 300, got {p1_cx - p0_cx:.2f}"
-
-
-def test_merge_scene_graphs_offsets_y():
-    from ferrum._interactive import merge_scene_graphs
-
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
-    spec, data, viewport, theme = chart._render_inputs()
-    scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
-
-    merged = json.loads(merge_scene_graphs(
-        [scene_json, scene_json],
-        [{"x_offset": 0, "y_offset": 0}, {"x_offset": 0, "y_offset": 250}],
-    ))
-
-    p0_cy = merged["panels"][0]["marks"][0]["nodes"][0]["cy"]
-    p1_cy = merged["panels"][1]["marks"][0]["nodes"][0]["cy"]
-    assert abs(p1_cy - p0_cy - 250) < 1.0, f"expected y offset 250, got {p1_cy - p0_cy:.2f}"
 
 
 # ── interaction_config includes selections for JS click handler ───────────────

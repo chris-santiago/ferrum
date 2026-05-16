@@ -25,37 +25,7 @@ import polars as pl
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-
-
-# ---------------------------------------------------------------------------
-# _resolve_source / _require — transitional thin wrappers
-# ---------------------------------------------------------------------------
-
-
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource or ComparedModelSource.
-
-    Thin wrapper that imports from ``ferrum.figures`` -- the canonical
-    location of ``_resolve_source`` -- so this module does not duplicate
-    the dispatch logic.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(model_or_source, X_data, y, random_state=random_state, compare=compare)
-
-
-def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
-    """Thin wrapper around ``ferrum.figures._require``."""
-    from ferrum.plots._helpers import _require as _req
-
-    return _req(func_name, arg_name, value, hint=hint)
+from ferrum.plots._helpers import _finalize_chart, _require, _resolve_source
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +115,7 @@ def _importance_chart_from_source(
             )
         chart = chart.layer(text_ly)
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +219,7 @@ def _shap_beeswarm_chart_from_source(
     chart = chart.properties(title=ferrum.Title("SHAP Summary"))
     if is_faceted:
         chart = chart.facet(col="class_label")
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _shap_bar_chart_from_source(
@@ -308,10 +272,7 @@ def _shap_bar_chart_from_source(
     )
     if per_class and agg["class_label"].n_unique() > 1:
         chart = chart.facet(col="class_label")
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _shap_waterfall_chart_from_source(
@@ -390,10 +351,7 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
@@ -521,10 +479,7 @@ def _pdp_chart_from_source(
         .facet(col="feature")
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------

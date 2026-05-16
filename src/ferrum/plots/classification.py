@@ -25,7 +25,7 @@ import polars as pl
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides, register_layer_names
-from ferrum.plots._helpers import _color_field_for
+from ferrum.plots._helpers import _color_field_for, _finalize_chart, _resolve_source
 
 # Register the calibration layer-name catalog entry.
 register_layer_names("calibration", frozenset({"line", "reference", "point"}))
@@ -252,10 +252,7 @@ def _roc_chart_from_source(
             position="end",
         )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _pr_chart_from_source(
@@ -387,10 +384,7 @@ def _pr_chart_from_source(
             position="end",
         )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _calibration_chart_from_source(
@@ -483,10 +477,7 @@ def _calibration_chart_from_source(
         _Layer(mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point")
     )
 
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _gain_chart_from_source(
@@ -538,10 +529,7 @@ def _gain_chart_from_source(
             x_col="percent_population",
             y_col="gain",
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _lift_chart_from_source(
@@ -587,10 +575,7 @@ def _lift_chart_from_source(
             x_col="percent_population",
             y_col="lift",
         )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _confusion_chart_from_source(
@@ -617,10 +602,7 @@ def _confusion_chart_from_source(
         y=Y("actual", title="True label"),
     )
     chart = chart.properties(title=ferrum.Title("Confusion Matrix"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _class_prediction_error_chart_from_source(
@@ -662,10 +644,7 @@ def _class_prediction_error_chart_from_source(
         y=Y("value", title="Number of predictions"),
     )
     chart = chart.properties(title=ferrum.Title("Class Prediction Error"))
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _discrimination_threshold_chart_from_source(
@@ -729,10 +708,7 @@ def _discrimination_threshold_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Discrimination Threshold", subtitle=subtitle),
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _classification_report_chart(
@@ -802,10 +778,7 @@ def _classification_report_chart(
             )
         )
     )
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 def _class_balance_chart_from_dataframe(
@@ -837,39 +810,12 @@ def _class_balance_chart_from_dataframe(
         .sort("y")
     )
     chart = ferrum.Chart(counts).mark_bar().encode(x="y", y="count", color="y")
-    chart = _apply_overrides(chart, mark=mark, encode=encode, properties=properties, layers=layers)
-    if theme is not None:
-        chart = chart.theme(theme)
-    return chart
+    return _finalize_chart(chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme)
 
 
 # ---------------------------------------------------------------------------
 # Public figure functions
 # ---------------------------------------------------------------------------
-
-
-def _resolve_source(
-    model_or_source: Any,
-    X_data: Any = None,
-    y: Any = None,
-    *,
-    y_true: Any = None,
-    y_pred: Any = None,
-    random_state: int | None = None,
-    compare: dict[str, Any] | None = None,
-) -> Any:
-    """Resolve a figure-function input into a ModelSource, ComparedModelSource,
-    or _PrecomputedSource.
-
-    Thin wrapper delegating to ``ferrum.plots._helpers._resolve_source``.
-    """
-    from ferrum.plots._helpers import _resolve_source as _resolve
-
-    return _resolve(
-        model_or_source, X_data, y,
-        y_true=y_true, y_pred=y_pred,
-        random_state=random_state, compare=compare,
-    )
 
 
 def roc_chart(

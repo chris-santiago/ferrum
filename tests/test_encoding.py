@@ -12,7 +12,6 @@ from ferrum.encoding import (
 
 class _TestChannel(ChannelBase):
     _channel_name = "x"
-    _renders_in_phase_8a = True
     _honored_kwargs = frozenset(["type", "scale", "title"])
 
 
@@ -43,7 +42,6 @@ def test_to_encoding_spec_dict_has_field_and_type():
 def test_to_implicit_transforms_with_bin_kwarg():
     class _BinTestChannel(ChannelBase):
         _channel_name = "x"
-        _renders_in_phase_8a = True
         _honored_kwargs = frozenset(["type", "bin", "aggregate"])
 
     reset_warnings()
@@ -58,7 +56,6 @@ def test_to_implicit_transforms_with_bin_kwarg():
 def test_to_implicit_transforms_with_aggregate_kwarg():
     class _AggTestChannel(ChannelBase):
         _channel_name = "y"
-        _renders_in_phase_8a = True
         _honored_kwargs = frozenset(["type", "aggregate"])
 
     reset_warnings()
@@ -72,19 +69,6 @@ def test_to_implicit_transforms_with_aggregate_kwarg():
 # ---------------------------------------------------------------------------
 # Task 16: positional channels
 # ---------------------------------------------------------------------------
-
-def test_x_renders_in_phase_8a():
-    assert X._renders_in_phase_8a is True
-
-
-def test_y_renders_in_phase_8a():
-    assert Y._renders_in_phase_8a is True
-
-
-def test_all_positional_channels_render():
-    for cls in (X2, Y2, XError, YError, XError2, YError2, Theta, Radius):
-        assert cls._renders_in_phase_8a is True, f"{cls.__name__} must render"
-
 
 def test_x_construction_with_full_honored_kwargs():
     reset_warnings()
@@ -110,20 +94,6 @@ def test_x_honored_kwargs_no_warning():
 # Task 17: appearance channels
 # ---------------------------------------------------------------------------
 
-def test_color_renders_in_phase_8a():
-    assert Color._renders_in_phase_8a is True
-
-
-def test_size_shape_opacity_render_in_phase_8a():
-    for cls in (Size, Shape, Opacity):
-        assert cls._renders_in_phase_8a is True, f"{cls.__name__} must render in 8a"
-
-
-def test_all_appearance_channels_render():
-    for cls in (Fill, Stroke, FillOpacity, StrokeOpacity, StrokeWidth, StrokeDash, Angle):
-        assert cls._renders_in_phase_8a is True, f"{cls.__name__} must render"
-
-
 def test_color_with_scheme_kwarg_no_warning():
     reset_warnings()
     with warnings.catch_warnings(record=True) as w:
@@ -145,26 +115,10 @@ def test_stroke_with_field_warns_once_on_render_attempt():
 # Task 18: text/detail/tooltip classes
 # ---------------------------------------------------------------------------
 
-def test_text_channels_all_render():
-    from ferrum.encoding import Text, Detail, Tooltip, TooltipField, Href, Description, Key
-    for cls in (Text, Detail, Tooltip, TooltipField, Href, Description, Key):
-        assert cls._renders_in_phase_8a is True, f"{cls.__name__} must render"
-
-
 def test_tooltip_accepts_multiple_fields():
     from ferrum.encoding import Tooltip
     t = Tooltip("a", "b", "c")
     assert t._field_list == ["a", "b", "c"]
-
-
-# ---------------------------------------------------------------------------
-# Task 19: facet channels
-# ---------------------------------------------------------------------------
-
-def test_facet_channels_render():
-    from ferrum.encoding import Facet, FacetRow, FacetCol
-    for cls in (Facet, FacetRow, FacetCol):
-        assert cls._renders_in_phase_8a is True
 
 
 # ---------------------------------------------------------------------------
