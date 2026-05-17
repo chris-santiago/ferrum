@@ -300,6 +300,8 @@ overlay = fm.LayerChart(scatter, trend)
 assert overlay.show_svg().startswith("<svg")
 ```
 
+![LayerChart: scatter + smooth overlay](img/composition_layerchart.png)
+
 `LayerChart` accepts an optional `resolve=` dict to control per-channel scale sharing (e.g. `resolve={"color": "independent"}` when layers use different color semantics) and a `title=` string applied to the combined output.
 
 ### ConcatChart
@@ -322,6 +324,8 @@ charts = [
 grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
 assert grid.show_svg().startswith("<svg")
 ```
+
+![ConcatChart: 3 panels in a 2-column wrapping grid](img/composition_concatchart.png)
 
 Charts are placed left-to-right, wrapping to the next row after `columns` charts. When `columns` is omitted, all charts go in a single row. Like `LayerChart`, `ConcatChart` accepts an optional `resolve=` dict for shared-scale control across panels.
 
