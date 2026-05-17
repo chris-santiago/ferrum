@@ -92,6 +92,15 @@ class Axis:
         Explicit tick values.
     zindex : int, optional
         Z-index for layering.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> ax = fm.Axis(title="Speed (km/h)", label_angle=-45)
+    >>> ax.title
+    'Speed (km/h)'
+    >>> ax.to_dict()
+    {'title': 'Speed (km/h)', 'label_angle': -45}
     """
 
     title: str | None = None

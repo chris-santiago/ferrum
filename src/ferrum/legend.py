@@ -72,6 +72,15 @@ class Legend:
         Internal padding.
     zindex : int, optional
         Z-index.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> leg = fm.Legend(title="Species", orient="top")
+    >>> leg.title
+    'Species'
+    >>> leg.to_dict()
+    {'title': 'Species', 'orient': 'top'}
     """
 
     title: str | None = None

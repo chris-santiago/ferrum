@@ -43,6 +43,13 @@ def transform_filter(predicate: "str | dict") -> dict:
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_filter("datum.age >= 18")
+    >>> t["type"]
+    'filter'
     """
     if isinstance(predicate, dict):
         # Dict predicates are serialized as the expression string representation.
@@ -75,6 +82,15 @@ def transform_calculate(as_: str, expr: str) -> dict:
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_calculate("ratio", "datum.x / datum.y")
+    >>> t["type"]
+    'calculate'
+    >>> t["as_field"]
+    'ratio'
     """
     return {"type": "calculate", "as_field": as_, "expr": expr}
 
@@ -97,6 +113,16 @@ def transform_aggregate(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_aggregate(
+    ...     {"field": "price", "fn": "mean", "as": "avg_price"},
+    ...     groupby=["category"],
+    ... )
+    >>> t["type"]
+    'data_aggregate'
     """
     spec: dict = {
         "type": "data_aggregate",
@@ -134,6 +160,15 @@ def transform_bin(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_bin("horsepower", maxbins=10)
+    >>> t["type"]
+    'data_bin'
+    >>> t["field"]
+    'horsepower'
     """
     spec: dict = {"type": "data_bin", "field": field, "nice": nice}
     if as_ is not None:
@@ -163,6 +198,15 @@ def transform_fold(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_fold(["col_a", "col_b"])
+    >>> t["type"]
+    'fold'
+    >>> t["as_"]
+    ['key', 'value']
     """
     return {
         "type": "fold",
@@ -198,6 +242,15 @@ def transform_pivot(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_pivot("category", "amount", groupby=["date"])
+    >>> t["type"]
+    'pivot'
+    >>> t["field"]
+    'category'
     """
     spec: dict = {"type": "pivot", "field": field, "value": value, "op": op}
     if groupby is not None:
@@ -225,6 +278,16 @@ def transform_join_aggregate(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_join_aggregate(
+    ...     {"field": "sales", "fn": "sum", "as": "total_sales"},
+    ...     groupby=["region"],
+    ... )
+    >>> t["type"]
+    'join_aggregate'
     """
     spec: dict = {
         "type": "join_aggregate",
@@ -260,6 +323,16 @@ def transform_window(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_window(
+    ...     {"op": "row_number", "as": "rank"},
+    ...     sort=["score"],
+    ... )
+    >>> t["type"]
+    'data_window'
     """
     spec: dict = {"type": "data_window", "ops": list(window_transforms)}
     if sort is not None:
@@ -304,6 +377,15 @@ def transform_density(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_density("weight", bandwidth=0.5)
+    >>> t["type"]
+    'density_data'
+    >>> t["as_"]
+    ['value', 'density']
     """
     spec: dict = {
         "type": "density_data",
@@ -352,6 +434,15 @@ def transform_regression(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_regression("x", "y", method="poly", order=2)
+    >>> t["type"]
+    'regression_data'
+    >>> t["method"]
+    'poly'
     """
     spec: dict = {
         "type": "regression_data",
@@ -393,6 +484,15 @@ def transform_loess(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_loess("x", "y", bandwidth=0.5)
+    >>> t["type"]
+    'loess_data'
+    >>> t["bandwidth"]
+    0.5
     """
     spec: dict = {
         "type": "loess_data",
@@ -433,6 +533,15 @@ def transform_impute(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_impute("sales", method="mean")
+    >>> t["type"]
+    'impute'
+    >>> t["method"]
+    'mean'
     """
     spec: dict = {"type": "impute", "field": field, "method": method}
     if value is not None:
@@ -462,6 +571,15 @@ def transform_flatten(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_flatten(["tags"])
+    >>> t["type"]
+    'flatten'
+    >>> t["fields"]
+    ['tags']
     """
     spec: dict = {"type": "flatten", "fields": list(fields)}
     if as_ is not None:
@@ -483,6 +601,15 @@ def transform_sample(n: int, *, seed: int = 42) -> dict:
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_sample(100, seed=7)
+    >>> t["type"]
+    'sample'
+    >>> t["n"]
+    100
     """
     return {"type": "sample", "n": n, "seed": seed}
 
@@ -511,6 +638,15 @@ def transform_top_k(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_top_k(5, field="revenue", op="sum")
+    >>> t["type"]
+    'top_k'
+    >>> t["n"]
+    5
     """
     return {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
 
@@ -542,6 +678,15 @@ def transform_stack(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_stack("sales", groupby=["region", "quarter"])
+    >>> t["type"]
+    'data_stack'
+    >>> t["as_"]
+    ['y0', 'y1']
     """
     spec: dict = {
         "type": "data_stack",
@@ -580,6 +725,15 @@ def transform_timeunit(
     -------
     dict
         Transform specification for the Rust engine.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> t = fm.transform_timeunit("date", "month")
+    >>> t["type"]
+    'time_unit'
+    >>> t["unit"]
+    'month'
     """
     spec: dict = {"type": "time_unit", "field": field, "unit": unit, "utc": utc}
     if as_ is not None:
