@@ -14,6 +14,7 @@ use crate::layout::ThemeInputs;
 use crate::scale::linear::LinearScale;
 use crate::scale::log::LogScale;
 use crate::scale::ordinal::OrdinalScale;
+use crate::scale::pow::PowScale;
 use crate::scale::symlog::SymlogScale;
 use crate::scale::time::TimeScale;
 use crate::spec::chart::ChartSpec;
@@ -25,6 +26,7 @@ use super::RenderError;
 
 /// Sealed-enum wrapper over Phase 4 scales, used during render.
 /// Phase 7: Linear/Ordinal/Time. Phase 8a adds: Log, Symlog.
+/// Phase 12: Pow (power/sqrt transform).
 #[derive(Debug, Clone)]
 pub enum ScaleKind {
     Linear(LinearScale),
@@ -32,9 +34,10 @@ pub enum ScaleKind {
     Time(TimeScale),
     Log(LogScale),
     Symlog(SymlogScale),
+    Pow(PowScale),
 }
 
-/// Dispatch a method call to all five `ScaleKind` variants.
+/// Dispatch a method call to all `ScaleKind` variants.
 macro_rules! dispatch_all {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
         match $self {
@@ -43,12 +46,13 @@ macro_rules! dispatch_all {
             ScaleKind::Time(s) => s.$method($($arg),*),
             ScaleKind::Log(s) => s.$method($($arg),*),
             ScaleKind::Symlog(s) => s.$method($($arg),*),
+            ScaleKind::Pow(s) => s.$method($($arg),*),
         }
     };
 }
 
-/// Dispatch a method call to the four continuous `ScaleKind` variants
-/// (Linear, Time, Log, Symlog). Ordinal is excluded — callers must
+/// Dispatch a method call to the continuous `ScaleKind` variants
+/// (Linear, Time, Log, Symlog, Pow). Ordinal is excluded — callers must
 /// handle it separately.
 macro_rules! dispatch_continuous {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
@@ -57,6 +61,7 @@ macro_rules! dispatch_continuous {
             ScaleKind::Time(s) => s.$method($($arg),*),
             ScaleKind::Log(s) => s.$method($($arg),*),
             ScaleKind::Symlog(s) => s.$method($($arg),*),
+            ScaleKind::Pow(s) => s.$method($($arg),*),
             ScaleKind::Ordinal(_) => unreachable!(),
         }
     };
@@ -114,6 +119,11 @@ impl ScaleKind {
                 .map(super::format::format_numeric)
                 .collect(),
             Self::Symlog(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .map(super::format::format_numeric)
+                .collect(),
+            Self::Pow(s) => s
                 .ticks_internal(count_hint)
                 .into_iter()
                 .map(super::format::format_numeric)
@@ -198,6 +208,22 @@ impl ScaleKind {
                 })
                 .collect(),
             Self::Symlog(s) => s
+                .ticks_internal(count_hint)
+                .into_iter()
+                .filter_map(|v| {
+                    let px = s.scale_internal(v);
+                    if px.is_finite() {
+                        Some(ferrum_scene::Tick {
+                            value: v,
+                            label: super::format::format_numeric(v),
+                            pixel: px,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Self::Pow(s) => s
                 .ticks_internal(count_hint)
                 .into_iter()
                 .filter_map(|v| {
@@ -864,15 +890,15 @@ fn build_from_scale_spec(
                 *padding,
             ))
         }
-        // Pow scale: apply power transform, then map linearly.
-        ScaleSpec::Pow { domain, range, clamp, padding, .. } => {
+        // Pow scale: apply power transform to position mapping.
+        ScaleSpec::Pow { exponent, domain, range, clamp, padding } => {
             let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
-            ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, false))
+            ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, *clamp))
         }
-        // Sqrt is Pow with exponent=0.5; maps to linear for position.
+        // Sqrt is Pow with exponent=0.5.
         ScaleSpec::Sqrt { domain, range, clamp, padding } => {
             let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
-            ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, false))
+            ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, *clamp))
         }
         // Utc is a temporal scale variant — same internal behavior as Time.
         ScaleSpec::Utc { domain, range, nice, clamp, padding } => {
@@ -2028,5 +2054,144 @@ mod tests {
             }
             Some(other) => panic!("unexpected color scale variant: {:?}", other),
         }
+    }
+
+    // --- Phase 12: Power/Sqrt scale position resolution ---
+
+    #[test]
+    fn pow_scale_exponent_2_compresses_low_values() {
+        // With exponent=2, domain [0, 10], pixel range [0, 100]:
+        // x=5 maps to: t = (5^2 - 0^2) / (10^2 - 0^2) = 25/100 = 0.25
+        // pixel = 0 + 0.25 * 100 = 25.0
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    scale: Some(ScaleSpec::Pow {
+                        exponent: 2.0,
+                        domain: Some(vec![0.0, 10.0]),
+                        range: Some(vec![0.0, 100.0]),
+                        clamp: false,
+                        padding: None,
+                    }),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+
+        // Verify it resolved to a Pow scale, not Linear.
+        assert!(matches!(scales.x, ScaleKind::Pow(_)));
+
+        // x=5 should map to 25% of the range (pixel 25), NOT 50% (pixel 50).
+        let px_at_5 = scales.x.to_pixel_f64(5.0).expect("pow scale returns Some for in-domain");
+        assert!(
+            (px_at_5 - 25.0).abs() < 1e-9,
+            "x=5 with exponent=2 should map to pixel 25.0, got {px_at_5}"
+        );
+
+        // x=0 => pixel 0
+        let px_at_0 = scales.x.to_pixel_f64(0.0).expect("pow scale returns Some for domain start");
+        assert!((px_at_0 - 0.0).abs() < 1e-9, "x=0 should map to pixel 0, got {px_at_0}");
+
+        // x=10 => pixel 100
+        let px_at_10 = scales.x.to_pixel_f64(10.0).expect("pow scale returns Some for domain end");
+        assert!((px_at_10 - 100.0).abs() < 1e-9, "x=10 should map to pixel 100, got {px_at_10}");
+    }
+
+    #[test]
+    fn sqrt_scale_expands_low_values() {
+        // With exponent=0.5 (sqrt), domain [0, 10], pixel range [0, 100]:
+        // x=5 maps to: t = (5^0.5 - 0^0.5) / (10^0.5 - 0^0.5) = sqrt(5)/sqrt(10)
+        //            = sqrt(5/10) = sqrt(0.5) ≈ 0.7071
+        // pixel = 0 + 0.7071 * 100 ≈ 70.71
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    scale: Some(ScaleSpec::Sqrt {
+                        domain: Some(vec![0.0, 10.0]),
+                        range: Some(vec![0.0, 100.0]),
+                        clamp: false,
+                        padding: None,
+                    }),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+
+        // Verify it resolved to a Pow scale (sqrt is Pow with exp=0.5).
+        assert!(matches!(scales.x, ScaleKind::Pow(_)));
+
+        // x=5 should map to ~70.71% of the range.
+        let expected = (5.0_f64.sqrt() / 10.0_f64.sqrt()) * 100.0;
+        let px_at_5 = scales.x.to_pixel_f64(5.0).expect("sqrt scale returns Some for in-domain");
+        assert!(
+            (px_at_5 - expected).abs() < 1e-6,
+            "x=5 with sqrt scale should map to ~{expected:.4}, got {px_at_5}"
+        );
     }
 }

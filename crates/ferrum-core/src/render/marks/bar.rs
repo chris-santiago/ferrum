@@ -122,7 +122,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (ScaleKind::Ordinal(_), _) => build_ordinal(ctx),
         (_, ScaleKind::Ordinal(_)) => build_ordinal_y(ctx),
         (_, _) if has_y2 && !has_x2 => build_quantitative_horizontal(ctx),
-        (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_), _) => {
+        (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_), _) => {
             build_quantitative(ctx)
         }
         _ => empty_result(),

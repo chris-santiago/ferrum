@@ -96,6 +96,35 @@ impl PowScaleData {
 pub struct PowScale(PowScaleData, Option<f64>, bool);
 
 impl PowScale {
+    /// Crate-internal constructor (no PyO3, no validation), for render-side use.
+    pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, exponent: f64, clamp: bool) -> Self {
+        let d = PowScaleData {
+            domain: [domain[0], domain[1]],
+            range: [range[0], range[1]],
+            exponent,
+            clamp,
+        };
+        PowScale(d, None, true)
+    }
+
+    /// Crate-internal scale call (no PyO3 boundary).
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
+        self.0.scale(x)
+    }
+
+    /// Crate-internal tick call.
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
+        self.0.ticks(count)
+    }
+
+    pub(crate) fn range_pair(&self) -> [f64; 2] {
+        self.0.range
+    }
+
+    pub(crate) fn domain_pair(&self) -> [f64; 2] {
+        self.0.domain
+    }
+
     fn repr_string(&self) -> String {
         let PowScaleData { domain, range, exponent, clamp } = &self.0;
         format!(
