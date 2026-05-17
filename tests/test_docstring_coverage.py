@@ -221,6 +221,24 @@ _DOC_ALLOWLIST: set[str] = {
     "value",
     # Auto-raster policy (Phase 12)
     "RenderConfig",
+    # Phase 12 — data transforms
+    "transform_filter",
+    "transform_calculate",
+    "transform_aggregate",
+    "transform_bin",
+    "transform_fold",
+    "transform_pivot",
+    "transform_join_aggregate",
+    "transform_window",
+    "transform_density",
+    "transform_regression",
+    "transform_loess",
+    "transform_impute",
+    "transform_flatten",
+    "transform_sample",
+    "transform_top_k",
+    "transform_stack",
+    "transform_timeunit",
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).

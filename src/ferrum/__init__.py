@@ -90,6 +90,27 @@ from ferrum.selection import (
     value,
 )
 
+# Phase 12 — data transforms
+from ferrum.transforms import (
+    transform_filter,
+    transform_calculate,
+    transform_aggregate,
+    transform_bin,
+    transform_fold,
+    transform_pivot,
+    transform_join_aggregate,
+    transform_window,
+    transform_density,
+    transform_regression,
+    transform_loess,
+    transform_impute,
+    transform_flatten,
+    transform_sample,
+    transform_top_k,
+    transform_stack,
+    transform_timeunit,
+)
+
 # Phase 10 — model diagnostics
 from ferrum._diagnostics import ComparedModelSource, ModelSource
 from ferrum._diagnostics.visualizers import (
@@ -467,4 +488,22 @@ __all__ = [
     "rank1d_chart",
     "rank2d_chart",
     "parallel_coordinates_chart",
+    # Phase 12 — data transforms
+    "transform_filter",
+    "transform_calculate",
+    "transform_aggregate",
+    "transform_bin",
+    "transform_fold",
+    "transform_pivot",
+    "transform_join_aggregate",
+    "transform_window",
+    "transform_density",
+    "transform_regression",
+    "transform_loess",
+    "transform_impute",
+    "transform_flatten",
+    "transform_sample",
+    "transform_top_k",
+    "transform_stack",
+    "transform_timeunit",
 ]
