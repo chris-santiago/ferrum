@@ -2,6 +2,8 @@
 
 Worked examples using the grammar API. Each recipe starts from data and builds up to a finished chart. The progression runs from simple single-mark charts to multi-layer compositions with per-group transforms.
 
+For explicit data preprocessing (filtering, reshaping, window functions), see the [Data Transforms](data-transforms.md) guide.
+
 ## Scatter with color and size
 
 Map two continuous fields to position and two more to appearance:
@@ -421,6 +423,121 @@ assert chart.show_svg().startswith("<svg")
 ![Time-series line chart](img/recipes_15.png)
 
 The `:T` suffix tells ferrum the x-axis is temporal, enabling date-aware tick formatting and axis scaling.
+
+## Filtered scatter with derived column
+
+Apply data transforms before rendering — `transform_filter` removes rows and `transform_calculate` adds a computed column:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({
+    "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "y": [2.1, 4.3, 5.8, 8.2, 9.5, 12.1, 14.0, 15.8, 18.2, 20.1],
+    "group": ["A", "A", "B", "B", "A", "B", "A", "B", "A", "B"],
+})
+chart = (
+    fm.Chart(df)
+    .transform(
+        fm.transform_filter("datum.x > 2"),
+        fm.transform_calculate("ratio", "datum.y / datum.x"),
+    )
+    .mark_point()
+    .encode(x="x", y="ratio", color="group:N")
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+![Filtered scatter with derived column](img/recipes_16.png)
+
+`transform_filter` removes rows where x <= 2, `transform_calculate` adds a derived `ratio` column. Both run in Rust before rendering.
+
+## ConcatChart wrapping grid
+
+Arrange multiple charts in a wrapping grid layout using `ConcatChart`:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({
+    "x": list(range(50)),
+    "y": [v ** 0.5 for v in range(50)],
+    "cat": ["A"] * 25 + ["B"] * 25,
+})
+charts = []
+for mark_fn in [fm.Chart.mark_point, fm.Chart.mark_line, fm.Chart.mark_area, fm.Chart.mark_density]:
+    c = mark_fn(fm.Chart(df)).encode(x="x", y="y", color="cat:N")
+    charts.append(c)
+
+grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
+assert grid.show_svg().startswith("<svg")
+```
+
+![ConcatChart wrapping grid](img/recipes_17.png)
+
+`ConcatChart` arranges 4 charts in a 2-column wrapping grid. Use it when charts share data but show different mark types or encodings.
+
+## Custom axis and legend
+
+Use `Axis(...)` and `Legend(...)` value classes for per-channel control over axis presentation and legend layout:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = (
+    fm.Chart(iris)
+    .mark_point(opacity=0.7)
+    .encode(
+        x=fm.X("sepal_length", axis=fm.Axis(title="Sepal Length (cm)", grid=False, label_angle=-45)),
+        y=fm.Y("petal_length", axis=fm.Axis(title="Petal Length (cm)", tick_count=5)),
+        color=fm.Color("species:N", legend=fm.Legend(orient="bottom", columns=3, title="Species")),
+    )
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+![Custom axis and legend](img/recipes_18.png)
+
+`Axis(...)` and `Legend(...)` give per-channel control over axis presentation and legend layout without affecting the theme.
+
+## Power-scaled bubble chart
+
+Use `SqrtScale` on the size encoding so bubble area is proportional to the data value:
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({
+    "country": ["US", "China", "India", "Brazil", "UK", "France", "Japan", "Germany"],
+    "gdp": [21.4, 14.7, 2.9, 1.8, 2.8, 2.7, 5.1, 3.8],
+    "population": [331, 1412, 1380, 213, 67, 67, 126, 83],
+    "continent": ["NA", "Asia", "Asia", "SA", "EU", "EU", "Asia", "EU"],
+})
+chart = (
+    fm.Chart(df)
+    .mark_point(opacity=0.7)
+    .encode(
+        x="gdp",
+        y="population",
+        size=fm.Size("population", scale=fm.SqrtScale(domain=[0, 1500])),
+        color="continent:N",
+    )
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+![Power-scaled bubble chart](img/recipes_19.png)
+
+`SqrtScale(domain=[0, 1500])` is equivalent to `PowScale(domain=[0, 1500], exponent=0.5)`. It makes bubble area proportional to the data value — without it, large values visually dominate.
 
 ## Where to go next
 

@@ -5,6 +5,7 @@
 //!   quantitative x → ordinal y: horizontal bar per row from panel-left to
 //!   x_pixel (Phase 10d-pre, feature-importance chart).
 
+#[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
@@ -122,10 +123,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (ScaleKind::Ordinal(_), _) => build_ordinal(ctx),
         (_, ScaleKind::Ordinal(_)) => build_ordinal_y(ctx),
         (_, _) if has_y2 && !has_x2 => build_quantitative_horizontal(ctx),
-        (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_), _) => {
+        (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_) | ScaleKind::Time(_), _) => {
             build_quantitative(ctx)
         }
-        _ => empty_result(),
     }
 }
 
@@ -167,7 +167,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let mut set: std::collections::HashSet<u64> =
             x_offsets.iter().map(|v| v.to_bits()).collect();
         set.remove(&0.0_f64.to_bits());
-        if set.is_empty() { 1 } else { set.len() + if x_offsets.iter().any(|v| *v == 0.0) { 1 } else { 0 } }
+        if set.is_empty() { 1 } else { set.len() + if x_offsets.contains(&0.0) { 1 } else { 0 } }
     } else {
         1
     };
@@ -347,14 +347,51 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return empty_result(),
-    };
 
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-    if xs.len() != ys.len() || x2s.len() != ys.len() { return empty_result(); }
+    if xs.len() != ys.len() { return empty_result(); }
+
+    // Load x2 column if the encoding is present.
+    let x2s_opt: Option<Vec<Option<f64>>> = spec.encoding.x2.as_ref()
+        .map(|e| e.field.as_str())
+        .and_then(|f| col_as_f64(ctx.batch, f).ok());
+
+    if let Some(ref x2s) = x2s_opt {
+        if x2s.len() != ys.len() { return empty_result(); }
+    }
+
+    // When x2 is absent, auto-compute bar width from minimum spacing between
+    // adjacent x values (like ggplot2's continuous-x bar behavior).
+    let auto_bar_width: Option<f64> = if x2s_opt.is_none() {
+        let mut sorted_xs: Vec<f64> = xs.iter()
+            .filter_map(|v| v.filter(|x| x.is_finite()))
+            .collect();
+        sorted_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_xs.dedup();
+
+        if sorted_xs.len() >= 2 {
+            let min_step = sorted_xs.windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .filter(|s| *s > 0.0)
+                .fold(f64::INFINITY, f64::min);
+
+            if min_step.is_finite() {
+                // Convert data-space step to pixel width via the scale.
+                let p0 = ctx.scales.x.to_pixel_f64(sorted_xs[0]).unwrap_or(0.0);
+                let p1 = ctx.scales.x.to_pixel_f64(sorted_xs[0] + min_step).unwrap_or(0.0);
+                let px_width = (p1 - p0).abs() * 0.8; // 0.8 gap factor
+                Some(px_width.max(1.0))
+            } else {
+                Some(ctx.panel.plot_area.w * 0.2)
+            }
+        } else {
+            // Single data point: use 20% of plot width.
+            Some(ctx.panel.plot_area.w * 0.2)
+        }
+    } else {
+        None
+    };
 
     let panel = ctx.panel.plot_area;
     let baseline_y = panel.y + panel.h;
@@ -371,16 +408,26 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     for i in 0..xs.len() {
         let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
         let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
-        let px_left = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-        let px_right = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-
-        let px_left = px_left + x_offsets[i];
         let top_y = top_y + y_offsets[i];
-        let width = (px_right - px_left).abs().max(1.0);
         let height = (baseline_y - top_y).max(0.0);
+
+        let (rect_x, width) = if let Some(ref x2s) = x2s_opt {
+            // x2 present: bin-style rect from x to x2 (histogram path).
+            let x2v = match x2s[i] { Some(v) if v.is_finite() => v, _ => continue };
+            let px_left = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+            let px_right = match ctx.scales.x.to_pixel_f64(x2v) { Some(p) => p, None => continue };
+            let px_left = px_left + x_offsets[i];
+            let w = (px_right - px_left).abs().max(1.0);
+            (px_left.min(px_right), w)
+        } else {
+            // No x2: center bar at x pixel with auto-computed width.
+            let cx = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
+            let cx = cx + x_offsets[i];
+            let bw = auto_bar_width.unwrap_or(20.0);
+            (cx - bw / 2.0, bw)
+        };
 
         let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
             match values[i].as_deref() {
@@ -406,7 +453,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
 
         nodes.push(SceneNode::Rect {
-            x: px_left.min(px_right),
+            x: rect_x,
             y: top_y,
             w: width,
             h: height,
@@ -422,7 +469,8 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         data_indices: Some(indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -668,6 +716,88 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 3, "expected 3 ranged-horizontal bars");
+    }
+
+    #[test]
+    fn bar_quantitative_x_no_x2_auto_width() {
+        // Continuous x without x2: bars should auto-compute width from min spacing.
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 15.0, 25.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 200.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        // Should produce 4 bars (one per row)
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 4, "expected 4 bars for 4 data points");
+        // All bars should have the same width (auto-computed from uniform spacing)
+        let first_w = rects[0].1;
+        for (_, w) in &rects {
+            assert!((w - first_w).abs() < 1e-6, "all bars should have equal width, got {} vs {}", w, first_w);
+        }
+        // Width should be positive and less than 1/4 of plot width (they need to fit)
+        assert!(first_w > 0.0 && first_w < 300.0 / 3.0, "bar width {} should be positive and reasonable", first_w);
+    }
+
+    #[test]
+    fn bar_quantitative_x_no_x2_single_point() {
+        // Single data point: should use fallback width (20% of plot width).
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0])),
+            Arc::new(Float64Array::from(vec![10.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 200.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 1, "expected 1 bar for 1 data point");
+        // Fallback width = 20% of 200.0 = 40.0
+        assert!((rects[0] - 40.0).abs() < 1e-6, "single-point bar width should be 40.0, got {}", rects[0]);
     }
 
     #[test]

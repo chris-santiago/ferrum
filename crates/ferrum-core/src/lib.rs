@@ -22,6 +22,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::ordinal::OrdinalScale>()?;
     m.add_class::<scale::threshold::ThresholdScale>()?;
     m.add_class::<scale::quantile::QuantileScale>()?;
+    m.add_class::<scale::pow::PowScale>()?;
+    m.add_class::<scale::pow::SqrtScale>()?;
+    m.add_class::<scale::band::BandScale>()?;
+    m.add_class::<scale::point::PointScale>()?;
+    m.add_class::<scale::sequential::SequentialScale>()?;
+    m.add_class::<scale::diverging::DivergingScale>()?;
+    m.add_class::<scale::quantize::QuantizeScale>()?;
+    m.add_class::<scale::bin_ordinal::BinOrdinalScale>()?;
     // Transform PyO3 wrappers, driven by the single-source-of-truth macro
     // in transform/core.rs. Adding a new transform is one line there;
     // registration happens automatically here.

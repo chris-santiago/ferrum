@@ -10,7 +10,7 @@ Address all 21 findings from the full Python review (Q1–Q7, M1–M8, H1–H6):
 
 - Review findings F1–F21 in the 2026-05-15 Python review conversation (no external doc — the review IS the spec)
 - `CLAUDE.md` §Hard constraints — no global mutable state, `ferrum-spec.md` is API contract
-- `design-docs/ARCHITECTURE.md` — Python vs. Rust responsibility boundary
+- `design-docs/architecture/ARCHITECTURE.md` — Python vs. Rust responsibility boundary
 
 ## 3. Files
 

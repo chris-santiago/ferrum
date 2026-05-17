@@ -1,10 +1,10 @@
-"""Multi-chart composition primitives (HConcat, VConcat, Joint, Repeat, ClusterMap)."""
+"""Multi-chart composition primitives (HConcat, VConcat, Layer, Concat, Joint, Repeat, ClusterMap)."""
 
 from __future__ import annotations
 
 import json as _json
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 def _embed_chart_spec(c) -> Optional[dict]:
@@ -1061,6 +1061,258 @@ class ClusterMapChart(_ChartLike):
             f"col_dendrogram={'set' if self.col_dendrogram else 'None'}, "
             f"ratio={self.dendrogram_ratio})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 12: LayerChart and ConcatChart
+# ---------------------------------------------------------------------------
+
+
+class LayerChart(_ChartLike):
+    """Overlay multiple charts on shared axes (same coordinate space).
+
+    All layers share x/y scales by default (union domain).  The charts
+    are merged using the same ``Chart + Chart`` layer-merge logic that
+    the ``+`` operator provides — domain union, null-padded diagonal
+    concat for heterogeneous data, named-transform routing for per-layer
+    transforms.
+
+    Use ``LayerChart`` when you have pre-built ``Chart`` objects and want
+    a composition-level overlay without constructing the ``+`` chain
+    inline.  The resulting SVG is rendered as a single plot area with
+    all layers stacked.
+
+    Parameters
+    ----------
+    *charts : Chart
+        Two or more charts to overlay.  At least one chart is required.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides — e.g.
+        ``resolve={"color": "independent"}``.  By default all positional
+        channels (x, y) are shared (union domain); non-positional
+        channels follow the same inheritance rules as ``Chart + Chart``.
+    title : str, optional
+        Title applied to the combined chart via ``.properties(title=...)``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than one chart is provided, or if ``resolve`` contains
+        invalid values.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> scatter = fm.Chart(df).mark_point().encode(x="x", y="y")
+    >>> line = fm.Chart(df).mark_line().encode(x="x", y="y")
+    >>> fm.LayerChart(scatter, line).save("overlay.svg")
+    """
+
+    __slots__ = ("_charts", "_resolve", "_title")
+
+    def __init__(
+        self,
+        *charts,
+        resolve: Optional[Dict[str, str]] = None,
+        title: Optional[str] = None,
+    ) -> None:
+        if len(charts) < 1:
+            raise ValueError("LayerChart requires at least one chart")
+        if resolve is not None:
+            if not isinstance(resolve, dict):
+                raise ValueError(
+                    "LayerChart: resolve must be a dict mapping channel names "
+                    f"to 'shared' or 'independent'; got {type(resolve).__name__}"
+                )
+            for ch, mode in resolve.items():
+                if mode not in ("shared", "independent"):
+                    raise ValueError(
+                        f"LayerChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
+                    )
+        self._charts = list(charts)
+        self._resolve = resolve
+        self._title = title
+
+    @property
+    def charts(self) -> list:
+        """List of Chart : All member charts in layer order (bottom to top)."""
+        return list(self._charts)
+
+    def show_svg(self) -> str:
+        """Render the layered charts to an SVG string.
+
+        Merges all layers using the ``Chart + Chart`` operator which
+        handles domain union, data merging, and transform routing, then
+        renders the resulting multi-layer chart to SVG.
+
+        Returns
+        -------
+        str
+            SVG markup with all layers rendered in a single plot area.
+        """
+        merged = self._build_merged()
+        return merged.show_svg()
+
+    def _build_merged(self):
+        """Merge member charts into a single multi-layer Chart via ``+``.
+
+        Applies ``resolve=`` scale sharing and ``title=`` when set.
+        """
+        result = self._charts[0]
+        for chart in self._charts[1:]:
+            result = result + chart
+        if self._resolve:
+            shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
+            if shared:
+                from ferrum._scale_share import compute_union_domain, inject_scale
+
+                for channel in shared:
+                    sd = compute_union_domain(self._charts, channel)
+                    if sd is not None:
+                        result = inject_scale(result, channel, sd)
+        if self._title is not None:
+            result = result.properties(title=self._title)
+        return result
+
+    def _rebuild_with_charts(self, fn):
+        return LayerChart(
+            *[fn(c) for c in self._charts],
+            resolve=self._resolve,
+            title=self._title,
+        )
+
+    def __repr__(self) -> str:
+        """Return a short developer-readable description."""
+        n = len(self._charts)
+        return f"LayerChart({n} layer{'s' if n != 1 else ''})"
+
+
+class ConcatChart(_CompositeBase):
+    """General wrapping concatenation of charts in a grid.
+
+    Arranges charts left-to-right, wrapping to the next row after
+    ``columns`` charts.  When ``columns`` is ``None``, all charts are
+    placed in a single row.
+
+    Parameters
+    ----------
+    *charts : Chart
+        Two or more charts to arrange.
+    columns : int, optional
+        Maximum number of columns before wrapping.  Defaults to
+        ``len(charts)`` (single row, no wrapping).
+    spacing : float, default 10.0
+        Pixel gap between adjacent cells.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides — e.g.
+        ``resolve={"x": "shared", "y": "shared"}``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than one chart is provided, if ``columns`` is not > 0,
+        or if ``resolve`` contains invalid values.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> charts = [fm.Chart(df).mark_point().encode(x=col, y="y") for col in cols]
+    >>> fm.ConcatChart(*charts, columns=2).save("grid.svg")
+    """
+
+    __slots__ = ("_columns", "_resolve")
+
+    def __init__(
+        self,
+        *charts,
+        columns: Optional[int] = None,
+        spacing: float = 10.0,
+        resolve: Optional[Dict[str, str]] = None,
+    ) -> None:
+        if len(charts) < 1:
+            raise ValueError("ConcatChart requires at least one chart")
+        if columns is not None and columns <= 0:
+            raise ValueError(f"ConcatChart: columns must be > 0; got {columns}")
+        if resolve is not None:
+            if not isinstance(resolve, dict):
+                raise ValueError(
+                    "ConcatChart: resolve must be a dict mapping channel names "
+                    f"to 'shared' or 'independent'; got {type(resolve).__name__}"
+                )
+            for ch, mode in resolve.items():
+                if mode not in ("shared", "independent"):
+                    raise ValueError(
+                        f"ConcatChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
+                    )
+        super().__init__(list(charts), spacing=spacing)
+        self._columns = columns
+        self._resolve = resolve
+
+    @property
+    def columns(self) -> Optional[int]:
+        """Number of columns in the wrapping grid, or None for single-row."""
+        return self._columns
+
+    def show_svg(self) -> str:
+        """Render the concatenated charts to an SVG string.
+
+        Returns
+        -------
+        str
+            SVG markup with charts arranged in a wrapping grid.
+        """
+        from ferrum._core import compose_svg_grid
+
+        n_cells = len(self.charts)
+        n_cols = self._columns if self._columns is not None else n_cells
+        n_cols = min(n_cols, n_cells)
+        n_rows = (n_cells + n_cols - 1) // n_cols
+
+        # Apply resolve (shared scales) before rendering
+        render_charts = self._resolved_charts()
+
+        grid: list = [None] * (n_rows * n_cols)
+        for idx, chart in enumerate(render_charts):
+            grid[idx] = chart.show_svg()
+
+        return compose_svg_grid(
+            grid,
+            rows=n_rows,
+            cols=n_cols,
+            row_ratios=[1.0] * n_rows,
+            col_ratios=[1.0] * n_cols,
+            spacing=self.spacing,
+        )
+
+    def _resolved_charts(self) -> list:
+        """Return charts with shared scales injected per ``resolve``."""
+        if not self._resolve:
+            return self.charts
+        from ferrum._scale_share import compute_union_domain, inject_scale
+
+        shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
+        if not shared:
+            return self.charts
+        result = list(self.charts)
+        for channel in shared:
+            sd = compute_union_domain(result, channel)
+            if sd is None:
+                continue
+            result = [inject_scale(c, channel, sd) for c in result]
+        return result
+
+    def _rebuild_with_charts(self, fn):
+        return ConcatChart(
+            *[fn(c) for c in self.charts],
+            columns=self._columns,
+            spacing=self.spacing,
+            resolve=self._resolve,
+        )
+
+    def __repr__(self) -> str:
+        """Return a short developer-readable description."""
+        n = len(self.charts)
+        return f"ConcatChart({n} chart{'s' if n != 1 else ''}, columns={self._columns})"
 
 
 # ---------------------------------------------------------------------------

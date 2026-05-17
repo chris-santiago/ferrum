@@ -1,5 +1,6 @@
 ---
 name: python-coder
+model: sonnet
 description: General-purpose Python coding agent for ferrum. Handles features, bug fixes, refactors, and tests in src/ferrum/, tests/, and scripts/. Internalizes the python-review principles so code passes the lite-review gate on first attempt. Dispatched by the orchestrator for any Python coding task — never use general-purpose or claude agents for Python work in this project.
 tools:
 - Read

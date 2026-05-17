@@ -4309,10 +4309,13 @@ class Chart(_RenderMixin):
 
     @staticmethod
     def _transforms_to_json_list_named(transforms: list) -> list:
-        """Like ``_transforms_to_json_list`` but handles ``_NamedTransform`` wrappers.
+        """Like ``_transforms_to_json_list`` but handles ``_NamedTransform`` wrappers
+        and plain dicts (Phase 12 data transforms).
 
         For each ``_NamedTransform``, serializes the inner transform and injects
-        the ``name`` field.  Plain PyO3 transform objects are serialized as-is.
+        the ``name`` field.  Plain dicts are passed through as-is (they already
+        match the Rust ``TransformSpec`` serde shape).  PyO3 transform objects
+        are serialized via the ChartSpec round-trip.
         Mixing named and unnamed in one list is valid — unnamed transforms chain,
         named transforms fan-out without advancing ``FINAL_OUTPUT_KEY``.
         """
@@ -4320,13 +4323,43 @@ class Chart(_RenderMixin):
             return []
         from ferrum import ChartSpec
 
-        plain = [t.transform if isinstance(t, _NamedTransform) else t for t in transforms]
-        dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=plain)
-        json_list = json.loads(dummy.to_json()).get("transforms", [])
+        # Separate dicts (already JSON-ready) from PyO3 objects (need round-trip).
+        # Build the output list preserving order.
+        result: list = []
+        # Collect runs of PyO3 objects to batch-serialize through ChartSpec.
+        pyo3_batch: list = []  # (original_index, transform_item) pairs
         for i, t in enumerate(transforms):
-            if isinstance(t, _NamedTransform) and i < len(json_list):
-                json_list[i]["name"] = t.name
-        return json_list
+            inner = t.transform if isinstance(t, _NamedTransform) else t
+            if isinstance(inner, dict):
+                # Flush any pending PyO3 batch first.
+                if pyo3_batch:
+                    pyo3_objs = [item for _, item in pyo3_batch]
+                    dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=pyo3_objs)
+                    serialized = json.loads(dummy.to_json()).get("transforms", [])
+                    for j, (orig_idx, orig_t) in enumerate(pyo3_batch):
+                        entry = serialized[j] if j < len(serialized) else {}
+                        if isinstance(transforms[orig_idx], _NamedTransform):
+                            entry["name"] = transforms[orig_idx].name
+                        result.append(entry)
+                    pyo3_batch = []
+                # Dict transform — pass through, inject name if wrapped.
+                entry = dict(inner)
+                if isinstance(t, _NamedTransform):
+                    entry["name"] = t.name
+                result.append(entry)
+            else:
+                pyo3_batch.append((i, inner))
+        # Flush remaining PyO3 batch.
+        if pyo3_batch:
+            pyo3_objs = [item for _, item in pyo3_batch]
+            dummy = ChartSpec(mark="point", x="__x__", y="__y__", transforms=pyo3_objs)
+            serialized = json.loads(dummy.to_json()).get("transforms", [])
+            for j, (orig_idx, orig_t) in enumerate(pyo3_batch):
+                entry = serialized[j] if j < len(serialized) else {}
+                if isinstance(transforms[orig_idx], _NamedTransform):
+                    entry["name"] = transforms[orig_idx].name
+                result.append(entry)
+        return result
 
     def _build_layers_list(self) -> list:
         """Convert internal _layers to a list of JSON-serializable dicts for Rust.
@@ -4612,10 +4645,12 @@ class Chart(_RenderMixin):
                 field = d.pop("field")
                 kw[axis] = EncodingSpec(field, **d)
         if resolved._transforms:
-            # If any transform is a _NamedTransform, serialize everything via
-            # JSON so we can inject the name field that the Rust pipeline needs
-            # to route this layer's output without advancing FINAL_OUTPUT_KEY.
-            if any(isinstance(t, _NamedTransform) for t in resolved._transforms):
+            # If any transform is a _NamedTransform or a plain dict (Phase 12
+            # data transforms), serialize everything via JSON so Rust receives
+            # the full pipeline through the serde path.
+            has_named = any(isinstance(t, _NamedTransform) for t in resolved._transforms)
+            has_dict = any(isinstance(t, dict) for t in resolved._transforms)
+            if has_named or has_dict:
                 xform_json = Chart._transforms_to_json_list_named(resolved._transforms)
                 kw["transforms_json"] = json.dumps(xform_json)
             else:

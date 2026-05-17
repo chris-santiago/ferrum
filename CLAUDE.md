@@ -22,7 +22,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Release build | `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` |
 | Run tests | `uv run pytest -n auto` |
 | Run scale tests | `uv run pytest -m slow` (10k–50k row tests, skipped by default) |
-| Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
+| Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test` |
 | Verify skeleton | `unset CONDA_PREFIX && uv run --no-sync python -c "from ferrum._core import ChartSpec; s=ChartSpec(mark='point', x='a', y='b'); assert s == ChartSpec.from_json(s.to_json()); print('OK')"` |
 | Build WASM module | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --out-dir ../../src/ferrum/_wasm/` |
 | Build WASM (release) | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --release --out-dir ../../src/ferrum/_wasm/` |
@@ -36,7 +36,8 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 > **macOS `cargo test` note:** On macOS with uv-managed Python, the test binary cannot
 > resolve `@rpath/libpython3.10.dylib` at runtime without `DYLD_LIBRARY_PATH` pointing to
-> the Python lib directory. The command above uses `sysconfig` to find the path dynamically.
+> the Python lib directory. The command above uses `sys.base_prefix` (not `sysconfig.get_config_var('LIBDIR')`,
+> which returns a bogus `/install/lib` on uv-managed cpython builds).
 > This is a macOS SIP + uv RPATH constraint; it does not affect `maturin develop` or pytest.
 
 `pip install -e .` will **not** compile the Rust extension. Always use `maturin develop`.
@@ -103,6 +104,8 @@ This rule governs Phase 12 forward; it does not retroactively reopen closed phas
 
 The coding agents internalize the review principles from `.claude/skills/python-review/` and `.claude/skills/rust-review/` respectively, so code should pass the lite-review gate on first attempt. The orchestrator still handles staging, lite-review dispatch, and commits.
 
+**Model selection:** Coding agents default to Sonnet (set in their frontmatter). Override to Opus via `model: "opus"` on the Agent call when the task requires significant architectural judgment — e.g., cross-subsystem refactors, complex Rust lifetime/type reasoning, or tasks that would otherwise need multiple re-dispatches.
+
 ---
 
 ## Bug fixes and cascading issues
@@ -168,7 +171,7 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 
 - **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
 - **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
-- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/ARCHITECTURE.md` "Composite marks" section).
+- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/architecture/ARCHITECTURE.md` "Composite marks" section).
 - **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
@@ -219,14 +222,14 @@ For the full surface comparison table, severity rubric (S1–S5), audit trail pa
 
 ## Key architectural decisions
 
-See **`design-docs/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
+See **`design-docs/architecture/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/architecture/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
 
 
 ## Docs site work in progress
 
   - **Worktree**: `../ferrum-worktree-docs-continue/` (sibling of repo root — `git worktree list` to confirm)
   - **Branch**: `docs/continue` (based on `main`)
-  - **Spec**: `design-docs/DOCS_SITE_PLAN.md` (in worktree, not main branch)
+  - **Spec**: `design-docs/superpowers/DOCS_SITE_PLAN.md` (in worktree, not main branch)
   - **Zensical config**: `zensical.toml` (in worktree root)
 
   **Status (paused 2026-05-11, unblocked 2026-05-15):**

@@ -135,6 +135,91 @@ pub enum ScaleSpec {
         #[serde(default)]
         padding: f64,
     },
+    Pow {
+        #[serde(default = "default_pow_exponent")]
+        exponent: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
+    },
+    Sqrt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
+    },
+    Utc {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
+        #[serde(default)]
+        nice: bool,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f64>,
+    },
+    Band {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<String>>,
+        #[serde(default = "default_band_padding")]
+        padding: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingInner")]
+        padding_inner: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "paddingOuter")]
+        padding_outer: Option<f64>,
+        #[serde(default = "default_band_align")]
+        align: f64,
+    },
+    Point {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<String>>,
+        #[serde(default = "default_point_padding")]
+        padding: f64,
+        #[serde(default = "default_band_align")]
+        align: f64,
+        #[serde(default)]
+        reverse: bool,
+    },
+    Sequential {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default)]
+        reverse: bool,
+    },
+    Diverging {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "domainMid")]
+        domain_mid: Option<f64>,
+    },
+    Quantize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<String>>,
+    },
+    #[serde(rename = "bin-ordinal")]
+    BinOrdinal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bins: Option<Vec<f64>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+    },
 }
 
 fn default_log_base() -> f64 {
@@ -142,6 +227,18 @@ fn default_log_base() -> f64 {
 }
 fn default_symlog_constant() -> f64 {
     1.0
+}
+fn default_pow_exponent() -> f64 {
+    2.0
+}
+fn default_band_padding() -> f64 {
+    0.1
+}
+fn default_point_padding() -> f64 {
+    0.5
+}
+fn default_band_align() -> f64 {
+    0.5
 }
 
 /// Opaque-but-typed axis spec. Round-trips JSON; renderer ignores in 8a.
@@ -875,6 +972,140 @@ mod tests {
         match parsed {
             ScaleSpec::Log { base, .. } => assert_eq!(base, 10.0),
             _ => panic!("expected Log variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_pow_defaults() {
+        let json = r#"{"type":"pow"}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match parsed {
+            ScaleSpec::Pow { exponent, clamp, padding, .. } => {
+                assert_eq!(exponent, 2.0);
+                assert!(!clamp);
+                assert_eq!(padding, None);
+            }
+            _ => panic!("expected Pow variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_sqrt_round_trip() {
+        let json = r#"{"type":"sqrt","clamp":true}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Sqrt { clamp, .. } => assert!(clamp),
+            _ => panic!("expected Sqrt variant"),
+        }
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"sqrt""#));
+    }
+
+    #[test]
+    fn scale_spec_utc_round_trip() {
+        let json = r#"{"type":"utc","nice":true}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Utc { nice, .. } => assert!(nice),
+            _ => panic!("expected Utc variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_band_defaults() {
+        let json = r#"{"type":"band"}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match parsed {
+            ScaleSpec::Band { padding, align, padding_inner, padding_outer, .. } => {
+                assert_eq!(padding, 0.1);
+                assert_eq!(align, 0.5);
+                assert_eq!(padding_inner, None);
+                assert_eq!(padding_outer, None);
+            }
+            _ => panic!("expected Band variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_point_defaults() {
+        let json = r#"{"type":"point"}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match parsed {
+            ScaleSpec::Point { padding, align, reverse, .. } => {
+                assert_eq!(padding, 0.5);
+                assert_eq!(align, 0.5);
+                assert!(!reverse);
+            }
+            _ => panic!("expected Point variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_sequential_round_trip() {
+        let json = r#"{"type":"sequential","scheme":"viridis","reverse":true}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Sequential { scheme, reverse, .. } => {
+                assert_eq!(scheme.as_deref(), Some("viridis"));
+                assert!(reverse);
+            }
+            _ => panic!("expected Sequential variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_diverging_round_trip() {
+        let json = r#"{"type":"diverging","scheme":"rdbu","domainMid":0.5}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Diverging { scheme, domain_mid, .. } => {
+                assert_eq!(scheme.as_deref(), Some("rdbu"));
+                assert_eq!(*domain_mid, Some(0.5));
+            }
+            _ => panic!("expected Diverging variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_quantize_round_trip() {
+        let json = r##"{"type":"quantize","domain":[0,100],"range":["#f00","#0f0","#00f"]}"##;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Quantize { domain, range } => {
+                assert_eq!(domain.as_ref().unwrap(), &vec![0.0, 100.0]);
+                assert_eq!(range.as_ref().unwrap().len(), 3);
+            }
+            _ => panic!("expected Quantize variant"),
+        }
+    }
+
+    #[test]
+    fn scale_spec_bin_ordinal_round_trip() {
+        let json = r#"{"type":"bin-ordinal","bins":[0,10,20,30],"scheme":"blues"}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::BinOrdinal { bins, scheme } => {
+                assert_eq!(bins.as_ref().unwrap(), &vec![0.0, 10.0, 20.0, 30.0]);
+                assert_eq!(scheme.as_deref(), Some("blues"));
+            }
+            _ => panic!("expected BinOrdinal variant"),
+        }
+        // Verify serialization uses "bin-ordinal" as the type tag
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"bin-ordinal""#), "json: {re}");
+    }
+
+    #[test]
+    fn scale_spec_band_with_padding_inner_outer() {
+        let json = r#"{"type":"band","paddingInner":0.2,"paddingOuter":0.1,"align":0.3}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match parsed {
+            ScaleSpec::Band { padding_inner, padding_outer, align, .. } => {
+                assert_eq!(padding_inner, Some(0.2));
+                assert_eq!(padding_outer, Some(0.1));
+                assert_eq!(align, 0.3);
+            }
+            _ => panic!("expected Band variant"),
         }
     }
 

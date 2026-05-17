@@ -32,3 +32,23 @@ pub(crate) mod identity;
 pub(crate) mod residuals;
 pub(crate) mod linalg;
 pub(crate) mod stats;
+pub(crate) mod expr;
+
+// Phase 12 data transforms
+pub(crate) mod filter;
+pub(crate) mod calculate;
+pub(crate) mod fold;
+pub(crate) mod pivot;
+pub(crate) mod join_aggregate;
+pub(crate) mod data_window;
+pub(crate) mod density_data;
+pub(crate) mod regression_data;
+pub(crate) mod loess_data;
+pub(crate) mod impute;
+pub(crate) mod flatten;
+pub(crate) mod sample;
+pub(crate) mod top_k;
+pub(crate) mod data_stack;
+pub(crate) mod timeunit;
+pub(crate) mod data_bin;
+pub(crate) mod data_aggregate;

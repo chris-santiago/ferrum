@@ -25,8 +25,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let both_quant = matches!(
         (&ctx.scales.x, &ctx.scales.y),
         (
-            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_),
-            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_),
+            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
+            ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_),
         )
     );
     if both_ranges && both_quant {
