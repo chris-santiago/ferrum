@@ -509,7 +509,7 @@ Transform expressions (used in `transform_filter` and `transform_calculate`) fol
 
 ## Chaining transforms
 
-Multiple transforms execute in sequence — each one operates on the output of the previous:
+Multiple transforms execute in sequence — each one operates on the output of the previous. You can chain separate `.transform()` calls or pass multiple transforms in a single call (`.transform(a, b, c)` is equivalent to `.transform(a).transform(b).transform(c)`):
 
 ```python
 import ferrum as fm

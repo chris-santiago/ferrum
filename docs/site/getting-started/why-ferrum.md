@@ -10,7 +10,7 @@ There are excellent Python plotting libraries today. Each is best at one thing. 
 
 ### 1. One grammar that scales to production data size
 
-Every existing library breaks at some point — Altair around 5,000 rows, seaborn or matplotlib around 100,000 marks, plotly around 500,000. So you swap tools or APIs as data grows, and your plotting code changes with your data size.
+Every existing library breaks at some point — Altair around 5,000 rows, seaborn or matplotlib around 100,000 marks, plotly around 500,000. So you swap tools or APIs as data grows, and your plotting code changes with your data size. (See [benchmarks](../guide/concepts/performance-scale.md) for methodology and numbers.)
 
 Ferrum keeps the same chart spec working at 100 rows and at 10,000,000 rows. Auto-raster and GPU rendering happen transparently behind the same spec — you don't author for one scale and rewrite for another.
 

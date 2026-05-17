@@ -60,6 +60,8 @@ chart = points + trend
 assert chart.show_svg().startswith("<svg")
 ```
 
+`groupby="species"` tells the smoother to fit a separate curve per group rather than one curve through all points. See the [Marks reference](../api/marks.md) for the full parameter list on each mark.
+
 ![Scatter with LOESS trend](img/first-plot_02.png)
 
 The `+` operator always layers — both marks share the same axes. The LOESS smooth is computed in Rust; you declared what you wanted, not how to compute it.

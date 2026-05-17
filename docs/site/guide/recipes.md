@@ -387,7 +387,7 @@ chart = (
     fm.Chart(df)
     .mark_bar()
     .encode(
-        x=fm.X("size", type_="N", sort=["S", "M", "L"]),
+        x=fm.X("size", type="N", sort=["S", "M", "L"]),
         y="count",
     )
 )
