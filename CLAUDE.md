@@ -171,7 +171,7 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 
 - **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
 - **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
-- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/ARCHITECTURE.md` "Composite marks" section).
+- **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/architecture/ARCHITECTURE.md` "Composite marks" section).
 - **Output** — `gallery/` symlink at repo root → `.claude/skills/gallery-audit/output/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
@@ -222,14 +222,14 @@ For the full surface comparison table, severity rubric (S1–S5), audit trail pa
 
 ## Key architectural decisions
 
-See **`design-docs/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
+See **`design-docs/architecture/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/architecture/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
 
 
 ## Docs site work in progress
 
   - **Worktree**: `../ferrum-worktree-docs-continue/` (sibling of repo root — `git worktree list` to confirm)
   - **Branch**: `docs/continue` (based on `main`)
-  - **Spec**: `design-docs/DOCS_SITE_PLAN.md` (in worktree, not main branch)
+  - **Spec**: `design-docs/superpowers/DOCS_SITE_PLAN.md` (in worktree, not main branch)
   - **Zensical config**: `zensical.toml` (in worktree root)
 
   **Status (paused 2026-05-11, unblocked 2026-05-15):**
