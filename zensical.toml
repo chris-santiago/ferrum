@@ -77,6 +77,8 @@ nav = [
 
 [project.theme]
 custom_dir = "docs/site/overrides"
+logo = "assets/images/mark-b.svg"
+favicon = "assets/images/favicon-b-32.png"
 language = "en"
 features = [
   "announce.dismiss",
@@ -114,6 +116,7 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
 [project.plugins.autorefs]
+show_warnings = false
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
@@ -121,6 +124,7 @@ inventories = ["https://docs.python.org/3/objects.inv"]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "numpy"
+docstring_options = { warnings = false }
 inherited_members = true
 show_source = false
 show_root_heading = true
