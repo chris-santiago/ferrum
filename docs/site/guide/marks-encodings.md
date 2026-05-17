@@ -196,6 +196,8 @@ Positional channels accept an explicit scale via the `scale=` parameter. Ferrum 
 | [`TimeScale`][ferrum.TimeScale] | Temporal axis. |
 | [`OrdinalScale`][ferrum.OrdinalScale] | Discrete/categorical. |
 
+See [Scale Types](../api/scales.md) for the full scale reference including `PowScale`, `BandScale`, `PointScale`, and color scales.
+
 ```python
 import ferrum as fm
 import polars as pl
@@ -294,9 +296,13 @@ chart = (
 
 Legend suppression is currently supported on [`Color`][ferrum.Color]. Other appearance channels (`size`, `shape`) accept the `legend` kwarg but it is reserved for future use.
 
+See [Legend](../api/legend.md) for per-channel legend customization via the `Legend(...)` value class.
+
 ## Palette cycling
 
 When the number of distinct categories exceeds the palette length, colors **cycle** — category `i` receives `palette[i % len(palette)]`. The same modular-index strategy applies to the shape palette. This means that with many categories, some groups will share a color or glyph. If your data has more groups than palette entries, consider switching to a larger palette via `scheme=` or reducing cardinality before plotting.
+
+See [Color](../api/color.md) for programmatic palette access.
 
 ## Mark families
 

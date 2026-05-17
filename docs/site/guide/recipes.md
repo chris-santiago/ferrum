@@ -2,6 +2,8 @@
 
 Worked examples using the grammar API. Each recipe starts from data and builds up to a finished chart. The progression runs from simple single-mark charts to multi-layer compositions with per-group transforms.
 
+For explicit data preprocessing (filtering, reshaping, window functions), see the [Data Transforms](data-transforms.md) guide.
+
 ## Scatter with color and size
 
 Map two continuous fields to position and two more to appearance:

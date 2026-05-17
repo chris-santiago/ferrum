@@ -277,6 +277,8 @@ That recursive composition is what makes complex dashboards-as-static-images via
 
 ## LayerChart and ConcatChart
 
+Phase 12 adds [`LayerChart`](../api/composition.md) for shared-axes overlay and [`ConcatChart`](../api/composition.md) for wrapping grid layouts.
+
 In addition to the `+` operator and `|` / `&` operators, ferrum provides two class-based composition primitives for programmatic use: [`LayerChart`][ferrum.LayerChart] and [`ConcatChart`][ferrum.ConcatChart].
 
 ### LayerChart

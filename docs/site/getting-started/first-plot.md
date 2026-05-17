@@ -107,6 +107,8 @@ assert chart.show_svg().startswith("<svg")
 
 Ferrum ships [twelve built-in themes](../guide/themes.md) in the [`themes`][ferrum.themes] module — from Paper Ink (the warm default) to dark, publication, and editorial styles.
 
+See [Configuration](../guide/themes.md) and [ferrum.config](../api/config.md) for more on customization.
+
 ## What just happened
 
 In four snippets you used:

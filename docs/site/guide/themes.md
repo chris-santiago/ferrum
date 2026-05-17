@@ -146,6 +146,8 @@ Every key listed below is plumbed end-to-end from the Python `Theme(...)` constr
 | `sequential_scheme` | str | Default sequential ramp for heatmaps, density, continuous-color charts. |
 | `diverging_scheme` | str | Default diverging ramp for correlation matrices, diverging-color charts. |
 
+For programmatic palette access outside of themes, see [ferrum.color](../api/color.md).
+
 ### Layout and decoration
 
 | Key | Type | What it controls |
@@ -233,6 +235,8 @@ fm.set_default_theme(fm.themes.default)
 ```
 
 ![Dark theme via process default](img/themes_02.png)
+
+For process-level configuration defaults (width, height, renderer), see [ferrum.config](../api/config.md).
 
 [`set_default_theme()`][ferrum.set_default_theme] does not mutate a module-level config object. It writes to a per-thread `contextvars.ContextVar`, which means:
 
