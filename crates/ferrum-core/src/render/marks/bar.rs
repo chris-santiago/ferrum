@@ -5,6 +5,7 @@
 //!   quantitative x → ordinal y: horizontal bar per row from panel-left to
 //!   x_pixel (Phase 10d-pre, feature-importance chart).
 
+#[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
@@ -166,7 +167,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let mut set: std::collections::HashSet<u64> =
             x_offsets.iter().map(|v| v.to_bits()).collect();
         set.remove(&0.0_f64.to_bits());
-        if set.is_empty() { 1 } else { set.len() + if x_offsets.iter().any(|v| *v == 0.0) { 1 } else { 0 } }
+        if set.is_empty() { 1 } else { set.len() + if x_offsets.contains(&0.0) { 1 } else { 0 } }
     } else {
         1
     };
