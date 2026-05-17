@@ -1,5 +1,65 @@
 # Ferrum: Development Meta-Analysis
 
+## The design problem
+
+Ferrum's original spec was not primarily an exercise in enumerating chart features; it was an attempt to solve a deeper design problem in the Python visualization ecosystem: users are routinely forced to switch APIs, object models, and conceptual frames as soon as their work moves from ordinary plotting to statistical graphics, interactivity, convenience plots, or model diagnostics. The spec's real contribution was to treat that fragmentation itself as the target of design, which is why it reads less like a product checklist and more like a philosophical and architectural argument for a single coherent chart system.
+
+### Starting problem
+
+Existing tools each solve part of the workflow well, but they do so in different worlds. Plotnine and ggplot-style systems are strong at grammar and layering, Altair is strong at typed encodings and composition, Seaborn is strong at statistical convenience, Plotly is strong at interactivity, and Yellowbrick or scikit-plot are useful for model evaluation, yet each demands different abstractions and different compromises once the user's task changes.
+
+That observation became the seed of Ferrum's design. Instead of asking which charts were missing from one existing library, the spec asked what kind of system would let a user stay inside one conceptual model from exploration to explanation to model evaluation, and from small data to much larger data, without rewriting plots or adopting a different mental model at each stage.
+
+### Spec as design compression
+
+For a meta document about agentic coding, this initial spec matters because it compressed a large amount of design intent into a stable artifact before implementation work accelerated. It fixed the project's philosophical center early: every visualization from a scatter plot to a SHAP beeswarm should be expressible as a composition of the same primitives, and high-level helpers should be sugar over that grammar rather than parallel APIs with their own rules.
+
+That compression reduced ambiguity for later implementation work. Agents and implementation passes did not need to repeatedly rediscover what counted as a chart, whether diagnostics should be special objects, whether interactivity should introduce a new authoring model, or whether statistical transforms belonged in user code or in the engine, because the original spec had already answered those questions at the level of principle.
+
+### Core beliefs
+
+The design becomes coherent when read through its core beliefs rather than its feature inventory. The spec explicitly commits to grammar first, convenience second; model artifacts as data; statistical transforms as part of rendering intent; interactivity as a renderer rather than a rewrite; zero unnecessary copies; and defaults chosen for correctness rather than mere aesthetics.
+
+These beliefs are stronger than ordinary product requirements. They imply that a confusion matrix should be composable like any other heatmap, that a ROC curve should be themeable and concatenable like any other layered chart, that KDE and smoothing should be declared in the chart spec rather than precomputed in SciPy, and that calling `.interactive()` should not force the user into a second object model.
+
+### Synthesis from prior art
+
+The original spec is best understood as a synthesis of prior art under stricter unification rules. It inherits layering and explicit scales from plotnine and ggplot2, typed channels and selection ideas from Altair, figure-level convenience and statistical vocabulary from Seaborn, interactive expectations from Plotly, and ML diagnostic vocabulary from Yellowbrick and scikit-plot, while explicitly rejecting the backend coupling, split static-versus-interactive models, row limits, and non-composable helper surfaces that come with those systems.
+
+This is what gives Ferrum's spec its particular shape. It is not arguing that existing libraries are useless; it is arguing that their strengths should not remain partitioned across separate systems, especially when those partitions force users to leave a chart grammar for diagnostics, leave static rendering for interactive rendering, or abandon a declarative interface once the data grows.
+
+### Three central claims
+
+Although the spec is broad, the center of gravity is actually narrow. The clearest synthesis of the original design is the three-part claim: one grammar that scales to production-sized data, model diagnostics as first-class grammar objects rather than a parallel API, and statistical computation in the render pipeline rather than in user preprocessing code.
+
+Those three claims explain most of the rest. Zero-copy ingestion, headless rendering, GPU-backed interactivity, pure-Rust backends, and dataframe interoperability via Narwhals are important, but they function mainly as enabling mechanisms that make the three larger promises believable.
+
+### Why Rust became necessary
+
+Rust enters the spec as a consequence of design ambition, not as the starting identity of the project. Once the library promises one grammar from small to very large data, in-engine statistics, headless rendering, and minimal Python involvement after data handoff, a Rust computation core paired with Arrow-based columnar interchange becomes the natural architectural answer.
+
+That is why the spec's architecture section feels downstream of the philosophy rather than separate from it. Python is defined as the declaration layer, Rust as the computation layer, data crosses the boundary once, and stat transforms, layout, aggregation, and rendering preparation happen after that boundary crossing; even the later shift from Arrow IPC to Arrow CDI preserves this same principle while improving the zero-copy story.
+
+### Why the API got so broad
+
+The breadth of the original spec can initially look excessive, but the reason is clear: Ferrum wants to be complete enough that a practitioner coming from Altair, Seaborn, or Yellowbrick does not immediately fall back to matplotlib when they need a practical chart type or diagnostic workflow. That naturally expands the surface to include primitive marks, composite marks, stat transforms, themes, compound views, figure-level functions, diagnostics, visualizers, and multiple rendering backends.
+
+Seen this way, the large scope is not evidence of aimlessness. It is the cost of taking the unification promise seriously: if Ferrum is meant to remove library-switching as a normal part of analysis, then it must cover the neighboring terrain that currently causes those switches.
+
+### Model diagnostics as a decisive idea
+
+One of the most original parts of the spec is its treatment of diagnostics. In many ecosystems, model evaluation is handled by separate plotting helpers or estimator-bound visualization objects that are useful but non-composable; Ferrum instead treats model-derived artifacts as ordinary tables and diagnostic views as ordinary chart constructions, which is why ROC curves, calibration plots, SHAP charts, residual plots, and learning curves can sit naturally inside the same grammar and composition operators as any other chart.
+
+This idea explains why the spec feels more ambitious than a typical plotting-library design. It is not merely trying to compete on chart aesthetics or syntax; it is trying to remove one of the most persistent conceptual boundaries in data science tooling, the boundary between "charts" and "model visualizations."
+
+### Agentic coding relevance
+
+In the context of agentic coding, the original spec served as a stabilizer. It made it possible for later coding agents to work incrementally on architecture, rendering, compatibility, and phased implementation without constantly renegotiating what the project was for, because the spec had already turned a broad frustration into a load-bearing design thesis.
+
+That is especially important because some implementation details evolved later. The move from Arrow IPC to Arrow CDI and the incorporation of Narwhals-based dataframe compatibility show that the implementation could change while the core design remained intact: one chart system, minimal copies, broad ecosystem interoperability, and no return to fragmented APIs.
+
+---
+
 ## The numbers
 
 | Metric | Value |
