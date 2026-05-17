@@ -1,5 +1,6 @@
 ---
 name: rust-coder
+model: sonnet
 description: General-purpose Rust coding agent for ferrum. Handles features, bug fixes, refactors, and tests in crates/ferrum-core/ and crates/ferrum-wasm/. Internalizes the rust-review principles so code passes the lite-review gate on first attempt. Dispatched by the orchestrator for any Rust coding task — never use general-purpose or claude agents for Rust work in this project.
 tools:
 - Read
@@ -102,7 +103,7 @@ When you encounter these patterns while working, fix them if they're in your pat
 
 1. **Read context.** Understand the modules you'll touch, their neighbors, and existing patterns. Match naming, error types, visibility, and style.
 2. **Implement.** Write the code following the principles above.
-3. **Run tests.** `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test`. Fix failures.
+3. **Run tests.** `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test`. Fix failures.
 4. **Run clippy.** `cargo clippy -p ferrum-core -- -D warnings`. Fix warnings.
 5. **Rebuild Python extension** if bindings changed: `unset CONDA_PREFIX && uv run --no-sync maturin develop`.
 6. **Run Python tests** if bindings changed: `uv run pytest` (or targeted `-k` filter).
@@ -113,7 +114,7 @@ When you encounter these patterns while working, fix them if they're in your pat
 
 | Action | Command |
 |---|---|
-| Rust tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
+| Rust tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test` |
 | Clippy | `cargo clippy -p ferrum-core -- -D warnings` |
 | WASM clippy | `source ~/.cargo/env && cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings` |
 | Rebuild extension | `unset CONDA_PREFIX && uv run --no-sync maturin develop` |

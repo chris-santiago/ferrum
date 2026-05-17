@@ -104,6 +104,8 @@ This rule governs Phase 12 forward; it does not retroactively reopen closed phas
 
 The coding agents internalize the review principles from `.claude/skills/python-review/` and `.claude/skills/rust-review/` respectively, so code should pass the lite-review gate on first attempt. The orchestrator still handles staging, lite-review dispatch, and commits.
 
+**Model selection:** Coding agents default to Sonnet (set in their frontmatter). Override to Opus via `model: "opus"` on the Agent call when the task requires significant architectural judgment — e.g., cross-subsystem refactors, complex Rust lifetime/type reasoning, or tasks that would otherwise need multiple re-dispatches.
+
 ---
 
 ## Bug fixes and cascading issues
