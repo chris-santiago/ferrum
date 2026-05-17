@@ -92,9 +92,7 @@ class TestSingleTransformFaceted:
         assert _is_svg(svg)
 
     def test_smooth_facet_grid(self, facet_df):
-        chart = (
-            Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(row="grp", col="cat")
-        )
+        chart = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(row="grp", col="cat")
         svg = chart.show_svg()
         assert _is_svg(svg)
 
@@ -277,11 +275,7 @@ class TestColorEncodingWithTransformFaceted:
     def test_point_plus_smooth_color_faceted(self, facet_df):
         """Layered: points colored by grp + smooth colored by grp, faceted."""
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q", color="grp:N")
-        smooth = (
-            Chart(facet_df)
-            .mark_smooth(groupby="grp")
-            .encode(x="x:Q", y="y:Q", color="grp:N")
-        )
+        smooth = Chart(facet_df).mark_smooth(groupby="grp").encode(x="x:Q", y="y:Q", color="grp:N")
         layered = (points + smooth).facet(col="cat")
         svg = layered.show_svg()
         assert _is_svg(svg)
@@ -315,9 +309,7 @@ class TestEdgeCases:
 
     def test_many_panels_smooth(self, many_panel_df):
         """5 facet panels with smooth transform — no crash."""
-        chart = (
-            Chart(many_panel_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(col="cat")
-        )
+        chart = Chart(many_panel_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(col="cat")
         svg = chart.show_svg()
         assert _is_svg(svg)
 
@@ -337,9 +329,7 @@ class TestEdgeCases:
 
     def test_facet_smooth_with_ci_band(self, facet_df):
         """Smooth with CI band (layered ribbon+line) faceted by col."""
-        chart = (
-            Chart(facet_df).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q").facet(col="cat")
-        )
+        chart = Chart(facet_df).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q").facet(col="cat")
         svg = chart.show_svg()
         assert _is_svg(svg)
 

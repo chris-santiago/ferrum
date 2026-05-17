@@ -66,9 +66,7 @@ def _render_with_theme(chart_fn, theme=None):
 
 def _assert_svgs_differ(svg_default, svg_custom, description):
     """Assert that the two SVGs are not byte-equal."""
-    assert svg_default != svg_custom, (
-        f"Theme key had no effect on rendered SVG: {description}"
-    )
+    assert svg_default != svg_custom, f"Theme key had no effect on rendered SVG: {description}"
 
 
 def _svg_contains_red(svg):
@@ -187,9 +185,7 @@ def test_line_stroke_width_affects_line_marks(chart_fn, mark_name):
     """line_stroke_width theme key should change SVG for line-based marks."""
     svg_default = _render_with_theme(chart_fn)
     svg_custom = _render_with_theme(chart_fn, Theme(line_stroke_width=5))
-    _assert_svgs_differ(
-        svg_default, svg_custom, f"line_stroke_width=5 on {mark_name}"
-    )
+    _assert_svgs_differ(svg_default, svg_custom, f"line_stroke_width=5 on {mark_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +208,7 @@ def test_bar_corner_radius_affects_bar_marks(chart_fn, mark_name):
     """bar_corner_radius theme key should produce different SVG."""
     svg_default = _render_with_theme(chart_fn, Theme(bar_corner_radius=0))
     svg_custom = _render_with_theme(chart_fn, Theme(bar_corner_radius=10))
-    _assert_svgs_differ(
-        svg_default, svg_custom, f"bar_corner_radius=10 on {mark_name}"
-    )
+    _assert_svgs_differ(svg_default, svg_custom, f"bar_corner_radius=10 on {mark_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -317,18 +311,14 @@ def test_mark_color_affects_composite_marks(chart_fn, mark_name):
     """mark_color should propagate through composite mark desugaring."""
     svg_default = _render_with_theme(chart_fn)
     svg_custom = _render_with_theme(chart_fn, Theme(mark_color="#ff0000"))
-    _assert_svgs_differ(
-        svg_default, svg_custom, f"mark_color on composite {mark_name}"
-    )
+    _assert_svgs_differ(svg_default, svg_custom, f"mark_color on composite {mark_name}")
 
 
 def test_line_stroke_width_affects_errorbar():
     """line_stroke_width should propagate to errorbar (rule-based composite)."""
     svg_default = _render_with_theme(_chart_errorbar)
     svg_custom = _render_with_theme(_chart_errorbar, Theme(line_stroke_width=8.0))
-    _assert_svgs_differ(
-        svg_default, svg_custom, "line_stroke_width on errorbar"
-    )
+    _assert_svgs_differ(svg_default, svg_custom, "line_stroke_width on errorbar")
 
 
 # ---------------------------------------------------------------------------

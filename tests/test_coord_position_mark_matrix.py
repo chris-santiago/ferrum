@@ -83,9 +83,9 @@ def test_stack_coord_flip_renders(grouped_df, mark_method, encoding):
     svg = _render(grouped_df, mark_method, encoding, position=Stack(), coord=CoordFlip())
     assert "<svg" in svg, f"{mark_method} + Stack + CoordFlip produced invalid SVG"
     # At least one graphical element should be present
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]
-    ), f"{mark_method} + Stack + CoordFlip: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]), (
+        f"{mark_method} + Stack + CoordFlip: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +111,9 @@ def test_dodge_coord_flip_renders(grouped_df, mark_method, encoding):
     """Dodge + CoordFlip renders valid SVG with mark elements."""
     svg = _render(grouped_df, mark_method, encoding, position=Dodge(), coord=CoordFlip())
     assert "<svg" in svg, f"{mark_method} + Dodge + CoordFlip produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line"]
-    ), f"{mark_method} + Dodge + CoordFlip: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line"]), (
+        f"{mark_method} + Dodge + CoordFlip: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +141,9 @@ def test_jitter_coord_flip_renders(grouped_df, mark_method, encoding, jitter):
     """Jitter + CoordFlip renders valid SVG with mark elements."""
     svg = _render(grouped_df, mark_method, encoding, position=jitter, coord=CoordFlip())
     assert "<svg" in svg, f"{mark_method} + Jitter + CoordFlip produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<circle", "<line"]
-    ), f"{mark_method} + Jitter + CoordFlip: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<circle", "<line"]), (
+        f"{mark_method} + Jitter + CoordFlip: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -167,13 +167,11 @@ _STACK_FIXED_CASES = [
 @pytest.mark.parametrize("mark_method,encoding", _STACK_FIXED_CASES)
 def test_stack_coord_fixed_renders(grouped_df, mark_method, encoding):
     """Stack + CoordFixed renders valid SVG with mark elements."""
-    svg = _render(
-        grouped_df, mark_method, encoding, position=Stack(), coord=CoordFixed(ratio=1.0)
-    )
+    svg = _render(grouped_df, mark_method, encoding, position=Stack(), coord=CoordFixed(ratio=1.0))
     assert "<svg" in svg, f"{mark_method} + Stack + CoordFixed produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]
-    ), f"{mark_method} + Stack + CoordFixed: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]), (
+        f"{mark_method} + Stack + CoordFixed: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +195,11 @@ _DODGE_FIXED_CASES = [
 @pytest.mark.parametrize("mark_method,encoding", _DODGE_FIXED_CASES)
 def test_dodge_coord_fixed_renders(grouped_df, mark_method, encoding):
     """Dodge + CoordFixed renders valid SVG with mark elements."""
-    svg = _render(
-        grouped_df, mark_method, encoding, position=Dodge(), coord=CoordFixed(ratio=1.0)
-    )
+    svg = _render(grouped_df, mark_method, encoding, position=Dodge(), coord=CoordFixed(ratio=1.0))
     assert "<svg" in svg, f"{mark_method} + Dodge + CoordFixed produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line"]
-    ), f"{mark_method} + Dodge + CoordFixed: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line"]), (
+        f"{mark_method} + Dodge + CoordFixed: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +241,12 @@ _STACK_POLAR_CASES = [
 @pytest.mark.parametrize("mark_method,encoding", _STACK_POLAR_CASES)
 def test_stack_coord_polar_renders(grouped_df, mark_method, encoding):
     """Stack + CoordPolar renders valid SVG (polar stacked bars/areas)."""
-    svg = _render(
-        grouped_df, mark_method, encoding, position=Stack(), coord=CoordPolar(theta="x")
-    )
+    svg = _render(grouped_df, mark_method, encoding, position=Stack(), coord=CoordPolar(theta="x"))
     assert "<svg" in svg, f"{mark_method} + Stack + CoordPolar produced invalid SVG"
     # Polar coords may use <path> arcs rather than <rect>
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]
-    ), f"{mark_method} + Stack + CoordPolar: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]), (
+        f"{mark_method} + Stack + CoordPolar: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -276,13 +270,11 @@ _DODGE_POLAR_CASES = [
 @pytest.mark.parametrize("mark_method,encoding", _DODGE_POLAR_CASES)
 def test_dodge_coord_polar_renders(grouped_df, mark_method, encoding):
     """Dodge + CoordPolar renders valid SVG."""
-    svg = _render(
-        grouped_df, mark_method, encoding, position=Dodge(), coord=CoordPolar(theta="x")
-    )
+    svg = _render(grouped_df, mark_method, encoding, position=Dodge(), coord=CoordPolar(theta="x"))
     assert "<svg" in svg, f"{mark_method} + Dodge + CoordPolar produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]
-    ), f"{mark_method} + Dodge + CoordPolar: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<rect", "<path", "<circle", "<line", "<polyline"]), (
+        f"{mark_method} + Dodge + CoordPolar: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -300,9 +292,9 @@ def test_jitter_coord_polar_renders(grouped_df):
         coord=CoordPolar(theta="x"),
     )
     assert "<svg" in svg, "mark_point + Jitter + CoordPolar produced invalid SVG"
-    assert any(
-        tag in svg for tag in ["<circle", "<path"]
-    ), "mark_point + Jitter + CoordPolar: no mark elements in SVG"
+    assert any(tag in svg for tag in ["<circle", "<path"]), (
+        "mark_point + Jitter + CoordPolar: no mark elements in SVG"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -370,9 +362,7 @@ def test_dodge_changes_svg_under_coord_flip(grouped_df):
 def test_jitter_changes_svg_under_coord_fixed(grouped_df):
     """mark_point under CoordFixed: Jitter vs no-position produces different SVG."""
     enc = {"x": "num:Q", "y": "val:Q"}
-    svg_no_pos = _render(
-        grouped_df, "mark_point", enc, coord=CoordFixed(ratio=1.0)
-    )
+    svg_no_pos = _render(grouped_df, "mark_point", enc, coord=CoordFixed(ratio=1.0))
     svg_jittered = _render(
         grouped_df, "mark_point", enc, position=Jitter(seed=42), coord=CoordFixed(ratio=1.0)
     )

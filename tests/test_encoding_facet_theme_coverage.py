@@ -65,12 +65,7 @@ class TestColorEncodingFaceted:
         assert len(svg) > 500
 
     def test_color_quantitative_facet_col(self, df):
-        chart = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", color="size_val:Q")
-            .mark_point()
-            .facet(col="cat")
-        )
+        chart = Chart(df).encode(x="x:Q", y="y:Q", color="size_val:Q").mark_point().facet(col="cat")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
@@ -85,12 +80,7 @@ class TestSizeEncodingFaceted:
     """Size:Q with facet(col=...) produces valid SVG."""
 
     def test_size_alone_facet_col(self, df):
-        chart = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", size="size_val:Q")
-            .mark_point()
-            .facet(col="cat")
-        )
+        chart = Chart(df).encode(x="x:Q", y="y:Q", size="size_val:Q").mark_point().facet(col="cat")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
@@ -147,12 +137,7 @@ class TestShapeEncodingFaceted:
     """Shape:N with facet(col=...) produces valid SVG (mark_point only)."""
 
     def test_shape_alone_facet_col(self, df):
-        chart = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", shape="grp:N")
-            .mark_point()
-            .facet(col="cat")
-        )
+        chart = Chart(df).encode(x="x:Q", y="y:Q", shape="grp:N").mark_point().facet(col="cat")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
@@ -178,12 +163,7 @@ class TestThemeOverridesEncodingFacet:
     """Theme props change the SVG output of faceted encoded charts."""
 
     def _base_chart(self, df):
-        return (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", color="grp:N")
-            .mark_point()
-            .facet(col="cat")
-        )
+        return Chart(df).encode(x="x:Q", y="y:Q", color="grp:N").mark_point().facet(col="cat")
 
     def test_color_scheme_override(self, df):
         default_svg = self._base_chart(df).show_svg()
@@ -199,24 +179,14 @@ class TestThemeOverridesEncodingFacet:
         assert default_svg != themed_svg
 
     def test_opacity_override(self, df):
-        base = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q")
-            .mark_point()
-            .facet(col="cat")
-        )
+        base = Chart(df).encode(x="x:Q", y="y:Q").mark_point().facet(col="cat")
         default_svg = base.show_svg()
         themed_svg = base.theme(Theme(opacity=0.3)).show_svg()
         assert themed_svg.startswith("<svg")
         assert default_svg != themed_svg
 
     def test_mark_color_override_bar(self, df):
-        base = (
-            Chart(df)
-            .encode(x="cat:N", y="y:Q", color="grp:N")
-            .mark_bar()
-            .facet(col="row_cat")
-        )
+        base = Chart(df).encode(x="cat:N", y="y:Q", color="grp:N").mark_bar().facet(col="row_cat")
         themed_svg = base.theme(Theme(mark_color="#ff0000")).show_svg()
         assert themed_svg.startswith("<svg")
         # mark_color may or may not override when color encoding is present,
@@ -325,12 +295,7 @@ class TestEdgeCases:
 
     def test_many_color_categories_faceted(self, df):
         """5 color categories across 3 facet panels renders fine."""
-        chart = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", color="grp:N")
-            .mark_point()
-            .facet(col="cat")
-        )
+        chart = Chart(df).encode(x="x:Q", y="y:Q", color="grp:N").mark_point().facet(col="cat")
         svg = chart.show_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
@@ -351,10 +316,7 @@ class TestEdgeCases:
     def test_quantitative_color_faceted(self, df):
         """Quantitative color encoding in faceted chart."""
         chart = (
-            Chart(df)
-            .encode(x="x:Q", y="y:Q", color="opacity_val:Q")
-            .mark_point()
-            .facet(col="cat")
+            Chart(df).encode(x="x:Q", y="y:Q", color="opacity_val:Q").mark_point().facet(col="cat")
         )
         svg = chart.show_svg()
         assert svg.startswith("<svg")

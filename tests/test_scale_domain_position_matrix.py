@@ -41,9 +41,30 @@ def boxplot_df() -> pl.DataFrame:
         {
             "cat": ["a"] * 8 + ["b"] * 8 + ["c"] * 8,
             "val": [
-                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 15.0,
-                2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0,
-                0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 14.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                15.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+                16.0,
+                0.5,
+                1.5,
+                2.5,
+                3.5,
+                4.5,
+                5.5,
+                6.5,
+                14.0,
             ],
             "grp": (["x", "y"] * 4) * 3,
         }
@@ -55,8 +76,28 @@ def numeric_df() -> pl.DataFrame:
     """DataFrame with numeric columns for histogram tests."""
     return pl.DataFrame(
         {
-            "val": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5,
-                    6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0, 10.5],
+            "val": [
+                1.0,
+                1.5,
+                2.0,
+                2.5,
+                3.0,
+                3.5,
+                4.0,
+                4.5,
+                5.0,
+                5.5,
+                6.0,
+                6.5,
+                7.0,
+                7.5,
+                8.0,
+                8.5,
+                9.0,
+                9.5,
+                10.0,
+                10.5,
+            ],
             "grp": ["x", "y"] * 10,
         }
     )
@@ -205,7 +246,11 @@ _JITTER_DOMAIN_CASES = [
 
 @pytest.mark.parametrize("mark_method,encoding,coord,jitter", _JITTER_DOMAIN_CASES)
 def test_jitter_with_domain_override_no_crash(
-    grouped_df: pl.DataFrame, mark_method: str, encoding: dict, coord: CoordCartesian, jitter: Jitter
+    grouped_df: pl.DataFrame,
+    mark_method: str,
+    encoding: dict,
+    coord: CoordCartesian,
+    jitter: Jitter,
 ) -> None:
     """Jitter + explicit domain override must not crash and must produce valid SVG."""
     base = fm.Chart(grouped_df)
@@ -236,9 +281,7 @@ def test_stack_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
         .coord(coord)
         .show_svg()
     )
-    assert svg_without != svg_with, (
-        "Stack() did not change SVG output when ylim is set"
-    )
+    assert svg_without != svg_with, "Stack() did not change SVG output when ylim is set"
 
 
 def test_dodge_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
@@ -258,20 +301,14 @@ def test_dodge_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
         .coord(coord)
         .show_svg()
     )
-    assert svg_without != svg_with, (
-        "Dodge() did not change SVG output when ylim is set"
-    )
+    assert svg_without != svg_with, "Dodge() did not change SVG output when ylim is set"
 
 
 def test_jitter_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
     """mark_point with Jitter vs no-position should produce different SVG even with ylim."""
     coord = CoordCartesian(ylim=(0, 8))
     svg_without = (
-        fm.Chart(grouped_df)
-        .mark_point()
-        .encode(x="num:Q", y="val:Q")
-        .coord(coord)
-        .show_svg()
+        fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").coord(coord).show_svg()
     )
     svg_with = (
         fm.Chart(grouped_df)
@@ -280,9 +317,7 @@ def test_jitter_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
         .coord(coord)
         .show_svg()
     )
-    assert svg_without != svg_with, (
-        "Jitter() did not change SVG output when ylim is set"
-    )
+    assert svg_without != svg_with, "Jitter() did not change SVG output when ylim is set"
 
 
 # ---------------------------------------------------------------------------
