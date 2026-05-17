@@ -8,8 +8,11 @@ from typing import Any
 def _scale_to_dict(scale: Any) -> Any:
     """Convert a Python Scale object to a JSON-serializable dict.
 
-    Converts LogScale, LinearScale, TimeScale, SymlogScale, and OrdinalScale
-    instances to the dict shape expected by Rust's ScaleSpec serde deserialiser.
+    Converts all ferrum scale types (LinearScale, LogScale, TimeScale,
+    SymlogScale, OrdinalScale, PowScale, SqrtScale, BandScale, PointScale,
+    SequentialScale, DivergingScale, QuantizeScale, BinOrdinalScale) to the
+    dict shape expected by Rust's ScaleSpec serde deserialiser.
+
     If ``scale`` is already a dict, ensure it has a ``type`` key (defaulting to
     ``"linear"`` when absent) so Rust's tagged-enum deserialiser can match the
     correct variant.  ``None`` is returned unchanged.
@@ -24,11 +27,19 @@ def _scale_to_dict(scale: Any) -> Any:
     # Import here to avoid circular imports at module load time.
     try:
         from ferrum._core import (  # type: ignore[attr-defined]
-            LogScale,
+            BandScale,
+            BinOrdinalScale,
+            DivergingScale,
             LinearScale,
-            TimeScale,
-            SymlogScale,
+            LogScale,
             OrdinalScale,
+            PointScale,
+            PowScale,
+            QuantizeScale,
+            SequentialScale,
+            SqrtScale,
+            SymlogScale,
+            TimeScale,
         )
     except ImportError:
         return scale  # can't convert, pass through and let Rust raise
@@ -52,7 +63,7 @@ def _scale_to_dict(scale: Any) -> Any:
             d["padding"] = p
         return d
     if isinstance(scale, TimeScale):
-        d = {"type": "time", "clamp": scale.clamp}
+        d = {"type": "utc" if scale.utc else "time", "clamp": scale.clamp}
         if scale.domain:
             d["domain"] = list(scale.domain)
         if scale.range:
@@ -75,6 +86,78 @@ def _scale_to_dict(scale: Any) -> Any:
             d["domain"] = list(scale.domain)
         if scale.range:
             d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, PowScale):
+        d = {"type": "pow", "exponent": scale.exponent, "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
+        return d
+    if isinstance(scale, SqrtScale):
+        d = {"type": "sqrt", "exponent": scale.exponent, "clamp": scale.clamp}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        if (p := scale.padding) is not None:
+            d["padding"] = p
+        return d
+    if isinstance(scale, BandScale):
+        d = {
+            "type": "band",
+            "paddingInner": scale.padding_inner,
+            "paddingOuter": scale.padding_outer,
+            "align": scale.align,
+        }
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, PointScale):
+        d = {
+            "type": "point",
+            "padding": scale.padding,
+            "align": scale.align,
+            "reverse": scale.reverse,
+        }
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, SequentialScale):
+        d = {"type": "sequential", "reverse": scale.reverse}
+        if scale.scheme:
+            d["scheme"] = scale.scheme
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        return d
+    if isinstance(scale, DivergingScale):
+        d = {"type": "diverging"}
+        if scale.scheme:
+            d["scheme"] = scale.scheme
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.domain_mid is not None:
+            d["domainMid"] = scale.domain_mid
+        return d
+    if isinstance(scale, QuantizeScale):
+        d = {"type": "quantize"}
+        if scale.domain:
+            d["domain"] = list(scale.domain)
+        if scale.range:
+            d["range"] = list(scale.range)
+        return d
+    if isinstance(scale, BinOrdinalScale):
+        d = {"type": "bin-ordinal"}
+        if scale.bins:
+            d["bins"] = list(scale.bins)
+        if scale.scheme:
+            d["scheme"] = scale.scheme
         return d
 
     # Unknown scale type — return as-is and let Rust surface the error.
