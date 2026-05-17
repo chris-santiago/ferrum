@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from ferrum._warn import warn_once
+from ferrum.axis import _normalize_axis
+from ferrum.legend import _normalize_legend
 from ferrum.encoding._scale import _scale_to_dict
 
 
@@ -80,18 +82,17 @@ class ChannelBase:
         if (v := self._kwargs.get("scale")) is not None:
             out["scale"] = _scale_to_dict(v)
         for k in ("title", "axis", "legend", "sort", "stack", "impute", "scheme", "format"):
+            if k == "axis" and "axis" in self._kwargs:
+                # Accept Axis instances, False (suppression), or raw dicts.
+                normalized = _normalize_axis(self._kwargs["axis"])
+                if normalized is not None:
+                    out["axis"] = normalized
+                continue
             if k == "legend" and "legend" in self._kwargs:
-                # Schwabish SB3 (2026-05-11): distinguish "legend not
-                # specified" from "legend explicitly suppressed".
-                # ``legend=None`` / ``legend=False`` from the Color encoding
-                # signals "hide the legend"; serialize as a dict with the
-                # ``disabled: true`` flag the Rust renderer recognizes.
-                v = self._kwargs["legend"]
-                if v is None or v is False:
-                    out["legend"] = {"disabled": True}
-                elif isinstance(v, dict):
-                    out["legend"] = v
-                # Other truthy values are reserved; drop silently.
+                # Accept Legend instances, None/False (suppression), or raw dicts.
+                normalized = _normalize_legend(self._kwargs["legend"])
+                if normalized is not None:
+                    out["legend"] = normalized
                 continue
             if (v := self._kwargs.get(k)) is not None:
                 out[k] = v
