@@ -2,6 +2,12 @@
 
 This page gets you from zero to a rendered chart in under a minute. By the end you'll have a scatter plot, a layered chart, and a saved SVG — and you'll know the three-piece pattern that every Ferrum chart follows.
 
+!!! note "Prerequisites"
+    This tutorial uses scikit-learn for sample datasets. If you followed the
+    [recommended install](install.md) (`pip install ferrum-viz[all]`), you
+    already have it. If you chose the lean install, run
+    `pip install ferrum-viz[models]` first.
+
 ## The pattern
 
 Every Ferrum chart is **data + mark + encoding**:
