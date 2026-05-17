@@ -227,7 +227,7 @@ Two modes:
 
 **File:** `skills/code-archaeology/SKILL.md`
 
-Dispatches three parallel agents (Python, Rust, Tests+Docs) to sweep the entire codebase for unimplemented features, silently dropped parameters, dead code paths, skipped tests, and spec-vs-impl gaps. Report saved to `docs/superpowers/followups/`.
+Dispatches three parallel agents (Python, Rust, Tests+Docs) to sweep the entire codebase for unimplemented features, silently dropped parameters, dead code paths, skipped tests, and spec-vs-impl gaps. Report saved to `design-docs/superpowers/followups/`.
 
 ---
 

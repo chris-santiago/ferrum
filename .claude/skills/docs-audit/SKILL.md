@@ -35,7 +35,7 @@ If the script is missing or broken, fall back to the manual checks below.
 The script handles all deterministic scanning:
 
 1. **Stale phase markers** — greps `docs/site/**/*.md` for patterns like `Phase \d+`
-   and cross-references against `docs/superpowers/ferrum-phases.md` to see which phases
+   and cross-references against `design-docs/superpowers/ferrum-phases.md` to see which phases
    are done. Any "Phase N" mentioned as future/planned/upcoming where N is already done
    is a finding.
 

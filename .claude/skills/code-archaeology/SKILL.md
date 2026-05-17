@@ -15,7 +15,7 @@ Split by domain and run three agents in parallel. Each reads every file in scope
 |---|---|
 | Python | `src/ferrum/` |
 | Rust | `crates/ferrum-core/src/` + `crates/ferrum-wasm/src/` |
-| Tests + Docs | `tests/`, `design-docs/`, `docs/superpowers/`, `ferrum-spec.md` |
+| Tests + Docs | `tests/`, `design-docs/`, `design-docs/superpowers/`, `ferrum-spec.md` |
 
 ## Python Patterns
 
@@ -91,4 +91,4 @@ After all agents return, group findings into a prioritized report:
 5. **Missing spec implementations** — not present in source at all
 6. **Stale docs** — comments/docstrings that no longer match the implementation
 
-Save the report to `docs/superpowers/followups/YYYY-MM-DD-code-archaeology.md`.
+Save the report to `design-docs/superpowers/followups/YYYY-MM-DD-code-archaeology.md`.

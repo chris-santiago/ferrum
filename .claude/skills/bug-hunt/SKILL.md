@@ -33,7 +33,7 @@ If the user provided a subsystem name (e.g. `/bug-hunt scale-stat`), run only th
 
 ### Step 2 — Check phases
 
-Read `docs/superpowers/ferrum-phases.md`. Skip any subsystem whose corresponding phase is not `done`:
+Read `design-docs/superpowers/ferrum-phases.md`. Skip any subsystem whose corresponding phase is not `done`:
 - `scale-stat` → Phase 4 + 5
 - `coerce-transport` → Phase 2
 - `marks-rendering` → Phase 7

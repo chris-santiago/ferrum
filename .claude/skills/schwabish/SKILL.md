@@ -5,7 +5,7 @@ description: Apply Schwabish "integrate text and graphics" principles to a ferru
 
 # Schwabish — Text-Integration Audit
 
-A two-mode skill that judges ferrum charts against the Schwabish "integrate text and graphics" rubric — the four T-categories: **T1 active title**, **T2 direct labels**, **T3 callouts**, **T4 inline metrics**. The full principle reference lives at `docs/superpowers/specs/2026-05-11-schwabish-principles.md` and is embedded as the cached prefix to the judge prompt.
+A two-mode skill that judges ferrum charts against the Schwabish "integrate text and graphics" rubric — the four T-categories: **T1 active title**, **T2 direct labels**, **T3 callouts**, **T4 inline metrics**. The full principle reference lives at `design-docs/superpowers/specs/2026-05-11-schwabish-principles.md` and is embedded as the cached prefix to the judge prompt.
 
 ## Modes
 
@@ -102,6 +102,6 @@ If `python-review-lite` returns `block`, the orchestrator dispatches the same fi
 
 ## Reference docs
 
-- `docs/superpowers/specs/2026-05-11-schwabish-principles.md` — canonical reference, embedded as cached prefix in `judge_prompt.md`.
-- `docs/superpowers/specs/2026-05-11-schwabish-design.md` — full design spec (the *how*).
+- `design-docs/superpowers/specs/2026-05-11-schwabish-principles.md` — canonical reference, embedded as cached prefix in `judge_prompt.md`.
+- `design-docs/superpowers/specs/2026-05-11-schwabish-design.md` — full design spec (the *how*).
 - `.claude/skills/schwabish/apply_eligibility.md` — objective-only findings the autonomous fixer applies.

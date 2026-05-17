@@ -5,7 +5,7 @@ description: Use when adding or updating docstrings in ferrum — applies the Nu
 
 # Ferrum docstring conventions
 
-Use this when adding a new public symbol to ferrum, or when updating an existing docstring. The full taxonomy and rationale live in `docs/superpowers/specs/2026-05-11-docstrings-design.md`; this skill captures the rules you need at the keyboard.
+Use this when adding a new public symbol to ferrum, or when updating an existing docstring. The full taxonomy and rationale live in `design-docs/superpowers/specs/2026-05-11-docstrings-design.md`; this skill captures the rules you need at the keyboard.
 
 ## The NumPy template
 
@@ -167,7 +167,7 @@ If a method gains/loses a parameter, the docstring `Parameters` section must be 
 
 ## Where to read the long-form rationale
 
-`docs/superpowers/specs/2026-05-11-docstrings-design.md` covers:
+`design-docs/superpowers/specs/2026-05-11-docstrings-design.md` covers:
 - Why these decisions and not others (§2 decisions table).
 - The full taxonomy of public symbols and where each lives (§3).
 - Lint configuration details (§6).

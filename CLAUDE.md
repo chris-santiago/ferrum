@@ -87,7 +87,7 @@ Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.to
 - Use sub-phase decomposition to manage build order, not to drop scope.
 - "Implement everything fully" is the default. No Warn-fallbacks. **NotImplementedErrors ARE NOT ACCEPTABLE.**
 
-This rule governs Phase 12 forward; it does not retroactively reopen closed phases (1–11 are done).
+This rule governs all open phases; it does not retroactively reopen closed phases (1–12 spec completeness are done; Phase 12 extension points is the current frontier).
 
 ---
 
@@ -158,7 +158,7 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 - **Channels:** `Description`/`Key` encoding (TODO G1 chart-level done, but `Key` is interactive-only), `Href` encoding already works
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
-- **Missing spec implementations:** `ferrum.color`, `ferrum.config`, `Axis(...)` full value class, `ferrum.Grid`, `WindowTransform`, full palette library, `SceneNode::Raw` WASM, `share_x`/`share_y` grid enforcement, `compare=` routing for 3 diagnostic charts, Phase 12
+- **Missing spec implementations:** `ferrum.Grid`, full palette library, `SceneNode::Raw` WASM, `compare=` routing for 3 diagnostic charts
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
 
 When fixing a bug or adding a feature that overlaps with an open item, update the archaeology doc's status column and check off the corresponding action-list entry.
