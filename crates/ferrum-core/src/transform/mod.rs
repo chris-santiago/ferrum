@@ -32,3 +32,5 @@ pub(crate) mod identity;
 pub(crate) mod residuals;
 pub(crate) mod linalg;
 pub(crate) mod stats;
+#[allow(dead_code)]
+pub(crate) mod expr;
