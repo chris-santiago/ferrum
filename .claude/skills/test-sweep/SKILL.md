@@ -172,7 +172,7 @@ The skill halts and asks the user when:
 
 ## Output
 
-After all rounds complete, write `TEST_SWEEP_REPORT.md` (gitignored) with:
+After all rounds complete, write `.claude/output/test-sweep/TEST_SWEEP_REPORT.md` (gitignored) with:
 - Per-round summary: dimension, tests written, failures found, fixes applied
 - Design decisions made (with rationale)
 - Derived dimensions discovered (queued for next invocation)

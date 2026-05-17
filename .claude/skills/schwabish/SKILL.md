@@ -32,7 +32,7 @@ Advisory mode is **read-only**. The judge agent never edits chart code.
 
 No target argument. The skill walks `gallery/plots/`, dispatches `schwabish-judge` per row in parallel, filters verdicts to findings where `objective: true`, and then dispatches `schwabish-fixer` to apply those findings to `gallery/plots/<row>/ferrum_panel.py` via the `Edit` tool. After fixes land and panels regenerate via `audit.py generate --row <id>`, the orchestrator runs `python-review-lite` on the staged diff (clean → commit one-per-row; block → un-stage and report; escalate → halt). Subjective findings stay in the per-row verdict for the user to review.
 
-A final `gallery/output/SCHWABISH_REPORT.md` summarizes applied changes and surfaces the subjective findings the user should action.
+A final `.claude/output/gallery-audit/SCHWABISH_REPORT.md` summarizes applied changes and surfaces the subjective findings the user should action.
 
 ## Target detection (advisory mode)
 
@@ -65,14 +65,14 @@ After all judges return:
 
 2. **Judge in parallel.** Dispatch one `schwabish-judge` per discovered row:
    - `target = gallery/plots/<row>/ferrum_panel.py`
-   - `out_path = gallery/output/<row>/schwabish_verdict.md`
+   - `out_path = .claude/output/gallery-audit/<row>/schwabish_verdict.md`
    - `context = ""` (row config files do not carry semantic context)
 
 3. **Filter to objective findings.** For each verdict file, parse the YAML; collect rows where ≥1 finding has `objective: true`.
 
 4. **Apply via fixer (parallel).** For each row from step 3, dispatch `schwabish-fixer`:
    - `row = <id>`
-   - `verdict_path = gallery/output/<row>/schwabish_verdict.md`
+   - `verdict_path = .claude/output/gallery-audit/<row>/schwabish_verdict.md`
    - `eligibility_path = .claude/skills/schwabish/apply_eligibility.md`
 
 5. **Stage + lite-review.** After all fixers return:
@@ -86,13 +86,13 @@ After all judges return:
 
 6. **Commit per row.** For each row touched, one commit:
    ```bash
-   git add gallery/plots/<row>/ gallery/output/<row>/
+   git add gallery/plots/<row>/ .claude/output/gallery-audit/<row>/
    git commit -m "feat(gallery): schwabish improvements on row <id>"
    ```
 
-7. **Aggregate.** Write `gallery/output/SCHWABISH_REPORT.md` summarizing applied changes per row and the subjective findings the user should review. Commit separately:
+7. **Aggregate.** Write `.claude/output/gallery-audit/SCHWABISH_REPORT.md` summarizing applied changes per row and the subjective findings the user should review. Commit separately:
    ```bash
-   git add gallery/output/SCHWABISH_REPORT.md
+   git add .claude/output/gallery-audit/SCHWABISH_REPORT.md
    git commit -m "docs(gallery): schwabish report — <ISO>"
    ```
 

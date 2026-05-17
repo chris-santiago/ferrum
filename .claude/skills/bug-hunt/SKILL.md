@@ -86,7 +86,7 @@ DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_conf
 
 ### Step 6 — Write the report
 
-Append a timestamped run section to `.claude/skills/bug-hunt/output/BUG_REPORT.md`. Format:
+Append a timestamped run section to `.claude/output/bug-hunt/BUG_REPORT.md`. Format:
 
 ```markdown
 ## Run — <ISO timestamp>
@@ -127,7 +127,7 @@ Then list every failing test with its error, grouped by subsystem. These are the
 
 | Artifact | Path | Committed? |
 |---|---|---|
-| Bug report | `.claude/skills/bug-hunt/output/BUG_REPORT.md` | No (gitignored) |
+| Bug report | `.claude/output/bug-hunt/BUG_REPORT.md` | No (gitignored) |
 | Python test files | `tests/test_bug_hunt_<subsystem>.py` | Yes |
 | ferrum-core Rust tests | `crates/ferrum-core/tests/bug_hunt_<subsystem>.rs` | Yes |
 | ferrum-wasm Rust tests | Inline `#[cfg(test)]` blocks in `crates/ferrum-wasm/src/*.rs` | Yes |

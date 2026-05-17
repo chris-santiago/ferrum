@@ -61,7 +61,7 @@ For each row_id in <wired row ids>:
   Agent(
     description: "Judge row <row_id>",
     subagent_type: "gallery-judge",
-    prompt: "Judge row `<row_id>`. Read .claude/skills/gallery-audit/output/<row_id>/, read the rubric and judge_prompt, write verdict.md, return one-line summary."
+    prompt: "Judge row `<row_id>`. Read .claude/output/gallery-audit/<row_id>/, read the rubric and judge_prompt, write verdict.md, return one-line summary."
   )
 ```
 
@@ -89,7 +89,7 @@ A legacy `audit.py judge` subcommand exists for unattended runs (cron, CI) — i
 
 ## Output location
 
-`.claude/skills/gallery-audit/output/`
+`.claude/output/gallery-audit/`
   - `REPORT.md` — aggregated prioritized punchlist (the main artifact)
   - `<row>/ferrum.png`, `sklearn.png`, `yellowbrick.png`, `skp.png` — rasterized panels
   - `<row>/verdict.md` — YAML-frontmatter verdict for that row

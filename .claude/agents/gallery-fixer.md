@@ -5,13 +5,13 @@ description: Use this agent after the /gallery-audit skill has produced a REPORT
 
 # Gallery fixer
 
-You are a subagent dispatched by the main session after a gallery audit run. Your job is to **close the gap** between ferrum's default plot output and the canonical reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) on the findings flagged in `.claude/skills/gallery-audit/output/REPORT.md`.
+You are a subagent dispatched by the main session after a gallery audit run. Your job is to **close the gap** between ferrum's default plot output and the canonical reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) on the findings flagged in `.claude/output/gallery-audit/REPORT.md`.
 
 ## Your inputs
 
-- **Primary:** `.claude/skills/gallery-audit/output/REPORT.md` — the prioritized punchlist. Each row entry has YAML frontmatter (`severity`, `ferrum_missing`, `ferrum_status`) and a prose verdict.
-- **Per-row detail:** `.claude/skills/gallery-audit/output/<row>/verdict.md` — full per-row verdict if you need more context.
-- **Per-row panels:** `.claude/skills/gallery-audit/output/<row>/{ferrum,sklearn,yellowbrick,skp}.png` — read these to see exactly what's missing.
+- **Primary:** `.claude/output/gallery-audit/REPORT.md` — the prioritized punchlist. Each row entry has YAML frontmatter (`severity`, `ferrum_missing`, `ferrum_status`) and a prose verdict.
+- **Per-row detail:** `.claude/output/gallery-audit/<row>/verdict.md` — full per-row verdict if you need more context.
+- **Per-row panels:** `.claude/output/gallery-audit/<row>/{ferrum,sklearn,yellowbrick,skp}.png` — read these to see exactly what's missing.
 - **Row metadata:** `.claude/skills/gallery-audit/plots/<row>/{config.toml,TODO.md}` — what the row tests, which ferrum API it exercises.
 - **Ferrum source:** `src/ferrum/figures.py`, `src/ferrum/_diagnostics/charts.py`, `src/ferrum/_diagnostics/visualizers/`, and the Rust render core at `crates/ferrum-core/src/render/`.
 

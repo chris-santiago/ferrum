@@ -191,7 +191,7 @@ Parallel edge-case test campaign. Dispatches one `bug-hunter` agent per subsyste
 
 **Subsystems:** `scale-stat`, `coerce-transport`, `marks-rendering`, `composition-facet`, `figure-api`, `model-diagnostics`, `phase-11-interactive`, `layout`, `draw`, `projection`, `stats-transforms`
 
-**Output:** `skills/bug-hunt/output/BUG_REPORT.md`
+**Output:** `output/bug-hunt/BUG_REPORT.md`
 
 ### `/test-sweep`
 
@@ -205,7 +205,7 @@ Iterative combinatorial test-and-fix campaign. Writes systematic test modules ta
 
 Renders the same plot in ferrum and reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) using default settings, then dispatches `gallery-judge` agents in parallel to score each row against a fixed rubric. Produces a prioritized `REPORT.md` punchlist. 38 plot types.
 
-**Output:** `skills/gallery-audit/output/` — `REPORT.md`, per-row `verdict.md`, panel PNGs
+**Output:** `output/gallery-audit/` — `REPORT.md`, per-row `verdict.md`, panel PNGs
 
 ### `/gallery-feedback`
 
@@ -356,6 +356,9 @@ Lite-agent verdicts are written to `.claude/output/review-lite/<ISO-timestamp>_{
 │   ├── regression-test/               ← Layer 6: post-fix regression tests
 │   ├── docs-audit/                    ← Layer 6: docs staleness check
 │   └── release/                       ← Layer 6: version bump + changelog
-└── output/
-    └── review-lite/                   ← verdict files (gitignored)
+└── output/                                ← all ephemeral output (gitignored)
+    ├── review-lite/                   ← commit-gate verdicts
+    ├── gallery-audit/                 ← panel PNGs, verdicts, REPORT.md
+    ├── bug-hunt/                      ← BUG_REPORT.md
+    └── test-sweep/                    ← TEST_SWEEP_REPORT.md
 ```

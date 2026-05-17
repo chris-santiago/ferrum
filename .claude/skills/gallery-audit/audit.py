@@ -54,12 +54,11 @@ from rich.console import Console
 from rich.table import Table
 
 SKILL_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SKILL_DIR.parent.parent.parent  # .claude/skills/gallery-audit/ → repo root
 PLOTS_DIR = SKILL_DIR / "plots"
-OUTPUT_DIR = SKILL_DIR / "output"
+OUTPUT_DIR = REPO_ROOT / ".claude" / "output" / "gallery-audit"
 RUBRIC_PATH = SKILL_DIR / "rubric.md"
 JUDGE_PROMPT_PATH = SKILL_DIR / "judge_prompt.md"
-
-REPO_ROOT = SKILL_DIR.parent.parent.parent  # .claude/skills/gallery-audit/ → repo root
 
 console = Console()
 

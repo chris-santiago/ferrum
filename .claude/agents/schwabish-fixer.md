@@ -28,7 +28,7 @@ You apply **objective** Schwabish findings to one gallery row's panel script. Yo
    ```
 5. Write a diff snapshot for the orchestrator's audit trail:
    ```bash
-   git diff -- gallery/plots/<row>/ > gallery/output/<row>/schwabish_applied.diff
+   git diff -- gallery/plots/<row>/ > .claude/output/gallery-audit/<row>/schwabish_applied.diff
    ```
 6. Return a structured summary listing applied finding IDs and skipped (idempotent) finding IDs so the orchestrator can populate `SCHWABISH_REPORT.md`.
 

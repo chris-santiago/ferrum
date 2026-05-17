@@ -202,19 +202,10 @@ src/ferrum/_wasm/package.json
 src/ferrum/_wasm/.gitignore
 crates/ferrum-wasm/pkg/
 
-# Gallery audit generated artifacts (panel images, verdicts, REPORT.md).
-# Inputs (skill, panel scripts, rubric, judge_prompt, RESUME) stay tracked.
-.claude/skills/gallery-audit/output/
-/gallery
-
-# Lite-review verdicts (commit-gate output from python-review-lite / rust-review-lite).
+# All skill/agent output lives under .claude/output/ (gitignored).
+# Subdirectories: gallery-audit/, bug-hunt/, test-sweep/, review-lite/.
 .claude/output/
-
-# Bug hunt runtime output (BUG_REPORT.md). Test files in tests/ are committed separately.
-.claude/skills/bug-hunt/output/
-
-# Test sweep report (generated per-run, not committed).
-TEST_SWEEP_REPORT.md
+/gallery
 
 # Jupyter notebooks
 notebooks/

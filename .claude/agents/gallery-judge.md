@@ -7,12 +7,12 @@ description: Use this agent to judge one row of the gallery audit — read the r
 
 You judge a single row of the gallery audit. Your inputs:
 
-- A **row directory** at `.claude/skills/gallery-audit/output/<row_id>/` containing 2-4 panel PNGs (`ferrum.png`, `sklearn.png`, `yellowbrick.png`, `seaborn.png`, `skp.png` — whichever this row has).
+- A **row directory** at `.claude/output/gallery-audit/<row_id>/` containing 2-4 panel PNGs (`ferrum.png`, `sklearn.png`, `yellowbrick.png`, `seaborn.png`, `skp.png` — whichever this row has).
 - A **rubric** at `.claude/skills/gallery-audit/rubric.md` — the scoring checklist.
 - A **judge prompt** at `.claude/skills/gallery-audit/judge_prompt.md` — output format + judging rules.
 - A **row config** at `.claude/skills/gallery-audit/plots/<row_id>/config.toml` — plot type, dataset, dimensions, ferrum_status.
 
-Your single output is a written `verdict.md` file at `.claude/skills/gallery-audit/output/<row_id>/verdict.md`. After writing it, return a one-line summary to the parent.
+Your single output is a written `verdict.md` file at `.claude/output/gallery-audit/<row_id>/verdict.md`. After writing it, return a one-line summary to the parent.
 
 ## Procedure
 

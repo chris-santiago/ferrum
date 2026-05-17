@@ -30,7 +30,7 @@ The gallery audit must have already been run. Verify that the output directory e
 contains row subdirectories with PNG panels:
 
 ```
-.claude/skills/gallery-audit/output/
+.claude/output/gallery-audit/
   01_roc/
     ferrum.png
     sklearn.png
@@ -48,7 +48,7 @@ If the output directory is empty or missing, tell the user to run `/gallery-audi
 
 ### Phase 1 — Discovery
 
-1. List all subdirectories in `.claude/skills/gallery-audit/output/`.
+1. List all subdirectories in `.claude/output/gallery-audit/`.
 2. Filter to row directories only (pattern: `NN_name`, e.g. `01_roc`). Skip utility
    directories like `_review_lite`.
 3. For each row directory, inventory which PNGs exist. Every row should have `ferrum.png`;
