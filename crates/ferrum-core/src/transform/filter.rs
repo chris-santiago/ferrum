@@ -5,7 +5,7 @@
 
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray, UInt32Array};
 use arrow::compute::take;
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -63,30 +63,56 @@ fn field_value(
         return ExprValue::Null;
     }
     match schema.field(idx).data_type() {
-        DataType::Float64 => {
-            let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
-            ExprValue::Number(arr.value(row))
-        }
-        DataType::Utf8 => {
-            let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
-            ExprValue::Str(arr.value(row).to_string())
-        }
-        DataType::Int32 => {
-            let arr = col.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
-            ExprValue::Number(arr.value(row) as f64)
-        }
-        DataType::Int64 => {
-            let arr = col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-            ExprValue::Number(arr.value(row) as f64)
-        }
-        DataType::Float32 => {
-            let arr = col.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
-            ExprValue::Number(arr.value(row) as f64)
-        }
-        DataType::Boolean => {
-            let arr = col.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
-            ExprValue::Bool(arr.value(row))
-        }
+        DataType::Float64 => col
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .map(|arr| ExprValue::Number(arr.value(row)))
+            .unwrap_or(ExprValue::Null),
+        DataType::Utf8 => col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .map(|arr| ExprValue::Str(arr.value(row).to_string()))
+            .unwrap_or(ExprValue::Null),
+        DataType::Int32 => col
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64))
+            .unwrap_or(ExprValue::Null),
+        DataType::Int64 => col
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64))
+            .unwrap_or(ExprValue::Null),
+        DataType::Float32 => col
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64))
+            .unwrap_or(ExprValue::Null),
+        DataType::Boolean => col
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .map(|arr| ExprValue::Bool(arr.value(row)))
+            .unwrap_or(ExprValue::Null),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64 / 1_000_000.0))
+            .unwrap_or(ExprValue::Null),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64 / 1_000.0))
+            .unwrap_or(ExprValue::Null),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64))
+            .unwrap_or(ExprValue::Null),
+        DataType::Timestamp(TimeUnit::Second, _) => col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampSecondArray>()
+            .map(|arr| ExprValue::Number(arr.value(row) as f64 * 1_000.0))
+            .unwrap_or(ExprValue::Null),
         _ => ExprValue::Null,
     }
 }
