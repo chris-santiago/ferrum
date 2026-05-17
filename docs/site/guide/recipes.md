@@ -467,7 +467,7 @@ df = pl.DataFrame({
     "cat": ["A"] * 25 + ["B"] * 25,
 })
 charts = []
-for mark_fn in [fm.Chart.mark_point, fm.Chart.mark_line, fm.Chart.mark_bar, fm.Chart.mark_area]:
+for mark_fn in [fm.Chart.mark_point, fm.Chart.mark_line, fm.Chart.mark_area, fm.Chart.mark_density]:
     c = mark_fn(fm.Chart(df)).encode(x="x", y="y", color="cat:N")
     charts.append(c)
 
