@@ -64,6 +64,8 @@ _DOC_ALLOWLIST: set[str] = {
     # Task 5 — composition / layer / repeat
     "HConcatChart",
     "VConcatChart",
+    "LayerChart",
+    "ConcatChart",
     "JointChart",
     "RepeatChart",
     "ClusterMapChart",
@@ -71,6 +73,8 @@ _DOC_ALLOWLIST: set[str] = {
     "Repeat",
     "hconcat",
     "vconcat",
+    "layer",
+    "concat",
     # Task 6 — themes / position / coord / annotations / schemes
     "Theme",
     "set_default_theme",
@@ -96,6 +100,8 @@ _DOC_ALLOWLIST: set[str] = {
     "BrierLabel",
     "OutlierLabel",
     "Title",
+    "Axis",
+    "Legend",
     "continuous_palette",
     # Task 7 — spec types (Rust)
     "ChartSpec",
@@ -127,8 +133,16 @@ _DOC_ALLOWLIST: set[str] = {
     "Unpivot",
     "Violin",
     # Task 9 — scales + schemes (Rust)
+    "BandScale",
+    "BinOrdinalScale",
+    "DivergingScale",
     "LinearScale",
     "LogScale",
+    "PointScale",
+    "PowScale",
+    "QuantizeScale",
+    "SequentialScale",
+    "SqrtScale",
     "TimeScale",
     "SymlogScale",
     "OrdinalScale",
@@ -242,7 +256,7 @@ _DOC_ALLOWLIST: set[str] = {
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
-_NAMESPACE_EXEMPT: set[str] = {"themes", "encoding", "figure"}
+_NAMESPACE_EXEMPT: set[str] = {"themes", "encoding", "figure", "color", "config"}
 
 
 def test_allowlist_symbols_have_docstrings() -> None:

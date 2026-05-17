@@ -3,12 +3,15 @@
 from ferrum._core import (
     Aggregate,
     AggregateOp,
+    BandScale,
     Bin,
     Bin2D,
+    BinOrdinalScale,
     BoxStats,
     ChartSpec,
     ContinuousScheme,
     Contour,
+    DivergingScale,
     EncodingSpec,
     ErrorExtent,
     Hex,
@@ -24,13 +27,18 @@ from ferrum._core import (
     SymlogScale,
     OrdinalScale,
     Outliers,
+    PointScale,
+    PowScale,
     QQ,
     QuantileScale,
+    QuantizeScale,
     Raster,
     ReferenceLine,
     Reorder,
     Robust,
+    SequentialScale,
     Smooth,
+    SqrtScale,
     Summary,
     Swarm,
     ThresholdScale,
@@ -65,7 +73,15 @@ from ferrum.coord import (
     CoordFixed,
 )
 from ferrum.layer import Layer
-from ferrum.composition import HConcatChart, VConcatChart, JointChart, RepeatChart, ClusterMapChart
+from ferrum.composition import (
+    HConcatChart,
+    VConcatChart,
+    LayerChart,
+    ConcatChart,
+    JointChart,
+    RepeatChart,
+    ClusterMapChart,
+)
 from ferrum.repeat import Repeat
 from ferrum.annotations import (
     annotate_hline,
@@ -78,6 +94,8 @@ from ferrum.annotations import (
     BrierLabel,
     OutlierLabel,
 )
+from ferrum.axis import Axis
+from ferrum.legend import Legend
 from ferrum.title import Title
 from ferrum.selection import (
     Selection,
@@ -192,6 +210,9 @@ from ferrum.plots import (
 )
 import ferrum.plots as plots
 
+import ferrum.color as color
+import ferrum.config as config
+
 import ferrum.encoding as encoding
 from ferrum.encoding import (
     X,
@@ -283,6 +304,65 @@ def vconcat(*charts, spacing=10.0):
     return VConcatChart(list(charts), spacing=spacing)
 
 
+def layer(*charts, resolve=None, title=None):
+    """Overlay charts on shared axes (same coordinate space).
+
+    Parameters
+    ----------
+    *charts : Chart
+        Two or more charts to overlay bottom-to-top.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides — e.g.
+        ``resolve={"color": "independent"}``.
+    title : str, optional
+        Title applied to the combined chart.
+
+    Returns
+    -------
+    LayerChart
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> scatter = fm.Chart(df).mark_point().encode(x="x", y="y")
+    >>> line = fm.Chart(df).mark_line().encode(x="x", y="y")
+    >>> fm.layer(scatter, line)
+    """
+    from ferrum.composition import LayerChart
+
+    return LayerChart(*charts, resolve=resolve, title=title)
+
+
+def concat(*charts, columns=None, spacing=10.0, resolve=None):
+    """Wrapping concatenation of charts in a grid.
+
+    Parameters
+    ----------
+    *charts : Chart or _ChartLike
+        Charts to arrange in a wrapping grid.
+    columns : int, optional
+        Maximum number of columns before wrapping.  Defaults to
+        ``len(charts)`` (single row).
+    spacing : float, default 10.0
+        Pixel gap between adjacent cells.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides.
+
+    Returns
+    -------
+    ConcatChart
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> charts = [fm.Chart(df).mark_point().encode(x=c, y="y") for c in cols]
+    >>> fm.concat(*charts, columns=2)
+    """
+    from ferrum.composition import ConcatChart
+
+    return ConcatChart(*charts, columns=columns, spacing=spacing, resolve=resolve)
+
+
 __all__ = [
     # Phase 1-7 core
     "Aggregate",
@@ -299,10 +379,18 @@ __all__ = [
     "Kde2D",
     "Glm",
     "LetterValue",
+    "BandScale",
+    "BinOrdinalScale",
+    "DivergingScale",
     "LinearScale",
     "Linkage",
     "Logistic",
     "LogScale",
+    "PointScale",
+    "PowScale",
+    "QuantizeScale",
+    "SequentialScale",
+    "SqrtScale",
     "TimeScale",
     "SymlogScale",
     "OrdinalScale",
@@ -332,8 +420,12 @@ __all__ = [
     "Layer",
     "HConcatChart",
     "VConcatChart",
+    "LayerChart",
+    "ConcatChart",
     "hconcat",
     "vconcat",
+    "layer",
+    "concat",
     # Phase 9
     "Repeat",
     "JointChart",
@@ -392,6 +484,9 @@ __all__ = [
     "BrierLabel",
     "OutlierLabel",
     "Title",
+    # Phase 12 — Axis and Legend value classes
+    "Axis",
+    "Legend",
     # Phase 11c — selections
     "Selection",
     "SelectionMark",
@@ -506,4 +601,7 @@ __all__ = [
     "transform_top_k",
     "transform_stack",
     "transform_timeunit",
+    # Phase 12 — color and config modules
+    "color",
+    "config",
 ]
