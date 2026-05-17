@@ -11,6 +11,7 @@ def _count_circles(svg: str) -> int:
 
 def _count_visible_rects(svg: str) -> int:
     import re
+
     rects = re.findall(r'<rect[^>]*width="([^"]+)"', svg)
     return sum(1 for w in rects if float(w) > 1.0)
 
@@ -70,10 +71,12 @@ class TestInfinityDomainRegression:
 
     def test_inf_in_size_encoding(self):
         """Regression: inf in size column doesn't poison size scale."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0],
-            "y": [10.0, 20.0, 30.0],
-            "s": [5.0, float("inf"), 15.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0],
+                "y": [10.0, 20.0, 30.0],
+                "s": [5.0, float("inf"), 15.0],
+            }
+        )
         svg = fm.Chart(df).mark_point().encode(x="x", y="y", size="s").show_svg()
         assert _count_circles(svg) >= 2

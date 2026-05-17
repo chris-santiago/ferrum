@@ -43,9 +43,13 @@ def _count_rects(svg: str) -> int:
 def test_point_mark_with_pow_scale_on_x():
     """mark_point renders circles when x uses an explicit PowScale."""
     df = pl.DataFrame({"x": [1.0, 4.0, 9.0, 16.0], "y": [1.0, 2.0, 3.0, 4.0]})
-    chart = fr.Chart(df).mark_point().encode(
-        x=fr.X("x", scale=fr.PowScale(domain=[0.0, 16.0], range=[0.0, 600.0], exponent=2.0)),
-        y="y",
+    chart = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(
+            x=fr.X("x", scale=fr.PowScale(domain=[0.0, 16.0], range=[0.0, 600.0], exponent=2.0)),
+            y="y",
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -56,9 +60,13 @@ def test_point_mark_with_pow_scale_on_x():
 def test_bar_mark_with_pow_scale_on_y():
     """mark_bar renders rects when y uses an explicit PowScale."""
     df = pl.DataFrame({"x": ["a", "b", "c"], "y": [4.0, 9.0, 16.0]})
-    chart = fr.Chart(df).mark_bar().encode(
-        x="x:N",
-        y=fr.Y("y", scale=fr.PowScale(domain=[0.0, 25.0], range=[0.0, 400.0], exponent=2.0)),
+    chart = (
+        fr.Chart(df)
+        .mark_bar()
+        .encode(
+            x="x:N",
+            y=fr.Y("y", scale=fr.PowScale(domain=[0.0, 25.0], range=[0.0, 400.0], exponent=2.0)),
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -69,9 +77,13 @@ def test_bar_mark_with_pow_scale_on_y():
 def test_line_mark_with_sqrt_scale_on_y():
     """mark_line renders polyline when y uses an explicit SqrtScale."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 25.0, 64.0, 100.0]})
-    chart = fr.Chart(df).mark_line().encode(
-        x="x",
-        y=fr.Y("y", scale=fr.SqrtScale(domain=[0.0, 100.0], range=[0.0, 400.0])),
+    chart = (
+        fr.Chart(df)
+        .mark_line()
+        .encode(
+            x="x",
+            y=fr.Y("y", scale=fr.SqrtScale(domain=[0.0, 100.0], range=[0.0, 400.0])),
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -88,9 +100,13 @@ def test_line_mark_with_sqrt_scale_on_y():
 def test_point_mark_with_band_scale_on_x():
     """mark_point with explicit BandScale positions points at band centers."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
-    chart = fr.Chart(df).mark_point().encode(
-        x=fr.X("cat", scale=fr.BandScale(domain=["a", "b", "c"])),
-        y="val",
+    chart = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(
+            x=fr.X("cat", scale=fr.BandScale(domain=["a", "b", "c"])),
+            y="val",
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -101,9 +117,13 @@ def test_point_mark_with_band_scale_on_x():
 def test_point_mark_with_point_scale_on_x():
     """mark_point with explicit PointScale positions points evenly."""
     df = pl.DataFrame({"cat": ["x", "y", "z"], "val": [5.0, 10.0, 15.0]})
-    chart = fr.Chart(df).mark_point().encode(
-        x=fr.X("cat", scale=fr.PointScale(domain=["x", "y", "z"])),
-        y="val",
+    chart = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(
+            x=fr.X("cat", scale=fr.PointScale(domain=["x", "y", "z"])),
+            y="val",
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -114,9 +134,13 @@ def test_point_mark_with_point_scale_on_x():
 def test_bar_mark_with_band_scale_on_x():
     """mark_bar with explicit BandScale renders bars within band widths."""
     df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
-    chart = fr.Chart(df).mark_bar().encode(
-        x=fr.X("cat", scale=fr.BandScale(domain=["a", "b", "c", "d"], padding_inner=0.2)),
-        y="val",
+    chart = (
+        fr.Chart(df)
+        .mark_bar()
+        .encode(
+            x=fr.X("cat", scale=fr.BandScale(domain=["a", "b", "c", "d"], padding_inner=0.2)),
+            y="val",
+        )
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -201,16 +225,14 @@ def test_bar_continuous_x_duplicate_values():
 
 def test_bar_dodge_position():
     """Grouped bars via Dodge should render multiple rects per category."""
-    df = pl.DataFrame({
-        "cat": ["a", "a", "b", "b"],
-        "group": ["g1", "g2", "g1", "g2"],
-        "val": [10.0, 20.0, 15.0, 25.0],
-    })
-    chart = (
-        fr.Chart(df)
-        .mark_bar(position=fr.Dodge())
-        .encode(x="cat:N", y="val", color="group:N")
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "a", "b", "b"],
+            "group": ["g1", "g2", "g1", "g2"],
+            "val": [10.0, 20.0, 15.0, 25.0],
+        }
     )
+    chart = fr.Chart(df).mark_bar(position=fr.Dodge()).encode(x="cat:N", y="val", color="group:N")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert _count_rects(svg) >= 4
@@ -219,16 +241,14 @@ def test_bar_dodge_position():
 
 def test_bar_stack_position():
     """Stacked bars should render without NaN."""
-    df = pl.DataFrame({
-        "cat": ["a", "a", "b", "b"],
-        "group": ["g1", "g2", "g1", "g2"],
-        "val": [10.0, 20.0, 15.0, 25.0],
-    })
-    chart = (
-        fr.Chart(df)
-        .mark_bar(position=fr.Stack())
-        .encode(x="cat:N", y="val", color="group:N")
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "a", "b", "b"],
+            "group": ["g1", "g2", "g1", "g2"],
+            "val": [10.0, 20.0, 15.0, 25.0],
+        }
     )
+    chart = fr.Chart(df).mark_bar(position=fr.Stack()).encode(x="cat:N", y="val", color="group:N")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert not _has_nan_in_svg(svg)
@@ -243,10 +263,7 @@ def test_bar_stack_position():
 def test_bar_coord_flip():
     """mark_bar with CoordFlip should render horizontal bars."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 30.0]})
-    chart = (
-        fr.Chart(df).mark_bar().encode(x="cat:N", y="val")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_bar().encode(x="cat:N", y="val").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert "<rect" in svg
@@ -256,10 +273,7 @@ def test_bar_coord_flip():
 def test_line_coord_flip():
     """mark_line with CoordFlip should render a path/polyline."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, 20.0, 15.0, 25.0]})
-    chart = (
-        fr.Chart(df).mark_line().encode(x="x", y="y")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_line().encode(x="x", y="y").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert not _has_nan_in_svg(svg)
@@ -268,10 +282,7 @@ def test_line_coord_flip():
 def test_point_coord_flip():
     """mark_point with CoordFlip should render circles."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    chart = (
-        fr.Chart(df).mark_point().encode(x="x", y="y")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert svg.count("<circle") == 3
@@ -281,10 +292,7 @@ def test_point_coord_flip():
 def test_area_coord_flip():
     """mark_area with CoordFlip should not crash."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 10.0, 8.0, 12.0]})
-    chart = (
-        fr.Chart(df).mark_area().encode(x="x", y="y")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_area().encode(x="x", y="y").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert not _has_nan_in_svg(svg)
@@ -297,11 +305,13 @@ def test_area_coord_flip():
 
 def test_point_faceted():
     """mark_point with facet should render circles in each panel."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "grp": ["A", "A", "A", "B", "B", "B"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "grp": ["A", "A", "A", "B", "B", "B"],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y").facet("grp")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -311,11 +321,13 @@ def test_point_faceted():
 
 def test_bar_faceted():
     """mark_bar with facet should render rects in each panel."""
-    df = pl.DataFrame({
-        "cat": ["a", "b", "c", "a", "b", "c"],
-        "val": [10.0, 20.0, 30.0, 15.0, 25.0, 35.0],
-        "panel": ["P1", "P1", "P1", "P2", "P2", "P2"],
-    })
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b", "c", "a", "b", "c"],
+            "val": [10.0, 20.0, 30.0, 15.0, 25.0, 35.0],
+            "panel": ["P1", "P1", "P1", "P2", "P2", "P2"],
+        }
+    )
     chart = fr.Chart(df).mark_bar().encode(x="cat:N", y="val").facet("panel")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -343,10 +355,12 @@ def test_point_all_null_y_no_crash():
 
 def test_point_null_in_x_skips_row():
     """Null in x column skips that row, renders remaining."""
-    df = pl.DataFrame({
-        "x": [1.0, None, 3.0, 4.0],
-        "y": [10.0, 20.0, 30.0, 40.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, None, 3.0, 4.0],
+            "y": [10.0, 20.0, 30.0, 40.0],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -357,22 +371,26 @@ def test_point_null_in_x_skips_row():
 
 def test_line_nan_in_y_does_not_produce_nan_path():
     """NaN in y should be skipped, not produce NaN in path d attribute."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "y": [1.0, 2.0, float("nan"), 4.0, 5.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [1.0, 2.0, float("nan"), 4.0, 5.0],
+        }
+    )
     chart = fr.Chart(df).mark_line().encode(x="x", y="y")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
     assert not _has_nan_in_svg(svg)
 
 
-def test_point_infinity_in_y_skipped(): # BUG: Infinity in one row poisons the entire chart domain -- zero circles rendered instead of 2
+def test_point_infinity_in_y_skipped():  # BUG: Infinity in one row poisons the entire chart domain -- zero circles rendered instead of 2
     """Infinity values in y should be skipped, rendering only finite rows."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, float("inf"), 30.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, float("inf"), 30.0],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -383,10 +401,12 @@ def test_point_infinity_in_y_skipped(): # BUG: Infinity in one row poisons the e
 
 def test_bar_nan_x_in_continuous_x():
     """NaN in continuous x should be skipped, not crash auto-width."""
-    df = pl.DataFrame({
-        "x": [1.0, float("nan"), 3.0, 4.0],
-        "y": [10.0, 20.0, 15.0, 25.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, float("nan"), 3.0, 4.0],
+            "y": [10.0, 20.0, 15.0, 25.0],
+        }
+    )
     chart = fr.Chart(df).mark_bar().encode(x="x", y="y")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -414,11 +434,13 @@ def test_point_opacity_encoding_all_null():
 
 def test_point_stroke_width_negative_ignored():
     """Negative stroke_width in encoding should be ignored (fall to default)."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "sw": [-1.0, 2.0, -5.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "sw": [-1.0, 2.0, -5.0],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", stroke_width="sw")
     svg = chart.show_svg()
     assert 'stroke-width="-' not in svg
@@ -427,11 +449,13 @@ def test_point_stroke_width_negative_ignored():
 
 def test_point_fill_opacity_nan_falls_back():
     """NaN in fill_opacity encoding falls back to 1.0."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "fo": [0.3, float("nan"), 0.7],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "fo": [0.3, float("nan"), 0.7],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo")
     svg = chart.show_svg()
     assert not _has_nan_in_svg(svg)
@@ -444,11 +468,13 @@ def test_point_fill_opacity_nan_falls_back():
 
 def test_text_mark_renders_labels():
     """mark_text should render text elements for each row."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "label": ["Alpha", "Beta", "Gamma"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "label": ["Alpha", "Beta", "Gamma"],
+        }
+    )
     chart = fr.Chart(df).mark_text().encode(x="x", y="y", text="label")
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -459,11 +485,13 @@ def test_text_mark_renders_labels():
 
 def test_text_mark_with_axis_object():
     """mark_text with Axis(...) on x encoding should not crash."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "label": ["A", "B", "C"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "label": ["A", "B", "C"],
+        }
+    )
     chart = (
         fr.Chart(df)
         .mark_text()
@@ -502,11 +530,13 @@ def test_area_mark_single_point_no_crash():
 
 def test_ribbon_mark_basic():
     """mark_ribbon with y and y2 should render a closed path."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y_upper": [12.0, 22.0, 18.0, 28.0],
-        "y_lower": [8.0, 18.0, 12.0, 22.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y_upper": [12.0, 22.0, 18.0, 28.0],
+            "y_lower": [8.0, 18.0, 12.0, 22.0],
+        }
+    )
     chart = fr.Chart(df).mark_ribbon().encode(x="x", y="y_upper", y2="y_lower")
     svg = chart.show_svg()
     assert svg.startswith("<svg")

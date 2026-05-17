@@ -9,6 +9,7 @@ import ferrum as fm
 def _count_rects(svg: str) -> int:
     """Count <rect> elements in SVG output (excludes background rects)."""
     import re
+
     # Match rect elements with width > 1 pixel (exclude decorative/background)
     rects = re.findall(r'<rect[^>]*width="([^"]+)"', svg)
     return sum(1 for w in rects if float(w) > 1.0)
@@ -31,6 +32,7 @@ class TestBarContinuousX:
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
         svg = chart.show_svg()
         import re
+
         # Extract widths from data-bar rects (those inside the mark <g> group,
         # identified by having a non-background fill color).
         bar_widths = []
@@ -66,11 +68,13 @@ class TestBarContinuousX:
 
     def test_bars_with_color_encoding(self):
         """Continuous-x bars should work with color grouping."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0, 4.0],
-            "y": [10.0, 20.0, 15.0, 25.0],
-            "cat": ["A", "B", "A", "B"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0],
+                "y": [10.0, 20.0, 15.0, 25.0],
+                "cat": ["A", "B", "A", "B"],
+            }
+        )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y", color="cat:N")
         svg = chart.show_svg()
         n_rects = _count_rects(svg)
@@ -78,10 +82,12 @@ class TestBarContinuousX:
 
     def test_nan_x_values_skipped(self):
         """Regression: NaN x values must be skipped, not crash the auto-width computation."""
-        df = pl.DataFrame({
-            "x": [1.0, float("nan"), 3.0, 4.0],
-            "y": [10.0, 20.0, 15.0, 25.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, float("nan"), 3.0, 4.0],
+                "y": [10.0, 20.0, 15.0, 25.0],
+            }
+        )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
         svg = chart.show_svg()
         n_rects = _count_rects(svg)
@@ -89,10 +95,12 @@ class TestBarContinuousX:
 
     def test_duplicate_x_values(self):
         """Regression: duplicate x values must not produce zero min-step."""
-        df = pl.DataFrame({
-            "x": [1.0, 1.0, 2.0, 3.0],
-            "y": [10.0, 15.0, 20.0, 25.0],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 1.0, 2.0, 3.0],
+                "y": [10.0, 15.0, 20.0, 25.0],
+            }
+        )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
         svg = chart.show_svg()
         n_rects = _count_rects(svg)
@@ -101,10 +109,7 @@ class TestBarContinuousX:
     def test_coord_flip_continuous_y_bars(self):
         """Regression: horizontal bars via CoordFlip with continuous y, no y2."""
         df = pl.DataFrame({"x": [10.0, 20.0, 15.0], "y": [1.0, 2.0, 3.0]})
-        chart = (
-            fm.Chart(df).mark_bar().encode(x="x", y="y")
-            .coord(fm.CoordFlip())
-        )
+        chart = fm.Chart(df).mark_bar().encode(x="x", y="y").coord(fm.CoordFlip())
         svg = chart.show_svg()
         assert svg.startswith("<svg")
         n_rects = _count_rects(svg)

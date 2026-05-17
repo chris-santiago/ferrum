@@ -6,6 +6,37 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.9.0
+
+*2026-05-17*
+
+### Added
+
+- **Phase 12: Spec completeness** — full implementation of all remaining `ferrum-spec.md` features
+- **Data transforms API** — 17 transform constructors (`FilterTransform`, `AggregateTransform`, `WindowTransform`, `BinTransform`, `CalculateTransform`, `FoldTransform`, `PivotTransform`, `StackTransform`, `FlattenTransform`, `SampleTransform`, `ImputeTransform`, `DensityTransform`, `RegressionTransform`, `LoessTransform`, `QuantileTransform`, `LookupTransform`, `TimeUnitTransform`) with Rust-backed execution and expression evaluator
+- **New scale types** — `PowScale`, `BandScale`, `PointScale`, `SequentialScale`, `DivergingScale`, `QuantizeScale`, `BinOrdinalScale`
+- **Power/sqrt transform** — `PowScale(exponent=0.5)` for square-root position resolution
+- **`Axis` and `Legend` value classes** — full configuration objects for axis and legend customization
+- **`ferrum.color` and `ferrum.config` modules** — color utilities and configuration API
+- **`LayerChart` and `ConcatChart`** — first-class composition types for programmatic multi-view construction
+- **9 infinity domain regression tests** — continuous-x bar width, infinity filtering across mark types
+- **Docs: 4 recipe pages** — transforms, ConcatChart, Axis/Legend, PowScale with rendered PNGs
+- **Docs: API reference pages** — transforms, scales, color, config, axis, legend
+- **Docs: data transforms guide**
+
+### Fixed
+
+- **Infinity domain filtering** — `±inf` values no longer corrupt scale domain auto-computation
+- **Continuous-x bar width** — bars with continuous x-axis and no `x2` now auto-compute width
+- **Safe Rust downcasts** — temporal type handling and Time bar rendering hardened
+- **Python type annotations and dead code** — review-lite findings addressed across Python surface
+
+### Changed
+
+- **Design-docs reorganization** — `design-docs/` split into `architecture/` and `narrative/` subdirectories
+- **Code archaeology updated** — Phase 12 items marked resolved, deferred marks inventory refreshed
+- **Documentation expanded** — Phase 12 pages, cross-reference links, missing docstrings added
+
 ## 0.8.3
 
 ### Added
