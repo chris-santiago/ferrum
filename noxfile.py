@@ -14,7 +14,7 @@ def lint(session: nox.Session) -> None:
 def test(session: nox.Session) -> None:
     """Run the test suite in an isolated venv."""
     session.run("uv", "sync", "--all-extras", "--all-groups", external=True)
-    session.run("uv", "run", "pytest", *session.posargs, external=True)
+    session.run("uv", "run", "pytest", "-n", "auto", *session.posargs, external=True)
 
 
 @nox.session()
