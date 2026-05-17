@@ -39,6 +39,7 @@ Update the version string in **both** of these files:
 |---|---|
 | `pyproject.toml` | `version = "X.Y.Z"` |
 | `Cargo.toml` (workspace root) | `version = "X.Y.Z"` |
+| `src/ferrum/__init__.py` | `__version__ = "X.Y.Z"` |
 
 After bumping, grep the repo for the **old** version string to catch any other references (README badges, docs, etc.). If found, update them or warn the user.
 
