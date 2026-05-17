@@ -159,6 +159,7 @@ pub fn build_scene(
                 layer.position.as_ref(),
                 &scales,
                 &layer.encoding,
+                prep.coord_flipped,
             )?;
             let layer_batch: &RecordBatch = &adjusted_owned;
 
