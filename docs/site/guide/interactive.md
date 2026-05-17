@@ -33,6 +33,12 @@ chart.interactive()
 
 The chart object is unchanged — `.interactive()` switches the render target from SVG to a WASM canvas widget. The same chart still works with `.show_svg()`, `.save("out.svg")`, and every other static render path. Selections and zoom/pan are silently ignored in static output.
 
+<div markdown="block">
+**Try it** — scroll to zoom, drag to pan:
+
+<iframe src="demos/zoom_pan.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
+</div>
+
 ## Selections
 
 Selections define interactive state: "which marks did the user click?" or "what region did the user brush?" They are declared in the chart spec and resolved by the renderer.
@@ -62,6 +68,12 @@ chart = (
 ```
 
 Clicking a mark selects all marks that share the same `group` value. Shift-click toggles additional selections (controlled by `toggle="event.shiftKey"`, the default). Use [`selection_single`][ferrum.selection_single] to disable toggling, or [`selection_multi`][ferrum.selection_multi] for explicit multi-select.
+
+<div markdown="block">
+**Try it** — click a point to select its species; shift-click to add more:
+
+<iframe src="demos/point_selection.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
+</div>
 
 Key parameters:
 
@@ -99,6 +111,12 @@ chart = (
 
 Dragging on the canvas creates a rectangular brush. Marks inside the brush are selected; marks outside are not. The brush can be panned (`translate=True`) and zoomed with the mousewheel (`zoom=True`).
 
+<div markdown="block">
+**Try it** — drag to brush a region; unselected points turn grey:
+
+<iframe src="demos/linked_brush.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
+</div>
+
 To style the brush rectangle, pass a [`SelectionMark`][ferrum.SelectionMark]:
 
 ```python
@@ -129,12 +147,9 @@ sel = fm.selection_point(fields=["species"])
 chart = (
     fm.Chart(df)
     .mark_point(size=100)
-    .encode(
-        x="x",
-        y="y",
-        color=sel.when(fm.Color("species")).otherwise(fm.value("#cccccc")),
-    )
+    .encode(x="x", y="y", color="species:N")
     .add_selection(sel)
+    .conditional(sel.when(fm.Color("species")).otherwise(fm.value("#cccccc")))
     .interactive()
 )
 ```
@@ -152,12 +167,9 @@ sel = fm.selection_point(fields=["g"])
 chart = (
     fm.Chart(df)
     .mark_point(size=100)
-    .encode(
-        x="x",
-        y="y",
-        opacity=sel.when(fm.Opacity("g")).otherwise(fm.value(0.2)),
-    )
+    .encode(x="x", y="y")
     .add_selection(sel)
+    .conditional(sel.when(fm.Opacity("g")).otherwise(fm.value(0.2)))
     .interactive()
 )
 ```
@@ -189,24 +201,24 @@ brush = fm.selection_interval()
 scatter = (
     fm.Chart(df)
     .mark_point()
-    .encode(
-        x="x",
-        y="y",
-        color=brush.when(fm.Color("category")).otherwise(fm.value("#cccccc")),
-    )
+    .encode(x="x", y="y", color="category:N")
     .add_selection(brush)
+    .conditional(brush.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
 )
 
 bars = (
     fm.Chart(df)
     .mark_bar()
-    .encode(x="category:N", y="count():Q")
+    .transform(fm.transform_aggregate(
+        {"field": "category", "fn": "count", "as": "n"}, groupby=["category"]
+    ))
+    .encode(x="category:N", y="n:Q")
 )
 
-linked = (scatter | bars).interactive()
+linked = scatter | bars
 ```
 
-Brushing on the scatter highlights points by category; the bar chart stays synchronized because both charts share the selection through the composition operator. This is the same `|` operator used for static concatenation — no separate "link API."
+Brushing on the scatter highlights points by category. The `|` operator composes both charts into a side-by-side view — the same operator used for static concatenation, no separate "link API." Selections declared in the scatter carry through the composition; the bar chart reacts because it shares the same data source.
 
 ## Listening for selections in Python
 
