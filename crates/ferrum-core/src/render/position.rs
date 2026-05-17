@@ -46,7 +46,9 @@ pub(crate) fn axis_batch_for_y<'a>(
     let Some((by, offset, anchor, layer_enc)) = find_stack_for_y(spec, y_field) else {
         return Cow::Borrowed(primary_batch);
     };
-    match apply_stack(primary_batch, by, offset, anchor, layer_enc) {
+    // axis_batch_for_y operates on the original spec (pre-flip), so
+    // coord_flipped is always false here.
+    match apply_stack(primary_batch, by, offset, anchor, layer_enc, false) {
         Ok(b) => Cow::Owned(b),
         Err(_) => Cow::Borrowed(primary_batch),
     }
@@ -102,13 +104,19 @@ pub(crate) fn apply_position(
     position: Option<&PositionAdjust>,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
+    coord_flipped: bool,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     // D9: when no explicit position is set, check encoding.y.stack for an
-    // encoding-level stacking directive.
+    // encoding-level stacking directive. When coord_flipped, the value channel
+    // lives in encoding.x (prepare.rs swapped x/y), so look there instead.
     let enc_stack: Option<PositionAdjust>;
     let effective_position: Option<&PositionAdjust> = if position.is_none() {
-        // Resolve encoding.y.stack → synthesize a Stack PositionAdjust.
-        enc_stack = encoding.y.as_ref().and_then(|y| y.stack.as_deref()).and_then(|s| {
+        let stack_source = if coord_flipped {
+            encoding.x.as_ref().and_then(|e| e.stack.as_deref())
+        } else {
+            encoding.y.as_ref().and_then(|e| e.stack.as_deref())
+        };
+        enc_stack = stack_source.and_then(|s| {
             let offset = match s {
                 "zero" => StackOffset::Zero,
                 "normalize" => StackOffset::Normalize,
@@ -133,7 +141,7 @@ pub(crate) fn apply_position(
             apply_jitter(batch, axis, *width, *seed, scales, encoding)
         }
         PositionAdjust::Stack { by, offset, anchor } => {
-            apply_stack(batch, by.as_deref(), offset, anchor, encoding)
+            apply_stack(batch, by.as_deref(), offset, anchor, encoding, coord_flipped)
         }
     }
 }
@@ -421,6 +429,7 @@ pub(crate) fn apply_stack(
     offset: &crate::spec::position::StackOffset,
     anchor: &crate::spec::position::StackAnchor,
     encoding: &crate::spec::encoding::Encoding,
+    coord_flipped: bool,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     use crate::spec::position::{StackAnchor, StackOffset};
     use std::collections::BTreeMap;
@@ -437,19 +446,29 @@ pub(crate) fn apply_stack(
         by_idx.and_then(|i| batch.column(i).as_any().downcast_ref::<StringArray>());
     let Some(by_arr) = by_arr_opt else { return Ok(batch.clone()); };
 
-    let x_field = encoding.x.as_ref().ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "x encoding required".into() }
+    // When coord_flipped, the prepare step has already swapped x/y in the
+    // encoding. The numeric (value) column is now in encoding.x and the
+    // categorical (grouping) column is in encoding.y. We swap the logical
+    // roles so Stack cumulates the correct column.
+    let (value_enc, cat_enc) = if coord_flipped {
+        (encoding.x.as_ref(), encoding.y.as_ref())
+    } else {
+        (encoding.y.as_ref(), encoding.x.as_ref())
+    };
+
+    let cat_field = cat_enc.ok_or_else(|| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "category (x) encoding required".into() }
     })?;
-    let y_field = encoding.y.as_ref().ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "y encoding required".into() }
+    let value_field = value_enc.ok_or_else(|| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "value (y) encoding required".into() }
     })?;
-    let xi = batch.schema().index_of(&x_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("x col '{}' not found",
-            x_field.field) }
+    let xi = batch.schema().index_of(&cat_field.field).map_err(|_| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("category col '{}' not found",
+            cat_field.field) }
     })?;
-    let yi = batch.schema().index_of(&y_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("y col '{}' not found",
-            y_field.field) }
+    let yi = batch.schema().index_of(&value_field.field).map_err(|_| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("value col '{}' not found",
+            value_field.field) }
     })?;
     // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column),
     // we transparently widen to f64 so stacked histograms over Bin's groupby
@@ -641,7 +660,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc, false).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
         assert_eq!(out.num_columns(), b.num_columns());
     }
@@ -651,7 +670,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, None, &s, &enc).unwrap();
+        let out = apply_position(&b, None, &s, &enc, false).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
     }
 
@@ -661,7 +680,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         // Two unique x values: 1.0, 2.0 → bandwidth = 1.0.
         // Two groups (a, b) → sub_band = 0.5; offsets a=-0.25, b=+0.25.
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -691,7 +710,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
         assert_eq!(xa.value(1), 2.0);
@@ -703,8 +722,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(42) };
-        let a = apply_position(&b, Some(&pos), &s, &enc).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -718,8 +737,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: None };
-        let a = apply_position(&b, Some(&pos), &s, &enc).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -733,7 +752,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Group order: a=0, b=1. At x=1: a=10 → 10, b=20 → 30. At x=2: a=30 → 30, b=40 → 70.
         assert_eq!(ya.value(0), 10.0);
@@ -752,7 +771,7 @@ mod tests {
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Top,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // For each x bin the top of the highest stack should be 1.0.
         // x=1: top group (b) reaches 1.0 → row 1.
@@ -767,7 +786,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Center, anchor: StackAnchor::Top };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30, mid=15. a row goes 0..10 → top at 10-15=-5.
         // b row goes 10..30 → top at 30-15=15.
@@ -789,7 +808,7 @@ mod tests {
             offset: StackOffset::Zero,
             anchor: StackAnchor::Mid,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: a segment 0..10 → mid 5;  b segment 10..30 → mid 20.
         // x=2: a segment 0..30 → mid 15; b segment 30..70 → mid 50.
@@ -818,7 +837,7 @@ mod tests {
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Mid,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30. a→10/30 ⇒ top=1/3, mid=1/6. b→20/30 ⇒ top=1, mid=2/3.
         assert!((ya.value(0) - (1.0 / 6.0)).abs() < 1e-9);
@@ -840,7 +859,7 @@ mod tests {
             offset: StackOffset::Center,
             anchor: StackAnchor::Mid,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1 total=30, mid_axis=15. a: base=-15, top=-5  → mid=-10.
         //                              b: base=-5,  top=15 → mid=5.
@@ -910,11 +929,88 @@ mod tests {
             &StackOffset::Zero,
             &StackAnchor::Top,
             &spec.encoding,
+            false,
         );
         assert!(
             direct.is_err(),
             "apply_stack should fail on Boolean y column"
         );
+    }
+
+    #[test]
+    fn stack_coord_flipped_uses_x_as_value_column() {
+        // When coord_flipped=true, the prepare step has swapped x/y in the
+        // encoding. The encoding now has:
+        //   x = original y (numeric, the value to cumulate)
+        //   y = original x (categorical, the grouping axis)
+        // Stack should cumulate encoding.x (the value column) grouped by
+        // encoding.y (the category column).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        // After coord flip, the encoding has x=val (numeric), y=cat (categorical).
+        // This mirrors what prepare.rs does: swap the original x/y.
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+
+        // With coord_flipped=true, Stack should treat encoding.x ("val") as
+        // the value column and encoding.y ("cat") as the category column.
+        let out = apply_position(&batch, Some(&pos), &s, &enc, true).unwrap();
+
+        // The value column ("val") should be cumulated.
+        let val_idx = out.schema().index_of("val").unwrap();
+        let va = out.column(val_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Group order: x=0, y=1. At cat="a": x=3→3, y=5→8. At cat="b": x=2→2, y=4→6.
+        assert_eq!(va.value(0), 3.0);  // cat=a, grp=x → first in stack
+        assert_eq!(va.value(1), 8.0);  // cat=a, grp=y → 3+5=8
+        assert_eq!(va.value(2), 2.0);  // cat=b, grp=x → first in stack
+        assert_eq!(va.value(3), 6.0);  // cat=b, grp=y → 2+4=6
+
+        // __stack_y_base__ should be present with correct bases.
+        let base_idx = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(base_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ba.value(0), 0.0);
+        assert_eq!(ba.value(1), 3.0);
+        assert_eq!(ba.value(2), 0.0);
+        assert_eq!(ba.value(3), 2.0);
+    }
+
+    #[test]
+    fn stack_coord_flipped_false_still_uses_y_as_value() {
+        // Verify that coord_flipped=false preserves the original behavior:
+        // encoding.y is the value column, encoding.x is the category.
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Same assertions as stack_zero_accumulates_y.
+        assert_eq!(ya.value(0), 10.0);
+        assert_eq!(ya.value(1), 30.0);
+        assert_eq!(ya.value(2), 30.0);
+        assert_eq!(ya.value(3), 70.0);
     }
 }
 
