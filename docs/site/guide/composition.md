@@ -294,8 +294,8 @@ raw = load_iris()
 iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
-scatter = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
-trend = fm.Chart(iris).mark_smooth().encode(x="sepal_length", y="petal_length")
+scatter = fm.Chart(iris).mark_point(opacity=0.6).encode(x="sepal_length", y="petal_length", color="species:N")
+trend = fm.Chart(iris).mark_smooth(groupby="species").encode(x="sepal_length", y="petal_length", color="species:N")
 overlay = fm.LayerChart(scatter, trend)
 assert overlay.show_svg().startswith("<svg")
 ```
@@ -318,7 +318,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 charts = [
-    fm.Chart(iris).mark_point().encode(x=col, y="petal_length")
+    fm.Chart(iris).mark_point(opacity=0.6).encode(x=col, y="petal_length", color="species:N")
     for col in ["sepal_length", "sepal_width", "petal_width"]
 ]
 grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
