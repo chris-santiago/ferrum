@@ -153,7 +153,19 @@ A phase is `done` when all of the following are true:
 - [x] Selections, zoom, and pan declared in the chart spec work in a browser
 - [x] `ferrum-wasm` crate added to workspace; wheel build still works for the Python package
 
-### Phase 12 — Extension points
+### Phase 12 — Spec completeness (done 2026-05-17)
+- [x] All 17 data transforms from §3.5 implemented in Rust + Python API (`transform_filter`, `transform_calculate`, `transform_window`, etc.)
+- [x] Expression evaluator (recursive-descent, sandboxed) powers `transform_filter`/`transform_calculate`
+- [x] 9 new scale types: `PowScale`, `SqrtScale`, `BandScale`, `PointScale`, `SequentialScale`, `DivergingScale`, `QuantizeScale`, `BinOrdinalScale` + `TimeScale(utc=True)`
+- [x] Power/sqrt scales produce non-linear position output (proper exponent transform)
+- [x] `ferrum.color` module: `palette()`, `to_hex()`, `sequential()`, `diverging()`
+- [x] `ferrum.config` module: `set()`, `get()`, `defaults()` context manager, `reset()`
+- [x] `LayerChart` (shared-axes overlay) + `ConcatChart` (wrapping grid)
+- [x] `Axis` and `Legend` frozen dataclasses with encoding-channel integration
+- [x] All `cargo test` (933) + `pytest` (2713) pass; all review-lite gates clean
+- [x] Spec: `design-docs/superpowers/specs/2026-05-17-phase-12-spec-completeness-design.md`
+
+### Phase 13 — Extension points
 - [ ] Custom mark, stat transform, and renderer plugin protocols are documented (`register_mark`, `register_stat`, `register_renderer` / `RendererProtocol`)
 - [x] Custom theme protocol is complete — `Theme` is a plain dataclass value; pass to `.theme()` or `set_default_theme()`. No registration needed. (landed Phase 8a)
 - [ ] At least one of each (custom mark, stat transform, renderer plugin) implemented as an example in `examples/`
