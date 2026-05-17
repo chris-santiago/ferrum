@@ -124,14 +124,14 @@ pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
     match col.data_type() {
         DataType::Float64 => {
             let a = col.as_any().downcast_ref::<Float64Array>().expect("Float64");
-            let min = a.iter().flatten().fold(f64::INFINITY, f64::min);
-            let max = a.iter().flatten().fold(f64::NEG_INFINITY, f64::max);
+            let min = a.iter().flatten().filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
+            let max = a.iter().flatten().filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
             Ok((min, max))
         }
         DataType::Float32 => {
             let a = col.as_any().downcast_ref::<Float32Array>().expect("Float32");
-            let min = a.iter().flatten().fold(f32::INFINITY, f32::min) as f64;
-            let max = a.iter().flatten().fold(f32::NEG_INFINITY, f32::max) as f64;
+            let min = a.iter().flatten().filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min) as f64;
+            let max = a.iter().flatten().filter(|v| v.is_finite()).fold(f32::NEG_INFINITY, f32::max) as f64;
             Ok((min, max))
         }
         DataType::Int64 => min_max_int!(Int64Array, i64),
