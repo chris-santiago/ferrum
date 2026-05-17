@@ -275,6 +275,56 @@ Compound views are themselves charts (in the structural sense): you can layer a 
 
 That recursive composition is what makes complex dashboards-as-static-images viable. A four-panel model report — one ROC curve, one calibration plot, one confusion matrix, one residuals plot — is `(roc | calibration) & (confusion | residuals)`. Same grammar, same theme, same `.save()`.
 
+## LayerChart and ConcatChart
+
+In addition to the `+` operator and `|` / `&` operators, ferrum provides two class-based composition primitives for programmatic use: [`LayerChart`][ferrum.LayerChart] and [`ConcatChart`][ferrum.ConcatChart].
+
+### LayerChart
+
+[`LayerChart`][ferrum.LayerChart] overlays multiple pre-built charts on shared axes — the class-based equivalent of chaining `+`. Use it when you have a list of charts and want a composition-level overlay without constructing the `+` chain inline:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+scatter = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
+trend = fm.Chart(iris).mark_smooth().encode(x="sepal_length", y="petal_length")
+overlay = fm.LayerChart(scatter, trend)
+assert overlay.show_svg().startswith("<svg")
+```
+
+`LayerChart` accepts an optional `resolve=` dict to control per-channel scale sharing (e.g. `resolve={"color": "independent"}` when layers use different color semantics) and a `title=` string applied to the combined output.
+
+### ConcatChart
+
+[`ConcatChart`][ferrum.ConcatChart] arranges charts in a wrapping grid layout — the class-based equivalent of combining `|` and `&` with explicit column control:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+charts = [
+    fm.Chart(iris).mark_point().encode(x=col, y="petal_length")
+    for col in ["sepal_length", "sepal_width", "petal_width"]
+]
+grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
+assert grid.show_svg().startswith("<svg")
+```
+
+Charts are placed left-to-right, wrapping to the next row after `columns` charts. When `columns` is omitted, all charts go in a single row. Like `LayerChart`, `ConcatChart` accepts an optional `resolve=` dict for shared-scale control across panels.
+
+Both `LayerChart` and `ConcatChart` support `.theme()`, `.properties()`, `.save()`, and `.share_scale()` — the full composition API surface.
+
 ## Low-level SVG composition
 
 The composition classes above produce their final SVG output using three low-level helpers: [`compose_svg_horizontal`][ferrum.compose_svg_horizontal], [`compose_svg_vertical`][ferrum.compose_svg_vertical], and [`compose_svg_grid`][ferrum.compose_svg_grid]. These are Rust-backed functions that stitch pre-rendered SVG strings into a single SVG document with configurable spacing and alignment.
