@@ -6,6 +6,27 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.8.3
+
+### Added
+
+- pytest-xdist for parallel test execution (`-n auto`)
+- 132 new tests from 5-round test-sweep campaign (scale, transform, composition, facet, theme, coord, encoding dimensions)
+- Scale tests for SHAP, ICE, and PDP figure functions
+
+### Fixed
+
+- Multi-layer scale domain union — layers now merge domains correctly instead of using only the first layer's range
+- TickLevel infinity serde — tick-level values no longer panic on serialize/deserialize with infinity bounds
+- Coord system × position adjustment interaction (dodge offsets under CoordFlip)
+- Figure function × data shapes gap (sweep-1)
+- Missing `packed_instances` field in scale-stat test fixture
+- Stale `docs/superpowers` paths updated to `design-docs/superpowers` in CLAUDE.md
+
+### Changed
+
+- Test-sweep skill: parallel Rust test track, coding agent dispatch enforcement
+
 ## 0.8.2
 
 ### Added
