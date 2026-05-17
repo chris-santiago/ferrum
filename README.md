@@ -76,6 +76,10 @@ unset CONDA_PREFIX && uv run --no-sync maturin develop   # build Rust extension
 uv run pytest                                            # run tests
 ```
 
+## How this was built
+
+Ferrum was designed and implemented in 9 days by one human and an agentic Claude framework — 911 commits, ~97k lines of source, 3,346 tests. The project uses a six-layer automation architecture with language-specific coding agents, commit-level review gates, and repeatable quality campaigns. See [design-docs/development-meta-analysis.md](design-docs/development-meta-analysis.md) for the full retrospective.
+
 ## Documentation
 
 Full docs at [ferrumviz.com](https://ferrumviz.com).
