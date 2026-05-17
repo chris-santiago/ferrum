@@ -17,7 +17,7 @@ pub enum ExprValue {
 
 impl ExprValue {
     /// Coerce to boolean for conditionals. Numbers: 0/NAN → false. Strings: empty → false.
-    fn is_truthy(&self) -> bool {
+    pub(crate) fn is_truthy(&self) -> bool {
         match self {
             Self::Bool(b) => *b,
             Self::Number(n) => *n != 0.0 && !n.is_nan(),

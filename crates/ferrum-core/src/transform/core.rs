@@ -32,6 +32,25 @@ use crate::transform::smooth::SmoothSpec;
 use crate::transform::summary::SummarySpec;
 use crate::transform::violin::{self, ViolinSpec};
 
+// Phase 12 data transforms
+use crate::transform::filter::FilterSpec;
+use crate::transform::calculate::CalculateSpec;
+use crate::transform::fold::FoldSpec;
+use crate::transform::pivot::PivotSpec;
+use crate::transform::join_aggregate::JoinAggregateSpec;
+use crate::transform::data_window::DataWindowSpec;
+use crate::transform::density_data::DensityDataSpec;
+use crate::transform::regression_data::RegressionDataSpec;
+use crate::transform::loess_data::LoessDataSpec;
+use crate::transform::impute::ImputeSpec;
+use crate::transform::flatten::FlattenSpec;
+use crate::transform::sample::SampleSpec;
+use crate::transform::top_k::TopKSpec;
+use crate::transform::data_stack::DataStackSpec;
+use crate::transform::timeunit::TimeUnitSpec;
+use crate::transform::data_bin::DataBinSpec;
+use crate::transform::data_aggregate::DataAggregateSpec;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum TransformSpec {
@@ -61,9 +80,27 @@ pub(crate) enum TransformSpec {
     Glm(GlmSpec),
     Robust(RobustSpec),
     Identity(IdentitySpec),
+    // Phase 12 data transforms
+    Filter(FilterSpec),
+    Calculate(CalculateSpec),
+    Fold(FoldSpec),
+    Pivot(PivotSpec),
+    JoinAggregate(JoinAggregateSpec),
+    DataWindow(DataWindowSpec),
+    DensityData(DensityDataSpec),
+    RegressionData(RegressionDataSpec),
+    LoessData(LoessDataSpec),
+    Impute(ImputeSpec),
+    Flatten(FlattenSpec),
+    Sample(SampleSpec),
+    TopK(TopKSpec),
+    DataStack(DataStackSpec),
+    TimeUnit(TimeUnitSpec),
+    DataBin(DataBinSpec),
+    DataAggregate(DataAggregateSpec),
 }
 
-/// Single source of truth for the 24 `TransformSpec` variants. Dispatchers
+/// Single source of truth for the 41 `TransformSpec` variants. Dispatchers
 /// across this module, `spec/chart.rs`, and `lib.rs` define a local `arm!`
 /// macro and invoke `for_each_transform!(arm)`; the macro expands the table
 /// into per-variant arms. Adding a transform means one edit here plus the
@@ -108,6 +145,23 @@ macro_rules! for_each_transform {
             Glm           => glm            : PyGlm,
             Robust        => robust         : PyRobust,
             Identity      => identity       : PyIdentity,
+            Filter        => filter         : PyDataFilter,
+            Calculate     => calculate      : PyDataCalculate,
+            Fold          => fold           : PyDataFold,
+            Pivot         => pivot          : PyDataPivot,
+            JoinAggregate => join_aggregate : PyJoinAggregate,
+            DataWindow    => data_window    : PyDataWindow,
+            DensityData   => density_data   : PyDensityData,
+            RegressionData => regression_data : PyRegressionData,
+            LoessData     => loess_data     : PyLoessData,
+            Impute        => impute         : PyImpute,
+            Flatten       => flatten        : PyFlatten,
+            Sample        => sample         : PySample,
+            TopK          => top_k          : PyTopK,
+            DataStack     => data_stack     : PyDataStack,
+            TimeUnit      => timeunit       : PyTimeUnit,
+            DataBin       => data_bin       : PyDataBin,
+            DataAggregate => data_aggregate : PyDataAggregate,
         }
     };
 }

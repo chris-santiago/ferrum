@@ -1,0 +1,203 @@
+//! Data transform: Filter — row filter using expression evaluator.
+//!
+//! Evaluates a predicate expression (via `expr.rs`) per row and retains
+//! only rows where the expression is truthy.
+
+use arrow::array::{Array, Float64Array, RecordBatch, StringArray, UInt32Array};
+use arrow::compute::take;
+use arrow::datatypes::DataType;
+use pyo3::exceptions::PyValueError;
+use pyo3::PyResult;
+use serde::{Deserialize, Serialize};
+
+use crate::transform::expr::{Expr, ExprValue};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FilterSpec {
+    pub predicate: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+}
+
+pub(crate) fn apply(spec: &FilterSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    let expr = Expr::parse(&spec.predicate).map_err(|e| {
+        PyValueError::new_err(format!("data_filter: invalid predicate: {e}"))
+    })?;
+
+    let schema = batch.schema();
+    let n_rows = batch.num_rows();
+    let mut keep_indices: Vec<u32> = Vec::with_capacity(n_rows);
+
+    for row in 0..n_rows {
+        let result = expr.eval(&|field_name: &str| {
+            field_value(batch, &schema, field_name, row)
+        });
+        if result.is_truthy() {
+            keep_indices.push(row as u32);
+        }
+    }
+
+    let indices = UInt32Array::from(keep_indices);
+    let columns: Vec<_> = (0..batch.num_columns())
+        .map(|i| take(batch.column(i).as_ref(), &indices, None))
+        .collect::<Result<_, _>>()
+        .map_err(|e| PyValueError::new_err(format!("data_filter: take failed: {e}")))?;
+
+    RecordBatch::try_new(schema, columns)
+        .map_err(|e| PyValueError::new_err(format!("data_filter: {e}")))
+}
+
+/// Extract a field value from a row as an ExprValue.
+fn field_value(
+    batch: &RecordBatch,
+    schema: &arrow::datatypes::SchemaRef,
+    field_name: &str,
+    row: usize,
+) -> ExprValue {
+    let idx = match schema.index_of(field_name) {
+        Ok(i) => i,
+        Err(_) => return ExprValue::Null,
+    };
+    let col = batch.column(idx);
+    if col.is_null(row) {
+        return ExprValue::Null;
+    }
+    match schema.field(idx).data_type() {
+        DataType::Float64 => {
+            let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+            ExprValue::Number(arr.value(row))
+        }
+        DataType::Utf8 => {
+            let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+            ExprValue::Str(arr.value(row).to_string())
+        }
+        DataType::Int32 => {
+            let arr = col.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+            ExprValue::Number(arr.value(row) as f64)
+        }
+        DataType::Int64 => {
+            let arr = col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+            ExprValue::Number(arr.value(row) as f64)
+        }
+        DataType::Float32 => {
+            let arr = col.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
+            ExprValue::Number(arr.value(row) as f64)
+        }
+        DataType::Boolean => {
+            let arr = col.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+            ExprValue::Bool(arr.value(row))
+        }
+        _ => ExprValue::Null,
+    }
+}
+
+/// Shared helper: extract field value from a RecordBatch row.
+/// Used by both filter and calculate transforms.
+pub(crate) fn batch_field_value(
+    batch: &RecordBatch,
+    field_name: &str,
+    row: usize,
+) -> ExprValue {
+    field_value(batch, &batch.schema(), field_name, row)
+}
+
+// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
+
+use pyo3::prelude::*;
+use crate::transform::core::TransformSpec;
+
+#[pyclass(module = "ferrum._core", name = "DataFilter")]
+#[derive(Debug, Clone)]
+pub(crate) struct PyDataFilter(pub(crate) TransformSpec);
+
+#[pymethods]
+impl PyDataFilter {
+    #[new]
+    #[pyo3(signature = (predicate, *, name = None))]
+    fn new(predicate: String, name: Option<String>) -> PyResult<Self> {
+        if predicate.is_empty() {
+            return Err(PyValueError::new_err("DataFilter: predicate must be non-empty"));
+        }
+        Ok(PyDataFilter(TransformSpec::Filter(FilterSpec { predicate, name })))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.0 {
+            TransformSpec::Filter(s) => format!("DataFilter(predicate='{}')", s.predicate),
+            _ => "DataFilter(?)".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn make_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn filter_gt_predicate() {
+        let batch = make_batch();
+        let spec = FilterSpec {
+            predicate: "datum.x > 3".into(),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        let xs = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(xs.value(0), 4.0);
+        assert_eq!(xs.value(1), 5.0);
+    }
+
+    #[test]
+    fn filter_compound_predicate() {
+        let batch = make_batch();
+        let spec = FilterSpec {
+            predicate: "datum.x >= 2 && datum.y <= 30".into(),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        let xs = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(xs.value(0), 2.0);
+        assert_eq!(xs.value(1), 3.0);
+    }
+
+    #[test]
+    fn filter_all_rows_removed() {
+        let batch = make_batch();
+        let spec = FilterSpec {
+            predicate: "datum.x > 100".into(),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 0);
+    }
+
+    #[test]
+    fn filter_invalid_expr_errors() {
+        let batch = make_batch();
+        let spec = FilterSpec {
+            predicate: "invalid!!!".into(),
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("data_filter"));
+    }
+}
