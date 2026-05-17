@@ -31,7 +31,7 @@ use super::ticks::{calendar_ticks, nice_calendar_interval, nice_time_interval_ms
 ///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimeScale(LinearScaleData, Option<f64>, bool);
+pub struct TimeScale(LinearScaleData, Option<f64>, bool, bool);
 
 impl TimeScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -43,7 +43,7 @@ impl TimeScale {
             range:  [range[0],  range[1]],
             clamp,
         };
-        let s = TimeScale(inner, None, true);
+        let s = TimeScale(inner, None, true, false);
         if nice { s.time_nice() } else { s }
     }
 
@@ -67,9 +67,10 @@ impl TimeScale {
 
     pub(crate) fn repr_string(&self) -> String {
         let LinearScaleData { domain, range, clamp } = &self.0;
+        let prefix = if self.3 { "TimeScale(utc=True, " } else { "TimeScale(" };
         format!(
-            "TimeScale(domain=[{}, {}], range=[{}, {}], clamp={})",
-            domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
+            "{}domain=[{}, {}], range=[{}, {}], clamp={})",
+            prefix, domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
         )
     }
 
@@ -95,7 +96,7 @@ impl TimeScale {
                     return TimeScale(LinearScaleData {
                         domain: [(lo / iv).floor() * iv, (hi / iv).ceil() * iv],
                         range: self.0.range, clamp: self.0.clamp,
-                    }, self.1, self.2);
+                    }, self.1, self.2, self.3);
                 };
                 let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
                     return self.clone();
@@ -131,7 +132,7 @@ impl TimeScale {
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
         TimeScale(
             LinearScaleData { domain: new_domain, range: self.0.range, clamp: self.0.clamp },
-            self.1, self.2,
+            self.1, self.2, self.3,
         )
     }
 }
@@ -139,13 +140,14 @@ impl TimeScale {
 #[pymethods]
 impl TimeScale {
     #[new]
-    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None, utc = false))]
     fn new(
         domain: Vec<f64>,
         range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
+        utc: bool,
     ) -> PyResult<Self> {
         let range_user_set = range.is_some();
         let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
@@ -155,7 +157,7 @@ impl TimeScale {
             range:  [r[0],  r[1]],
             clamp,
         };
-        let s = TimeScale(inner, padding, range_user_set);
+        let s = TimeScale(inner, padding, range_user_set, utc);
         if nice {
             Ok(s.time_nice())
         } else {
@@ -198,6 +200,10 @@ impl TimeScale {
     #[getter]
     fn padding(&self) -> Option<f64> { self.1 }
 
+    /// Whether this is a UTC time scale (affects type serialization).
+    #[getter]
+    fn utc(&self) -> bool { self.3 }
+
     fn __repr__(&self) -> String { self.repr_string() }
 }
 
@@ -215,6 +221,7 @@ mod tests {
             false,
             false,
             None,
+            false,
         ).unwrap();
         let mid = (1_767_225_600_000.0 + 1_798_761_599_000.0) / 2.0;
         let y = t.scale(mid);
@@ -230,6 +237,7 @@ mod tests {
             false,
             false,
             None,
+            false,
         ).unwrap();
         let ticks = t.ticks(10);
         assert!(!ticks.is_empty(), "expected non-empty ticks");
