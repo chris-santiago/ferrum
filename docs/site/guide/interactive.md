@@ -33,12 +33,6 @@ chart.interactive()
 
 The chart object is unchanged — `.interactive()` switches the render target from SVG to a WASM canvas widget. The same chart still works with `.show_svg()`, `.save("out.svg")`, and every other static render path. Selections and zoom/pan are silently ignored in static output.
 
-<div markdown="block">
-**Try it** — scroll to zoom, drag to pan:
-
-<iframe src="demos/zoom_pan.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
-</div>
-
 ## Selections
 
 Selections define interactive state: "which marks did the user click?" or "what region did the user brush?" They are declared in the chart spec and resolved by the renderer.
@@ -68,12 +62,6 @@ chart = (
 ```
 
 Clicking a mark selects all marks that share the same `group` value. Shift-click toggles additional selections (controlled by `toggle="event.shiftKey"`, the default). Use [`selection_single`][ferrum.selection_single] to disable toggling, or [`selection_multi`][ferrum.selection_multi] for explicit multi-select.
-
-<div markdown="block">
-**Try it** — click a point to select its species; shift-click to add more:
-
-<iframe src="demos/point_selection.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
-</div>
 
 Key parameters:
 
@@ -110,12 +98,6 @@ chart = (
 ```
 
 Dragging on the canvas creates a rectangular brush. Marks inside the brush are selected; marks outside are not. The brush can be panned (`translate=True`) and zoomed with the mousewheel (`zoom=True`).
-
-<div markdown="block">
-**Try it** — drag to brush a region; unselected points turn grey:
-
-<iframe src="demos/linked_brush.html" width="100%" height="420" style="border: 1px solid #e0e0e0; border-radius: 4px;" loading="lazy"></iframe>
-</div>
 
 To style the brush rectangle, pass a [`SelectionMark`][ferrum.SelectionMark]:
 
