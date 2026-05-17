@@ -22,7 +22,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Release build | `unset CONDA_PREFIX && uv run --no-sync maturin develop --release` |
 | Run tests | `uv run pytest -n auto` |
 | Run scale tests | `uv run pytest -m slow` (10k–50k row tests, skipped by default) |
-| Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") cargo test` |
+| Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test` |
 | Verify skeleton | `unset CONDA_PREFIX && uv run --no-sync python -c "from ferrum._core import ChartSpec; s=ChartSpec(mark='point', x='a', y='b'); assert s == ChartSpec.from_json(s.to_json()); print('OK')"` |
 | Build WASM module | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --out-dir ../../src/ferrum/_wasm/` |
 | Build WASM (release) | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --release --out-dir ../../src/ferrum/_wasm/` |
@@ -36,7 +36,8 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 > **macOS `cargo test` note:** On macOS with uv-managed Python, the test binary cannot
 > resolve `@rpath/libpython3.10.dylib` at runtime without `DYLD_LIBRARY_PATH` pointing to
-> the Python lib directory. The command above uses `sysconfig` to find the path dynamically.
+> the Python lib directory. The command above uses `sys.base_prefix` (not `sysconfig.get_config_var('LIBDIR')`,
+> which returns a bogus `/install/lib` on uv-managed cpython builds).
 > This is a macOS SIP + uv RPATH constraint; it does not affect `maturin develop` or pytest.
 
 `pip install -e .` will **not** compile the Rust extension. Always use `maturin develop`.
