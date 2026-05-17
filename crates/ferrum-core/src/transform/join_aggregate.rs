@@ -66,7 +66,7 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
         // Compute per-group aggregate.
         let mut row_values: Vec<f64> = vec![f64::NAN; n_rows];
 
-        for (_key, rows) in &groups {
+        for rows in groups.values() {
             let agg_val = compute_agg(batch.column(col_idx).as_ref(), rows, agg.fn_)?;
             for &r in rows {
                 row_values[r] = agg_val;

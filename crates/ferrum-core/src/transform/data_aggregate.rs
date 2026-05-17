@@ -79,7 +79,12 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
     for (key, rows) in &groups {
         group_key_vecs.push(key.clone());
         for (ai, agg) in spec.aggregates.iter().enumerate() {
-            let col_idx = schema.index_of(&agg.field).unwrap();
+            let col_idx = schema.index_of(&agg.field).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "data_aggregate: column '{}' not found",
+                    agg.field
+                ))
+            })?;
             let col = batch.column(col_idx);
             let val = compute_agg(col.as_ref(), rows, agg.fn_);
             agg_results[ai].push(val);

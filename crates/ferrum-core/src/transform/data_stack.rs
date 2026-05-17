@@ -88,7 +88,7 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
     let mut y0 = vec![0.0f64; n_rows];
     let mut y1 = vec![0.0f64; n_rows];
 
-    for (_key, rows) in &groups {
+    for rows in groups.values() {
         // Accumulate.
         let mut cumsum = 0.0;
         for &row in rows {
