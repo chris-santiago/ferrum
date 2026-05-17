@@ -121,7 +121,9 @@ def reset() -> None:
     """Reset all config to built-in defaults.
 
     Removes all user-set overrides so subsequent ``get()`` calls return
-    the built-in defaults.
+    the built-in defaults.  This only affects the current context — child
+    async tasks that already inherited a prior ``ContextVar`` snapshot
+    retain their own copy and are not affected by this call.
 
     Examples
     --------

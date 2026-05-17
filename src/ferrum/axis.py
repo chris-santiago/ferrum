@@ -6,9 +6,6 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 
-# Sentinel for "axis suppressed" — produced by axis=False shorthand.
-_AXIS_SUPPRESSED = object()
-
 # Default values that should be omitted from serialization (they match
 # the renderer's built-in defaults and would add noise to the spec).
 _AXIS_DEFAULTS: dict[str, Any] = {
@@ -110,7 +107,7 @@ class Axis:
     tick_extra: bool = False
     tick_min_step: float | None = None
     grid: bool = True
-    grid_dash: list | None = None
+    grid_dash: list[float] | None = None
     grid_width: float | None = None
     grid_color: str | None = None
     grid_opacity: float | None = None
