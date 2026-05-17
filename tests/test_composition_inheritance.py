@@ -104,9 +104,7 @@ class TestFacetEncodingInheritance:
 
     def test_facet_grid_renders(self, df):
         """Facet with row= and col= (grid mode) renders."""
-        chart = (
-            fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").facet(row="grp", col="cat")
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").facet(row="grp", col="cat")
         _renders(chart)
 
     def test_facet_with_explicit_title(self, df):
@@ -121,12 +119,7 @@ class TestFacetEncodingInheritance:
 
     def test_facet_with_hue_encoding(self, df):
         """Facet with color encoding renders a legend."""
-        chart = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x:Q", y="y:Q", color="grp:N")
-            .facet(col="cat")
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="grp:N").facet(col="cat")
         svg = _renders(chart)
         # Color legend produces text elements for the legend entries
         assert "X" in svg or "Y" in svg
@@ -139,16 +132,12 @@ class TestFacetEncodingInheritance:
     def test_facet_single_group(self, df):
         """Facet where only one group exists renders as single panel."""
         single_grp = df.filter(pl.col("cat") == "a")
-        chart = (
-            fm.Chart(single_grp).mark_point().encode(x="x:Q", y="y:Q").facet(col="cat")
-        )
+        chart = fm.Chart(single_grp).mark_point().encode(x="x:Q", y="y:Q").facet(col="cat")
         _renders(chart)
 
     def test_facet_field_kwarg(self, df):
         """Facet with field= keyword (explicit wrap) renders."""
-        chart = (
-            fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").facet(field="cat", ncols=2)
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").facet(field="cat", ncols=2)
         _renders(chart)
 
     def test_facet_row_only(self, df):
@@ -180,39 +169,29 @@ class TestRepeatEncodingPropagation:
     def test_repeat_fixed_color_preserved(self, df):
         """Non-placeholder channel (fixed color) preserved in all cells."""
         template = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x=fm.Repeat.column, y=fm.Repeat.row, color="cat:N")
+            fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row, color="cat:N")
         )
         rc = RepeatChart(template, row=["x", "y"], column=["x", "y"])
         _renders(rc)
 
     def test_repeat_share_scale_x(self, df):
         """RepeatChart with share_scale(x='shared') renders."""
-        template = (
-            fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
-        )
+        template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
         rc = RepeatChart(template, row=["x", "y"], column=["x", "y"])
         shared = rc.share_scale(x="shared")
         _renders(shared)
 
     def test_repeat_share_scale_y(self, df):
         """RepeatChart with share_scale(y='shared') renders."""
-        template = (
-            fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
-        )
+        template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
         rc = RepeatChart(template, row=["x", "y"], column=["x", "y"])
         shared = rc.share_scale(y="shared")
         _renders(shared)
 
     def test_repeat_resolve_constructor(self, df):
         """RepeatChart constructed with resolve= renders."""
-        template = (
-            fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
-        )
-        rc = RepeatChart(
-            template, row=["x", "y"], column=["x", "y"], resolve={"x": "shared"}
-        )
+        template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
+        rc = RepeatChart(template, row=["x", "y"], column=["x", "y"], resolve={"x": "shared"})
         _renders(rc)
 
     def test_pairplot_multiple_vars(self, df):

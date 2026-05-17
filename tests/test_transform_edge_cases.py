@@ -59,25 +59,21 @@ def df_single_row():
 @pytest.fixture()
 def df_constant():
     """All-identical numeric values."""
-    return pl.DataFrame(
-        {"x": [5.0] * 10, "y": [3.0] * 10, "g": ["a"] * 10}
-    )
+    return pl.DataFrame({"x": [5.0] * 10, "y": [3.0] * 10, "g": ["a"] * 10})
 
 
 @pytest.fixture()
 def df_all_null():
     """All-null numeric columns with a categorical grouper."""
-    return pl.DataFrame(
-        {"x": [None] * 5, "y": [None] * 5, "g": ["a", "a", "b", "b", "b"]}
-    ).cast({"x": pl.Float64, "y": pl.Float64})
+    return pl.DataFrame({"x": [None] * 5, "y": [None] * 5, "g": ["a", "a", "b", "b", "b"]}).cast(
+        {"x": pl.Float64, "y": pl.Float64}
+    )
 
 
 @pytest.fixture()
 def df_all_nan():
     """All-NaN numeric columns."""
-    return pl.DataFrame(
-        {"x": [float("nan")] * 5, "y": [float("nan")] * 5, "g": ["a"] * 5}
-    )
+    return pl.DataFrame({"x": [float("nan")] * 5, "y": [float("nan")] * 5, "g": ["a"] * 5})
 
 
 @pytest.fixture()
@@ -138,10 +134,7 @@ class TestSingleRow:
     def test_robust_two_rows(self):
         df = pl.DataFrame({"x": [1.0, 10.0], "y": [1.0, 10.0]})
         chart = (
-            fm.Chart(df)
-            .mark_smooth()
-            .encode(x="x:Q", y="y:Q")
-            .transform(fm.Robust(x="x", y="y"))
+            fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Robust(x="x", y="y"))
         )
         _graceful_failure(chart)
 
@@ -163,9 +156,7 @@ class TestConstantValues:
         _graceful_failure(chart)
 
     def test_smooth_constant_y(self):
-        df = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [3.0] * 5}
-        )
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [3.0] * 5})
         chart = fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q")
         _graceful_failure(chart)
 
@@ -277,9 +268,7 @@ class TestHighCardinality:
     """Stress-test groupby paths with many unique groups."""
 
     def test_aggregate_100_groups(self):
-        df = pl.DataFrame(
-            {"x": [f"g{i}" for i in range(100)], "y": [float(i) for i in range(100)]}
-        )
+        df = pl.DataFrame({"x": [f"g{i}" for i in range(100)], "y": [float(i) for i in range(100)]})
         chart = (
             fm.Chart(df)
             .mark_bar()
@@ -317,10 +306,7 @@ class TestLogistic:
         """All y=0 should raise (no separation possible)."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5})
         chart = (
-            fm.Chart(df)
-            .mark_smooth()
-            .encode(x="x:Q", y="y:Q")
-            .transform(fm.Logistic(x="x", y="y"))
+            fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular"):
             chart.show_svg()
@@ -329,24 +315,16 @@ class TestLogistic:
         """All y=1 should raise (no separation possible)."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [1.0] * 5})
         chart = (
-            fm.Chart(df)
-            .mark_smooth()
-            .encode(x="x:Q", y="y:Q")
-            .transform(fm.Logistic(x="x", y="y"))
+            fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular"):
             chart.show_svg()
 
     def test_logistic_single_unique_x(self):
         """Constant x with mixed y should raise (singular design)."""
-        df = pl.DataFrame(
-            {"x": [5.0] * 10, "y": [0.0] * 5 + [1.0] * 5}
-        )
+        df = pl.DataFrame({"x": [5.0] * 10, "y": [0.0] * 5 + [1.0] * 5})
         chart = (
-            fm.Chart(df)
-            .mark_smooth()
-            .encode(x="x:Q", y="y:Q")
-            .transform(fm.Logistic(x="x", y="y"))
+            fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular|zero variance"):
             chart.show_svg()
@@ -360,10 +338,7 @@ class TestLogistic:
             }
         )
         chart = (
-            fm.Chart(df)
-            .mark_smooth()
-            .encode(x="x:Q", y="y:Q")
-            .transform(fm.Logistic(x="x", y="y"))
+            fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         _renders(chart)
 
@@ -412,9 +387,7 @@ class TestHexEdgeCases:
 
     def test_hex_collinear(self):
         """All points on a line — zero y-spread."""
-        df = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5}
-        )
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5})
         chart = fm.Chart(df).mark_hex().encode(x="x:Q", y="y:Q")
         _graceful_failure(chart)
 
@@ -444,9 +417,7 @@ class TestAggregateEdgeCases:
         _renders(chart)
 
     def test_aggregate_multiple_ops(self):
-        df = pl.DataFrame(
-            {"x": ["a", "a", "b", "b"], "y": [1.0, 2.0, 3.0, 4.0]}
-        )
+        df = pl.DataFrame({"x": ["a", "a", "b", "b"], "y": [1.0, 2.0, 3.0, 4.0]})
         chart = (
             fm.Chart(df)
             .mark_bar()
@@ -483,9 +454,7 @@ class TestContourEdgeCases:
 
     def test_contour_collinear(self):
         """All points along x-axis (zero y-spread)."""
-        df = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5}
-        )
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [0.0] * 5})
         chart = fm.Chart(df).mark_contour().encode(x="x:Q", y="y:Q")
         _graceful_failure(chart)
 

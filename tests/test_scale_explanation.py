@@ -45,9 +45,7 @@ def _make_regression(n_samples: int, n_features: int = 20, *, seed: int = 42):
     model.fit(X, y)
 
     feature_names = [f"f{i}" for i in range(n_features)]
-    X_df = pl.DataFrame(
-        {name: X[:, i].tolist() for i, name in enumerate(feature_names)}
-    )
+    X_df = pl.DataFrame({name: X[:, i].tolist() for i, name in enumerate(feature_names)})
     return model, X_df, y
 
 
@@ -64,9 +62,7 @@ def _make_classification(n_samples: int, n_features: int = 20, *, seed: int = 42
     model.fit(X, y)
 
     feature_names = [f"f{i}" for i in range(n_features)]
-    X_df = pl.DataFrame(
-        {name: X[:, i].tolist() for i, name in enumerate(feature_names)}
-    )
+    X_df = pl.DataFrame({name: X[:, i].tolist() for i, name in enumerate(feature_names)})
     return model, X_df, y
 
 
@@ -112,9 +108,7 @@ class TestShapBeeswarmScale:
     def test_5k_max_display_limits_features(self):
         """max_display=5 with 20 features: only 5k × 5 = 25k circles."""
         model, X, y = _make_regression(5_000)
-        svg = fm.shap_beeswarm_chart(
-            model, X, y, max_display=5, random_state=0
-        ).show_svg()
+        svg = fm.shap_beeswarm_chart(model, X, y, max_display=5, random_state=0).show_svg()
         circles = svg.count("<circle ")
         assert 25_000 <= circles <= 26_000, (
             f"Expected ~25k circles for max_display=5; got {circles}"
@@ -171,26 +165,20 @@ class TestShapWaterfallScale:
 
     def test_10k_samples_renders(self):
         model, X, y = _make_regression(10_000)
-        svg = fm.shap_waterfall_chart(
-            model, X, y, sample_idx=0, random_state=0
-        ).show_svg()
+        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
         assert "<svg" in svg
 
     def test_10k_under_15_seconds(self):
         model, X, y = _make_regression(10_000)
         t0 = time.monotonic()
-        fm.shap_waterfall_chart(
-            model, X, y, sample_idx=0, random_state=0
-        ).show_svg()
+        fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 15.0, f"10k waterfall took {elapsed:.2f}s (limit 15s)"
 
     def test_10k_svg_compact(self):
         """Waterfall is a fixed-size chart; SVG should be compact."""
         model, X, y = _make_regression(10_000)
-        svg = fm.shap_waterfall_chart(
-            model, X, y, sample_idx=0, random_state=0
-        ).show_svg()
+        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
         size_kb = len(svg) / 1024
         assert size_kb < 1000, f"Waterfall SVG is {size_kb:.0f}KB (limit 1MB)"
 
@@ -207,7 +195,9 @@ class TestICEScale:
     def test_2k_individual_3_features_renders(self):
         model, X, y = _make_regression(2_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=50,
             kind="individual",
@@ -225,7 +215,9 @@ class TestICEScale:
         model, X, y = _make_regression(2_000, n_features=10)
         t0 = time.monotonic()
         fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=50,
             kind="individual",
@@ -238,7 +230,9 @@ class TestICEScale:
         """5k × 5 = 25k polylines — tests rendering pipeline at high element count."""
         model, X, y = _make_regression(5_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2", "f3", "f4"],
             grid_resolution=50,
             kind="individual",
@@ -256,7 +250,9 @@ class TestICEScale:
         model, X, y = _make_regression(5_000, n_features=10)
         t0 = time.monotonic()
         fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2", "f3", "f4"],
             grid_resolution=50,
             kind="individual",
@@ -269,7 +265,9 @@ class TestICEScale:
         """25k polylines at 50 grid points — SVG should stay manageable."""
         model, X, y = _make_regression(5_000, n_features=10)
         svg = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2", "f3", "f4"],
             grid_resolution=50,
             kind="individual",
@@ -291,7 +289,9 @@ class TestPDPScale:
     def test_5k_average_5_features_renders(self):
         model, X, y = _make_regression(5_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2", "f3", "f4"],
             grid_resolution=100,
             kind="average",
@@ -306,22 +306,24 @@ class TestPDPScale:
         model, X, y = _make_regression(10_000, n_features=10)
         t0 = time.monotonic()
         fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=[f"f{i}" for i in range(10)],
             grid_resolution=100,
             kind="average",
             random_state=0,
         ).show_svg()
         elapsed = time.monotonic() - t0
-        assert elapsed < 15.0, (
-            f"10k PDP (10 features, grid=100) took {elapsed:.2f}s (limit 15s)"
-        )
+        assert elapsed < 15.0, f"10k PDP (10 features, grid=100) took {elapsed:.2f}s (limit 15s)"
 
     def test_10k_average_svg_compact(self):
         """Average PDP is always compact regardless of sample count."""
         model, X, y = _make_regression(10_000, n_features=10)
         svg = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=[f"f{i}" for i in range(10)],
             grid_resolution=100,
             kind="average",
@@ -343,7 +345,9 @@ class TestPDPBothScale:
     def test_2k_both_3_features_renders(self):
         model, X, y = _make_regression(2_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=50,
             kind="both",
@@ -361,7 +365,9 @@ class TestPDPBothScale:
         model, X, y = _make_regression(2_000, n_features=10)
         t0 = time.monotonic()
         fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=50,
             kind="both",
@@ -373,7 +379,9 @@ class TestPDPBothScale:
     def test_5k_both_5_features_renders(self):
         model, X, y = _make_regression(5_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2", "f3", "f4"],
             grid_resolution=50,
             kind="both",
@@ -391,7 +399,9 @@ class TestPDPBothScale:
         """center=True path at scale."""
         model, X, y = _make_regression(5_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=50,
             kind="both",
@@ -417,7 +427,9 @@ class TestHighGridResolution:
     def test_grid_200_renders(self):
         model, X, y = _make_regression(2_000, n_features=10)
         chart = fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=200,
             kind="individual",
@@ -432,16 +444,16 @@ class TestHighGridResolution:
         model, X, y = _make_regression(2_000, n_features=10)
         t0 = time.monotonic()
         fm.pdp_chart(
-            model, X, y,
+            model,
+            X,
+            y,
             features=["f0", "f1", "f2"],
             grid_resolution=200,
             kind="individual",
             random_state=0,
         ).show_svg()
         elapsed = time.monotonic() - t0
-        assert elapsed < 15.0, (
-            f"2k ICE grid=200 (3 feat) took {elapsed:.2f}s (limit 15s)"
-        )
+        assert elapsed < 15.0, f"2k ICE grid=200 (3 feat) took {elapsed:.2f}s (limit 15s)"
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +474,16 @@ class TestBeeswarmRenderScale:
         rng = np.random.default_rng(42)
         features = [f"f{i}" for i in range(n_features)]
         n_rows = n_samples * n_features
-        return pl.DataFrame({
-            "shap_value": rng.normal(0, 0.5, n_rows).tolist(),
-            "feature": [features[i % n_features] for i in range(n_rows)],
-            "feature_value": rng.uniform(0, 1, n_rows).tolist(),
-            "feature_value_normalized": rng.normal(0, 1, n_rows).tolist(),
-            "class_label": ["class_0"] * n_rows,
-            "sample_id": [i // n_features for i in range(n_rows)],
-        })
+        return pl.DataFrame(
+            {
+                "shap_value": rng.normal(0, 0.5, n_rows).tolist(),
+                "feature": [features[i % n_features] for i in range(n_rows)],
+                "feature_value": rng.uniform(0, 1, n_rows).tolist(),
+                "feature_value_normalized": rng.normal(0, 1, n_rows).tolist(),
+                "class_label": ["class_0"] * n_rows,
+                "sample_id": [i // n_features for i in range(n_rows)],
+            }
+        )
 
     def test_50k_beeswarm_renders(self):
         """50k samples × 20 features = 1M circles via mark_shap_beeswarm."""
@@ -539,12 +553,14 @@ class TestICERenderScale:
                 pd_value_col.extend(vals.tolist())
                 sample_id_col.extend([sid] * grid_resolution)
 
-        df = pl.DataFrame({
-            "feature": feature_col,
-            "feature_value": feature_value_col,
-            "pd_value": pd_value_col,
-            "sample_id": sample_id_col,
-        }).with_columns(
+        df = pl.DataFrame(
+            {
+                "feature": feature_col,
+                "feature_value": feature_value_col,
+                "pd_value": pd_value_col,
+                "sample_id": sample_id_col,
+            }
+        ).with_columns(
             pl.col("sample_id").cast(pl.Utf8).alias("_sample_id_str"),
         )
         return df, features

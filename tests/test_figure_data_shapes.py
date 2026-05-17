@@ -31,9 +31,7 @@ def tiny_df():
 @pytest.fixture
 def constant_df():
     """All values identical in numeric columns (zero variance)."""
-    return pl.DataFrame(
-        {"x": [5.0] * 10, "y": [5.0] * 10, "cat": ["a"] * 5 + ["b"] * 5}
-    )
+    return pl.DataFrame({"x": [5.0] * 10, "y": [5.0] * 10, "cat": ["a"] * 5 + ["b"] * 5})
 
 
 @pytest.fixture
@@ -65,9 +63,7 @@ def zero_row_df():
 def wide_df():
     """Wide-format with 10 numeric columns for pairplot/heatmap."""
     random.seed(42)
-    data: dict[str, list] = {
-        f"v{i}": [random.gauss(0, 1) for _ in range(20)] for i in range(10)
-    }
+    data: dict[str, list] = {f"v{i}": [random.gauss(0, 1) for _ in range(20)] for i in range(10)}
     data["label"] = ["a"] * 10 + ["b"] * 10
     return pl.DataFrame(data)
 
@@ -273,16 +269,10 @@ class TestConfusionMatrixChart:
     """confusion_matrix_chart with precomputed y_true/y_pred arrays."""
 
     def test_tiny(self):
-        _produces_svg(
-            fm.confusion_matrix_chart(y_true=["a", "b"], y_pred=["a", "b"])
-        )
+        _produces_svg(fm.confusion_matrix_chart(y_true=["a", "b"], y_pred=["a", "b"]))
 
     def test_single_class(self):
-        _produces_svg(
-            fm.confusion_matrix_chart(
-                y_true=["a", "a", "a"], y_pred=["a", "a", "a"]
-            )
-        )
+        _produces_svg(fm.confusion_matrix_chart(y_true=["a", "a", "a"], y_pred=["a", "a", "a"]))
 
     def test_many_classes(self):
         classes = list("abcdefgh")

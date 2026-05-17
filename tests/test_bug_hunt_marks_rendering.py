@@ -176,12 +176,7 @@ def test_coord_flip_bar_renders_horizontal_rects():
             "val": [10.0, 20.0, 30.0],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_bar()
-        .encode(x="cat:N", y="val:Q")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_bar().encode(x="cat:N", y="val:Q").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert "NaN" not in svg
     # Should produce rect elements
@@ -193,16 +188,31 @@ def test_coord_flip_boxplot_renders_without_crash():
     df = pl.DataFrame(
         {
             "cat": ["a"] * 10 + ["b"] * 10,
-            "val": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0,
-                    3.0, 4.0, 5.0, 6.0, 7.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "val": [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+            ],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_boxplot()
-        .encode(x="cat:N", y="val:Q")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val:Q").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert "NaN" not in svg
     assert "<svg" in svg
@@ -213,6 +223,7 @@ def test_coord_flip_boxplot_renders_without_crash():
 def test_coord_flip_violin_renders_polygon_paths():
     """CoordFlip on a violin must produce path elements (polygon shapes)."""
     import random
+
     random.seed(42)
     df = pl.DataFrame(
         {
@@ -221,12 +232,7 @@ def test_coord_flip_violin_renders_polygon_paths():
             + [random.gauss(8, 2) for _ in range(30)],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_violin()
-        .encode(x="cat:N", y="val:Q")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_violin().encode(x="cat:N", y="val:Q").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert "NaN" not in svg
     assert "<svg" in svg
@@ -248,11 +254,7 @@ def test_point_batch_opacity_with_per_instance_stroke_width():
             "sw": [1.0, 2.0, 3.0],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_point(opacity=0.6)
-        .encode(x="x", y="y", stroke_width="sw")
-    )
+    chart = fr.Chart(df).mark_point(opacity=0.6).encode(x="x", y="y", stroke_width="sw")
     svg = chart.show_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") >= 3
@@ -269,11 +271,7 @@ def test_point_batch_stroke_with_per_instance_fill_opacity():
             "fo": [0.2, 0.5, 0.8],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_point(stroke="#ff0000")
-        .encode(x="x", y="y", fill_opacity="fo")
-    )
+    chart = fr.Chart(df).mark_point(stroke="#ff0000").encode(x="x", y="y", fill_opacity="fo")
     svg = chart.show_svg()
     assert "NaN" not in svg
     # fill-opacity should be emitted for at least one element
@@ -289,11 +287,7 @@ def test_bar_batch_corner_radius_with_per_instance_opacity():
             "op": [0.3, 0.6, 0.9],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_bar(corner_radius=5)
-        .encode(x="x:N", y="y", opacity="op")
-    )
+    chart = fr.Chart(df).mark_bar(corner_radius=5).encode(x="x:N", y="y", opacity="op")
     svg = chart.show_svg()
     assert "NaN" not in svg
     # corner_radius should produce rx/ry attributes
@@ -441,6 +435,7 @@ def test_polygon_coordflip_produces_paths():
     """Polygon mark under CoordFlip must still produce path elements."""
     # This tests the fix for CoordFlip dropping violin paths
     import random
+
     random.seed(123)
     vals = [random.gauss(0, 1) for _ in range(50)]
     df = pl.DataFrame(
@@ -449,12 +444,7 @@ def test_polygon_coordflip_produces_paths():
             "val": vals,
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_violin()
-        .encode(x="cat:N", y="val:Q")
-        .coord(fr.CoordFlip())
-    )
+    chart = fr.Chart(df).mark_violin().encode(x="cat:N", y="val:Q").coord(fr.CoordFlip())
     svg = chart.show_svg()
     assert "NaN" not in svg
     # Violin must produce path elements via the polygon renderer
