@@ -65,17 +65,17 @@ That is especially important because some implementation details evolved later. 
 | Metric | Value |
 |---|---|
 | Calendar days | **9** (May 9–17, 2026) |
-| Total commits | **911** |
-| Python source | **33,288 lines** across 89 files |
-| Rust source | **63,651 lines** across 153 files |
+| Total commits | **918** |
+| Python source | **33,460 lines** across 89 files |
+| Rust source | **64,131 lines** across 153 files |
 | Python tests | **2,278** test functions in 125 files |
-| Rust tests | **1,068** `#[test]` functions |
+| Rust tests | **1,080** `#[test]` functions |
 | Design specs | **36** documents |
 | Implementation plans | **38** documents |
-| Phases completed | **11 of 12** (Phase 12 in-flight) |
+| Phases completed | **12 of 12** |
 | Peak day | **213 commits** (May 11) |
 
-Phases 1–7 (skeleton through first rendered chart) landed on **day 1**. Phase 8a (full grammar API with 31 encoding channels) landed **day 2**. Phase 10 (26 model-diagnostic marks, 21 figure functions, 25 sklearn visualizers) landed **day 3**. Phase 11 (WASM interactive renderer with selections, zoom, pan) landed by **day 6**.
+Phases 1–7 (skeleton through first rendered chart) landed on **day 1**. Phase 8a (full grammar API with 31 encoding channels) landed **day 2**. Phase 10 (26 model-diagnostic marks, 21 figure functions, 25 sklearn visualizers) landed **day 3**. Phase 11 (WASM interactive renderer with selections, zoom, pan) landed by **day 6**. Phase 12 (17 data transforms, 7 new scale types, `ferrum.color`, `ferrum.config`, `LayerChart`, `ConcatChart`, `Axis`/`Legend` value classes) landed on **day 9**.
 
 ## What made it work
 
@@ -139,7 +139,8 @@ A Rust-backed Python visualization library with:
 - 31 encoding channels, 20+ mark types, 21 figure functions, 25 sklearn visualizers
 - A WASM interactive renderer with selections, zoom, pan, and linked views
 - Zero matplotlib dependency (hard constraint from day 1)
-- 3,346 tests across Python and Rust
+- 17 data transforms, 7 new scale types, and utility modules (`ferrum.color`, `ferrum.config`) closing the spec gap
+- 3,358 tests across Python and Rust
 - A docs site (in-progress on a worktree branch)
 - A release pipeline with conventional commits, changelog generation, and PyPI publishing
 
@@ -154,4 +155,4 @@ The velocity didn't come from typing faster. It came from:
 4. **Making quality campaigns repeatable** — sweeps are skills, not one-time heroics
 5. **Treating agent infrastructure as product** — the `.claude/` directory has its own README, architecture diagram, and severity rubric
 
-The 911 commits aren't 911 manual actions. They're the output of a system that was designed to produce correct code at high throughput, with the human providing direction, constraints, and architectural taste — not keystrokes.
+The 918 commits aren't 918 manual actions. They're the output of a system that was designed to produce correct code at high throughput, with the human providing direction, constraints, and architectural taste — not keystrokes.
