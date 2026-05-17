@@ -864,6 +864,62 @@ fn build_from_scale_spec(
                 *padding,
             ))
         }
+        // Pow scale: apply power transform, then map linearly.
+        ScaleSpec::Pow { domain, range, clamp, padding, .. } => {
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
+            ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, false))
+        }
+        // Sqrt is Pow with exponent=0.5; maps to linear for position.
+        ScaleSpec::Sqrt { domain, range, clamp, padding } => {
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
+            ScaleKind::Linear(LinearScale::new_internal(d, r, *clamp, false))
+        }
+        // Utc is a temporal scale variant — same internal behavior as Time.
+        ScaleSpec::Utc { domain, range, nice, clamp, padding } => {
+            let (d, r) = resolve_continuous_domain_and_range(domain, range, *padding, col.as_ref(), &enc.field, pr)?;
+            ScaleKind::Time(TimeScale::new_internal(d, r, *clamp, *nice))
+        }
+        // Band: discrete position scale — maps to Ordinal with effective padding.
+        ScaleSpec::Band { domain, padding, padding_inner, .. } => {
+            let mut d = match domain {
+                Some(d) => d.clone(),
+                None => distinct_values_in_order(batch, &enc.field)?,
+            };
+            apply_sort_to_domain(&mut d, enc.sort.as_ref());
+            let effective_padding = padding_inner.unwrap_or(*padding);
+            ScaleKind::Ordinal(OrdinalScale::new_internal(
+                d,
+                vec![pr.0, pr.1],
+                effective_padding,
+            ))
+        }
+        // Point: discrete position scale — maps to Ordinal with padding.
+        ScaleSpec::Point { domain, padding, .. } => {
+            let mut d = match domain {
+                Some(d) => d.clone(),
+                None => distinct_values_in_order(batch, &enc.field)?,
+            };
+            apply_sort_to_domain(&mut d, enc.sort.as_ref());
+            ScaleKind::Ordinal(OrdinalScale::new_internal(
+                d,
+                vec![pr.0, pr.1],
+                *padding,
+            ))
+        }
+        // Color-oriented scales that should not normally reach position resolution.
+        // If they do (e.g. user misconfiguration), fall back to Linear with auto domain.
+        ScaleSpec::Sequential { domain, .. }
+        | ScaleSpec::Diverging { domain, .. }
+        | ScaleSpec::Quantize { domain, .. } => {
+            let (d, r) = resolve_continuous_domain_and_range(domain, &None, None, col.as_ref(), &enc.field, pr)?;
+            ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
+        }
+        ScaleSpec::BinOrdinal { .. } => {
+            // BinOrdinal is a color scale; if it reaches position resolution,
+            // fall back to auto-detected linear.
+            let (d, r) = resolve_continuous_domain_and_range(&None, &None, None, col.as_ref(), &enc.field, pr)?;
+            ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
+        }
     })
 }
 
