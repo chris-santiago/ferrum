@@ -241,23 +241,3 @@ For the full surface comparison table, severity rubric (S1–S5), audit trail pa
 ## Key architectural decisions
 
 See **`design-docs/architecture/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/architecture/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
-
-
-## Docs site work in progress
-
-  - **Worktree**: `../ferrum-worktree-docs-continue/` (sibling of repo root — `git worktree list` to confirm)
-  - **Branch**: `docs/continue` (based on `main`)
-  - **Spec**: `design-docs/superpowers/DOCS_SITE_PLAN.md` (in worktree, not main branch)
-  - **Zensical config**: `zensical.toml` (in worktree root)
-
-  **Status (paused 2026-05-11, unblocked 2026-05-15):**
-  - Scaffold + 6 source-independent pages landed on the worktree branch.
-  - Previously-blocked pages (source-backed examples, model diagnostics, interactive rendering, gallery comparisons) are now unblocked — Phases 10 and 11 are done and on `main`.
-
-  **Resume path:**
-  1. From the docs worktree: `git fetch && git rebase origin/main`.
-  2. Expect conflicts in `pyproject.toml` (dev deps — usually auto-mergeable), `uv.lock` (resolve with `git checkout --theirs uv.lock && uv sync`), and `.gitignore` (additive).
-  3. Run `uv run zensical build --clean` to verify and check the `griffe` warning count from Phase 10/11 visualizers.
-  4. Author the previously-blocked pages against the now-real API surface.
-
-  **Do not** delete the worktree or branch until the docs work merges to `main`.
