@@ -294,3 +294,64 @@ def test_p13_text_elements_in_scene_json():
         style = node["style"]
         assert "font_size" in style, "text node style must have font_size"
         assert "color" in style, "text node style must have color"
+
+
+# ── P14. Generated HTML contains D3 bundle ──────────────────────────────
+
+
+def test_p14_html_contains_d3_bundle(tmp_path):
+    """The generated HTML must contain the vendored D3 bundle with brush
+    and zoom functionality."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "d3_test.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "zoom" in content, "HTML must contain D3 zoom code"
+    assert "brush" in content, "HTML must contain D3 brush code"
+
+
+# ── P15. No hand-written interaction state in HTML ──────────────────────
+
+
+def test_p15_no_handwritten_interaction_state(tmp_path):
+    """The generated HTML must NOT contain hand-written interaction state
+    variables that were replaced by D3."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "d3_test.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "_panStart" not in content, "HTML must not contain _panStart"
+    assert "_brushOrigin" not in content, "HTML must not contain _brushOrigin"
+    assert "_isBrushing" not in content, "HTML must not contain _isBrushing"
+
+
+# ── P16. No CSS-div text overlay in HTML ────────────────────────────────
+
+
+def test_p16_no_css_div_text_overlay(tmp_path):
+    """The generated HTML must NOT contain the old ferrum-overlay div or
+    _placeText function — replaced by SVG text rendering."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "d3_test.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "ferrum-overlay" not in content, "HTML must not contain ferrum-overlay"
+
+
+# ── P17. SVG text rendering present in HTML ─────────────────────────────
+
+
+def test_p17_svg_text_rendering_present(tmp_path):
+    """The generated HTML must contain SVG text rendering via the
+    ferrum-label class."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "d3_test.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "ferrum-label" in content, "HTML must contain ferrum-label class for SVG text"
+    assert "createElementNS" in content or "_placeTextSvg" in content, \
+        "HTML must contain SVG element creation"

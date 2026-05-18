@@ -56,6 +56,17 @@ export class WasmRenderer {
     resetZoom(panel_id: number): string;
     resize(width: number, height: number): void;
     /**
+     * Set an absolute zoom+pan transform from D3-zoom.
+     *
+     * `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+     *
+     * Operates on panel 0 (single-panel charts; multi-panel support later).
+     * Returns updated text-element JSON so the JS overlay can reposition labels.
+     */
+    setTransform(k: number, tx: number, ty: number): string;
+    /**
      * Begin a GPU-interpolated transition from the currently loaded scene to a
      * new scene JSON string.
      *
@@ -92,6 +103,7 @@ export interface InitOutput {
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];
     readonly wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
     readonly wasmrenderer_resize: (a: number, b: number, c: number) => void;
+    readonly wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];

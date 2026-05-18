@@ -80,19 +80,20 @@ chart5 = (
 chart5.save(str(OUT / "05_conditional_opacity.html"))
 print("5/8 conditional opacity")
 
-# 6. Linked views — composition with brush selection
+# 6. Linked views — click-selection with field linking across panels
 df6 = pl.DataFrame({
     "x": [1, 2, 3, 4, 5, 6, 7, 8],
     "y": [2, 4, 1, 5, 3, 6, 2, 4],
     "category": ["a", "b", "a", "b", "a", "b", "a", "b"],
 })
-brush6 = fm.selection_interval()
+sel6 = fm.selection_point(fields=["category"])
 scatter6 = (
     fm.Chart(df6)
-    .mark_point()
-    .encode(x="x", y="y", color="category:N")
-    .add_selection(brush6)
-    .conditional(brush6.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
+    .mark_point(size=80)
+    .encode(x="x", y="y", color="category:N", tooltip="category:N")
+    .add_selection(sel6)
+    .conditional(sel6.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
+    .properties(title="Scatter (click to select)")
 )
 bars6 = (
     fm.Chart(df6)
@@ -100,7 +101,10 @@ bars6 = (
     .transform(fm.transform_aggregate(
         {"field": "category", "fn": "count", "as": "n"}, groupby=["category"]
     ))
-    .encode(x="category:N", y="n:Q")
+    .encode(x="category:N", y="n:Q", color="category:N", tooltip="category:N")
+    .add_selection(sel6)
+    .conditional(sel6.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
+    .properties(title="Bar (linked)")
 )
 linked6 = scatter6 | bars6
 linked6.interactive().save(str(OUT / "06_linked_views.html"))

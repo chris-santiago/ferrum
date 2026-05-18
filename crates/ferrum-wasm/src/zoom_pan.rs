@@ -85,6 +85,21 @@ impl ZoomPanState {
         t.ty += dy;
     }
 
+    /// Set the transform for the given panel to absolute values.
+    ///
+    /// `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+    /// This replaces whatever accumulated state `on_wheel`/`on_pan` built up,
+    /// and is the entry point for D3-zoom which provides absolute transforms.
+    pub fn set_absolute(&mut self, panel_id: usize, k: f64, tx: f64, ty: f64) {
+        let Some(t) = self.transforms.get_mut(panel_id) else {
+            return;
+        };
+        t.sx = k.clamp(self.zoom_range.0, self.zoom_range.1);
+        t.sy = t.sx; // D3-zoom uses uniform scaling
+        t.tx = tx;
+        t.ty = ty;
+    }
+
     pub fn reset(&mut self, panel_id: usize) {
         if let Some(t) = self.transforms.get_mut(panel_id) {
             *t = Affine2::identity();
@@ -385,5 +400,71 @@ mod tests {
         state.on_wheel(0, 100.0, 50.0, 50.0, ScaleMode::Uniform);
         let t = &state.transforms[0];
         assert!((t.sx - t.sy).abs() < 1e-10, "sx={} sy={} must be equal for CoordFixed", t.sx, t.sy);
+    }
+
+    #[test]
+    fn set_absolute_sets_scale_and_translation() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 2.0, 100.0, 50.0);
+        let t = &state.transforms[0];
+        assert!((t.sx - 2.0).abs() < 1e-10, "sx should be 2.0, got {}", t.sx);
+        assert!((t.sy - 2.0).abs() < 1e-10, "sy should equal sx (uniform), got {}", t.sy);
+        assert!((t.tx - 100.0).abs() < 1e-10, "tx should be 100.0, got {}", t.tx);
+        assert!((t.ty - 50.0).abs() < 1e-10, "ty should be 50.0, got {}", t.ty);
+    }
+
+    #[test]
+    fn set_absolute_then_reset_returns_to_identity() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 3.0, 10.0, 20.0);
+        state.reset(0);
+        let t = &state.transforms[0];
+        assert!((t.sx - 1.0).abs() < 1e-10, "sx should be 1.0 after reset");
+        assert!((t.sy - 1.0).abs() < 1e-10, "sy should be 1.0 after reset");
+        assert!(t.tx.abs() < 1e-10, "tx should be 0.0 after reset");
+        assert!(t.ty.abs() < 1e-10, "ty should be 0.0 after reset");
+    }
+
+    #[test]
+    fn set_absolute_out_of_bounds_panel_is_noop() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(99, 5.0, 300.0, 400.0);
+        // Panel 0 should be untouched
+        let t = &state.transforms[0];
+        assert!((t.sx - 1.0).abs() < 1e-10);
+        assert!((t.sy - 1.0).abs() < 1e-10);
+        assert!(t.tx.abs() < 1e-10);
+        assert!(t.ty.abs() < 1e-10);
+    }
+
+    #[test]
+    fn set_absolute_clamps_scale_to_zoom_range() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        // Scale below minimum (0.1)
+        state.set_absolute(0, 0.01, 0.0, 0.0);
+        assert!((state.transforms[0].sx - 0.1).abs() < 1e-10, "scale should clamp to min");
+        // Scale above maximum (50.0)
+        state.set_absolute(0, 100.0, 0.0, 0.0);
+        assert!((state.transforms[0].sx - 50.0).abs() < 1e-10, "scale should clamp to max");
+    }
+
+    #[test]
+    fn set_absolute_overwrites_accumulated_state() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        // Accumulate some zoom and pan state
+        state.on_wheel(0, 500.0, 100.0, 100.0, ScaleMode::Independent);
+        state.on_pan(0, 30.0, -20.0);
+        // Now set_absolute should overwrite everything
+        state.set_absolute(0, 1.5, 42.0, -17.0);
+        let t = &state.transforms[0];
+        assert!((t.sx - 1.5).abs() < 1e-10);
+        assert!((t.sy - 1.5).abs() < 1e-10);
+        assert!((t.tx - 42.0).abs() < 1e-10);
+        assert!((t.ty - (-17.0)).abs() < 1e-10);
     }
 }

@@ -1,5 +1,5 @@
 use ferrum_scene::{
-    ChannelName, ConditionalEncoding, EncodingValue, MarkBatch, Panel, SceneNode,
+    ChannelName, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode,
 };
 
 use crate::scene_load::{CircleInstance, RectInstance};
@@ -105,6 +105,24 @@ fn apply_conditional_to_batch(
                 };
                 pos.is_some_and(|(mx, my)| sel.contains_point(mx, my))
             }
+            SelectionState::Point { field_values, .. } if !field_values.is_empty() => {
+                // Field-value matching: check if this mark's tooltip contains
+                // matching values for all selection fields. This enables
+                // cross-panel linked selection where panels have different
+                // datasets and data indices cannot be shared.
+                batch
+                    .tooltips
+                    .as_ref()
+                    .and_then(|tips| tips.get(node_idx))
+                    .map(|tip| {
+                        field_values.iter().all(|(fname, fval)| {
+                            tip.fields
+                                .iter()
+                                .any(|f| f.name == *fname && field_value_matches_tooltip(&f.value, fval))
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => data_idx.is_some_and(|di| sel.contains(di)),
         };
 
@@ -145,6 +163,27 @@ fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value
             inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
         }
         _ => {}
+    }
+}
+
+/// Compare a tooltip string value against a typed `FieldValue`.
+///
+/// Tooltip fields are always stored as strings in the scene graph. This
+/// function bridges the gap by parsing the string according to the
+/// `FieldValue` variant so cross-panel matching works even when one panel
+/// stores `"42"` and the selection carries `FieldValue::Number { value: 42.0 }`.
+fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) -> bool {
+    match field_value {
+        FieldValue::String { value } => tooltip_value == value,
+        FieldValue::Number { value } => tooltip_value
+            .parse::<f64>()
+            .ok()
+            .is_some_and(|n| n == *value),
+        FieldValue::Bool { value } => tooltip_value
+            .parse::<bool>()
+            .ok()
+            .is_some_and(|b| b == *value),
+        FieldValue::Null => tooltip_value.is_empty() || tooltip_value == "null",
     }
 }
 

@@ -247,6 +247,38 @@ export class WasmRenderer {
         wasm.wasmrenderer_resize(this.__wbg_ptr, width, height);
     }
     /**
+     * Set an absolute zoom+pan transform from D3-zoom.
+     *
+     * `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+     *
+     * Operates on panel 0 (single-panel charts; multi-panel support later).
+     * Returns updated text-element JSON so the JS overlay can reposition labels.
+     * @param {number} k
+     * @param {number} tx
+     * @param {number} ty
+     * @returns {string}
+     */
+    setTransform(k, tx, ty) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_setTransform(this.__wbg_ptr, k, tx, ty);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * Begin a GPU-interpolated transition from the currently loaded scene to a
      * new scene JSON string.
      *

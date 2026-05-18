@@ -346,6 +346,21 @@ impl WasmRenderer {
         Ok(build_text_json(&loaded.data))
     }
 
+    /// Set an absolute zoom+pan transform from D3-zoom.
+    ///
+    /// `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+    /// This replaces the accumulated state from `onWheel`/`onPan` and is the
+    /// entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+    ///
+    /// Operates on panel 0 (single-panel charts; multi-panel support later).
+    /// Returns updated text-element JSON so the JS overlay can reposition labels.
+    #[wasm_bindgen(js_name = "setTransform")]
+    pub fn set_transform(&mut self, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
+        let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        self.zoom.set_absolute(0, k as f64, tx as f64, ty as f64);
+        self.upload_transform_and_render(0)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.config.width = width.max(1);
         self.gpu.config.height = height.max(1);

@@ -144,6 +144,18 @@ def assemble_html(
             css += f'\n@font-face{{font-family:"Inter";src:url("data:font/ttf;base64,{font_b64}") format("truetype");}}'
             break
 
+    # Inline the D3 interactions bundle with exports converted to module-scoped vars.
+    d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
+    d3_js = re.sub(
+        r"export\{([^}]+)\}",
+        lambda m: "var " + ",".join(
+            f"{parts[-1].strip()}={parts[0].strip()}" if len(parts := p.split(" as ")) > 1
+            else p.strip()
+            for p in m.group(1).split(",")
+        ) + ";",
+        d3_source,
+    )
+
     # Inline the anywidget JS with ESM exports stripped for standalone use.
     anywidget_source = (_WASM_DIR / "ferrum-anywidget.js").read_text()
     anywidget_js = _strip_anywidget_for_standalone(anywidget_source)
@@ -194,6 +206,8 @@ def assemble_html(
         f'<div id="ferrum-root" style="background:{bg_css}"></div>\n'
         '<script type="module">\n'
         f"{js_glue}\n"
+        "\n"
+        f"{d3_js}\n"
         "\n"
         f"{anywidget_js}\n"
         "\n"

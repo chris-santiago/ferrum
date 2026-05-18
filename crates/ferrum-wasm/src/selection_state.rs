@@ -92,17 +92,25 @@ impl InteractionState {
                                 } else {
                                     vec![data_idx]
                                 };
+                                // Extract field values from the clicked mark's tooltip
+                                // so cross-panel conditional resolution can match by
+                                // field content rather than by data index.
+                                let field_values = if let Some(field_names) = fields {
+                                    extract_field_values(panels, h, field_names)
+                                } else {
+                                    Vec::new()
+                                };
                                 let is_toggle = shift_held
                                     && matches!(
                                         toggle,
                                         ferrum_scene::EventExpr::ShiftKey
                                     );
                                 if is_toggle {
-                                    toggle_points(sel, &indices);
+                                    toggle_points(sel, &indices, &field_values);
                                 } else {
                                     *sel = SelectionState::Point {
                                         indices,
-                                        field_values: Vec::new(),
+                                        field_values,
                                     };
                                 }
                             }
@@ -200,6 +208,47 @@ impl InteractionState {
     }
 }
 
+/// Extract field values from the clicked mark's tooltip, converting each
+/// tooltip string to a typed `FieldValue` (number if parseable, else string).
+fn extract_field_values(
+    panels: &[ferrum_scene::Panel],
+    hit: &crate::hit_test::HitResult,
+    field_names: &[String],
+) -> Vec<(String, FieldValue)> {
+    let Some(panel) = panels.get(hit.panel_id) else {
+        return Vec::new();
+    };
+    let Some(batch) = panel.marks.get(hit.batch_idx) else {
+        return Vec::new();
+    };
+    let Some(tooltips) = &batch.tooltips else {
+        return Vec::new();
+    };
+    let Some(tooltip) = tooltips.get(hit.node_idx) else {
+        return Vec::new();
+    };
+
+    field_names
+        .iter()
+        .filter_map(|fname| {
+            tooltip
+                .fields
+                .iter()
+                .find(|f| f.name == *fname)
+                .map(|f| {
+                    let fv = if let Ok(n) = f.value.parse::<f64>() {
+                        FieldValue::Number { value: n }
+                    } else {
+                        FieldValue::String {
+                            value: f.value.clone(),
+                        }
+                    };
+                    (fname.clone(), fv)
+                })
+        })
+        .collect()
+}
+
 /// Scan all marks in a panel for rows whose tooltip field values match those
 /// of the clicked mark.  Returns the set of data indices to select.
 ///
@@ -235,23 +284,31 @@ fn collect_matching_indices(
         return vec![clicked_data_idx];
     }
 
-    // Scan all mark batches in the panel; collect data indices whose tooltip
-    // fields match every (field_name, field_value) pair from the clicked mark.
+    // Scan all mark batches across ALL panels; collect data indices whose
+    // tooltip fields match every (field_name, field_value) pair from the
+    // clicked mark. This enables cross-panel linked selection.
     let mut matching: Vec<usize> = Vec::new();
-    for batch in &panel.marks {
-        let Some(tooltips) = batch.tooltips.as_ref() else { continue; };
-        let data_indices = batch.data_indices.as_deref();
-        for (node_idx, tooltip) in tooltips.iter().enumerate() {
-            let all_match = clicked_values.iter().all(|(fname, fval)| {
-                tooltip.fields.iter().any(|f| f.name == *fname && f.value == *fval)
-            });
-            if all_match {
-                let data_idx = data_indices
-                    .and_then(|di| di.get(node_idx))
-                    .copied()
-                    .unwrap_or(node_idx);
-                if !matching.contains(&data_idx) {
-                    matching.push(data_idx);
+    for p in panels {
+        for batch in &p.marks {
+            let Some(tooltips) = batch.tooltips.as_ref() else {
+                continue;
+            };
+            let data_indices = batch.data_indices.as_deref();
+            for (node_idx, tooltip) in tooltips.iter().enumerate() {
+                let all_match = clicked_values.iter().all(|(fname, fval)| {
+                    tooltip
+                        .fields
+                        .iter()
+                        .any(|f| f.name == *fname && f.value == *fval)
+                });
+                if all_match {
+                    let data_idx = data_indices
+                        .and_then(|di| di.get(node_idx))
+                        .copied()
+                        .unwrap_or(node_idx);
+                    if !matching.contains(&data_idx) {
+                        matching.push(data_idx);
+                    }
                 }
             }
         }
@@ -261,36 +318,53 @@ fn collect_matching_indices(
 }
 
 /// Toggle a set of indices: if all are already selected, deselect them;
-/// otherwise add all missing ones.
-fn toggle_points(sel: &mut SelectionState, indices: &[usize]) {
+/// otherwise add all missing ones. Field values are replaced wholesale on
+/// add (they describe the most recent click) and cleared on full deselect.
+fn toggle_points(
+    sel: &mut SelectionState,
+    indices: &[usize],
+    new_field_values: &[(String, FieldValue)],
+) {
     let already_all = match sel {
-        SelectionState::Point { indices: existing, .. } => {
-            indices.iter().all(|i| existing.contains(i))
-        }
+        SelectionState::Point {
+            indices: existing, ..
+        } => indices.iter().all(|i| existing.contains(i)),
         _ => false,
     };
     if already_all {
         // Deselect — remove all from set.
-        if let SelectionState::Point { indices: existing, .. } = sel {
+        if let SelectionState::Point {
+            indices: existing,
+            field_values,
+        } = sel
+        {
             existing.retain(|i| !indices.contains(i));
             if existing.is_empty() {
                 *sel = SelectionState::Empty;
+            } else {
+                // Keep field_values from the remaining selection; if the
+                // deselected entries were the only source, clear them.
+                field_values.clear();
             }
         }
     } else {
         // Add missing.
         match sel {
-            SelectionState::Point { indices: existing, .. } => {
+            SelectionState::Point {
+                indices: existing,
+                field_values,
+            } => {
                 for &idx in indices {
                     if !existing.contains(&idx) {
                         existing.push(idx);
                     }
                 }
+                *field_values = new_field_values.to_vec();
             }
             _ => {
                 *sel = SelectionState::Point {
                     indices: indices.to_vec(),
-                    field_values: Vec::new(),
+                    field_values: new_field_values.to_vec(),
                 };
             }
         }
@@ -330,15 +404,15 @@ mod tests {
             indices: vec![0],
             field_values: Vec::new(),
         };
-        toggle_points(&mut sel, &[1]);
+        toggle_points(&mut sel, &[1], &[]);
         if let SelectionState::Point { indices, .. } = &sel {
             assert_eq!(indices, &[0, 1]);
         }
-        toggle_points(&mut sel, &[0]);
+        toggle_points(&mut sel, &[0], &[]);
         if let SelectionState::Point { indices, .. } = &sel {
             assert_eq!(indices, &[1]);
         }
-        toggle_points(&mut sel, &[1]);
+        toggle_points(&mut sel, &[1], &[]);
         assert!(matches!(sel, SelectionState::Empty));
     }
 
@@ -469,7 +543,7 @@ mod tests {
             indices: vec![1, 2, 3],
             field_values: Vec::new(),
         };
-        toggle_points(&mut sel, &[1, 2, 3]);
+        toggle_points(&mut sel, &[1, 2, 3], &[]);
         assert!(matches!(sel, SelectionState::Empty), "all-selected toggle must deselect to Empty");
     }
 
@@ -477,7 +551,7 @@ mod tests {
     fn bug_hunt_toggle_points_adds_when_none_selected() {
         // Toggling from Empty must add the indices.
         let mut sel = SelectionState::Empty;
-        toggle_points(&mut sel, &[4, 5]);
+        toggle_points(&mut sel, &[4, 5], &[]);
         match &sel {
             SelectionState::Point { indices, .. } => {
                 assert!(indices.contains(&4) && indices.contains(&5));
@@ -493,7 +567,7 @@ mod tests {
             indices: vec![0, 1],
             field_values: Vec::new(),
         };
-        toggle_points(&mut sel, &[1, 2]);
+        toggle_points(&mut sel, &[1, 2], &[]);
         match &sel {
             SelectionState::Point { indices, .. } => {
                 assert!(indices.contains(&2), "index 2 must be added");

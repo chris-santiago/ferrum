@@ -30,19 +30,34 @@ def _build_anywidget_esm() -> str:
     """Build a self-contained anywidget ESM with inlined WASM.
 
     Reads ``ferrum-anywidget.js`` (the real JS source file in ``_wasm/``),
-    prepends the wasm-bindgen glue, and substitutes ``__B64__`` with the
-    base64-encoded WASM blob.  All JS lives in ``ferrum-anywidget.js`` —
-    never as embedded strings in Python.
+    prepends the wasm-bindgen glue and the D3 interactions bundle, and
+    substitutes ``__B64__`` with the base64-encoded WASM blob.  All JS
+    lives in source files in ``_wasm/`` — never as embedded strings in Python.
     """
     import base64
+    import re
 
     from ferrum._html import _read_wasm_artifact
 
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     wasm_b64 = base64.b64encode(_read_wasm_artifact("ferrum_wasm_bg.wasm")).decode("ascii")
+
+    # D3 bundle: convert `export { ri as brush, ... }` to `var brush=ri, ...;`
+    # so D3 functions are module-scoped (accessible to anywidget JS below).
+    d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
+    d3_js = re.sub(
+        r"export\{([^}]+)\}",
+        lambda m: "var " + ",".join(
+            f"{parts[-1].strip()}={parts[0].strip()}" if len(parts := p.split(" as ")) > 1
+            else p.strip()
+            for p in m.group(1).split(",")
+        ) + ";",
+        d3_source,
+    )
+
     anywidget_js = (_WASM_DIR / "ferrum-anywidget.js").read_text()
 
-    return js_glue + "\n\n" + anywidget_js.replace("'__B64__'", f"'{wasm_b64}'")
+    return js_glue + "\n\n" + d3_js + "\n\n" + anywidget_js.replace("'__B64__'", f"'{wasm_b64}'")
 
 
 def _get_widget_class() -> Any:
