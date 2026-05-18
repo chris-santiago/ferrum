@@ -50,11 +50,17 @@ Agent(subagent_type="interactive-auditor", model="opus",
 
 Dispatch only the matching agent.
 
-### Step 3 — Consolidate
+### Step 3 — Consolidate and save
 
-After all agents return, consolidate findings into a single report grouped by severity:
+After all agents return, consolidate findings into a single report grouped by severity.
 
-```
+**Write the report to `.claude/output/interactive-audit/YYYY-MM-DD-audit.md`** (use today's date). The report must include:
+
+```markdown
+# Interactive Wiring Audit — YYYY-MM-DD
+
+**Totals:** X BUGs, Y WARNs, Z GOODs across N seams.
+
 ## BUGs (must fix)
 | # | Seam | Finding | File:Line | Impact |
 |---|------|---------|-----------|--------|
@@ -64,10 +70,10 @@ After all agents return, consolidate findings into a single report grouped by se
 |---|------|---------|-----------|--------|
 
 ## GOODs (verified correct)
-- [seam] description
+- [seam] description (one line per GOOD)
 ```
 
-Count totals: X BUGs, Y WARNs, Z GOODs.
+Count totals: X BUGs, Y WARNs, Z GOODs. The file is gitignored (`.claude/output/` is in `.gitignore`).
 
 ### Step 4 — Recommend
 
