@@ -6,6 +6,7 @@ _clone(), to_spec/to_json round-trips, and the _build_merged /
 _render_interactive pathways.  Focuses on state that might be silently
 dropped when layering or chaining fluent methods.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,12 +23,15 @@ from ferrum.selection import selection_interval, selection_point, value
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _df():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "y": [2.0, 4.0, 1.0, 5.0, 3.0],
-        "group": ["a", "b", "a", "b", "a"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [2.0, 4.0, 1.0, 5.0, 3.0],
+            "group": ["a", "b", "a", "b", "a"],
+        }
+    )
 
 
 def _base_chart(df=None, *, sel=None, cond=None, mark="point"):
@@ -51,6 +55,7 @@ def _base_chart(df=None, *, sel=None, cond=None, mark="point"):
 # 1. Fluent chaining preserves selections: properties()
 # ---------------------------------------------------------------------------
 
+
 def test_properties_preserves_selections():
     """chart.add_selection(sel).properties(title='foo') must not drop selections."""
     sel = selection_point(fields=["group"], name="prop_sel")
@@ -63,6 +68,7 @@ def test_properties_preserves_selections():
 # ---------------------------------------------------------------------------
 # 2. Fluent chaining preserves selections: theme()
 # ---------------------------------------------------------------------------
+
 
 def test_theme_preserves_selections():
     """chart.add_selection(sel).theme(t) must not drop selections."""
@@ -77,6 +83,7 @@ def test_theme_preserves_selections():
 # 3. Fluent chaining preserves selections: encode()
 # ---------------------------------------------------------------------------
 
+
 def test_encode_preserves_selections():
     """chart.add_selection(sel).encode(color='group:N') must not drop selections."""
     sel = selection_point(fields=["group"], name="enc_sel")
@@ -90,6 +97,7 @@ def test_encode_preserves_selections():
 # 4. Fluent chaining preserves selections: coord()
 # ---------------------------------------------------------------------------
 
+
 def test_coord_preserves_selections():
     """chart.add_selection(sel).coord(CoordCartesian()) must not drop selections."""
     sel = selection_point(fields=["group"], name="coord_sel")
@@ -102,6 +110,7 @@ def test_coord_preserves_selections():
 # ---------------------------------------------------------------------------
 # 5. Fluent chaining preserves conditionals through properties/theme/encode/coord
 # ---------------------------------------------------------------------------
+
 
 def test_properties_preserves_conditionals():
     """chart.conditional(spec).properties(...) must not drop conditionals."""
@@ -144,6 +153,7 @@ def test_coord_preserves_conditionals():
 # 6. _clone() produces independent selection/conditional lists (no aliasing)
 # ---------------------------------------------------------------------------
 
+
 def test_clone_selections_are_independent():
     """Mutating the clone's _selections must not affect the original."""
     sel = selection_point(name="clone_sel")
@@ -170,13 +180,16 @@ def test_clone_conditionals_are_independent():
     cond2 = sel2.when(fm.Opacity("x")).otherwise(value(0.1))
     cloned._conditionals.append(cond2)
 
-    assert len(chart._conditionals) == 1, "original conditionals must be unchanged after clone mutation"
+    assert len(chart._conditionals) == 1, (
+        "original conditionals must be unchanged after clone mutation"
+    )
     assert len(cloned._conditionals) == 2
 
 
 # ---------------------------------------------------------------------------
 # 7. __add__ where ONLY the RHS chart has a selection
 # ---------------------------------------------------------------------------
+
 
 def test_add_only_rhs_has_selection():
     """chart_without_sel + chart_with_sel must produce a merged chart that
@@ -203,6 +216,7 @@ def test_add_only_rhs_has_conditional():
 # ---------------------------------------------------------------------------
 # 8. Triple layer: c1 + c2 + c3 with 3 different selections
 # ---------------------------------------------------------------------------
+
 
 def test_triple_layer_all_three_selections_survive():
     """(c1 + c2 + c3) where each has a distinct selection must preserve all 3."""
@@ -235,6 +249,7 @@ def test_triple_layer_all_three_conditionals_survive():
 # 9. Duplicate selection names across LHS and RHS are deduplicated
 # ---------------------------------------------------------------------------
 
+
 def test_add_duplicate_selection_names_deduplicated():
     """When LHS and RHS both have a selection with the same name, the merged
     chart should contain exactly one copy (not two)."""
@@ -251,6 +266,7 @@ def test_add_duplicate_selection_names_deduplicated():
 # ---------------------------------------------------------------------------
 # 10. Selections survive through to_spec() serialization
 # ---------------------------------------------------------------------------
+
 
 def test_selections_in_to_spec_json():
     """Selections attached to a chart must appear in the to_spec().to_json()
@@ -281,6 +297,7 @@ def test_conditionals_in_to_spec_json():
 # 11. Merged chart's to_spec includes selections from both sides
 # ---------------------------------------------------------------------------
 
+
 def test_merged_chart_to_spec_includes_both_selections():
     """(chart_a + chart_b).to_spec().to_json() must include selections from
     both sides."""
@@ -302,6 +319,7 @@ def test_merged_chart_to_spec_includes_both_selections():
 # 12. (chart1 + chart2).interactive() scene JSON contains all selections
 # ---------------------------------------------------------------------------
 
+
 def test_add_then_interactive_preserves_all_selections():
     """(chart1 + chart2).interactive() must produce scene JSON with selections
     from both charts."""
@@ -314,13 +332,18 @@ def test_add_then_interactive_preserves_all_selections():
     ic = InteractiveChart(merged)
     scene = json.loads(ic.scene_json)
     sel_names = {s["name"] for s in scene.get("selections", [])}
-    assert "int_sel_a" in sel_names, f"LHS selection missing from interactive scene; got {sel_names}"
-    assert "int_sel_b" in sel_names, f"RHS selection missing from interactive scene; got {sel_names}"
+    assert "int_sel_a" in sel_names, (
+        f"LHS selection missing from interactive scene; got {sel_names}"
+    )
+    assert "int_sel_b" in sel_names, (
+        f"RHS selection missing from interactive scene; got {sel_names}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 13. LayerChart with heterogeneous selections (point + interval on different layers)
 # ---------------------------------------------------------------------------
+
 
 def test_layer_chart_heterogeneous_selections_in_scene():
     """LayerChart where layer 1 has point and layer 2 has interval selection:
@@ -334,13 +357,18 @@ def test_layer_chart_heterogeneous_selections_in_scene():
     scene_json, _ = _render_scene(layer)
     scene = json.loads(scene_json)
     sel_names = {s["name"] for s in scene.get("selections", [])}
-    assert "hetero_pt" in sel_names, f"point selection missing from LayerChart scene; got {sel_names}"
-    assert "hetero_iv" in sel_names, f"interval selection missing from LayerChart scene; got {sel_names}"
+    assert "hetero_pt" in sel_names, (
+        f"point selection missing from LayerChart scene; got {sel_names}"
+    )
+    assert "hetero_iv" in sel_names, (
+        f"interval selection missing from LayerChart scene; got {sel_names}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 14. LayerChart with conditional on only one layer
 # ---------------------------------------------------------------------------
+
 
 def test_layer_chart_one_layer_conditional_only():
     """LayerChart where only the second layer has a conditional: it must
@@ -363,6 +391,7 @@ def test_layer_chart_one_layer_conditional_only():
 # 15. Selections survive through axis() chaining
 # ---------------------------------------------------------------------------
 
+
 def test_axis_preserves_selections():
     """chart.add_selection(sel).axis(x=False) must not drop selections."""
     sel = selection_point(name="axis_sel")
@@ -375,6 +404,7 @@ def test_axis_preserves_selections():
 # ---------------------------------------------------------------------------
 # 16. Multiple add_selection calls accumulate
 # ---------------------------------------------------------------------------
+
 
 def test_multiple_add_selection_calls_accumulate():
     """Multiple .add_selection() calls must accumulate selections, not replace."""
@@ -391,6 +421,7 @@ def test_multiple_add_selection_calls_accumulate():
 # 17. Composition .theme() preserves child selections
 # ---------------------------------------------------------------------------
 
+
 def test_hconcat_theme_preserves_child_selections():
     """(chart_a | chart_b).theme(t) must preserve selections on child charts."""
     df = _df()
@@ -401,8 +432,7 @@ def test_hconcat_theme_preserves_child_selections():
     themed = composed.theme(fm.Theme(background="#111111"))
     # The themed composition's child charts should still have the selection
     has_sel = any(
-        any(s.name == "htheme_sel" for s in getattr(c, "_selections", []))
-        for c in themed.charts
+        any(s.name == "htheme_sel" for s in getattr(c, "_selections", [])) for c in themed.charts
     )
     assert has_sel, "selections on child charts must survive composition .theme()"
 
@@ -416,8 +446,7 @@ def test_hconcat_properties_preserves_child_selections():
     composed = c1 | c2
     propped = composed.properties(width=400)
     has_sel = any(
-        any(s.name == "hprop_sel" for s in getattr(c, "_selections", []))
-        for c in propped.charts
+        any(s.name == "hprop_sel" for s in getattr(c, "_selections", [])) for c in propped.charts
     )
     assert has_sel, "selections on child charts must survive composition .properties()"
 
@@ -425,6 +454,7 @@ def test_hconcat_properties_preserves_child_selections():
 # ---------------------------------------------------------------------------
 # 18. HTML save of layered chart with selections from both layers
 # ---------------------------------------------------------------------------
+
 
 def test_layer_chart_html_contains_all_selections(tmp_path):
     """A LayerChart with selections on both layers, saved as HTML, must have
@@ -445,6 +475,7 @@ def test_layer_chart_html_contains_all_selections(tmp_path):
 # ---------------------------------------------------------------------------
 # 19. __add__ with different data preserves selections
 # ---------------------------------------------------------------------------
+
 
 def test_add_different_data_preserves_selections():
     """chart1 + chart2 with different DataFrames: selections must survive the

@@ -191,9 +191,7 @@ def test_per_chart_theme_overrides_default_in_svg():
     chart_bg = "#ffffff"
     with set_default_theme(Theme(background=default_bg)):
         svg = (
-            Chart(df).mark_point().encode(x="a", y="b")
-            .theme(Theme(background=chart_bg))
-            .show_svg()
+            Chart(df).mark_point().encode(x="a", y="b").theme(Theme(background=chart_bg)).show_svg()
         )
     assert chart_bg in svg, "Per-chart theme background must appear in SVG"
     assert default_bg not in svg, "Default theme background must be overridden"
@@ -222,11 +220,7 @@ def test_strip_text_size_reaches_rust():
     from ferrum.themes import Theme
 
     df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
-    svg = (
-        Chart(df).mark_point().encode(x="a", y="b")
-        .theme(Theme(strip_text_size=16.0))
-        .show_svg()
-    )
+    svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(strip_text_size=16.0)).show_svg()
     assert svg.startswith("<svg")
 
 
@@ -237,11 +231,7 @@ def test_strip_padding_reaches_rust():
     from ferrum.themes import Theme
 
     df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
-    svg = (
-        Chart(df).mark_point().encode(x="a", y="b")
-        .theme(Theme(strip_padding=10.0))
-        .show_svg()
-    )
+    svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(strip_padding=10.0)).show_svg()
     assert svg.startswith("<svg")
 
 
