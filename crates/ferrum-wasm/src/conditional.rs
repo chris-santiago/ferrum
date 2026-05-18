@@ -182,7 +182,7 @@ fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) ->
         FieldValue::Number { value } => tooltip_value
             .parse::<f64>()
             .ok()
-            .is_some_and(|n| (n - *value).abs() < 1e-10),
+            .is_some_and(|n| n == *value || (n - *value).abs() < 1e-10),
         FieldValue::Bool { value } => tooltip_value
             .parse::<bool>()
             .ok()
@@ -843,6 +843,559 @@ mod tests {
         assert!(
             !field_value_matches_tooltip("1.0", &FieldValue::Number { value: 2.0 }),
             "1.0 should not match 2.0"
+        );
+    }
+
+    // ── bug_hunt: field_value_matches_tooltip edge cases ─────────────────
+
+    #[test]
+    fn bug_hunt_field_value_matches_nan() {
+        // "NaN" tooltip vs FieldValue::Number{NaN}: parse("NaN") returns NaN,
+        // then (NaN - NaN).abs() is NaN which is NOT < 1e-10 -> false.
+        // This means NaN field values will never match, which is arguably
+        // correct (NaN != NaN). Verify that behavior.
+        assert!(
+            !field_value_matches_tooltip("NaN", &FieldValue::Number { value: f64::NAN }),
+            "NaN must not match NaN (NaN != NaN)"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_infinity() { // BUG: (inf - inf).abs() is NaN, not < 1e-10, so equal infinities don't match
+        // "Infinity" parses to f64::INFINITY.
+        assert!(
+            field_value_matches_tooltip("inf", &FieldValue::Number { value: f64::INFINITY }),
+            "inf tooltip must match INFINITY field value"
+        );
+        assert!(
+            field_value_matches_tooltip("-inf", &FieldValue::Number { value: f64::NEG_INFINITY }),
+            "-inf tooltip must match NEG_INFINITY field value"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_negative_zero() {
+        // -0.0 == 0.0 in f64, so they should match.
+        assert!(
+            field_value_matches_tooltip("0", &FieldValue::Number { value: -0.0_f64 }),
+            "0 tooltip must match -0.0 field value (they're equal in f64)"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_empty_string() {
+        // Empty tooltip string vs empty FieldValue::String.
+        assert!(
+            field_value_matches_tooltip("", &FieldValue::String { value: String::new() }),
+            "empty tooltip must match empty string field value"
+        );
+        // Empty tooltip vs Null: "".is_empty() is true so should match.
+        assert!(
+            field_value_matches_tooltip("", &FieldValue::Null),
+            "empty tooltip must match Null field value"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_null_keyword() {
+        // "null" string as tooltip vs FieldValue::Null.
+        assert!(
+            field_value_matches_tooltip("null", &FieldValue::Null),
+            "'null' tooltip must match Null field value"
+        );
+        // "null" vs String("null") should also match.
+        assert!(
+            field_value_matches_tooltip("null", &FieldValue::String { value: "null".to_string() }),
+            "'null' tooltip must match String('null') field value"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_bool() {
+        assert!(
+            field_value_matches_tooltip("true", &FieldValue::Bool { value: true }),
+            "'true' tooltip must match Bool(true)"
+        );
+        assert!(
+            field_value_matches_tooltip("false", &FieldValue::Bool { value: false }),
+            "'false' tooltip must match Bool(false)"
+        );
+        assert!(
+            !field_value_matches_tooltip("True", &FieldValue::Bool { value: true }),
+            "'True' (capitalized) must not match Bool(true) -- Rust parse::<bool> is case-sensitive"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_unicode() {
+        // Unicode strings must match exactly.
+        let emoji = "\u{1F600}";
+        assert!(
+            field_value_matches_tooltip(emoji, &FieldValue::String { value: emoji.to_string() }),
+            "unicode emoji must match identical string field value"
+        );
+        assert!(
+            !field_value_matches_tooltip(emoji, &FieldValue::String { value: "smiley".to_string() }),
+            "emoji must not match non-emoji string"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_numeric_string_as_string() {
+        // A tooltip value "42" compared against FieldValue::String{"42"} must
+        // match (direct string equality).
+        assert!(
+            field_value_matches_tooltip("42", &FieldValue::String { value: "42".to_string() }),
+            "'42' tooltip must match String('42') field value"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_field_value_matches_very_long_string() {
+        let long = "x".repeat(100_000);
+        assert!(
+            field_value_matches_tooltip(&long, &FieldValue::String { value: long.clone() }),
+            "very long strings must still match"
+        );
+    }
+
+    // ── bug_hunt: resolve_conditionals edge cases ────────────────────────
+
+    #[test]
+    fn bug_hunt_resolve_conditionals_nonexistent_selection_name() {
+        // A conditional referencing a selection name that doesn't exist in
+        // the selections map should be silently skipped (no panic).
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle {
+                    cx: 50.0,
+                    cy: 50.0,
+                    r: 5.0,
+                    style: style.clone(),
+                }],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "does_not_exist".to_string(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Color {
+                value: Color { r: 255, g: 0, b: 0, a: 255 },
+            },
+            if_not: EncodingValue::Color {
+                value: Color { r: 128, g: 128, b: 128, a: 255 },
+            },
+        }];
+
+        let selections = HashMap::new(); // empty -- no matching selection
+
+        let original_fill = [0.5_f32, 0.5, 0.5, 1.0];
+        let base_circles = vec![CircleInstance {
+            center: [50.0, 50.0],
+            radius: 5.0,
+            fill_color: original_fill,
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+
+        // Must not panic and must leave instances unchanged.
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+        assert_eq!(
+            result.circle_instances[0].fill_color, original_fill,
+            "non-existent selection must not alter instances"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_resolve_conditionals_no_data_indices_skips() {
+        // Batch without data_indices should be skipped (no panic).
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle {
+                    cx: 50.0,
+                    cy: 50.0,
+                    r: 5.0,
+                    style: style.clone(),
+                }],
+                data_indices: None, // <-- no data indices
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".to_string(),
+            channel: ChannelName::Opacity,
+            if_selected: EncodingValue::Opacity { value: 1.0 },
+            if_not: EncodingValue::Opacity { value: 0.2 },
+        }];
+
+        let mut selections = HashMap::new();
+        selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: Vec::new(),
+            },
+        );
+
+        let base_circles = vec![CircleInstance {
+            center: [50.0, 50.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 0.8,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+
+        // Must not panic -- batch without data_indices is skipped.
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+        assert!(
+            (result.circle_instances[0].opacity - 0.8).abs() < 0.01,
+            "batch without data_indices must not be modified"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_apply_size_to_circle_computes_radius() {
+        // Size -> radius conversion: radius = sqrt(size / PI).
+        let mut inst = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        apply_value_to_circle(
+            &mut inst,
+            &ChannelName::Size,
+            &EncodingValue::Size { value: std::f64::consts::PI * 100.0 },
+        );
+        // Expected: sqrt(PI*100 / PI) = sqrt(100) = 10
+        assert!(
+            (inst.radius - 10.0).abs() < 0.1,
+            "size PI*100 should give radius ~10, got {}",
+            inst.radius
+        );
+    }
+
+    #[test]
+    fn bug_hunt_apply_unknown_channel_is_noop() {
+        // Applying an X-channel value (not Color/Opacity/Size) to a circle
+        // should be a no-op (falls through the match).
+        let mut inst = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 0.7,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        let original_fill = inst.fill_color;
+        let original_opacity = inst.opacity;
+        let original_radius = inst.radius;
+
+        apply_value_to_circle(
+            &mut inst,
+            &ChannelName::X,
+            &EncodingValue::Opacity { value: 0.1 },
+        );
+        assert_eq!(inst.fill_color, original_fill, "X channel must not change fill");
+        assert!((inst.opacity - original_opacity).abs() < 1e-10, "X channel must not change opacity");
+        assert!((inst.radius - original_radius).abs() < 1e-10, "X channel must not change radius");
+    }
+
+    #[test]
+    fn bug_hunt_interval_selection_rect_center_containment() {
+        // Rect mark containment uses center (x + w/2, y + h/2).
+        // Verify that a rect whose corner is outside but center is inside is selected.
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Rect at x=90, y=90, w=20, h=20 -> center=(100, 100).
+        // Brush from (95, 95) to (105, 105) -- contains center (100,100).
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Rect {
+                    x: 90.0,
+                    y: 90.0,
+                    w: 20.0,
+                    h: 20.0,
+                    corner_radius: 0.0,
+                    style: style.clone(),
+                }],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "brush".to_string(),
+            channel: ChannelName::Opacity,
+            if_selected: EncodingValue::Opacity { value: 1.0 },
+            if_not: EncodingValue::Opacity { value: 0.1 },
+        }];
+
+        let mut selections = HashMap::new();
+        selections.insert(
+            "brush".to_string(),
+            SelectionState::Interval {
+                x_range: Some((95.0, 105.0)),
+                y_range: Some((95.0, 105.0)),
+            },
+        );
+
+        let base_rects = vec![RectInstance {
+            position: [90.0, 90.0],
+            size: [20.0, 20.0],
+            corner_radius: 0.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 0.5,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &[], &base_rects);
+        assert!(
+            (result.rect_instances[0].opacity - 1.0).abs() < 0.01,
+            "rect whose center is inside brush must be selected (opacity=1.0), got {}",
+            result.rect_instances[0].opacity
+        );
+    }
+
+    #[test]
+    fn bug_hunt_point_selection_no_tooltips_falls_back_to_index() {
+        // Point selection with field_values but no tooltips on the batch
+        // must fall back to index-based matching (the `unwrap_or(false)` path).
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1]),
+                tooltips: None, // <-- no tooltips
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".to_string(),
+            channel: ChannelName::Opacity,
+            if_selected: EncodingValue::Opacity { value: 1.0 },
+            if_not: EncodingValue::Opacity { value: 0.2 },
+        }];
+
+        // Point selection with field_values but batch has no tooltips.
+        // The code checks field_values.is_empty() first; since it's not empty,
+        // it tries tooltip matching which returns false (no tooltips). So the
+        // mark should be treated as NOT selected and get if_not opacity.
+        let mut selections = HashMap::new();
+        selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: vec![
+                    ("group".to_string(), FieldValue::String { value: "a".to_string() }),
+                ],
+            },
+        );
+
+        let base_circles = vec![
+            CircleInstance {
+                center: [50.0, 50.0],
+                radius: 5.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+            CircleInstance {
+                center: [150.0, 50.0],
+                radius: 5.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+        ];
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+        // When field_values are present but tooltips are missing, the mark
+        // is NOT matched by field values. So both marks get if_not = 0.2.
+        assert!(
+            (result.circle_instances[0].opacity - 0.2).abs() < 0.01,
+            "mark 0 with no tooltip must get if_not opacity (0.2), got {}",
+            result.circle_instances[0].opacity
+        );
+        assert!(
+            (result.circle_instances[1].opacity - 0.2).abs() < 0.01,
+            "mark 1 with no tooltip must get if_not opacity (0.2), got {}",
+            result.circle_instances[1].opacity
         );
     }
 }

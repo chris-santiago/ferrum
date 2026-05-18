@@ -317,6 +317,98 @@ mod bug_hunt_tests {
         assert!((bx - orig.0).abs() < 1e-8, "roundtrip x failed: got {bx}");
         assert!((by - orig.1).abs() < 1e-8, "roundtrip y failed: got {by}");
     }
+
+    // ── set_absolute → inverse_apply coordinate-space correctness ───────────
+
+    #[test]
+    fn bug_hunt_set_absolute_then_inverse_apply_recovers_scene_space() {
+        // This is the exact coordinate-space transform that handleClick
+        // must use: D3 calls setTransform(k, tx, ty), then hit_test_at
+        // uses inverse_apply to convert canvas coords to scene coords.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 3.0, 120.0, -50.0);
+        let t = &state.transforms[0];
+        // Scene point (80, 200): canvas = (3*80+120, 3*200-50) = (360, 550)
+        let (canvas_x, canvas_y) = t.apply(80.0, 200.0);
+        assert!((canvas_x - 360.0).abs() < 1e-8);
+        assert!((canvas_y - 550.0).abs() < 1e-8);
+        // Inverse must recover scene point
+        let (scene_x, scene_y) = t.inverse_apply(canvas_x, canvas_y);
+        assert!((scene_x - 80.0).abs() < 1e-8, "inverse must recover x=80");
+        assert!((scene_y - 200.0).abs() < 1e-8, "inverse must recover y=200");
+    }
+
+    #[test]
+    fn bug_hunt_set_absolute_negative_translation() {
+        // Negative translation: user pans left/up.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 1.5, -100.0, -75.0);
+        let t = &state.transforms[0];
+        let (fx, fy) = t.apply(0.0, 0.0);
+        assert!((fx - (-100.0)).abs() < 1e-8, "origin maps to tx");
+        assert!((fy - (-75.0)).abs() < 1e-8, "origin maps to ty");
+        let (bx, by) = t.inverse_apply(fx, fy);
+        assert!((bx).abs() < 1e-8, "roundtrip x must be 0");
+        assert!((by).abs() < 1e-8, "roundtrip y must be 0");
+    }
+
+    #[test]
+    fn bug_hunt_inverse_apply_with_identity_is_noop() {
+        let t = Affine2::identity();
+        let (x, y) = t.inverse_apply(42.0, 99.0);
+        assert!((x - 42.0).abs() < 1e-10, "identity inverse must not change x");
+        assert!((y - 99.0).abs() < 1e-10, "identity inverse must not change y");
+    }
+
+    #[test]
+    fn bug_hunt_set_absolute_zero_scale_clamps_to_min() {
+        // Zero scale should be clamped to zoom_range.0 (0.1).
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 0.0, 0.0, 0.0);
+        let t = &state.transforms[0];
+        assert!(t.sx >= 0.1, "zero scale must clamp to min 0.1, got {}", t.sx);
+        assert!(t.sy >= 0.1, "zero scale must clamp to min 0.1, got {}", t.sy);
+    }
+
+    #[test]
+    fn bug_hunt_set_absolute_negative_scale_clamps_to_min() {
+        // Negative scale should be clamped to zoom_range.0 (0.1).
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, -5.0, 0.0, 0.0);
+        let t = &state.transforms[0];
+        assert!(t.sx >= 0.1, "negative scale must clamp to min 0.1, got {}", t.sx);
+    }
+
+    #[test]
+    fn bug_hunt_multiple_set_absolute_last_wins() {
+        // Multiple set_absolute calls: the last one should overwrite.
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        state.set_absolute(0, 2.0, 10.0, 20.0);
+        state.set_absolute(0, 5.0, 100.0, 200.0);
+        let t = &state.transforms[0];
+        assert!((t.sx - 5.0).abs() < 1e-10);
+        assert!((t.tx - 100.0).abs() < 1e-10);
+        assert!((t.ty - 200.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn bug_hunt_tick_level_for_very_small_zoom() {
+        // Very small zoom factor (below 0.5) should map to level 0.
+        assert_eq!(tick_level_for_zoom(0.01), 0);
+        assert_eq!(tick_level_for_zoom(0.0), 0);
+    }
+
+    #[test]
+    fn bug_hunt_tick_level_for_very_large_zoom() {
+        // Very large zoom factor should map to the highest level (3).
+        assert_eq!(tick_level_for_zoom(100.0), 3);
+        assert_eq!(tick_level_for_zoom(1000.0), 3);
+    }
 }
 
 #[cfg(test)]

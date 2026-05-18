@@ -326,6 +326,11 @@ fn toggle_points(
     indices: &[usize],
     new_field_values: &[(String, FieldValue)],
 ) {
+    // Nothing to toggle — leave selection unchanged.
+    if indices.is_empty() {
+        return;
+    }
+
     // Build a HashSet from the existing indices once so all membership checks
     // below are O(1) rather than O(n) per query.
     let existing_set: HashSet<usize> = match sel {
@@ -979,6 +984,364 @@ mod tests {
         // range would be in canvas-space and the comparison would use
         // scene-space mark positions, causing a mismatch.
         assert!(!sel.contains_point(400.0, 300.0), "canvas-space point must be outside scene-space interval");
+    }
+
+    // ── bug_hunt_2: selection state machine edge cases ──────────────────
+
+    #[test]
+    fn bug_hunt_toggle_points_from_empty_with_empty_indices() { // BUG: creates Point{indices:[], field_values:[]} instead of staying Empty
+        // Toggling with empty indices from Empty must remain Empty (not create
+        // Point{indices:[], field_values:[]}).
+        let mut sel = SelectionState::Empty;
+        toggle_points(&mut sel, &[], &[]);
+        assert!(
+            matches!(sel, SelectionState::Empty),
+            "toggling empty indices from Empty must remain Empty, got {sel:?}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_toggle_points_from_point_with_empty_indices() {
+        // Toggling with empty indices from an existing Point selection:
+        // `already_all` is `!indices.is_empty() && ...` so the guard returns
+        // false for empty, hitting the else branch. But the else branch on
+        // Point should not change existing because there are no new indices
+        // to add -- it only replaces field_values.
+        let mut sel = SelectionState::Point {
+            indices: vec![1, 2],
+            field_values: vec![("k".to_string(), FieldValue::String { value: "v".to_string() })],
+        };
+        toggle_points(&mut sel, &[], &[("k2".to_string(), FieldValue::Null)]);
+        match &sel {
+            SelectionState::Point { indices, field_values } => {
+                assert_eq!(indices, &[1, 2], "existing indices must be unchanged");
+                // field_values get replaced wholesale by the new ones
+                assert_eq!(field_values.len(), 1);
+            }
+            other => panic!("expected Point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_toggle_points_duplicate_indices() {
+        // Toggling [3, 3, 3] when none are selected: should add 3 only once.
+        let mut sel = SelectionState::Empty;
+        toggle_points(&mut sel, &[3, 3, 3], &[]);
+        match &sel {
+            SelectionState::Point { indices, .. } => {
+                // Implementation converts to set internally, but the result
+                // list may or may not deduplicate. Just verify 3 is present.
+                assert!(indices.contains(&3), "index 3 must be present");
+            }
+            other => panic!("expected Point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_toggle_entire_set_then_subset() {
+        // Select [0,1,2], then toggle [0,1,2] (should go to Empty),
+        // then toggle [1] (should be Point{1}).
+        let mut sel = SelectionState::Empty;
+        toggle_points(&mut sel, &[0, 1, 2], &[]);
+        assert!(matches!(&sel, SelectionState::Point { indices, .. } if indices.len() == 3));
+
+        toggle_points(&mut sel, &[0, 1, 2], &[]);
+        assert!(matches!(sel, SelectionState::Empty), "full deselect must go to Empty");
+
+        toggle_points(&mut sel, &[1], &[]);
+        match &sel {
+            SelectionState::Point { indices, .. } => {
+                assert_eq!(indices, &[1], "re-toggle from Empty must select [1]");
+            }
+            other => panic!("expected Point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_contains_point_nan_coordinates() {
+        // NaN in interval range or query point should not produce true.
+        let sel = SelectionState::Interval {
+            x_range: Some((f64::NAN, 100.0)),
+            y_range: Some((0.0, 100.0)),
+        };
+        assert!(
+            !sel.contains_point(50.0, 50.0),
+            "NaN in x_range lo must not contain a valid point"
+        );
+
+        let sel2 = SelectionState::Interval {
+            x_range: Some((0.0, 100.0)),
+            y_range: Some((0.0, 100.0)),
+        };
+        assert!(
+            !sel2.contains_point(f64::NAN, 50.0),
+            "NaN query x must not be contained"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_contains_point_infinity() {
+        // Infinity in range should handle gracefully.
+        let sel = SelectionState::Interval {
+            x_range: Some((0.0, f64::INFINITY)),
+            y_range: Some((f64::NEG_INFINITY, 100.0)),
+        };
+        assert!(
+            sel.contains_point(1e300, 50.0),
+            "very large x should be inside [0, +inf)"
+        );
+        assert!(
+            sel.contains_point(50.0, -1e300),
+            "very negative y should be inside [-inf, 100]"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_to_json_with_field_values_special_chars() {
+        // Field values containing special JSON characters must produce valid JSON.
+        let specs = vec![point_spec("special")];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "special".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: vec![
+                    ("quote_field".to_string(), FieldValue::String { value: r#"say "hello""#.to_string() }),
+                    ("newline".to_string(), FieldValue::String { value: "line1\nline2".to_string() }),
+                    ("unicode".to_string(), FieldValue::String { value: "\u{1F600}\u{1F4A9}".to_string() }),
+                ],
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("to_json must produce valid JSON even with special chars");
+        assert_eq!(parsed["special"]["type"], "point");
+        let fv = parsed["special"]["field_values"].as_array().expect("field_values");
+        assert_eq!(fv.len(), 3);
+    }
+
+    #[test]
+    fn bug_hunt_to_json_with_large_indices() {
+        // Very large indices should serialize correctly.
+        let specs = vec![point_spec("big")];
+        let mut state = InteractionState::new(&specs);
+        let big_indices: Vec<usize> = (0..10_000).collect();
+        state.selections.insert(
+            "big".to_string(),
+            SelectionState::Point {
+                indices: big_indices,
+                field_values: Vec::new(),
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("to_json must handle large index arrays");
+        let arr = parsed["big"]["indices"].as_array().expect("indices array");
+        assert_eq!(arr.len(), 10_000);
+    }
+
+    #[test]
+    fn bug_hunt_to_json_field_value_null() {
+        // Null FieldValue must serialize as JSON null.
+        let specs = vec![point_spec("nv")];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "nv".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: vec![("f".to_string(), FieldValue::Null)],
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let fv = &parsed["nv"]["field_values"][0];
+        assert!(fv["value"].is_null(), "FieldValue::Null must serialize as JSON null");
+    }
+
+    #[test]
+    fn bug_hunt_to_json_field_value_bool() {
+        // Bool FieldValue must serialize as JSON boolean.
+        let specs = vec![point_spec("bv")];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "bv".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: vec![("flag".to_string(), FieldValue::Bool { value: true })],
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let fv = &parsed["bv"]["field_values"][0];
+        assert_eq!(fv["value"], true, "FieldValue::Bool must serialize as JSON bool");
+    }
+
+    #[test]
+    fn bug_hunt_handle_drag_zero_size_brush() {
+        // Drag with x0==x1 and y0==y1 (zero-size brush) must produce an Interval
+        // where lo == hi. This is a degenerate brush that would select nothing.
+        let specs = vec![interval_spec("z")];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&specs, 0, 100.0, 200.0, 100.0, 200.0);
+        match state.selections.get("z") {
+            Some(SelectionState::Interval { x_range: Some((lo, hi)), y_range: Some((ylo, yhi)) }) => {
+                assert!((lo - hi).abs() < 1e-10, "zero-size brush: x lo must equal hi");
+                assert!((ylo - yhi).abs() < 1e-10, "zero-size brush: y lo must equal hi");
+            }
+            other => panic!("expected Interval, got {other:?}"),
+        }
+        // A point exactly at the brush location should be contained (inclusive bounds).
+        let sel = state.selections.get("z").unwrap();
+        assert!(sel.contains_point(100.0, 200.0), "zero-size brush must contain its own location");
+    }
+
+    #[test]
+    fn bug_hunt_multiple_specs_only_matching_type_updated() {
+        // If specs contains both Point and Interval, handle_drag should only
+        // update the Interval selection, not the Point one.
+        let specs = vec![point_spec("pt"), interval_spec("iv")];
+        let mut state = InteractionState::new(&specs);
+        // Pre-seed a Point selection.
+        state.selections.insert(
+            "pt".to_string(),
+            SelectionState::Point { indices: vec![42], field_values: Vec::new() },
+        );
+        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        // Point selection must be untouched.
+        match state.selections.get("pt") {
+            Some(SelectionState::Point { indices, .. }) => {
+                assert_eq!(indices, &[42], "handle_drag must not modify Point selection");
+            }
+            other => panic!("Point selection was modified by handle_drag: {other:?}"),
+        }
+        // Interval selection must be updated.
+        assert!(matches!(
+            state.selections.get("iv"),
+            Some(SelectionState::Interval { x_range: Some(_), .. })
+        ));
+    }
+
+    // ── bug_hunt: additional edge cases for wasm-renderer-api ─────────────
+
+    #[test]
+    fn bug_hunt_contains_point_on_exact_boundary_hi() {
+        // Point exactly on the hi boundary must be contained (inclusive).
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(sel.contains_point(50.0, 60.0), "hi boundary must be inclusive");
+        assert!(sel.contains_point(50.0, 20.0), "x-hi, y-lo boundary must be inclusive");
+    }
+
+    #[test]
+    fn bug_hunt_contains_point_just_outside_boundary() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(!sel.contains_point(50.001, 40.0), "just outside x-hi must not contain");
+        assert!(!sel.contains_point(30.0, 60.001), "just outside y-hi must not contain");
+        assert!(!sel.contains_point(9.999, 40.0), "just outside x-lo must not contain");
+    }
+
+    #[test]
+    fn bug_hunt_handle_drag_zero_area_brush() {
+        // Dragging from a point to the same point produces a zero-area brush.
+        // This should not panic, and the selection should still be Interval.
+        let specs = vec![interval_spec("b")];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&specs, 0, 100.0, 100.0, 100.0, 100.0);
+        match state.selections.get("b") {
+            Some(SelectionState::Interval { x_range: Some((lo, hi)), .. }) => {
+                assert!((lo - hi).abs() < 1e-10, "zero-area brush must have lo == hi");
+            }
+            other => panic!("expected Interval; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_hunt_contains_point_zero_area_brush_contains_only_exact_point() {
+        // A zero-area interval should contain only the exact point.
+        let sel = SelectionState::Interval {
+            x_range: Some((100.0, 100.0)),
+            y_range: Some((100.0, 100.0)),
+        };
+        assert!(sel.contains_point(100.0, 100.0), "exact point must be contained");
+        assert!(!sel.contains_point(100.001, 100.0), "nearby point must not be contained");
+    }
+
+    #[test]
+    fn bug_hunt_handle_drag_ignores_point_specs() {
+        // handle_drag should only update interval specs, not point specs.
+        let specs = vec![point_spec("p"), interval_spec("b")];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        // Point selection must remain Empty
+        assert!(
+            matches!(state.selections.get("p"), Some(SelectionState::Empty)),
+            "handle_drag must not modify point selection"
+        );
+        // Interval selection must be updated
+        assert!(
+            matches!(state.selections.get("b"), Some(SelectionState::Interval { .. })),
+            "handle_drag must update interval selection"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_selection_state_contains_interval_always_false() {
+        // SelectionState::contains(data_idx) returns false for Interval.
+        // Interval uses spatial containment (contains_point), not index lookup.
+        let sel = SelectionState::Interval {
+            x_range: Some((0.0, 1000.0)),
+            y_range: Some((0.0, 1000.0)),
+        };
+        assert!(!sel.contains(0), "Interval.contains(data_idx) must be false");
+        assert!(!sel.contains(999), "Interval.contains(data_idx) must be false");
+    }
+
+    #[test]
+    fn bug_hunt_to_json_with_mixed_selections_valid() {
+        // Both a point and interval selection produce valid combined JSON.
+        let specs = vec![point_spec("pt"), interval_spec("iv")];
+        let mut state = InteractionState::new(&specs);
+        state.selections.insert(
+            "pt".to_string(),
+            SelectionState::Point {
+                indices: vec![1, 2],
+                field_values: Vec::new(),
+            },
+        );
+        state.selections.insert(
+            "iv".to_string(),
+            SelectionState::Interval {
+                x_range: Some((10.0, 200.0)),
+                y_range: None,
+            },
+        );
+        let json_str = state.to_json();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("mixed selections JSON must parse");
+        assert_eq!(parsed["pt"]["type"], "point");
+        assert_eq!(parsed["iv"]["type"], "interval");
+        assert!(parsed["iv"]["y_range"].is_null(), "y_range=None should serialize to null");
+    }
+
+    #[test]
+    fn bug_hunt_toggle_empty_indices_is_noop() {
+        // Toggling with an empty indices slice must not change the state.
+        let mut sel = SelectionState::Point {
+            indices: vec![1, 2, 3],
+            field_values: Vec::new(),
+        };
+        toggle_points(&mut sel, &[], &[]);
+        match &sel {
+            SelectionState::Point { indices, .. } => {
+                assert_eq!(indices, &[1, 2, 3], "empty toggle must not change indices");
+            }
+            _ => panic!("state type must not change"),
+        }
     }
 
     // Test 5: handle_click with fields populates field_values.

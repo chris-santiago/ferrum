@@ -1654,6 +1654,18 @@ def _offset_node(node: dict, dx: float, dy: float) -> None:
             for ykey in ("y", "cy", "c1y", "c2y"):
                 if ykey in cmd:
                     cmd[ykey] = cmd[ykey] + dy
+    elif t == "image":
+        node["x"] = node.get("x", 0) + dx
+        node["y"] = node.get("y", 0) + dy
+    elif t == "polygon":
+        for ring in node.get("rings", []):
+            for pt in ring:
+                pt[0] += dx
+                pt[1] += dy
+    elif t == "polyline":
+        for pt in node.get("points", []):
+            pt[0] += dx
+            pt[1] += dy
     elif t == "group":
         for child in node.get("children", []):
             _offset_node(child, dx, dy)

@@ -129,7 +129,11 @@ def _background_css_from_dict(scene: dict) -> str:
     """Extract a CSS background color from a parsed scene dict, defaulting to white."""
     bg = scene.get("background")
     if bg:
-        return f"rgba({bg['r']},{bg['g']},{bg['b']},{bg['a'] / 255.0})"
+        r = bg.get("r", 0)
+        g = bg.get("g", 0)
+        b = bg.get("b", 0)
+        a = bg.get("a", 255)
+        return f"rgba({r},{g},{b},{a / 255.0})"
     return "#ffffff"
 
 

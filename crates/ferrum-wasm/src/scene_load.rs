@@ -2166,4 +2166,165 @@ mod tests {
             r#"{"fields":[{"name":"label","value":"say \"hello\""}]}"#,
         );
     }
+
+    // ── bug_hunt: srgb_to_linear boundary and extreme values ─────────────
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_negative_input() {
+        // Negative input: the sRGB spec doesn't define this, but the function
+        // should not panic and should return a negative or zero value.
+        let result = srgb_to_linear(-0.5);
+        assert!(result.is_finite(), "srgb_to_linear(-0.5) must be finite");
+    }
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_above_one() {
+        // Input > 1.0: out-of-spec but should not panic.
+        let result = srgb_to_linear(1.5);
+        assert!(result.is_finite(), "srgb_to_linear(1.5) must be finite");
+        assert!(result > 1.0, "srgb_to_linear(1.5) must be > 1.0");
+    }
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_at_knee_point() {
+        // The knee point is at 0.04045 where the two branches meet.
+        // Both branches should produce the same value (continuity).
+        let below = srgb_to_linear(0.04045);
+        let above = srgb_to_linear(0.04046);
+        // The two branches should produce nearly the same value at the knee.
+        assert!(
+            (below - above).abs() < 0.001,
+            "srgb_to_linear must be continuous at knee: below={below}, above={above}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_full_white() {
+        let white = Color { r: 255, g: 255, b: 255, a: 255 };
+        let result = color_to_linear(&white, 1.0);
+        assert!((result[0] - 1.0).abs() < 1e-5, "white r must be ~1.0 linear");
+        assert!((result[1] - 1.0).abs() < 1e-5, "white g must be ~1.0 linear");
+        assert!((result[2] - 1.0).abs() < 1e-5, "white b must be ~1.0 linear");
+        assert!((result[3] - 1.0).abs() < 1e-5, "white a must be ~1.0");
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_full_black() {
+        let black = Color { r: 0, g: 0, b: 0, a: 255 };
+        let result = color_to_linear(&black, 1.0);
+        assert!(result[0].abs() < 1e-7, "black r must be ~0.0 linear");
+        assert!(result[1].abs() < 1e-7, "black g must be ~0.0 linear");
+        assert!(result[2].abs() < 1e-7, "black b must be ~0.0 linear");
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_opacity_scales_alpha() {
+        let color = Color { r: 128, g: 128, b: 128, a: 128 };
+        let result = color_to_linear(&color, 0.5);
+        // a = (128/255) * 0.5 = ~0.251
+        let expected_a = (128.0 / 255.0) * 0.5;
+        assert!(
+            (result[3] - expected_a).abs() < 0.01,
+            "alpha must combine color alpha with opacity: expected ~{expected_a}, got {}",
+            result[3]
+        );
+    }
+
+    // ── bug_hunt: parse_tooltip_json edge cases ─────────────────────────────
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_truncated_field_name() {
+        // Header says 1 field, but the string length exceeds the buffer.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // num_fields = 1
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // string length = 100 (but buffer is short)
+        bytes.extend_from_slice(b"short");
+        let result = parse_tooltip_json(&bytes, 0);
+        assert_eq!(result, "{}", "truncated field name must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_zero_fields() {
+        // num_fields = 0 must return empty JSON.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let result = parse_tooltip_json(&bytes, 0);
+        assert_eq!(result, "{}", "zero fields must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_row_idx_exactly_at_count() {
+        // 2 rows, requesting row 2 (out of bounds)
+        let bytes = build_tooltip_bytes(
+            &["x"],
+            &[vec!["1"], vec!["2"]],
+        );
+        let result = parse_tooltip_json(&bytes, 2);
+        assert_eq!(result, "{}", "row_idx == count must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_large_row_idx() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["val"]]);
+        let result = parse_tooltip_json(&bytes, 999999);
+        assert_eq!(result, "{}", "very large row_idx must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_utf8_content() {
+        // Unicode content in field names and values
+        let bytes = build_tooltip_bytes(
+            &["name"],
+            &[vec!["hello world"]],
+        );
+        let result = parse_tooltip_json(&bytes, 0);
+        assert!(result.contains("hello world"), "ASCII content must appear in JSON");
+    }
+
+    // ── bug_hunt: unpack_binary_instances edge cases ─────────────────────────
+
+    #[test]
+    fn bug_hunt_unpack_empty_data_is_noop() {
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&[], &mut circles, &mut rects, &mut meta);
+        assert!(circles.is_empty());
+        assert!(rects.is_empty());
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn bug_hunt_unpack_unknown_kind_stops_parsing() {
+        // kind=99 is unknown; parser should stop at this batch.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());  // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes());  // batch_idx
+        buf.extend_from_slice(&99u32.to_le_bytes()); // kind = unknown
+        buf.extend_from_slice(&1u32.to_le_bytes());  // count = 1
+        buf.extend_from_slice(&0u32.to_le_bytes());  // flags
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&buf, &mut circles, &mut rects, &mut meta);
+        assert!(circles.is_empty(), "unknown kind must not produce circles");
+        assert!(rects.is_empty(), "unknown kind must not produce rects");
+    }
+
+    #[test]
+    fn bug_hunt_load_scene_empty_scenegraph() {
+        use ferrum_scene::{InteractionConfig, SceneGraph};
+        let scene = SceneGraph {
+            width: 100.0, height: 100.0, background: None, title: vec![],
+            panels: vec![], legend: vec![], decorations: vec![],
+            selections: vec![], interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+        let data = load_scene(&scene);
+        assert!(data.circle_instances.is_empty());
+        assert!(data.rect_instances.is_empty());
+        assert!(data.text_elements.is_empty());
+        assert!((data.width - 100.0).abs() < 1e-3);
+        assert!((data.height - 100.0).abs() < 1e-3);
+    }
 }
