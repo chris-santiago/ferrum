@@ -6,6 +6,36 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.9.1
+
+*2026-05-18*
+
+### Added
+
+- Auto-inject selection fields into tooltip for cross-panel linking
+- D3 interaction layer, SVG text rendering, and cross-panel linked selection
+- Interactive HTML export with interval selection, composition support, and adapter pattern
+- Nox `docs` session for docs site build verification
+
+### Fixed
+
+- Resolve 13 scene-pipeline audit findings across all 4 stages
+- Include tooltip field names in SVG output and escape Group attrs
+- Wire `strip_text_size` and `strip_padding` theme keys end-to-end
+- Resolve 4 PyO3 binding audit findings (B1, B2, W1, W4)
+- Bug-hunt across 5 interactive subsystems — 189 tests, 7 bugs fixed
+- Resolve 9 wiring-audit findings in interactive HTML export (B1-B5, W1, W3, W6, W8)
+- Deduplicate and harden interactive HTML export pipeline (Rust + Python)
+- Eagerly populate `LAYER_NAME_CATALOG` from all mark modules
+- Embed Inter font in shared CSS for Jupyter and HTML export
+- sRGB-to-linear color conversion for correct GPU rendering
+- Rebuild WASM artifacts with B4 `startTransition` fix
+
+### Changed
+
+- Rename audit skills/agents to prefix pattern (`audit-*`, `auditor-*`)
+- Docs site: add classification meta tags, update author metadata, plain display names for API nav
+
 ## 0.9.0
 
 *2026-05-17*

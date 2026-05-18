@@ -249,7 +249,7 @@ from ferrum.encoding import (
     FacetCol,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 
 def hconcat(*charts, spacing=10.0):
