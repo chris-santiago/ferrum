@@ -25,6 +25,23 @@ impl SelectionState {
             Self::Interval { .. } => false,
         }
     }
+
+    /// Returns `true` if the given screen-space point falls within this
+    /// selection's spatial extent.
+    ///
+    /// For `Interval` selections, a `None` range on either axis means that
+    /// dimension is unconstrained (always in range). Boundaries are inclusive.
+    pub fn contains_point(&self, x: f64, y: f64) -> bool {
+        match self {
+            Self::Empty => false,
+            Self::Point { .. } => false, // point selections don't use spatial containment
+            Self::Interval { x_range, y_range } => {
+                let in_x = x_range.is_none_or(|(lo, hi)| x >= lo && x <= hi);
+                let in_y = y_range.is_none_or(|(lo, hi)| y >= lo && y <= hi);
+                in_x && in_y
+            }
+        }
+    }
 }
 
 pub struct InteractionState {
@@ -55,6 +72,7 @@ impl InteractionState {
         x: f64,
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
+        shift_held: bool,
     ) {
         let hit = hit_test::hit_test(panels, x, y, zoom);
 
@@ -74,10 +92,11 @@ impl InteractionState {
                                 } else {
                                     vec![data_idx]
                                 };
-                                let is_toggle = matches!(
-                                    toggle,
-                                    ferrum_scene::EventExpr::ShiftKey
-                                );
+                                let is_toggle = shift_held
+                                    && matches!(
+                                        toggle,
+                                        ferrum_scene::EventExpr::ShiftKey
+                                    );
                                 if is_toggle {
                                     toggle_points(sel, &indices);
                                 } else {
@@ -311,15 +330,15 @@ mod tests {
             indices: vec![0],
             field_values: Vec::new(),
         };
-        toggle_point(&mut sel, 1);
+        toggle_points(&mut sel, &[1]);
         if let SelectionState::Point { indices, .. } = &sel {
             assert_eq!(indices, &[0, 1]);
         }
-        toggle_point(&mut sel, 0);
+        toggle_points(&mut sel, &[0]);
         if let SelectionState::Point { indices, .. } = &sel {
             assert_eq!(indices, &[1]);
         }
-        toggle_point(&mut sel, 1);
+        toggle_points(&mut sel, &[1]);
         assert!(matches!(sel, SelectionState::Empty));
     }
 
@@ -336,7 +355,7 @@ mod tests {
         );
         // Click on empty panels (no marks) — simulates a background click.
         let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
-        state.handle_click(&[], &specs, 50.0, 50.0, &zoom);
+        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false);
         assert!(
             matches!(state.selections.get("sel1"), Some(SelectionState::Empty)),
             "background click must deselect to Empty"
@@ -348,7 +367,7 @@ mod tests {
         let specs = vec![point_spec("s")];
         let mut state = InteractionState::new(&specs);
         let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
-        state.handle_click(&[], &specs, 0.0, 0.0, &zoom);
+        state.handle_click(&[], &specs, 0.0, 0.0, &zoom, false);
         assert!(matches!(state.selections.get("s"), Some(SelectionState::Empty)));
     }
 
@@ -503,4 +522,215 @@ mod tests {
         assert!(!sel.contains(0));
         assert!(!sel.contains(100));
     }
+
+    // ── R1–R6: regression tests for interval/brush selection ────────────────
+
+    fn interval_spec(name: &str) -> SelectionSpec {
+        SelectionSpec::Interval {
+            name: name.to_string(),
+            fields: None,
+            encodings: None,
+            translate: true,
+            zoom: true,
+            mark: None,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }
+    }
+
+    fn shift_toggle_point_spec(name: &str) -> SelectionSpec {
+        SelectionSpec::Point {
+            name: name.to_string(),
+            fields: Some(vec![]),
+            encodings: None,
+            nearest: false,
+            toggle: ferrum_scene::EventExpr::ShiftKey,
+            on: ferrum_scene::EventExpr::Click,
+            clear: ferrum_scene::EventExpr::Mouseout,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }
+    }
+
+    // R1: handle_drag updates interval selection state.
+    #[test]
+    fn r1_handle_drag_updates_interval_selection() {
+        let specs = vec![interval_spec("brush")];
+        let mut state = InteractionState::new(&specs);
+        state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
+        match state.selections.get("brush") {
+            Some(SelectionState::Interval {
+                x_range: Some((x_lo, x_hi)),
+                y_range: Some((y_lo, y_hi)),
+            }) => {
+                assert!(
+                    (x_lo - 10.0).abs() < 1e-10 && (x_hi - 50.0).abs() < 1e-10,
+                    "x_range must be (10.0, 50.0), got ({x_lo}, {x_hi})"
+                );
+                assert!(
+                    (y_lo - 20.0).abs() < 1e-10 && (y_hi - 60.0).abs() < 1e-10,
+                    "y_range must be (20.0, 60.0), got ({y_lo}, {y_hi})"
+                );
+            }
+            other => panic!("expected Interval with both ranges, got {other:?}"),
+        }
+    }
+
+    // R2: Interval contains_point spatial resolution.
+
+    // Outside x — should return false even with the stub.
+    #[test]
+    fn r2_contains_point_outside_x() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(
+            !sel.contains_point(5.0, 40.0),
+            "point outside x_range must not be contained"
+        );
+    }
+
+    // Outside y — should return false even with the stub.
+    #[test]
+    fn r2_contains_point_outside_y() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(
+            !sel.contains_point(30.0, 70.0),
+            "point outside y_range must not be contained"
+        );
+    }
+
+    // Inside — contains_point now implemented.
+    #[test]
+    fn r2_contains_point_inside() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(
+            sel.contains_point(30.0, 40.0),
+            "point inside interval must be contained"
+        );
+    }
+
+    // On boundary — contains_point now implemented with inclusive bounds.
+    #[test]
+    fn r2_contains_point_on_boundary() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: Some((20.0, 60.0)),
+        };
+        assert!(
+            sel.contains_point(10.0, 20.0),
+            "point on boundary (lo, lo) must be contained (inclusive)"
+        );
+    }
+
+    // R4: Point selection shift-click toggle semantics.
+    #[test]
+    fn r4_point_selection_shift_click_toggle() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
+        let specs = vec![shift_toggle_point_spec("sel")];
+        let mut state = InteractionState::new(&specs);
+
+        let style = FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![ferrum_scene::SceneNode::Circle {
+                    cx: 100.0,
+                    cy: 100.0,
+                    r: 10.0,
+                    style: style.clone(),
+                }],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+        let zoom = crate::zoom_pan::ZoomPanState::new(
+            1,
+            &ferrum_scene::InteractionConfig::default(),
+        );
+
+        // First click on mark with shift held — should select index 0.
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true);
+        match state.selections.get("sel") {
+            Some(SelectionState::Point { indices, .. }) => {
+                assert!(
+                    indices.contains(&0),
+                    "first click must select index 0, got {indices:?}"
+                );
+            }
+            other => panic!("expected Point selection after first click, got {other:?}"),
+        }
+
+        // Second click on same mark with shift held — toggle=ShiftKey means deselect.
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true);
+        assert!(
+            matches!(
+                state.selections.get("sel"),
+                Some(SelectionState::Empty)
+            ),
+            "second click on same mark must toggle to Empty"
+        );
+    }
+
+    // R5: handle_click with empty panels returns Empty selection.
+    #[test]
+    fn r5_handle_click_empty_panels_gives_empty_selection() {
+        let specs = vec![point_spec("sel")];
+        let mut state = InteractionState::new(&specs);
+        // Pre-seed a selection to verify it gets cleared.
+        state.selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![42],
+                field_values: Vec::new(),
+            },
+        );
+        let zoom = crate::zoom_pan::ZoomPanState::new(
+            0,
+            &ferrum_scene::InteractionConfig::default(),
+        );
+        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false);
+        assert!(
+            matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
+            "click with empty panels must produce Empty selection"
+        );
+    }
+
+    // R6: Skipped — already covered by bug_hunt_to_json_produces_valid_json_for_interval_selection.
 }

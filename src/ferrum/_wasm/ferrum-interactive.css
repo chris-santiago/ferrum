@@ -39,3 +39,9 @@
   font-weight: bold;
   text-align: right;
 }
+
+.ferrum-brush {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+}

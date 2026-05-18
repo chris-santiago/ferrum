@@ -26,6 +26,18 @@ class _ChartLike:
     def show_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement show_svg")
 
+    def interactive(self):
+        """Return an interactive rendering of this composition.
+
+        Returns
+        -------
+        InteractiveChart
+            An interactive widget/container backed by the WASM renderer.
+        """
+        from ferrum._interactive import InteractiveChart
+
+        return InteractiveChart(self)
+
     # Subclasses provide ``charts`` as either an instance attribute
     # (symmetric containers — HConcat / VConcat) or as a ``@property``
     # (asymmetric containers — Joint / Repeat / ClusterMap, where the
@@ -76,13 +88,13 @@ class _ChartLike:
             Destination file path.  The extension determines the format when
             *format* is omitted.
         format : str, optional
-            ``"svg"`` or ``"png"``.  Other formats raise
+            ``"svg"``, ``"png"``, or ``"html"``.  Other formats raise
             ``NotImplementedError``.
 
         Raises
         ------
         NotImplementedError
-            If *format* is not ``"svg"`` or ``"png"``.
+            If *format* is not ``"svg"``, ``"png"``, or ``"html"``.
         """
         dest = Path(path)
         fmt = format or dest.suffix.lstrip(".")
@@ -90,9 +102,13 @@ class _ChartLike:
             dest.write_text(self.show_svg(), encoding="utf-8")
         elif fmt == "png":
             dest.write_bytes(self.show_png())
+        elif fmt == "html":
+            ic = self.interactive()
+            ic.save(str(dest), **kwargs)
         else:
             raise NotImplementedError(
-                f"format={fmt!r} is not supported for {type(self).__name__}; use 'svg' or 'png'."
+                f"format={fmt!r} is not supported for {type(self).__name__}; "
+                "use 'svg', 'png', or 'html'."
             )
 
     def share_scale(self, **channels):
@@ -239,6 +255,10 @@ class HConcatChart(_CompositeBase):
     >>> combined.save("side_by_side.svg")
     """
 
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes horizontally."""
+        return _merge_child_scenes(self.charts, self.spacing, layout="horizontal")
+
     def show_svg(self) -> str:
         """Render the horizontally concatenated charts to an SVG string.
 
@@ -276,6 +296,10 @@ class VConcatChart(_CompositeBase):
     >>> stacked = fm.Chart(df).encode(x="hp", y="mpg").mark_point() & fm.Chart(df).encode(x="hp").mark_histogram()
     >>> stacked.save("stacked.svg")
     """
+
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes vertically."""
+        return _merge_child_scenes(self.charts, self.spacing, layout="vertical")
 
     def show_svg(self) -> str:
         """Render the vertically concatenated charts to an SVG string.
@@ -418,6 +442,22 @@ class JointChart(_ChartLike):
             ratio=self.ratio,
             spacing=self.spacing,
         )
+
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes in a grid layout."""
+        from ferrum._interactive import _render_scene
+
+        # Render the center chart; merge with marginals if present.
+        children = [self.center]
+        if self.top is not None:
+            children.append(self.top)
+        if self.right is not None:
+            children.append(self.right)
+        # For JointChart the center is the primary panel; render it directly
+        # when marginals are absent, otherwise merge all children horizontally.
+        if len(children) == 1:
+            return _render_scene(self.center)
+        return _merge_child_scenes(children, self.spacing, layout="horizontal")
 
     def show_svg(self) -> str:
         """Render the joint chart to an SVG string.
@@ -818,6 +858,16 @@ class RepeatChart(_ChartLike):
             resolve=merged or None,
         )
 
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by expanding cells and merging scenes."""
+        cells = self.expand()
+        expanded_charts = [chart for _, _, chart in cells]
+        if self.row is not None and self.column is not None:
+            n_cols = len(self.column)
+        else:
+            n_cols, _ = self._wrap_dimensions(len(expanded_charts))
+        return _merge_child_scenes_grid(expanded_charts, self.spacing, columns=n_cols)
+
     def show_svg(self) -> str:
         """Render the repeated grid to an SVG string.
 
@@ -1006,6 +1056,19 @@ class ClusterMapChart(_ChartLike):
             spacing=self.spacing,
         )
 
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes."""
+        children = [self.heatmap]
+        if self.row_dendrogram is not None:
+            children.append(self.row_dendrogram)
+        if self.col_dendrogram is not None:
+            children.append(self.col_dendrogram)
+        if len(children) == 1:
+            from ferrum._interactive import _render_scene
+
+            return _render_scene(self.heatmap)
+        return _merge_child_scenes(children, self.spacing, layout="horizontal")
+
     def show_svg(self) -> str:
         """Render the cluster map to an SVG string.
 
@@ -1138,6 +1201,13 @@ class LayerChart(_ChartLike):
         """List of Chart : All member charts in layer order (bottom to top)."""
         return list(self._charts)
 
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) via the merged multi-layer Chart."""
+        from ferrum._interactive import _render_scene
+
+        merged = self._build_merged()
+        return _render_scene(merged)
+
     def show_svg(self) -> str:
         """Render the layered charts to an SVG string.
 
@@ -1253,6 +1323,13 @@ class ConcatChart(_CompositeBase):
         """Number of columns in the wrapping grid, or None for single-row."""
         return self._columns
 
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes in a grid."""
+        render_charts = self._resolved_charts()
+        n_cols = self._columns if self._columns is not None else len(render_charts)
+        n_cols = min(n_cols, len(render_charts))
+        return _merge_child_scenes_grid(render_charts, self.spacing, columns=n_cols)
+
     def show_svg(self) -> str:
         """Render the concatenated charts to an SVG string.
 
@@ -1313,6 +1390,290 @@ class ConcatChart(_CompositeBase):
         """Return a short developer-readable description."""
         n = len(self.charts)
         return f"ConcatChart({n} chart{'s' if n != 1 else ''}, columns={self._columns})"
+
+
+# ---------------------------------------------------------------------------
+# Interactive scene-merging helpers (composition → WASM renderer)
+# ---------------------------------------------------------------------------
+
+
+def _merge_child_scenes(
+    charts: list,
+    spacing: float,
+    layout: str = "horizontal",
+) -> tuple[str, bytes]:
+    """Render each child chart and merge their scene JSONs.
+
+    Parameters
+    ----------
+    charts : list
+        Child charts to render.
+    spacing : float
+        Pixel gap between charts.
+    layout : ``"horizontal"`` or ``"vertical"``
+
+    Returns
+    -------
+    tuple[str, bytes]
+        ``(merged_scene_json, merged_packed_data)``
+    """
+    from ferrum._interactive import _render_scene
+
+    child_scenes = []
+    child_packed = []
+    for chart in charts:
+        scene_json, packed = _render_scene(chart)
+        child_scenes.append(_json.loads(scene_json))
+        child_packed.append(packed)
+
+    if not child_scenes:
+        return '{"panels":[],"width":0,"height":0}', b""
+
+    merged = _empty_scene()
+    x_offset = 0.0
+    y_offset = 0.0
+    panel_id_offset = 0
+
+    for scene in child_scenes:
+        dx = x_offset if layout == "horizontal" else 0.0
+        dy = y_offset if layout == "vertical" else 0.0
+        _merge_scene_panels(merged, scene, dx, dy, panel_id_offset)
+        panel_id_offset += len(scene.get("panels", []))
+
+        merged["selections"].extend(scene.get("selections", []))
+        child_interaction = scene.get("interaction", {})
+        merged["interaction"]["conditionals"].extend(
+            child_interaction.get("conditionals", [])
+        )
+        for tl in child_interaction.get("tick_levels", []):
+            tl_copy = dict(tl)
+            tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
+            merged["interaction"]["tick_levels"].append(tl_copy)
+        if merged["background"] is None and scene.get("background"):
+            merged["background"] = scene["background"]
+
+        # Offset and merge title, legend, and decoration nodes.
+        import copy
+        for node in scene.get("title", []):
+            n = copy.deepcopy(node)
+            _offset_node(n, dx, dy)
+            merged["title"].append(n)
+        for node in scene.get("legend", []):
+            n = copy.deepcopy(node)
+            _offset_node(n, dx, dy)
+            merged["legend"].append(n)
+        for node in scene.get("decorations", []):
+            n = copy.deepcopy(node)
+            _offset_node(n, dx, dy)
+            merged["decorations"].append(n)
+
+        w = scene.get("width", 0)
+        h = scene.get("height", 0)
+        if layout == "horizontal":
+            x_offset += w + spacing
+            merged["width"] = x_offset - spacing
+            merged["height"] = max(merged["height"], h)
+        else:
+            y_offset += h + spacing
+            merged["height"] = y_offset - spacing
+            merged["width"] = max(merged["width"], w)
+
+    merged_packed = _merge_packed_data(child_packed)
+    return _json.dumps(merged), merged_packed
+
+
+def _merge_child_scenes_grid(
+    charts: list,
+    spacing: float,
+    columns: int,
+) -> tuple[str, bytes]:
+    """Render child charts in a wrapping grid layout.
+
+    Arranges charts left-to-right, wrapping to the next row after
+    *columns* charts.  Each row is merged horizontally, then rows
+    are merged vertically.
+
+    Parameters
+    ----------
+    charts : list
+        Child charts to render.
+    spacing : float
+        Pixel gap between charts.
+    columns : int
+        Number of columns before wrapping.
+
+    Returns
+    -------
+    tuple[str, bytes]
+        ``(merged_scene_json, merged_packed_data)``
+    """
+    from ferrum._interactive import _render_scene
+
+    if not charts:
+        return '{"panels":[],"width":0,"height":0}', b""
+
+    columns = max(1, columns)
+
+    # Render all children up front.
+    rendered: list[tuple[dict, bytes]] = []
+    for chart in charts:
+        scene_json, packed = _render_scene(chart)
+        rendered.append((_json.loads(scene_json), packed))
+
+    # Partition into rows.
+    rows: list[list[tuple[dict, bytes]]] = []
+    for i in range(0, len(rendered), columns):
+        rows.append(rendered[i : i + columns])
+
+    # Merge each row horizontally, then merge rows vertically.
+    merged = _empty_scene()
+    y_offset = 0.0
+    panel_id_offset = 0
+
+    for row in rows:
+        row_width = 0.0
+        row_height = 0.0
+        x_offset = 0.0
+
+        for scene, packed in row:
+            _merge_scene_panels(merged, scene, x_offset, y_offset, panel_id_offset)
+            n_panels = len(scene.get("panels", []))
+            merged["selections"].extend(scene.get("selections", []))
+            child_interaction = scene.get("interaction", {})
+            merged["interaction"]["conditionals"].extend(
+                child_interaction.get("conditionals", [])
+            )
+            for tl in child_interaction.get("tick_levels", []):
+                tl_copy = dict(tl)
+                tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
+                merged["interaction"]["tick_levels"].append(tl_copy)
+            panel_id_offset += n_panels
+            if merged["background"] is None and scene.get("background"):
+                merged["background"] = scene["background"]
+            import copy
+            for node in scene.get("title", []):
+                n = copy.deepcopy(node)
+                _offset_node(n, x_offset, y_offset)
+                merged["title"].append(n)
+            for node in scene.get("legend", []):
+                n = copy.deepcopy(node)
+                _offset_node(n, x_offset, y_offset)
+                merged["legend"].append(n)
+            for node in scene.get("decorations", []):
+                n = copy.deepcopy(node)
+                _offset_node(n, x_offset, y_offset)
+                merged["decorations"].append(n)
+
+            w = scene.get("width", 0)
+            h = scene.get("height", 0)
+            x_offset += w + spacing
+            row_width = x_offset - spacing
+            row_height = max(row_height, h)
+
+        merged["width"] = max(merged["width"], row_width)
+        y_offset += row_height + spacing
+
+    merged["height"] = y_offset - spacing
+
+    all_packed = [p for _, p in rendered]
+    merged_packed = _merge_packed_data(all_packed)
+    return _json.dumps(merged), merged_packed
+
+
+def _empty_scene() -> dict:
+    """Return a skeleton scene dict for merging."""
+    return {
+        "width": 0,
+        "height": 0,
+        "background": None,
+        "title": [],
+        "panels": [],
+        "legend": [],
+        "decorations": [],
+        "selections": [],
+        "interaction": {
+            "zoom_enabled": True,
+            "pan_enabled": True,
+            "conditionals": [],
+            "linked_panels": [],
+            "tick_levels": [],
+        },
+    }
+
+
+def _merge_scene_panels(
+    merged: dict,
+    scene: dict,
+    dx: float,
+    dy: float,
+    panel_id_offset: int,
+) -> None:
+    """Offset and append panels from *scene* into *merged*."""
+    for panel in scene.get("panels", []):
+        panel["id"] = panel.get("id", 0) + panel_id_offset
+
+        for area_key in ("plot_area", "clip"):
+            area = panel.get(area_key, {})
+            area["x"] = area.get("x", 0) + dx
+            area["y"] = area.get("y", 0) + dy
+
+        for batch in panel.get("marks", []):
+            for node in batch.get("nodes", []):
+                _offset_node(node, dx, dy)
+        for node in panel.get("axes", []):
+            _offset_node(node, dx, dy)
+        for node in panel.get("grid", []):
+            _offset_node(node, dx, dy)
+        for node in panel.get("annotations", []):
+            _offset_node(node, dx, dy)
+
+        merged["panels"].append(panel)
+
+
+def _offset_node(node: dict, dx: float, dy: float) -> None:
+    """Offset a scene node's position by ``(dx, dy)``."""
+    if dx == 0.0 and dy == 0.0:
+        return
+    t = node.get("type")
+    if t == "circle":
+        node["cx"] = node.get("cx", 0) + dx
+        node["cy"] = node.get("cy", 0) + dy
+    elif t == "rect":
+        node["x"] = node.get("x", 0) + dx
+        node["y"] = node.get("y", 0) + dy
+    elif t == "line":
+        node["x1"] = node.get("x1", 0) + dx
+        node["y1"] = node.get("y1", 0) + dy
+        node["x2"] = node.get("x2", 0) + dx
+        node["y2"] = node.get("y2", 0) + dy
+    elif t == "text":
+        node["x"] = node.get("x", 0) + dx
+        node["y"] = node.get("y", 0) + dy
+    elif t == "path":
+        for cmd in node.get("commands", []):
+            if "x" in cmd:
+                cmd["x"] = cmd["x"] + dx
+            if "y" in cmd:
+                cmd["y"] = cmd["y"] + dy
+    elif t == "group":
+        for child in node.get("children", []):
+            _offset_node(child, dx, dy)
+
+
+def _merge_packed_data(packed_list: list[bytes]) -> bytes:
+    """Merge packed binary data from multiple child scenes.
+
+    For the initial implementation, packed data is only preserved when all
+    children have empty packed data (the common case for small charts).
+    When any child has non-empty packed data the binary header would need
+    panel-index rewriting, so we return empty bytes and let the WASM
+    renderer fall back to per-node rendering from the scene JSON.
+    """
+    if all(len(p) == 0 for p in packed_list):
+        return b""
+    # Non-empty packed data requires binary header rewriting (panel indices).
+    # The WASM renderer falls back gracefully to per-node JSON rendering.
+    return b""
 
 
 # ---------------------------------------------------------------------------

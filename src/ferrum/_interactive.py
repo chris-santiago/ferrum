@@ -97,8 +97,8 @@ class InteractiveChart:
 
     Parameters
     ----------
-    chart : Chart
-        The chart to render interactively.
+    chart : Chart or _ChartLike
+        A chart or composition to render interactively.
     """
 
     def __init__(self, chart: "Chart") -> None:
@@ -123,6 +123,10 @@ class InteractiveChart:
     def _on_zoom_change(self, change: Any) -> None:
         """Rebuild the scene with updated domain when the JS zoom state changes."""
         import json as _json
+
+        # Compositions don't support zoom rebuild (no _clone / coord override).
+        if not hasattr(self._chart, "_clone"):
+            return
 
         zoom = _json.loads(change.get("new", "{}"))
         if not zoom:
@@ -218,10 +222,36 @@ class InteractiveChart:
             )
 
     def save(self, path: str, **kwargs: Any) -> None:
-        """Save as self-contained HTML file."""
-        from ferrum.display import save_chart
+        """Save as self-contained HTML file.
 
-        save_chart(self._chart, path, format="html", **kwargs)
+        Uses the pre-rendered scene JSON and packed data so this works
+        for both plain ``Chart`` objects and composition types that lack
+        ``_render_inputs()``.
+        """
+        from pathlib import Path as _Path
+
+        from ferrum._html import assemble_html
+
+        embed_wasm = kwargs.pop("embed_wasm", True)
+        title = getattr(self._chart, "_title", None) or "Ferrum chart"
+        html = assemble_html(
+            self._scene_json,
+            packed_data=self._packed_data,
+            title=title,
+            embed_wasm=embed_wasm,
+        )
+        dest = _Path(path)
+        dest.write_text(html)
+        if not embed_wasm:
+            import shutil
+
+            wasm_dir = _Path(__file__).parent / "_wasm"
+            wasm_src = wasm_dir / "ferrum_wasm_bg.wasm"
+            if wasm_src.exists():
+                shutil.copy2(wasm_src, dest.parent / "ferrum_wasm_bg.wasm")
+            js_src = wasm_dir / "ferrum_wasm.js"
+            if js_src.exists():
+                shutil.copy2(js_src, dest.parent / "ferrum_wasm.js")
 
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
         if self._widget is None:
@@ -237,11 +267,21 @@ class InteractiveChart:
         return self._widget._repr_mimebundle_(**kwargs)
 
     def __repr__(self) -> str:
-        return f"InteractiveChart(selections={len(self._chart._selections)})"
+        selections = getattr(self._chart, "_selections", [])
+        return f"InteractiveChart(selections={len(selections)})"
 
 
 def _render_scene(chart: "Chart") -> tuple[str, bytes]:
-    """Return (scene_json, packed_bytes) for the interactive renderer."""
+    """Return (scene_json, packed_bytes) for the interactive renderer.
+
+    Dispatches to ``_render_interactive()`` when the object is a
+    composition type (HConcat, VConcat, Layer, etc.), and falls through
+    to the standard Rust ``render_interactive`` for plain ``Chart``.
+    """
+    # Composition types implement _render_interactive(); plain Charts do not.
+    if hasattr(chart, "_render_interactive"):
+        return chart._render_interactive()
+
     import json as _json
 
     from ferrum._core import render_interactive

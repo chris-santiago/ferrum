@@ -19,7 +19,13 @@ export class WasmRenderer {
      * The returned JSON is a map of `selection_name → {field_name: field_value}`.
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      */
-    handleClick(x: number, y: number): string;
+    handleClick(x: number, y: number, shift_held: boolean): string;
+    /**
+     * Handle a brush-drag on a panel: update interval selection state, apply
+     * conditional encodings, rebuild GPU buffers, re-render, and return
+     * the new selection state as JSON.
+     */
+    handleDrag(panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
     /**
      * Return tooltip JSON for a specific mark instance.
      *
@@ -77,7 +83,8 @@ export interface InitOutput {
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
     readonly wasmrenderer_create: (a: any) => any;
     readonly wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly wasmrenderer_handleClick: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];

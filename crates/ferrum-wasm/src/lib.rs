@@ -194,7 +194,7 @@ impl WasmRenderer {
     /// The returned JSON is a map of `selection_name → {field_name: field_value}`.
     /// The JS caller should forward this to `model.set('selection_state', ...)`.
     #[wasm_bindgen(js_name = "handleClick")]
-    pub fn handle_click(&mut self, x: f32, y: f32) -> Result<String, JsValue> {
+    pub fn handle_click(&mut self, x: f32, y: f32, shift_held: bool) -> Result<String, JsValue> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok("{}".to_string());
         };
@@ -206,6 +206,65 @@ impl WasmRenderer {
             x as f64,
             y as f64,
             &self.zoom,
+            shift_held,
+        );
+
+        // Apply conditional encodings to produce dimmed/highlighted instance colors.
+        let conditionals = &loaded.scene.interaction.conditionals;
+        let updates = resolve_conditionals(
+            &loaded.scene.panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data.circle_instances,
+            &loaded.data.rect_instances,
+        );
+
+        // Rebuild GPU buffers with updated colors and re-render.
+        let updated_data = SceneData {
+            circle_instances: updates.circle_instances,
+            rect_instances: updates.rect_instances,
+            mesh_buffers: loaded.data.mesh_buffers.clone(),
+            text_elements: loaded.data.text_elements.clone(),
+            image_quads: loaded.data.image_quads.clone(),
+            background: loaded.data.background,
+            width: loaded.data.width,
+            height: loaded.data.height,
+            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
+        };
+        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
+        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
+            .map_err(JsValue::from)?;
+        loaded.buffers = new_buffers;
+
+        // Serialize current selection state for Python sync.
+        let state_json = self.interaction_state.to_json();
+        Ok(state_json)
+    }
+
+    /// Handle a brush-drag on a panel: update interval selection state, apply
+    /// conditional encodings, rebuild GPU buffers, re-render, and return
+    /// the new selection state as JSON.
+    #[wasm_bindgen(js_name = "handleDrag")]
+    pub fn handle_drag(
+        &mut self,
+        panel_id: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Result<String, JsValue> {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok("{}".to_string());
+        };
+
+        // Update interval selection state.
+        self.interaction_state.handle_drag(
+            &self.selections,
+            panel_id as usize,
+            x0 as f64,
+            y0 as f64,
+            x1 as f64,
+            y1 as f64,
         );
 
         // Apply conditional encodings to produce dimmed/highlighted instance colors.

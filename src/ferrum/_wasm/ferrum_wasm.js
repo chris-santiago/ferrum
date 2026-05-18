@@ -54,13 +54,43 @@ export class WasmRenderer {
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      * @param {number} x
      * @param {number} y
+     * @param {boolean} shift_held
      * @returns {string}
      */
-    handleClick(x, y) {
+    handleClick(x, y, shift_held) {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ret = wasm.wasmrenderer_handleClick(this.__wbg_ptr, x, y);
+            const ret = wasm.wasmrenderer_handleClick(this.__wbg_ptr, x, y, shift_held);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * Handle a brush-drag on a panel: update interval selection state, apply
+     * conditional encodings, rebuild GPU buffers, re-render, and return
+     * the new selection state as JSON.
+     * @param {number} panel_id
+     * @param {number} x0
+     * @param {number} y0
+     * @param {number} x1
+     * @param {number} y1
+     * @returns {string}
+     */
+    handleDrag(panel_id, x0, y0, x1, y1) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_handleDrag(this.__wbg_ptr, panel_id, x0, y0, x1, y1);
             var ptr1 = ret[0];
             var len1 = ret[1];
             if (ret[3]) {
@@ -1263,7 +1293,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 174, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 175, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02);
             return ret;
         },

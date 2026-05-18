@@ -52,11 +52,12 @@ def save_chart(
     elif fmt == "png":
         path.write_bytes(chart.show_png())
     elif fmt == "html":
-        scene_json = _render_scene_json(chart)
+        scene_json, packed_data = _render_scene_json(chart)
         from ferrum._html import assemble_html
 
         html = assemble_html(
             scene_json,
+            packed_data=packed_data,
             title=chart._title or "Ferrum chart",
             embed_wasm=embed_wasm,
         )
@@ -71,7 +72,7 @@ def save_chart(
             if js_src.exists():
                 shutil.copy2(js_src, path.parent / "ferrum_wasm.js")
     elif fmt == "json":
-        scene_json = _render_scene_json(chart)
+        scene_json, _ = _render_scene_json(chart)
         path.write_text(scene_json)
     elif fmt == "":
         raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
@@ -139,10 +140,15 @@ def _wrap_svg_in_html(svg: str, *, title: str = "Ferrum chart") -> str:
     )
 
 
-def _render_scene_json(chart: "Chart") -> str:
-    """Render a chart to SceneGraph JSON for the WASM renderer."""
+def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
+    """Render a chart to SceneGraph JSON + packed binary data for the WASM renderer.
+
+    Returns
+    -------
+    tuple[str, bytes]
+        (scene_json, packed_data) from ``render_interactive``.
+    """
     from ferrum._core import render_interactive
 
     spec, data, viewport, theme_dict = chart._render_inputs()
-    json_str, _packed = render_interactive(spec, data, viewport=viewport, theme=theme_dict)
-    return json_str
+    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

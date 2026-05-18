@@ -33,6 +33,9 @@ pub fn resolve_conditionals(
                 let Some(sel) = selections.get(&cond.selection_name) else {
                     continue;
                 };
+                if matches!(sel, SelectionState::Empty) {
+                    continue;
+                }
                 if let Some(indices) = &batch.data_indices {
                     apply_conditional_to_batch(
                         &cond.channel,
@@ -91,7 +94,20 @@ fn apply_conditional_to_batch(
 
     for (node_idx, node) in batch.nodes.iter().enumerate() {
         let data_idx = data_indices.get(node_idx).copied();
-        let selected = data_idx.is_some_and(|di| sel.contains(di));
+
+        let selected = match sel {
+            SelectionState::Interval { .. } => {
+                // Spatial containment: check if mark center is inside brush.
+                let pos = match node {
+                    SceneNode::Circle { cx, cy, .. } => Some((*cx, *cy)),
+                    SceneNode::Rect { x, y, w, h, .. } => Some((*x + *w / 2.0, *y + *h / 2.0)),
+                    _ => None,
+                };
+                pos.is_some_and(|(mx, my)| sel.contains_point(mx, my))
+            }
+            _ => data_idx.is_some_and(|di| sel.contains(di)),
+        };
+
         let value = if selected { if_selected } else { if_not };
 
         match node {
@@ -234,5 +250,148 @@ mod tests {
         );
         assert!((inst.size[0] - 20.0).abs() < 0.01);
         assert!((inst.size[1] - 20.0).abs() < 0.01);
+    }
+
+    // ── R3: Interval conditional encoding applies ───────────────────────────
+    //
+    // resolve_conditionals currently only uses SelectionState::contains(data_idx)
+    // for membership, which always returns false for Interval selections. After
+    // implementing spatial containment (contains_point), this test should pass.
+    // The test documents the EXPECTED behavior: marks inside the brush rectangle
+    // get the if_selected color, marks outside get if_not.
+
+    #[test]
+    fn r3_interval_conditional_encoding_applies() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Three circles: (20,30) inside, (100,100) outside, (30,40) inside brush.
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: 20.0, cy: 30.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 30.0, cy: 40.0, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1, 2]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "brush".to_string(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Color { value: red },
+            if_not: EncodingValue::Color { value: grey },
+        }];
+
+        let mut selections = HashMap::new();
+        selections.insert(
+            "brush".to_string(),
+            SelectionState::Interval {
+                x_range: Some((10.0, 50.0)),
+                y_range: Some((20.0, 60.0)),
+            },
+        );
+
+        // Base circle instances — neutral fill so we can detect changes.
+        let neutral = [0.0_f32, 0.0, 0.0, 1.0];
+        let base_circles = vec![
+            CircleInstance {
+                center: [20.0, 30.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+            CircleInstance {
+                center: [100.0, 100.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+            CircleInstance {
+                center: [30.0, 40.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+        ];
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+
+        let red_fill = [1.0_f32, 0.0, 0.0, 1.0];
+        let grey_fill = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+
+        // Circle 0 at (20,30) is inside brush (10..50, 20..60) — should be red.
+        assert!(
+            (result.circle_instances[0].fill_color[0] - red_fill[0]).abs() < 0.01,
+            "circle at (20,30) should be red (inside brush), got {:?}",
+            result.circle_instances[0].fill_color
+        );
+
+        // Circle 1 at (100,100) is outside brush — should be grey.
+        assert!(
+            (result.circle_instances[1].fill_color[0] - grey_fill[0]).abs() < 0.01,
+            "circle at (100,100) should be grey (outside brush), got {:?}",
+            result.circle_instances[1].fill_color
+        );
+
+        // Circle 2 at (30,40) is inside brush — should be red.
+        assert!(
+            (result.circle_instances[2].fill_color[0] - red_fill[0]).abs() < 0.01,
+            "circle at (30,40) should be red (inside brush), got {:?}",
+            result.circle_instances[2].fill_color
+        );
     }
 }

@@ -2,6 +2,11 @@
 // This file is read by _interactive.py which replaces __B64__ with the
 // base64-encoded ferrum_wasm_bg.wasm blob before sending to the browser.
 // Keep all JS here — never embed JS strings in Python.
+//
+// Adapter pattern: _render() accepts an adapter object (not a raw model).
+// Two adapters exist:
+//   1. Jupyter adapter — constructed in render() for anywidget
+//   2. Standalone adapter — exported as createStandaloneAdapter() for HTML exports
 
 const _B64 = '__B64__';
 const _raw = atob(_B64);
@@ -24,8 +29,15 @@ function _placeText(overlay, texts) {
       `font-size:${t.fontSize}px;font-weight:${t.fontWeight};` +
       `font-family:${t.fontFamily};color:${t.color};` +
       `white-space:nowrap;pointer-events:none;line-height:1`;
-    if (t.anchor === 'center') d.style.transform = 'translateX(-50%)';
-    else if (t.anchor === 'end') d.style.transform = 'translateX(-100%)';
+    // Build composite transform: anchor (translateX) + rotation + baseline (translateY)
+    const parts = [];
+    if (t.anchor === 'center') parts.push('translateX(-50%)');
+    else if (t.anchor === 'end') parts.push('translateX(-100%)');
+    if (t.angle) parts.push(`rotate(${t.angle}deg)`);
+    if (t.baseline === 'middle') parts.push('translateY(-50%)');
+    else if (t.baseline === 'bottom') parts.push('translateY(-100%)');
+    else if (t.baseline === 'alphabetic') parts.push('translateY(-85%)');
+    if (parts.length > 0) d.style.transform = parts.join(' ');
     d.textContent = t.content;
     overlay.appendChild(d);
   }
@@ -85,7 +97,25 @@ function _hitTest(marks, x, y) {
   return null;
 }
 
-async function _render(container, sceneJson, model) {
+// ── CSS-coordinate scaling helper ────────────────────────────────────────
+// Converts a mouse event to canvas-space coordinates, accounting for any
+// CSS scaling between the canvas element's intrinsic size and its layout size.
+function _canvasCoords(canvas, e) {
+  const r = canvas.getBoundingClientRect();
+  const sx = canvas.width / r.width;
+  const sy = canvas.height / r.height;
+  return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
+}
+
+// ── Adapter interface (duck-typed) ───────────────────────────────────────
+// {
+//   getPackedData()           → Uint8Array
+//   getInteractionConfig()    → string (JSON)
+//   onSelectionChange(state)  → void (called when selection changes)
+//   onZoomChange(state)       → void (called when zoom changes)
+// }
+
+async function _render(container, sceneJson, adapter) {
   container.replaceChildren();
   container.style.position = 'relative';
 
@@ -113,6 +143,23 @@ async function _render(container, sceneJson, model) {
     ? scene.panels.flatMap(p => (p.marks || []).map(b => ({ batch: b, panel: p })))
     : [];
 
+  // ── Brush / interval selection detection ──────────────────────────
+  const cfg = JSON.parse(adapter.getInteractionConfig());
+  const _hasPointSelections = (cfg.selections || []).some(s => s.type === 'point');
+  const hasInterval = (cfg.selections || []).some(s => s.type === 'interval');
+
+  // Extract brush styling from the interval selection's SelectionMark, if present.
+  let _brushBg = 'rgba(51, 136, 204, 0.2)';
+  let _brushBorder = '1px solid rgba(51, 136, 204, 0.6)';
+  if (hasInterval) {
+    const intervalSel = (cfg.selections || []).find(s => s.type === 'interval');
+    if (intervalSel && intervalSel.mark) {
+      const m = intervalSel.mark;
+      if (m.fill) _brushBg = m.fill;
+      if (m.stroke) _brushBorder = `1px solid ${m.stroke}`;
+    }
+  }
+
   // ── Pan + hover tooltip (combined mousemove) ─────────────────────
   // renderer is declared below (let), captured by closure.
   //
@@ -132,15 +179,62 @@ async function _render(container, sceneJson, model) {
 
   let _isDragging = false;
   let _panStart = null;
+  let _isBrushing = false;
+  let _brushDiv = null;
+  let _brushOrigin = null; // {x, y} in canvas coords at mousedown
+
   canvas.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
-    const r = canvas.getBoundingClientRect();
-    _panStart = { x: e.clientX - r.left, y: e.clientY - r.top };
-    _isDragging = false;
+    const [mx, my] = _canvasCoords(canvas, e);
+
+    if (hasInterval && !e.altKey) {
+      // Start brush mode.
+      _isBrushing = true;
+      _brushOrigin = { x: mx, y: my };
+      _brushDiv = document.createElement('div');
+      _brushDiv.className = 'ferrum-brush';
+      // Position the brush in CSS coords (relative to container).
+      const r = canvas.getBoundingClientRect();
+      const cssX = mx / (canvas.width / r.width);
+      const cssY = my / (canvas.height / r.height);
+      Object.assign(_brushDiv.style, {
+        position: 'absolute',
+        left: cssX + 'px',
+        top: cssY + 'px',
+        width: '0px',
+        height: '0px',
+        background: _brushBg,
+        border: _brushBorder,
+        pointerEvents: 'none',
+        zIndex: '10',
+      });
+      container.appendChild(_brushDiv);
+    } else {
+      // Pan mode.
+      _panStart = { x: mx, y: my };
+      _isDragging = false;
+    }
   });
+
   canvas.addEventListener('mousemove', e => {
-    const r = canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const [mx, my] = _canvasCoords(canvas, e);
+
+    // ── Brush resize ──────────────────────────────────────────────
+    if (_isBrushing && _brushDiv && _brushOrigin) {
+      const r = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / r.width;
+      const scaleY = canvas.height / r.height;
+      const ox = _brushOrigin.x / scaleX;
+      const oy = _brushOrigin.y / scaleY;
+      const cx = mx / scaleX;
+      const cy = my / scaleY;
+      _brushDiv.style.left = Math.min(ox, cx) + 'px';
+      _brushDiv.style.top = Math.min(oy, cy) + 'px';
+      _brushDiv.style.width = Math.abs(cx - ox) + 'px';
+      _brushDiv.style.height = Math.abs(cy - oy) + 'px';
+      return; // don't process tooltip or pan while brushing
+    }
+
     // Tooltip hover: inverse-transform mouse into original mark space before hit-testing.
     const [hx, hy] = _invZoom(mx, my);
     let tooltipData = null;
@@ -172,8 +266,12 @@ async function _render(container, sceneJson, model) {
         tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
       }
       tip.appendChild(tbl);
-      tip.style.left = (mx + 12) + 'px';
-      tip.style.top = (my - 12) + 'px';
+      // Position tooltip in CSS coords.
+      const r = canvas.getBoundingClientRect();
+      const cssMx = mx / (canvas.width / r.width);
+      const csMy = my / (canvas.height / r.height);
+      tip.style.left = (cssMx + 12) + 'px';
+      tip.style.top = (csMy - 12) + 'px';
       tip.style.opacity = '1';
     } else {
       tip.style.opacity = '0';
@@ -191,15 +289,58 @@ async function _render(container, sceneJson, model) {
     } catch (err) { /* GPU not ready */ }
     _panStart = { x: mx, y: my };
   });
+
   const _endPan = () => { _panStart = null; setTimeout(() => { _isDragging = false; }, 0); };
-  canvas.addEventListener('mouseup', _endPan);
-  canvas.addEventListener('mouseleave', () => { tip.style.opacity = '0'; _endPan(); });
+
+  canvas.addEventListener('mouseup', e => {
+    // ── End brush ─────────────────────────────────────────────────
+    if (_isBrushing && _brushOrigin) {
+      const [mx, my] = _canvasCoords(canvas, e);
+      const dx = Math.abs(mx - _brushOrigin.x);
+      const dy = Math.abs(my - _brushOrigin.y);
+      // Only fire handleDrag for real brush gestures (>4px), not clicks.
+      if (renderer && dx > 4 && dy > 4) {
+        try {
+          const x0 = Math.min(_brushOrigin.x, mx);
+          const y0 = Math.min(_brushOrigin.y, my);
+          const x1 = Math.max(_brushOrigin.x, mx);
+          const y1 = Math.max(_brushOrigin.y, my);
+          const resultJson = renderer.handleDrag(0, x0, y0, x1, y1);
+          adapter.onSelectionChange(JSON.parse(resultJson));
+        } catch (err) {
+          console.warn('[ferrum] handleDrag error:', err);
+        }
+      }
+      // Remove brush div.
+      if (_brushDiv && _brushDiv.parentNode) {
+        _brushDiv.parentNode.removeChild(_brushDiv);
+      }
+      _isBrushing = false;
+      _brushDiv = null;
+      _brushOrigin = null;
+      return;
+    }
+    _endPan();
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    tip.style.opacity = '0';
+    // Clean up brush if mouse leaves canvas.
+    if (_isBrushing) {
+      if (_brushDiv && _brushDiv.parentNode) {
+        _brushDiv.parentNode.removeChild(_brushDiv);
+      }
+      _isBrushing = false;
+      _brushDiv = null;
+      _brushOrigin = null;
+    }
+    _endPan();
+  });
 
   // ── Click: href navigation + selection ──────────────────────────────
   canvas.addEventListener('click', e => {
     if (_isDragging) return; // suppress click fired immediately after a pan drag
-    const r = canvas.getBoundingClientRect();
-    const cx = e.clientX - r.left, cy = e.clientY - r.top;
+    const [cx, cy] = _canvasCoords(canvas, e);
 
     // Href navigation: inverse-transform then JS hit test.
     const [hx, hy] = _invZoom(cx, cy);
@@ -209,15 +350,13 @@ async function _render(container, sceneJson, model) {
       return;
     }
 
-    // Delegate ALL clicks (hit or miss) to WASM handleClick so Rust is
-    // authoritative: background clicks deselect, post-zoom clicks use
-    // actual rendered geometry rather than stale JS scene positions.
-    if (renderer) {
+    // Delegate clicks to WASM handleClick only when point selections exist.
+    // Interval selections only respond to drags (handleDrag), not clicks.
+    if (renderer && _hasPointSelections) {
       try {
-        const stateJson = renderer.handleClick(cx, cy);
+        const stateJson = renderer.handleClick(cx, cy, e.shiftKey);
         const state = JSON.parse(stateJson);
-        model.set('selection_state', state);
-        model.save_changes();
+        adapter.onSelectionChange(state);
       } catch (err) {
         console.warn('[ferrum] handleClick error:', err);
       }
@@ -226,9 +365,9 @@ async function _render(container, sceneJson, model) {
 
     // Fallback (no GPU): use JS hit test + tooltip field extraction.
     if (!h) return;
-    const cfg = model.get('interaction_config');
+    const icfg = adapter.getInteractionConfig();
     let selConfig = {};
-    try { selConfig = JSON.parse(cfg || '{}'); } catch (e) { /* ignore */ }
+    try { selConfig = JSON.parse(icfg || '{}'); } catch (_e) { /* ignore */ }
     const selections = selConfig.selections || [];
     const tooltip = h.batch.tooltips && h.batch.tooltips[h.idx];
     const fieldMap = {};
@@ -243,8 +382,7 @@ async function _render(container, sceneJson, model) {
       if (Object.keys(vals).length > 0) selState[sel.name] = vals;
     }
     if (Object.keys(selState).length > 0) {
-      model.set('selection_state', selState);
-      model.save_changes();
+      adapter.onSelectionChange(selState);
     }
   });
 
@@ -254,27 +392,100 @@ async function _render(container, sceneJson, model) {
   try {
     await _ensureWasm();
     renderer = await WasmRenderer.create(canvas);
-    const packedData = model.get('packed_data');
-    let packedArr;
-    if (packedData instanceof Uint8Array) {
-      packedArr = packedData;
-    } else if (packedData && packedData.buffer instanceof ArrayBuffer) {
-      packedArr = new Uint8Array(packedData.buffer, packedData.byteOffset, packedData.byteLength);
-    } else if (packedData instanceof ArrayBuffer) {
-      packedArr = new Uint8Array(packedData);
-    } else {
-      packedArr = new Uint8Array(packedData || []);
-    }
+    const packedArr = adapter.getPackedData();
     const textJson = renderer.loadScene(sceneJson, packedArr);
     _placeText(ov, JSON.parse(textJson));
   } catch (e) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
 
+  // ── Scroll zoom — GPU affine transform via WASM onWheel ──────────
+  let _zoomDebounceId = null;
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (!renderer) return;
+    const [cx, cy] = _canvasCoords(canvas, e);
+    try {
+      const textJson = renderer.onWheel(0, e.deltaY, cx, cy);
+      _placeText(ov, JSON.parse(textJson));
+      const t = _zoom;
+      const f = 1.0 + e.deltaY * 0.001;
+      const ZMIN = 0.1, ZMAX = 50.0;
+      const sx = Math.min(ZMAX, Math.max(ZMIN, t.sx * f));
+      const sy = Math.min(ZMAX, Math.max(ZMIN, t.sy * f));
+      t.tx = cx - sx * ((cx - t.tx) / t.sx);
+      t.ty = cy - sy * ((cy - t.ty) / t.sy);
+      t.sx = sx;
+      t.sy = sy;
+    } catch (err) { /* GPU not ready */ }
+    clearTimeout(_zoomDebounceId);
+    _zoomDebounceId = setTimeout(() => {
+      const p = scene.panels && scene.panels[0];
+      if (!p || !p.coord) return;
+      const xs = p.coord.x_domain, ys = p.coord.y_domain;
+      if (!xs || !ys) return;
+      adapter.onZoomChange({ '0': { x_domain: xs, y_domain: ys }});
+    }, 400);
+  }, { passive: false });
+
+  // ── Double-click: reset zoom to identity ──────────────────────────
+  canvas.addEventListener('dblclick', () => {
+    if (!renderer) return;
+    try {
+      const textJson = renderer.resetZoom(0);
+      _placeText(ov, JSON.parse(textJson));
+      Object.assign(_zoom, { sx: 1, sy: 1, tx: 0, ty: 0 });
+    } catch (err) { /* ignore */ }
+  });
+
+  // ── ResizeObserver ────────────────────────────────────────────────
+  if (renderer) {
+    const ro = new ResizeObserver(() => {
+      try { renderer.resize(canvas.width, canvas.height); } catch (err) { /* ignore */ }
+    });
+    ro.observe(canvas);
+  }
+
   return { canvas, renderer, scene, ov, zoom: _zoom };
 }
 
+// ── Standalone adapter factory (for HTML exports) ────────────────────────
+export function createStandaloneAdapter(packedB64, interactionConfig) {
+  let packedArr;
+  if (packedB64) {
+    const raw = atob(packedB64);
+    packedArr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) packedArr[i] = raw.charCodeAt(i);
+  } else {
+    packedArr = new Uint8Array(0);
+  }
+  return {
+    getPackedData() { return packedArr; },
+    getInteractionConfig() { return interactionConfig || '{}'; },
+    onSelectionChange(_state) { /* local-only, no Python round-trip */ },
+    onZoomChange(_state) { /* local-only, no Python round-trip */ },
+  };
+}
+
+// ── Export _render as renderChart for standalone HTML templates ───────────
+export { _render as renderChart };
+
+// ── anywidget entry point ────────────────────────────────────────────────
 export async function render({ model, el }) {
+  // Jupyter adapter: bridges the anywidget model to the adapter interface.
+  const adapter = {
+    getPackedData() {
+      const pd = model.get('packed_data');
+      if (pd instanceof Uint8Array) return pd;
+      if (pd && pd.buffer instanceof ArrayBuffer) return new Uint8Array(pd.buffer, pd.byteOffset, pd.byteLength);
+      if (pd instanceof ArrayBuffer) return new Uint8Array(pd);
+      return new Uint8Array(pd || []);
+    },
+    getInteractionConfig() { return model.get('interaction_config') || '{}'; },
+    onSelectionChange(state) { model.set('selection_state', state); model.save_changes(); },
+    onZoomChange(state) { model.set('zoom_state', JSON.stringify(state)); model.save_changes(); },
+  };
+
   const container = document.createElement('div');
   el.appendChild(container);
   let _state = null;
@@ -284,7 +495,7 @@ export async function render({ model, el }) {
     try {
       const prev = _prevJson;
       _prevJson = s;
-      _state = await _render(container, s, model);
+      _state = await _render(container, s, adapter);
 
       if (_state && prev && _state.renderer) {
         // Animate transition from previous scene.
@@ -301,60 +512,8 @@ export async function render({ model, el }) {
         } catch (e) { /* transition not supported — fall back to static render */ }
       }
 
-      if (_state) {
-        // ── Scroll zoom — GPU affine transform via WASM onWheel ──────
-        // When the GPU renderer is available, wheel events apply a per-panel
-        // affine transform entirely on the GPU (≤16 ms, no Python round-trip).
-        // A 400 ms debounced round-trip fires for mark_function/mark_raster
-        // charts that need data-space recomputation; all other mark types skip it.
-        let _zoomDebounceId = null;
-        _state.canvas.addEventListener('wheel', e => {
-          e.preventDefault();
-          if (!_state) return;
-          const r = _state.canvas.getBoundingClientRect();
-          const cx = e.clientX - r.left, cy = e.clientY - r.top;
-          if (_state.renderer) {
-            try {
-              const textJson = _state.renderer.onWheel(0, e.deltaY, cx, cy);
-              _placeText(_state.ov, JSON.parse(textJson));
-              // Mirror Rust ZoomPanState::on_wheel to keep JS zoom transform in sync.
-              const t = _state.zoom;
-              const f = 1.0 + e.deltaY * 0.001;
-              const ZMIN = 0.1, ZMAX = 50.0;
-              const sx = Math.min(ZMAX, Math.max(ZMIN, t.sx * f));
-              const sy = Math.min(ZMAX, Math.max(ZMIN, t.sy * f));
-              t.tx = cx - sx * ((cx - t.tx) / t.sx);
-              t.ty = cy - sy * ((cy - t.ty) / t.sy);
-              t.sx = sx;
-              t.sy = sy;
-            } catch (err) { /* GPU not ready */ }
-          }
-          // Debounced Python round-trip (for mark_function/mark_raster recompute).
-          clearTimeout(_zoomDebounceId);
-          _zoomDebounceId = setTimeout(() => {
-            if (!_state) return;
-            const sc = _state.scene;
-            const p = sc.panels && sc.panels[0];
-            if (!p || !p.coord) return;
-            const xs = p.coord.x_domain, ys = p.coord.y_domain;
-            if (!xs || !ys) return;
-            model.set('zoom_state', JSON.stringify({ '0': {
-              x_domain: xs, y_domain: ys,
-            }}));
-            model.save_changes();
-          }, 400);
-        }, { passive: false });
-
-        // ── Double-click: reset zoom to identity ─────────────────────
-        _state.canvas.addEventListener('dblclick', () => {
-          if (!_state || !_state.renderer) return;
-          try {
-            const textJson = _state.renderer.resetZoom(0);
-            _placeText(_state.ov, JSON.parse(textJson));
-            Object.assign(_state.zoom, { sx: 1, sy: 1, tx: 0, ty: 0 });
-          } catch (err) { /* ignore */ }
-        });
-      }
+      // Zoom, dblclick-reset, and ResizeObserver are now wired inside _render()
+      // so they work in both Jupyter and standalone HTML modes.
     } catch (e) {
       console.error('[ferrum] widget reload failed:', e);
     }
