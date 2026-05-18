@@ -6,11 +6,11 @@
 [project]
 site_name = "Ferrum"
 site_description = "Grammar-of-graphics statistical visualization for Python, with a Rust core. One chart model for statistical graphics, interactive views, and ML diagnostics."
-site_author = "The Ferrum authors"
+site_author = "Chris Santiago"
 site_url = "https://ferrumviz.com/"
 docs_dir = "docs/site"
 copyright = """
-Copyright &copy; 2026 The Ferrum authors
+Copyright &copy; 2026 Chris Santiago
 """
 
 repo_url = "https://github.com/chris-santiago/ferrum"
