@@ -2,7 +2,7 @@ use ferrum_scene::{
     ChannelName, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode,
 };
 
-use crate::scene_load::{CircleInstance, RectInstance};
+use crate::scene_load::{srgb_to_linear, CircleInstance, RectInstance};
 use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
@@ -150,9 +150,9 @@ fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value
     match (channel, value) {
         (ChannelName::Color, EncodingValue::Color { value: c }) => {
             inst.fill_color = [
-                c.r as f32 / 255.0,
-                c.g as f32 / 255.0,
-                c.b as f32 / 255.0,
+                srgb_to_linear(c.r as f32 / 255.0),
+                srgb_to_linear(c.g as f32 / 255.0),
+                srgb_to_linear(c.b as f32 / 255.0),
                 c.a as f32 / 255.0,
             ];
         }
@@ -191,9 +191,9 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
     match (channel, value) {
         (ChannelName::Color, EncodingValue::Color { value: c }) => {
             inst.fill_color = [
-                c.r as f32 / 255.0,
-                c.g as f32 / 255.0,
-                c.b as f32 / 255.0,
+                srgb_to_linear(c.r as f32 / 255.0),
+                srgb_to_linear(c.g as f32 / 255.0),
+                srgb_to_linear(c.b as f32 / 255.0),
                 c.a as f32 / 255.0,
             ];
         }
@@ -410,7 +410,9 @@ mod tests {
         let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
 
         let red_fill = [1.0_f32, 0.0, 0.0, 1.0];
-        let grey_fill = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+        // Grey (128,128,128) in linear space after srgb_to_linear conversion.
+        let grey_linear = srgb_to_linear(128.0 / 255.0);
+        let grey_fill = [grey_linear, grey_linear, grey_linear, 1.0];
 
         // Circle 0 at (20,30) is inside brush (10..50, 20..60) — should be red.
         assert!(

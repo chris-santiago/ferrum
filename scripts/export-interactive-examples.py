@@ -20,14 +20,14 @@ df2 = pl.DataFrame({
     "y": [2, 4, 1, 5, 3],
     "group": ["a", "b", "a", "b", "a"],
 })
-sel2 = fm.selection_point(fields=["group"])
+sel2 = fm.selection_point()
 chart2 = (
     fm.Chart(df2)
     .mark_point(size=100)
     .encode(x="x", y="y", color="group:N")
     .add_selection(sel2)
     .conditional(sel2.when(fm.Color("group")).otherwise(fm.value("#cccccc")))
-    .properties(title="Point Selection")
+    .properties(title="Single Point Selection")
     .interactive()
 )
 chart2.save(str(OUT / "02_point_selection.html"))

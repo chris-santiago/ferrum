@@ -5,6 +5,31 @@ use lyon::tessellation::VertexBuffers;
 
 use crate::tessellate::{self, MeshVertex};
 
+/// Convert a single sRGB channel value (0.0..1.0) to linear light.
+///
+/// WebGPU with an sRGB surface format automatically applies linear-to-sRGB
+/// conversion on output. If we feed sRGB values directly, the gamma curve
+/// is applied twice and colors appear washed-out. This function undoes the
+/// sRGB encoding so the GPU's automatic conversion produces correct output.
+///
+/// The alpha channel is NOT converted — alpha is linear in both spaces.
+pub(crate) fn srgb_to_linear(s: f32) -> f32 {
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Convert the RGB channels of a `[r, g, b, a]` color array from sRGB to
+/// linear. Alpha is left untouched (it is already linear in both spaces).
+fn linearize_color_channels(color: &mut [f32; 4]) {
+    color[0] = srgb_to_linear(color[0]);
+    color[1] = srgb_to_linear(color[1]);
+    color[2] = srgb_to_linear(color[2]);
+    // color[3] (alpha) stays as-is.
+}
+
 /// Stroke-dash palette: maps palette index (0–3) to a `stroke-dasharray`
 /// pattern string, shared with the SVG renderer for cross-renderer consistency.
 ///
@@ -137,9 +162,9 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
 
     let background = scene.background.as_ref().map(|c| {
         [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
+            srgb_to_linear(c.r as f32 / 255.0),
+            srgb_to_linear(c.g as f32 / 255.0),
+            srgb_to_linear(c.b as f32 / 255.0),
             c.a as f32 / 255.0,
         ]
     });
@@ -221,8 +246,13 @@ fn unpack_binary_instances(
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = circles.len();
-                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                if let Ok(instances) = bytemuck::try_cast_slice::<_, CircleInstance>(&data[offset..offset+byte_len]) {
                     circles.extend_from_slice(instances);
+                    // Packed instance color channels are sRGB — convert to linear.
+                    for ci in &mut circles[start..] {
+                        linearize_color_channels(&mut ci.fill_color);
+                        linearize_color_channels(&mut ci.stroke_color);
+                    }
                 }
                 (byte_len, start)
             }
@@ -230,8 +260,13 @@ fn unpack_binary_instances(
                 let byte_len = count * std::mem::size_of::<RectInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = rects.len();
-                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                if let Ok(instances) = bytemuck::try_cast_slice::<_, RectInstance>(&data[offset..offset+byte_len]) {
                     rects.extend_from_slice(instances);
+                    // Packed instance color channels are sRGB — convert to linear.
+                    for ri in &mut rects[start..] {
+                        linearize_color_channels(&mut ri.fill_color);
+                        linearize_color_channels(&mut ri.stroke_color);
+                    }
                 }
                 (byte_len, start)
             }
@@ -514,9 +549,9 @@ pub fn batch_uses_additive_blend(blend: BlendMode) -> bool {
 fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     match color {
         Some(c) => [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
+            srgb_to_linear(c.r as f32 / 255.0),
+            srgb_to_linear(c.g as f32 / 255.0),
+            srgb_to_linear(c.b as f32 / 255.0),
             (c.a as f32 / 255.0) * opacity as f32,
         ],
         None => [0.0, 0.0, 0.0, 0.0],
@@ -559,6 +594,43 @@ fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── sRGB-to-linear conversion ────────────────────────────────────
+
+    #[test]
+    fn srgb_to_linear_boundary_values() {
+        // 0.0 maps to 0.0 (black stays black).
+        assert!((srgb_to_linear(0.0)).abs() < 1e-7);
+        // 1.0 maps to 1.0 (white stays white).
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_to_linear_mid_grey() {
+        // sRGB 0.5 ≈ linear 0.214
+        let linear = srgb_to_linear(0.5);
+        assert!((linear - 0.214).abs() < 0.002, "sRGB 0.5 → linear ~0.214, got {linear}");
+    }
+
+    #[test]
+    fn srgb_to_linear_low_range_uses_linear_segment() {
+        // Below 0.04045 the function is s/12.92 (linear segment).
+        let s = 0.03;
+        let expected = 0.03 / 12.92;
+        assert!((srgb_to_linear(s) - expected).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_to_linear_monotonic() {
+        // The conversion must be monotonically increasing.
+        let mut prev = 0.0_f32;
+        for i in 1..=100 {
+            let s = i as f32 / 100.0;
+            let l = srgb_to_linear(s);
+            assert!(l >= prev, "srgb_to_linear must be monotonic: f({s}) = {l} < f({}) = {prev}", (i - 1) as f32 / 100.0);
+            prev = l;
+        }
+    }
 
     // ── Task 1: instance struct layout and round-trip ─────────────────
 
