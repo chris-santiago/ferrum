@@ -133,16 +133,7 @@ def assemble_html(
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     css = (_WASM_DIR / "ferrum-interactive.css").read_text()
 
-    # Embed Inter font as base64 @font-face (matches the SVG renderer).
-    _font_search = [
-        Path(__file__).parent.parent.parent / "crates" / "ferrum-core" / "assets" / "fonts" / "Inter-Regular.ttf",
-        Path(__file__).parent / "_fonts" / "Inter-Regular.ttf",
-    ]
-    for _fp in _font_search:
-        if _fp.exists():
-            font_b64 = base64.b64encode(_fp.read_bytes()).decode("ascii")
-            css += f'\n@font-face{{font-family:"Inter";src:url("data:font/ttf;base64,{font_b64}") format("truetype");}}'
-            break
+    # Inter @font-face is embedded in ferrum-interactive.css (shared by Jupyter and HTML).
 
     # Inline the D3 interactions bundle with exports converted to module-scoped vars.
     d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
