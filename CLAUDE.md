@@ -134,24 +134,24 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
 | Review verdicts (gitignored) | `.claude/output/review-lite/` |
 | Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
-| Gallery audit skill | `.claude/skills/gallery-audit/` |
+| Gallery audit skill | `.claude/skills/audit-gallery/` |
 | Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
 | Bug-hunt skill | `.claude/skills/bug-hunt/` |
 | Bug-hunter agent | `.claude/agents/bug-hunter.md` |
 | Test-sweep skill | `.claude/skills/test-sweep/` |
-| Interactive wiring audit | `.claude/skills/interactive-audit/` |
-| Interactive auditor agent | `.claude/agents/interactive-auditor.md` |
-| PyO3 binding audit | `.claude/skills/pyo3-audit/` |
-| PyO3 binding auditor agent | `.claude/agents/pyo3-binding-auditor.md` |
-| Scene pipeline audit | `.claude/skills/scene-pipeline-audit/` |
-| Scene pipeline auditor agent | `.claude/agents/scene-pipeline-auditor.md` |
-| Theme wiring audit | `.claude/skills/theme-audit/` |
-| Theme wiring auditor agent | `.claude/agents/theme-wiring-auditor.md` |
+| Interactive wiring audit | `.claude/skills/audit-interactive/` |
+| Interactive auditor agent | `.claude/agents/auditor-interactive.md` |
+| PyO3 binding audit | `.claude/skills/audit-pyo3/` |
+| PyO3 binding auditor agent | `.claude/agents/auditor-pyo3-binding.md` |
+| Scene pipeline audit | `.claude/skills/audit-scene-pipeline/` |
+| Scene pipeline auditor agent | `.claude/agents/auditor-scene-pipeline.md` |
+| Theme wiring audit | `.claude/skills/audit-theme/` |
+| Theme wiring auditor agent | `.claude/agents/auditor-theme-wiring.md` |
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
 | **Code archaeology report** | **`design-docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
-| Docs audit skill | `.claude/skills/docs-audit/` |
+| Docs audit skill | `.claude/skills/audit-docs/` |
 | Regression test skill | `.claude/skills/regression-test/` |
 | Release skill | `.claude/skills/release/` |
 | Nox sessions | `noxfile.py` |
@@ -187,10 +187,10 @@ When fixing a bug or adding a feature that overlaps with an open item, update th
 
 A reproducible side-by-side audit of ferrum's default plot output against canonical Python libraries (sklearn, seaborn, yellowbrick, scikit-plot). Use it to find where ferrum's defaults lack information or visual quality that competitors ship out of the box — missing AUC annotations, missing reference lines, wrong axis labels, missing per-cell counts on confusion matrices, etc.
 
-- **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
+- **Skill** — `.claude/skills/audit-gallery/`. Trigger with `/audit-gallery` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
 - **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
 - **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/architecture/ARCHITECTURE.md` "Composite marks" section).
-- **Output** — `gallery/` symlink at repo root → `.claude/output/gallery-audit/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
+- **Output** — `gallery/` symlink at repo root → `.claude/output/audit-gallery/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
 

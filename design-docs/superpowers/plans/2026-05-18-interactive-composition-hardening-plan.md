@@ -8,7 +8,7 @@ Fix the 6 bugs and 3 user-facing warnings from the 2026-05-18 wiring audit by ha
 
 ## 2. Spec references
 
-- `.claude/output/interactive-audit/2026-05-18-audit.md` — full audit report with file:line citations
+- `.claude/output/audit-interactive/2026-05-18-audit.md` — full audit report with file:line citations
 - `design-docs/superpowers/audits/2026-05-18-interactive-wiring-audit-prompts.md` — audit methodology
 - `CLAUDE.md` §"Known interactive-export limitations" — W2, W4, W5 deferred items
 
@@ -80,7 +80,7 @@ Fix the 6 bugs and 3 user-facing warnings from the 2026-05-18 wiring audit by ha
 ### Task 8: Regression tests + CLAUDE.md cleanup
 - [ ] Write regression tests for B1-B6 and W2 in `tests/test_html_export_regression.py`
 - [ ] Update CLAUDE.md: remove resolved W2/W5 from known limitations, update W4 if still open
-- [ ] Run `/interactive-audit` to verify clean audit
+- [ ] Run `/audit-interactive` to verify clean audit
 - [ ] Verify: `uv run pytest -x -q` and `cargo test -p ferrum-wasm` both green
 
 ## 6. Acceptance checks
@@ -93,7 +93,7 @@ Fix the 6 bugs and 3 user-facing warnings from the 2026-05-18 wiring audit by ha
 - RepeatChart corner mode interactive matches SVG layout (B3 resolved)
 - Multi-panel brush works on non-first panels (W2 resolved)
 - Empty-data charts produce valid interactive output (B2 resolved)
-- `/interactive-audit` produces 0 BUGs
+- `/audit-interactive` produces 0 BUGs
 
 ## 7. Open questions
 

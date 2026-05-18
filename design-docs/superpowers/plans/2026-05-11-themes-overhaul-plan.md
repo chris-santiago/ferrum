@@ -2372,7 +2372,7 @@ git commit -m "docs(spec): §3.13 + §3.6 Themes-T4 dated notes — defaults fli
 From the worktree root:
 
 ```bash
-uv run --no-project --script .claude/skills/gallery-audit/audit.py generate --rows 01_roc,06_residuals,08_histogram,03_confusion_matrix,10_regression_scatter,11_correlation_heatmap
+uv run --no-project --script .claude/skills/audit-gallery/audit.py generate --rows 01_roc,06_residuals,08_histogram,03_confusion_matrix,10_regression_scatter,11_correlation_heatmap
 ```
 
 (Run additional rows if you want comprehensive coverage: `02_pr,04_calibration,05_learning_curve,07_feature_importance,09_boxplot,12_bar_with_error,13_pdp,14_validation_curve,15_cv_scores,16_alpha_selection`.)

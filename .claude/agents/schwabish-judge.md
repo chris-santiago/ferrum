@@ -38,7 +38,7 @@ You judge **one** ferrum chart artifact against the four-category Schwabish text
 
 - **Do not edit any chart code.** You are read-only by tools-frontmatter restriction.
 - **Do not propose fabricated subtitles.** When `context` is empty, your subtitle suggestions stay generic (point the user at `--context`).
-- **Do not score findings outside the four T-categories.** "Show the data" and "reduce clutter" critiques are covered by the gallery-audit B-rubric and the themes overhaul respectively; they are explicitly out of scope here.
+- **Do not score findings outside the four T-categories.** "Show the data" and "reduce clutter" critiques are covered by the audit-gallery B-rubric and the themes overhaul respectively; they are explicitly out of scope here.
 - **Do not invent finding IDs.** Use only the IDs listed in `judge_prompt.md` so the autonomous fixer can match against `apply_eligibility.md`.
 
 ## Output

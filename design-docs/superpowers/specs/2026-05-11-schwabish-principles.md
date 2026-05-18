@@ -8,7 +8,7 @@
 
 ## Source
 
-Jonathan Schwabish, *Better Data Visualizations: A Guide for Scholars, Researchers, and Wonks* (Columbia University Press, 2021), Part I "Visualizing Data Effectively," third principle: *integrate text and graphics*. The book's first two core principles — *show the data* and *reduce the clutter* — are operationalized elsewhere in ferrum: the gallery audit's B-rubric (`/.claude/skills/gallery-audit/rubric.md` §B) covers domain-expected information density, and the themes-overhaul T1–T4 work (`docs/superpowers/specs/2026-05-11-themes-overhaul-design.md`) covers visual polish. This doc covers only the third principle.
+Jonathan Schwabish, *Better Data Visualizations: A Guide for Scholars, Researchers, and Wonks* (Columbia University Press, 2021), Part I "Visualizing Data Effectively," third principle: *integrate text and graphics*. The book's first two core principles — *show the data* and *reduce the clutter* — are operationalized elsewhere in ferrum: the gallery audit's B-rubric (`/.claude/skills/audit-gallery/rubric.md` §B) covers domain-expected information density, and the themes-overhaul T1–T4 work (`docs/superpowers/specs/2026-05-11-themes-overhaul-design.md`) covers visual polish. This doc covers only the third principle.
 
 The book is the reference; this doc translates the principle into the four T-categories that ferrum's defaults, primitives, and audit pipeline all share.
 

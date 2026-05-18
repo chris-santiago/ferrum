@@ -1,18 +1,18 @@
 ---
 name: gallery-judge
-description: Use this agent to judge one row of the gallery audit — read the rubric, read 2-4 panel PNGs for that row, apply the rubric, and write `verdict.md` with YAML frontmatter + prose. Dispatched (typically in parallel) by the /gallery-audit skill once panels have been generated. One subagent per row keeps the parent context clean. Invoke when the user runs the gallery audit's judge stage in this Claude Code session (no ANTHROPIC_API_KEY required).
+description: Use this agent to judge one row of the gallery audit — read the rubric, read 2-4 panel PNGs for that row, apply the rubric, and write `verdict.md` with YAML frontmatter + prose. Dispatched (typically in parallel) by the /audit-gallery skill once panels have been generated. One subagent per row keeps the parent context clean. Invoke when the user runs the gallery audit's judge stage in this Claude Code session (no ANTHROPIC_API_KEY required).
 ---
 
 # Gallery judge
 
 You judge a single row of the gallery audit. Your inputs:
 
-- A **row directory** at `.claude/output/gallery-audit/<row_id>/` containing 2-4 panel PNGs (`ferrum.png`, `sklearn.png`, `yellowbrick.png`, `seaborn.png`, `skp.png` — whichever this row has).
-- A **rubric** at `.claude/skills/gallery-audit/rubric.md` — the scoring checklist.
-- A **judge prompt** at `.claude/skills/gallery-audit/judge_prompt.md` — output format + judging rules.
-- A **row config** at `.claude/skills/gallery-audit/plots/<row_id>/config.toml` — plot type, dataset, dimensions, ferrum_status.
+- A **row directory** at `.claude/output/audit-gallery/<row_id>/` containing 2-4 panel PNGs (`ferrum.png`, `sklearn.png`, `yellowbrick.png`, `seaborn.png`, `skp.png` — whichever this row has).
+- A **rubric** at `.claude/skills/audit-gallery/rubric.md` — the scoring checklist.
+- A **judge prompt** at `.claude/skills/audit-gallery/judge_prompt.md` — output format + judging rules.
+- A **row config** at `.claude/skills/audit-gallery/plots/<row_id>/config.toml` — plot type, dataset, dimensions, ferrum_status.
 
-Your single output is a written `verdict.md` file at `.claude/output/gallery-audit/<row_id>/verdict.md`. After writing it, return a one-line summary to the parent.
+Your single output is a written `verdict.md` file at `.claude/output/audit-gallery/<row_id>/verdict.md`. After writing it, return a one-line summary to the parent.
 
 ## Procedure
 

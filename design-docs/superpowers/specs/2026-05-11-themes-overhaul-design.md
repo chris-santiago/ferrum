@@ -9,7 +9,7 @@
 
 ## Motivation
 
-The gallery audit (`/.claude/skills/gallery-audit/output/`) shows ferrum's default chart output as visually weak next to seaborn / sklearn / yellowbrick. Investigation surfaced three layered causes:
+The gallery audit (`/.claude/skills/audit-gallery/output/`) shows ferrum's default chart output as visually weak next to seaborn / sklearn / yellowbrick. Investigation surfaced three layered causes:
 
 1. **The Theme system is half-wired.** Python's `Theme(...)` class accepts ~35 keys per `ferrum-spec.md §3.13`. The Rust `theme_from_dict` binding (`crates/ferrum-core/src/render/binding.rs:79`) reads only 8 of them — every other key is silently dropped. Four of the eight built-in themes (`dark`, `economist`, `fivethirtyeight`, `solarized_*`) declare `color_scheme=...` keys that never reach the renderer, so they render essentially identical to `default`. The named themes are mostly placebo today.
 2. **Gridlines are not implemented.** `theme.grid: true` is the default, and the `grid_color`/`grid_width` keys exist on `ThemeInputs`, but no code in `crates/ferrum-core/src/render/` reads `theme.grid_color` or emits gridline strokes. No chart shows a grid, regardless of theme.

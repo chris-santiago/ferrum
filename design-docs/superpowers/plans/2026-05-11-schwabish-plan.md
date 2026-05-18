@@ -2526,7 +2526,7 @@ You apply **objective** Schwabish findings to one gallery row's panel script. Yo
    - Otherwise, apply the action via `Edit`. Append composites at the end of the chart construction expression chain; flip kwargs in-place.
 4. After all eligible findings are applied, regenerate:
    ```bash
-   uv run python .claude/skills/gallery-audit/audit.py generate --row <row>
+   uv run python .claude/skills/audit-gallery/audit.py generate --row <row>
    ```
 5. Write a diff snapshot:
    ```bash
@@ -2707,10 +2707,10 @@ git commit -m "test(skill): schwabish eligibility + idempotence contract tests (
 
 **Files:** no new files — manual verification step.
 
-- [ ] **Step 1: Run the gallery-audit generate step to ensure panels exist**
+- [ ] **Step 1: Run the audit-gallery generate step to ensure panels exist**
 
 ```bash
-uv run python .claude/skills/gallery-audit/audit.py generate 2>&1 | tail -10
+uv run python .claude/skills/audit-gallery/audit.py generate 2>&1 | tail -10
 ```
 
 Expected: panels regenerate in `gallery/output/`.

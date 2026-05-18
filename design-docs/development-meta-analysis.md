@@ -64,14 +64,14 @@ That is especially important because some implementation details evolved later. 
 
 | Metric | Value |
 |---|---|
-| Calendar days | **9** (May 9–17, 2026) |
-| Total commits | **918** |
-| Python source | **33,460 lines** across 89 files |
-| Rust source | **64,131 lines** across 153 files |
-| Python tests | **2,278** test functions in 125 files |
-| Rust tests | **1,080** `#[test]` functions |
-| Design specs | **36** documents |
-| Implementation plans | **38** documents |
+| Calendar days | **10** (May 9–18, 2026) |
+| Total commits | **975** |
+| Python source | **34,395 lines** across 89 files |
+| Rust source | **69,115 lines** across 153 files |
+| Python tests | **2,609** test functions in 139 files |
+| Rust tests | **1,220** `#[test]` functions |
+| Design specs | **38** documents |
+| Implementation plans | **42** documents |
 | Phases completed | **12 of 12** |
 | Peak day | **213 commits** (May 11) |
 
@@ -87,14 +87,15 @@ This front-loaded the hard decisions (Arrow CDI vs. IPC, JSON vs. binary seriali
 
 ### 2. Six-layer automation architecture
 
-The `.claude/` directory is as engineered as the library itself — 9 agent definitions, 12 skills, a shared severity rubric (S1–S5), and explicit dispatch rules:
+The `.claude/` directory is as engineered as the library itself — 13 agent definitions, 16 skills, a shared severity rubric (S1–S5), and explicit dispatch rules:
 
 - **Layer 1 (coding agents):** `python-coder` and `rust-coder` embed the full review principles from their respective heavyweight review skills. Code is written to pass review on the first attempt, not iteratively corrected.
 - **Layer 2 (commit gates):** `python-review-lite` and `rust-review-lite` run on every staged diff before commit. Read-only. Three consecutive blocks escalate to heavyweight review. The orchestrator (Opus) never commits without a gate pass.
 - **Layer 3 (heavyweight reviews):** Full subsystem audits at phase boundaries. Catch sibling drift, API inconsistency, and structural decay that accumulate across a phase's worth of commits.
-- **Layer 4 (quality campaigns):** `/bug-hunt` dispatches 11 parallel agents across subsystems. `/test-sweep` runs multi-round combinatorial TDD. `/gallery-audit` renders 38 plot types against sklearn/seaborn/yellowbrick and judges them with a rubric. `/code-archaeology` sweeps the entire codebase for unimplemented features and spec drift.
-- **Layer 5 (remediation agents):** `gallery-fixer`, `schwabish-fixer`, `bug-hunter` — each reads campaign output and closes findings autonomously, delegating code changes back to the Layer 1 coding agents.
-- **Layer 6 (utility skills):** `/regression-test` (auto-triggered after every bug fix), `/ferrum-docstrings`, `/docs-audit`, `/release`.
+- **Layer 4 (quality campaigns):** `/bug-hunt` dispatches 11 parallel agents across subsystems. `/test-sweep` runs multi-round combinatorial TDD. `/audit-gallery` renders 38 plot types against sklearn/seaborn/yellowbrick and judges them with a rubric. `/code-archaeology` sweeps the entire codebase for unimplemented features and spec drift. `/schwabish` applies Schwabish text-integration principles across the gallery.
+- **Layer 4b (structural audits):** `/audit-pyo3` (3 parallel `auditor-pyo3-binding` agents verifying the PyO3 FFI boundary), `/audit-scene-pipeline` (4 `auditor-scene-pipeline` agents tracing data through the render pipeline), `/audit-theme` (4 `auditor-theme-wiring` agents tracing theme keys through Rust consumption), `/audit-interactive` (4 `auditor-interactive` agents auditing the WASM export pipeline seams). Each dispatches parallel read-only agents that trace actual code paths and report GOOD/WARN/BUG findings.
+- **Layer 5 (remediation agents):** `gallery-fixer`, `schwabish-fixer`, `bug-hunter` — each reads campaign output and closes findings autonomously, delegating code changes back to the Layer 1 coding agents. `gallery-judge` and `schwabish-judge` are read-only scoring agents dispatched in parallel during campaigns.
+- **Layer 6 (utility skills):** `/regression-test` (auto-triggered after every bug fix), `/ferrum-docstrings`, `/audit-docs`, `/release`, `/gallery-feedback`.
 
 The key insight: **coding agents never commit**. The orchestrator handles staging, gate dispatch, and commit. This separation means the review pipeline is structurally unforgeable — you can't skip it.
 
@@ -122,7 +123,7 @@ The project didn't just write code and move on. After phases stabilized, systema
 
 - `/test-sweep` wrote **132 combinatorial tests** across 5 rounds (mark×channel, facet×layer, coord×position, theme×mark, encoding×facet×theme), found and fixed **2 bugs**.
 - `/bug-hunt` dispatched **11 parallel agents** to write edge-case tests per subsystem.
-- `/gallery-audit` rendered **38 plot types** against 4 reference libraries, scored them against a rubric, and fed findings to `gallery-fixer`.
+- `/audit-gallery` rendered **38 plot types** against 4 reference libraries, scored them against a rubric, and fed findings to `gallery-fixer`.
 - `/code-archaeology` swept the **entire codebase** for silent drops, dead code, and spec drift — found 4 active bugs, 7 high-severity Rust gaps, 11 silent-drop mark kwargs, and 6 stale doc references. All fixed.
 
 These aren't one-time runs. They're repeatable skills that can be re-invoked after any significant change. Each run either confirms quality or surfaces regressions.
@@ -140,11 +141,11 @@ A Rust-backed Python visualization library with:
 - A WASM interactive renderer with selections, zoom, pan, and linked views
 - Zero matplotlib dependency (hard constraint from day 1)
 - 17 data transforms, 7 new scale types, and utility modules (`ferrum.color`, `ferrum.config`) closing the spec gap
-- 3,358 tests across Python and Rust
-- A docs site (in-progress on a worktree branch)
+- 3,829 tests across Python and Rust
+- A docs site at ferrumviz.com (MkDocs Material via Zensical)
 - A release pipeline with conventional commits, changelog generation, and PyPI publishing
 
-Built in 9 days by one human and an agentic Claude framework.
+Built in 10 days by one human and an agentic Claude framework.
 
 ## The meta-lesson
 

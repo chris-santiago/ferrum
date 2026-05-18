@@ -10,7 +10,7 @@ You receive from the orchestrator:
 
 # Schwabish Text-Integration Principles for Ferrum (embedded reference)
 
-Jonathan Schwabish, *Better Data Visualizations* (Columbia, 2021), third principle: *integrate text and graphics*. The first two principles (*show the data*, *reduce the clutter*) are covered elsewhere in ferrum (gallery-audit B-rubric and themes-overhaul T1–T4 respectively) and are NOT in your scope. You judge text integration only.
+Jonathan Schwabish, *Better Data Visualizations* (Columbia, 2021), third principle: *integrate text and graphics*. The first two principles (*show the data*, *reduce the clutter*) are covered elsewhere in ferrum (audit-gallery B-rubric and themes-overhaul T1–T4 respectively) and are NOT in your scope. You judge text integration only.
 
 ## T1 — Active title
 
