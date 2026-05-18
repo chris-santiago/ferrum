@@ -2,7 +2,7 @@ use ferrum_scene::{
     ChannelName, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode,
 };
 
-use crate::scene_load::{color_to_linear, CircleInstance, RectInstance};
+use crate::scene_load::{color_to_linear, stroke_dash_index, CircleInstance, RectInstance};
 use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
@@ -166,6 +166,12 @@ fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value
         (ChannelName::Size, EncodingValue::Size { value: s }) => {
             inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
         }
+        (_, EncodingValue::StrokeWidth { value: w }) => {
+            inst.stroke_width = *w as f32;
+        }
+        (_, EncodingValue::StrokeDash { value: pattern }) => {
+            inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+        }
         _ => {}
     }
 }
@@ -207,6 +213,12 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
             // conservative fallback that matches the circle counterpart's intent
             // (scale the mark proportionally to the encoded value).
             inst.size = [*s as f32, *s as f32];
+        }
+        (_, EncodingValue::StrokeWidth { value: w }) => {
+            inst.stroke_width = *w as f32;
+        }
+        (_, EncodingValue::StrokeDash { value: pattern }) => {
+            inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
         }
         _ => {}
     }
@@ -1190,6 +1202,116 @@ mod tests {
         assert_eq!(inst.fill_color, original_fill, "X channel must not change fill");
         assert!((inst.opacity - original_opacity).abs() < 1e-10, "X channel must not change opacity");
         assert!((inst.radius - original_radius).abs() < 1e-10, "X channel must not change radius");
+    }
+
+    // ── W7: StrokeWidth and StrokeDash conditional values ────────────────
+
+    /// apply_value_to_circle must set stroke_width when value is StrokeWidth.
+    #[test]
+    fn w7_stroke_width_value_applied_to_circle() {
+        let mut inst = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        apply_value_to_circle(
+            &mut inst,
+            &ChannelName::Color, // channel field is ignored for StrokeWidth value
+            &EncodingValue::StrokeWidth { value: 3.5 },
+        );
+        assert!(
+            (inst.stroke_width - 3.5).abs() < 0.01,
+            "StrokeWidth value must set stroke_width, got {}",
+            inst.stroke_width
+        );
+    }
+
+    /// apply_value_to_circle must set stroke_dash when value is StrokeDash.
+    #[test]
+    fn w7_stroke_dash_value_applied_to_circle() {
+        let mut inst = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        // [6.0, 3.0] maps to dash index 1.0
+        apply_value_to_circle(
+            &mut inst,
+            &ChannelName::Color,
+            &EncodingValue::StrokeDash { value: vec![6.0, 3.0] },
+        );
+        assert!(
+            (inst.stroke_dash - 1.0).abs() < 0.01,
+            "StrokeDash [6,3] must set stroke_dash index to 1.0, got {}",
+            inst.stroke_dash
+        );
+    }
+
+    /// apply_value_to_rect must set stroke_width when value is StrokeWidth.
+    #[test]
+    fn w7_stroke_width_value_applied_to_rect() {
+        let mut inst = RectInstance {
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+            corner_radius: 0.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        apply_value_to_rect(
+            &mut inst,
+            &ChannelName::Color,
+            &EncodingValue::StrokeWidth { value: 2.0 },
+        );
+        assert!(
+            (inst.stroke_width - 2.0).abs() < 0.01,
+            "StrokeWidth value must set rect stroke_width, got {}",
+            inst.stroke_width
+        );
+    }
+
+    /// apply_value_to_rect must set stroke_dash when value is StrokeDash.
+    #[test]
+    fn w7_stroke_dash_value_applied_to_rect() {
+        let mut inst = RectInstance {
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+            corner_radius: 0.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        // [2.0, 3.0] maps to dash index 2.0
+        apply_value_to_rect(
+            &mut inst,
+            &ChannelName::Color,
+            &EncodingValue::StrokeDash { value: vec![2.0, 3.0] },
+        );
+        assert!(
+            (inst.stroke_dash - 2.0).abs() < 0.01,
+            "StrokeDash [2,3] must set rect stroke_dash index to 2.0, got {}",
+            inst.stroke_dash
+        );
     }
 
     #[test]

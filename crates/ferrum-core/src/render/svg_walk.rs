@@ -207,8 +207,8 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
         }
         SceneNode::Image { x, y, w, h, data } => {
             match data {
-                ImageData::Inline { bytes, .. } => {
-                    svg.image(*x, *y, *w, *h, bytes);
+                ImageData::Inline { bytes, mime } => {
+                    svg.image(*x, *y, *w, *h, bytes, *mime);
                 }
                 ImageData::Url { url } => {
                     svg.image_data_url(*x, *y, *w, *h, url);

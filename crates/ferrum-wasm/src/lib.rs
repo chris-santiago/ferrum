@@ -186,6 +186,7 @@ impl WasmRenderer {
                 width: tr.new_data.width,
                 height: tr.new_data.height,
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
+                draw_commands: tr.new_data.draw_commands.clone(),
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -447,6 +448,7 @@ impl WasmRenderer {
             width: loaded.data.width,
             height: loaded.data.height,
             packed_batch_meta: loaded.data.packed_batch_meta.clone(),
+            draw_commands: loaded.data.draw_commands.clone(),
         };
         let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
         render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
@@ -648,12 +650,12 @@ fn text_element_to_json(t: &crate::scene_load::TextElementData) -> serde_json::V
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn tick_label_json(
     x: f64, y: f64, label: &str, anchor: &str,
     style: Option<&ferrum_scene::TextStyle>,
 ) -> serde_json::Value {
-    let (font_size, font_weight, font_family, baseline, color) = match style {
+    let (font_size, font_weight, font_family, baseline, angle, color) = match style {
         Some(s) => (
             s.font_size,
             match &s.font_weight {
@@ -669,15 +671,82 @@ fn tick_label_json(
                 ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
                 ferrum_scene::TextBaseline::Custom(v) => v.clone(),
             },
+            s.angle,
             format!("rgba({},{},{},{})", s.color.r, s.color.g, s.color.b, s.opacity),
         ),
         None => (11.0, "normal".to_string(), "sans-serif".to_string(),
-                 "alphabetic".to_string(), "rgba(51,51,51,1)".to_string()),
+                 "alphabetic".to_string(), 0.0, "rgba(51,51,51,1)".to_string()),
     };
     serde_json::json!({
         "x": x, "y": y, "content": label,
         "fontSize": font_size, "fontWeight": font_weight,
         "fontFamily": font_family, "anchor": anchor,
-        "baseline": baseline, "angle": 0.0, "color": color,
+        "baseline": baseline, "angle": angle, "color": color,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── W1: tick_label_json preserves text element angle ─────────────────
+
+    /// tick_label_json must forward the style's angle, not hardcode 0.0.
+    #[test]
+    fn w1_tick_label_json_preserves_angle() {
+        use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
+
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            opacity: 1.0,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 45.0,
+        };
+
+        let json = tick_label_json(100.0, 200.0, "label", "center", Some(&style));
+        let angle = json["angle"].as_f64().expect("angle must be present");
+        assert!(
+            (angle - 45.0).abs() < 0.01,
+            "tick_label_json must preserve style.angle (45.0), got {angle}"
+        );
+    }
+
+    /// When no style is provided, the default angle must be 0.0.
+    #[test]
+    fn w1_tick_label_json_defaults_angle_to_zero() {
+        let json = tick_label_json(0.0, 0.0, "0", "center", None);
+        let angle = json["angle"].as_f64().expect("angle must be present");
+        assert!(
+            angle.abs() < 0.01,
+            "tick_label_json with no style must have angle=0.0, got {angle}"
+        );
+    }
+
+    /// tick_label_json with zero angle must still include the angle field.
+    #[test]
+    fn w1_tick_label_json_zero_angle_still_present() {
+        use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
+
+        let style = TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            opacity: 1.0,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+        };
+
+        let json = tick_label_json(50.0, 300.0, "tick", "end", Some(&style));
+        let angle = json["angle"].as_f64().expect("angle field must be present");
+        assert!(
+            angle.abs() < 0.01,
+            "zero angle must produce angle=0.0 in JSON, got {angle}"
+        );
+    }
 }

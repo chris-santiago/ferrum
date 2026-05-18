@@ -445,20 +445,35 @@ class JointChart(_ChartLike):
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes in a grid layout."""
+        """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
+
+        Grid layout mirrors the SVG path (``show_svg``):
+          - top marginal  at (row=0, col=0)
+          - center        at (row=1, col=0)
+          - right marginal at (row=1, col=1)
+        """
         from ferrum._interactive import _render_scene
 
-        # Render the center chart; merge with marginals if present.
-        children = [self.center]
-        if self.top is not None:
-            children.append(self.top)
-        if self.right is not None:
-            children.append(self.right)
-        # For JointChart the center is the primary panel; render it directly
-        # when marginals are absent, otherwise merge all children horizontally.
-        if len(children) == 1:
+        has_top = self.top is not None
+        has_right = self.right is not None
+
+        # No marginals: render center directly.
+        if not has_top and not has_right:
             return _render_scene(self.center)
-        return _merge_child_scenes(children, self.spacing, layout="horizontal")
+
+        # Build grid cells matching the SVG path layout.
+        cells: list[tuple[int, int, object]] = []
+        if has_top and has_right:
+            # Full 2x2 grid: top at (0,0), center at (1,0), right at (1,1).
+            cells = [(0, 0, self.top), (1, 0, self.center), (1, 1, self.right)]
+        elif has_top:
+            # Vertical stack: top at (0,0), center at (1,0).
+            cells = [(0, 0, self.top), (1, 0, self.center)]
+        else:
+            # Horizontal stack: center at (0,0), right at (0,1).
+            cells = [(0, 0, self.center), (0, 1, self.right)]
+
+        return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
     def show_svg(self) -> str:
         """Render the joint chart to an SVG string.
@@ -1068,17 +1083,39 @@ class ClusterMapChart(_ChartLike):
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes."""
-        children = [self.heatmap]
-        if self.row_dendrogram is not None:
-            children.append(self.row_dendrogram)
-        if self.col_dendrogram is not None:
-            children.append(self.col_dendrogram)
-        if len(children) == 1:
+        """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
+
+        Grid layout mirrors the SVG path (``show_svg``):
+          - col_dendrogram at (row=0, col=1) -- above heatmap
+          - row_dendrogram at (row=1, col=0) -- left of heatmap
+          - heatmap        at (row=1, col=1) -- main content
+        """
+        has_row = self.row_dendrogram is not None
+        has_col = self.col_dendrogram is not None
+
+        # No dendrograms: render heatmap directly.
+        if not has_row and not has_col:
             from ferrum._interactive import _render_scene
 
             return _render_scene(self.heatmap)
-        return _merge_child_scenes(children, self.spacing, layout="horizontal")
+
+        # Build grid cells matching the SVG path layout.
+        cells: list[tuple[int, int, object]] = []
+        if has_row and has_col:
+            # Full 2x2: col_dendro at (0,1), row_dendro at (1,0), heatmap at (1,1).
+            cells = [
+                (0, 1, self.col_dendrogram),
+                (1, 0, self.row_dendrogram),
+                (1, 1, self.heatmap),
+            ]
+        elif has_row:
+            # Horizontal: row_dendro at (0,0), heatmap at (0,1).
+            cells = [(0, 0, self.row_dendrogram), (0, 1, self.heatmap)]
+        else:
+            # Vertical: col_dendro at (0,0), heatmap at (1,0).
+            cells = [(0, 0, self.col_dendrogram), (1, 0, self.heatmap)]
+
+        return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
     def show_svg(self) -> str:
         """Render the cluster map to an SVG string.
@@ -1601,6 +1638,87 @@ def _merge_child_scenes_sparse_grid(
 
     merged["width"] = n_cols * cell_w + (n_cols - 1) * spacing
     merged["height"] = n_rows * cell_h + (n_rows - 1) * spacing
+
+    all_packed = [p for _, _, _, p in rendered]
+    merged_packed = _merge_packed_data(all_packed, child_offsets)
+    return _json.dumps(merged), merged_packed
+
+
+def _merge_child_scenes_nonuniform_grid(
+    cells: list[tuple[int, int, object]],
+    spacing: float,
+) -> tuple[str, bytes]:
+    """Render child charts in a sparse grid with per-row/per-column sizing.
+
+    Unlike ``_merge_child_scenes_sparse_grid`` which uses uniform cell
+    dimensions, this variant computes the maximum width per column and
+    maximum height per row, so that differently-sized children (e.g.
+    marginal plots next to a center plot) occupy only as much space as
+    they need.
+
+    Parameters
+    ----------
+    cells : list of (row, col, chart)
+        Each element is a ``(row_index, col_index, chart)`` triple.
+    spacing : float
+        Pixel gap between adjacent cells.
+
+    Returns
+    -------
+    tuple[str, bytes]
+        ``(merged_scene_json, merged_packed_data)``
+    """
+    from ferrum._interactive import _render_scene
+
+    if not cells:
+        return '{"panels":[],"width":0,"height":0}', b""
+
+    # Render all children up front.
+    rendered: list[tuple[int, int, dict, bytes]] = []
+    for row_idx, col_idx, chart in cells:
+        scene_json, packed = _render_scene(chart)
+        rendered.append((row_idx, col_idx, _json.loads(scene_json), packed))
+
+    # Compute per-row heights and per-column widths.
+    row_heights: dict[int, float] = {}
+    col_widths: dict[int, float] = {}
+    for row_idx, col_idx, scene, _packed in rendered:
+        h = scene.get("height", 0)
+        w = scene.get("width", 0)
+        row_heights[row_idx] = max(row_heights.get(row_idx, 0), h)
+        col_widths[col_idx] = max(col_widths.get(col_idx, 0), w)
+
+    # Compute cumulative offsets for each row/col.
+    sorted_rows = sorted(row_heights)
+    sorted_cols = sorted(col_widths)
+    row_y: dict[int, float] = {}
+    y = 0.0
+    for i, r in enumerate(sorted_rows):
+        row_y[r] = y
+        y += row_heights[r] + (spacing if i < len(sorted_rows) - 1 else 0)
+    total_height = y
+
+    col_x: dict[int, float] = {}
+    x = 0.0
+    for i, c in enumerate(sorted_cols):
+        col_x[c] = x
+        x += col_widths[c] + (spacing if i < len(sorted_cols) - 1 else 0)
+    total_width = x
+
+    # Merge each cell at its computed position.
+    merged = _empty_scene()
+    panel_id_offset = 0
+    child_offsets: list[int] = []
+
+    for row_idx, col_idx, scene, _packed in rendered:
+        child_offsets.append(panel_id_offset)
+        dx = col_x[col_idx]
+        dy = row_y[row_idx]
+        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
+        panel_id_offset += n_panels
+
+    merged["width"] = total_width
+    merged["height"] = total_height
 
     all_packed = [p for _, _, _, p in rendered]
     merged_packed = _merge_packed_data(all_packed, child_offsets)

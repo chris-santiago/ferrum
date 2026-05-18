@@ -94,6 +94,30 @@ pub fn format_ordinal(value: &str) -> String {
     value.to_string()
 }
 
+/// Format a numeric value per a subset of d3-format-style specs.
+///
+/// Recognized patterns:
+/// - `".Nf"` — fixed N decimal places (e.g. `".2f"` → `"3.14"`).
+/// - `".Ne"` — scientific notation with N digits (e.g. `".2e"` → `"3.14e0"`).
+/// - `".Ng"` — general (falls back to `format_numeric`).
+///
+/// The leading dot is optional. Unknown patterns fall back to `format_numeric`.
+pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
+    let Some(s) = spec else { return format_numeric(v) };
+    let trimmed = s.strip_prefix('.').unwrap_or(s);
+    let (digits_part, fmt_char) = match trimmed.chars().last() {
+        Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
+        _ => return format_numeric(v),
+    };
+    let n: usize = digits_part.parse().unwrap_or(2);
+    match fmt_char {
+        'f' => format!("{v:.*}", n),
+        'e' => format!("{v:.*e}", n),
+        'g' => format_numeric(v),
+        _ => format_numeric(v),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

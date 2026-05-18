@@ -82,6 +82,9 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -120,7 +123,16 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             }
             _ => ctx.mark_style.fill,
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+        // Resolve per-row opacity through scale if present; fall back to mark_style.opacity.
+        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+        let fill = with_opacity(fill, row_opacity);
 
         nodes.push(SceneNode::Rect {
             x: px_left,
@@ -131,7 +143,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
                 Some(fill),
                 ctx.mark_style.stroke,
                 ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
+                row_opacity,
                 ctx.mark_style.stroke_dash.as_deref(),
             ),
             corner_radius: ctx.mark_style.corner_radius,
@@ -167,6 +179,9 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -209,7 +224,15 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 }
                 _ => ctx.mark_style.fill,
             };
-            let fill = with_opacity(fill, ctx.mark_style.opacity);
+            let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+                match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                    Some(op) => op,
+                    None => ctx.mark_style.opacity,
+                }
+            } else {
+                ctx.mark_style.opacity
+            };
+            let fill = with_opacity(fill, row_opacity);
 
             nodes.push(SceneNode::Rect {
                 x: cx - box_w / 2.0,
@@ -220,7 +243,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     Some(fill),
                     ctx.mark_style.stroke,
                     ctx.mark_style.stroke_width,
-                    ctx.mark_style.opacity,
+                    row_opacity,
                     ctx.mark_style.stroke_dash.as_deref(),
                 ),
                 corner_radius: ctx.mark_style.corner_radius,
@@ -262,7 +285,15 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 }
                 _ => ctx.mark_style.fill,
             };
-            let fill = with_opacity(fill, ctx.mark_style.opacity);
+            let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+                match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
+                    Some(op) => op,
+                    None => ctx.mark_style.opacity,
+                }
+            } else {
+                ctx.mark_style.opacity
+            };
+            let fill = with_opacity(fill, row_opacity);
 
             nodes.push(SceneNode::Rect {
                 x: rect_left,
@@ -273,7 +304,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     Some(fill),
                     ctx.mark_style.stroke,
                     ctx.mark_style.stroke_width,
-                    ctx.mark_style.opacity,
+                    row_opacity,
                     ctx.mark_style.stroke_dash.as_deref(),
                 ),
                 corner_radius: ctx.mark_style.corner_radius,
@@ -468,9 +499,10 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{PanelLayout, ThemeInputs};
-    use crate::render::draw::resolve_mark_style;
-    use crate::render::scale_resolve::resolve_scales;
+    use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    use crate::render::draw::{resolve_mark_style, DrawCtx};
+    use crate::render::scale_resolve::{resolve_scales, OpacityScale, ResolvedScales, ScaleKind};
+    use crate::scale::linear::LinearScale;
     use crate::spec::chart::ChartSpec;
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
@@ -661,6 +693,149 @@ mod tests {
             result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(),
             3,
             "expected 3 quant-range rects (one per row)",
+        );
+    }
+
+    // --- W18: opacity encoding must be applied per-row ---
+
+    /// W18: build_quantitative_range must read the opacity encoding and apply it
+    /// per-row. Two rows with different opacity values must produce different
+    /// alpha values in their FillStroke fill color.
+    #[test]
+    fn w18_rect_quantitative_range_applies_per_row_opacity() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y",  DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.2, 0.8])),  // distinct opacity values
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+
+        // Build scales manually with an opacity scale so it maps [0,1] → [0,1].
+        use crate::render::scale_resolve::OpacityScale;
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: Some(OpacityScale {
+                inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.8], vec![0.2, 0.8], false, false)),
+            }),
+            x2: None,
+            y2: None,
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style.clone()) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 rects");
+
+        // The two rects must have different fill alpha (opacity applied per-row).
+        // ferrum_scene::Color uses .a for alpha.
+        let alpha0 = rects[0].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        let alpha1 = rects[1].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        assert_ne!(
+            alpha0, alpha1,
+            "per-row opacity encoding must produce different alphas; both were {alpha0}"
+        );
+    }
+
+    /// W18: build_heatmap also already reads opacity encoding (Phase 10 added it).
+    /// This test verifies that ordinal-range path also reads opacity encoding.
+    #[test]
+    fn w18_rect_ordinal_range_applies_per_row_opacity() {
+        use crate::render::scale_resolve::{OpacityScale, ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "q1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "q3".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("q1",  DataType::Float64, false),
+            Field::new("q3",  DataType::Float64, false),
+            Field::new("op",  DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0])),
+            Arc::new(Float64Array::from(vec![2.0, 4.0])),
+            Arc::new(Float64Array::from(vec![0.2, 0.9])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let scales_default = ResolvedScales {
+            x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![25.0, 75.0], 0.0)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![1.0, 4.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None,
+            opacity: Some(OpacityScale {
+                inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.9], vec![0.2, 0.9], false, false)),
+            }),
+            x2: None, y2: None,
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales_default, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style.clone()) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 ordinal-range rects");
+
+        // ferrum_scene::Color uses .a for alpha.
+        let alpha0 = rects[0].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        let alpha1 = rects[1].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        assert_ne!(
+            alpha0, alpha1,
+            "ordinal-range opacity encoding must produce different alphas; both were {alpha0}"
         );
     }
 

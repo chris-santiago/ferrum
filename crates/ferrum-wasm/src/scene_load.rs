@@ -126,6 +126,12 @@ pub struct SceneData {
     /// Per-batch metadata from the packed binary sidecar, keyed by
     /// `(panel_idx, batch_idx)`.
     pub packed_batch_meta: HashMap<(u32, u32), PackedBatchMeta>,
+    /// Ordered draw commands for circle/rect batches. The render loop
+    /// iterates these to select the correct blend pipeline per batch.
+    /// Non-mark instances (grid, axes, legend, title) are emitted as
+    /// normal-blend commands; mark batches carry their scene-graph
+    /// `BlendMode`.
+    pub draw_commands: Vec<DrawCommand>,
 }
 
 #[derive(Clone)]
@@ -161,6 +167,33 @@ pub struct PackedBatchMeta {
     pub instance_count: usize,
 }
 
+/// Which GPU instance buffer a draw command targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawKind {
+    Circle,
+    Rect,
+}
+
+/// A single instanced draw call for circle or rect batches.
+///
+/// `render_frame` iterates these in order to select the correct pipeline
+/// (normal vs. additive blend) and draw the correct instance slice. The
+/// ordering preserves the painter's algorithm: batches appear in panel order,
+/// then batch order within each panel, matching the scene-graph walk in
+/// `load_scene_with_packed`.
+#[derive(Clone, Debug)]
+pub struct DrawCommand {
+    pub kind: DrawKind,
+    /// First instance index in the corresponding flat array
+    /// (`circle_instances` or `rect_instances`).
+    pub instance_start: u32,
+    /// Number of instances to draw.
+    pub instance_count: u32,
+    /// When `true`, the additive-blend pipeline is used instead of the
+    /// normal alpha-blend pipeline.
+    pub additive: bool,
+}
+
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
     load_scene_with_packed(scene, &[])
 }
@@ -172,32 +205,66 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let mut images = Vec::new();
     let mut texts = Vec::new();
     let mut batch_meta = HashMap::new();
+    let mut draw_commands: Vec<DrawCommand> = Vec::new();
 
     // Unpack binary instance data (passed as raw bytes, not base64).
+    // Draw commands for packed batches are emitted in the scene-graph walk
+    // below, where the MarkBatch.blend mode is available.
     unpack_binary_instances(packed_data, &mut circles, &mut rects, &mut batch_meta);
 
     let background = scene.background.as_ref().map(|c| color_to_linear(c, 1.0));
 
+    // Snapshot counters: used to emit draw commands for each collect_nodes call.
+    let mut prev_c = circles.len();
+    let mut prev_r = rects.len();
+
     collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
-    for panel in &scene.panels {
+    for (panel_idx, panel) in scene.panels.iter().enumerate() {
         collect_nodes(&panel.grid, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
-        for batch in &panel.marks {
-            collect_nodes(
-                &batch.nodes,
-                &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
-                batch.stroke_cap, batch.stroke_join,
-            );
+        for (batch_idx, batch) in panel.marks.iter().enumerate() {
+            let additive = batch_uses_additive_blend(batch.blend);
+
+            // If this batch has packed binary instances, emit a draw command
+            // from the packed metadata (the instances were already added by
+            // unpack_binary_instances above). Otherwise, collect from nodes.
+            let key = (panel_idx as u32, batch_idx as u32);
+            if let Some(meta) = batch_meta.get(&key) {
+                let kind = match meta.kind {
+                    0 => DrawKind::Circle,
+                    _ => DrawKind::Rect,
+                };
+                draw_commands.push(DrawCommand {
+                    kind,
+                    instance_start: meta.instance_start as u32,
+                    instance_count: meta.instance_count as u32,
+                    additive,
+                });
+            } else {
+                collect_nodes(
+                    &batch.nodes,
+                    &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
+                    batch.stroke_cap, batch.stroke_join,
+                );
+                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, &mut draw_commands);
+            }
         }
 
         collect_nodes(&panel.axes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
         collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
         collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
     }
 
     collect_nodes(&scene.legend, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
     collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
     SceneData {
         circle_instances: circles,
@@ -209,7 +276,39 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         width: scene.width as f32,
         height: scene.height as f32,
         packed_batch_meta: batch_meta,
+        draw_commands,
     }
+}
+
+/// Emit draw commands for any circles/rects added since the previous snapshot.
+fn emit_draw_commands(
+    circles: &[CircleInstance],
+    rects: &[RectInstance],
+    prev_c: &mut usize,
+    prev_r: &mut usize,
+    additive: bool,
+    commands: &mut Vec<DrawCommand>,
+) {
+    let new_c = circles.len();
+    if new_c > *prev_c {
+        commands.push(DrawCommand {
+            kind: DrawKind::Circle,
+            instance_start: *prev_c as u32,
+            instance_count: (new_c - *prev_c) as u32,
+            additive,
+        });
+    }
+    *prev_c = new_c;
+    let new_r = rects.len();
+    if new_r > *prev_r {
+        commands.push(DrawCommand {
+            kind: DrawKind::Rect,
+            instance_start: *prev_r as u32,
+            instance_count: (new_r - *prev_r) as u32,
+            additive,
+        });
+    }
+    *prev_r = new_r;
 }
 
 /// Flag: tooltips string table follows instance data (+ optional data_indices).
@@ -234,6 +333,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 /// based on `flags`.
 ///
 /// kind=0 → CircleInstance, kind=1 → RectInstance.
+///
 fn unpack_binary_instances(
     data: &[u8],
     circles: &mut Vec<CircleInstance>,
@@ -355,7 +455,7 @@ fn collect_nodes(
                 circles.push(CircleInstance {
                     center: [*cx as f32, *cy as f32],
                     radius: *r as f32,
-                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.opacity),
+                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
@@ -369,7 +469,7 @@ fn collect_nodes(
                     position: [*x as f32, *y as f32],
                     size: [*w as f32, *h as f32],
                     corner_radius: *corner_radius as f32,
-                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.opacity),
+                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
@@ -405,9 +505,16 @@ fn collect_nodes(
                 });
             }
             SceneNode::Image { x, y, w, h, data } => {
-                if let ImageData::Inline { bytes, .. } = data {
-                    if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
-                        images.push(quad);
+                match data {
+                    ImageData::Inline { bytes, .. } => {
+                        if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
+                            images.push(quad);
+                        }
+                    }
+                    ImageData::Url { .. } => {
+                        web_sys::console::warn_1(
+                            &"ferrum: ImageData::Url not supported in WASM renderer".into(),
+                        );
                     }
                 }
             }
@@ -567,7 +674,7 @@ fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
 /// `None` / empty vec → 0.0 (solid). Otherwise matches the first non-empty
 /// palette pattern by round-trip string comparison of the vec joined with ",".
 /// Falls back to 0.0 (solid) for unrecognised patterns.
-fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
+pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
     match dash {
         None => 0.0,
         Some(v) if v.is_empty() => 0.0,
@@ -2326,5 +2433,347 @@ mod tests {
         assert!(data.text_elements.is_empty());
         assert!((data.width - 100.0).abs() < 1e-3);
         assert!((data.height - 100.0).abs() < 1e-3);
+    }
+
+    // ── B2: fill_opacity is used for fill color alpha, not overall opacity ──
+
+    /// A circle with fill_opacity=0.5 and opacity=1.0 must produce a fill
+    /// color with alpha ≈ 0.5, not 1.0 (the overall opacity value).
+    #[test]
+    fn b2_circle_fill_color_uses_fill_opacity_not_opacity() {
+        use ferrum_scene::{Color, FillStroke, SceneNode};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.5, // half-transparent fill
+            angle: 0.0,
+        };
+
+        let nodes = vec![SceneNode::Circle {
+            cx: 10.0,
+            cy: 10.0,
+            r: 5.0,
+            style,
+        }];
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut mesh = lyon::tessellation::VertexBuffers::new();
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+
+        assert_eq!(circles.len(), 1);
+        // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
+        assert!(
+            (circles[0].fill_color[3] - 0.5).abs() < 0.02,
+            "fill_color alpha must use fill_opacity (0.5), got {}",
+            circles[0].fill_color[3]
+        );
+        // overall opacity field must reflect the opacity field (1.0).
+        assert!(
+            (circles[0].opacity - 1.0).abs() < 0.01,
+            "instance opacity must reflect style.opacity (1.0), got {}",
+            circles[0].opacity
+        );
+    }
+
+    /// Same check for Rect nodes.
+    #[test]
+    fn b2_rect_fill_color_uses_fill_opacity_not_opacity() {
+        use ferrum_scene::{Color, FillStroke, SceneNode};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.25, // quarter-transparent fill
+            angle: 0.0,
+        };
+
+        let nodes = vec![SceneNode::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 20.0,
+            h: 10.0,
+            corner_radius: 0.0,
+            style,
+        }];
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut mesh = lyon::tessellation::VertexBuffers::new();
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+
+        assert_eq!(rects.len(), 1);
+        assert!(
+            (rects[0].fill_color[3] - 0.25).abs() < 0.02,
+            "rect fill_color alpha must use fill_opacity (0.25), got {}",
+            rects[0].fill_color[3]
+        );
+        assert!(
+            (rects[0].opacity - 1.0).abs() < 0.01,
+            "rect instance opacity must reflect style.opacity (1.0), got {}",
+            rects[0].opacity
+        );
+    }
+
+    // ── B3: draw commands populated with correct blend mode ──────────
+
+    /// Helper: build a scene with two panels, each having one normal and one
+    /// additive circle batch, to test that draw_commands correctly records
+    /// per-batch blend mode and instance ranges.
+    fn make_blend_test_scene() -> SceneGraph {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
+            MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+
+        let circle_a = SceneNode::Circle { cx: 10.0, cy: 10.0, r: 5.0, style: style.clone() };
+        let circle_b = SceneNode::Circle { cx: 20.0, cy: 20.0, r: 5.0, style: style.clone() };
+        let circle_c = SceneNode::Circle { cx: 30.0, cy: 30.0, r: 5.0, style };
+
+        SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle_a],
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle_b, circle_c],
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
+                        blend: BlendMode::Additive,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
+                    },
+                ],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    #[test]
+    fn draw_commands_created_for_each_batch() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        // 3 circles total across 2 batches.
+        assert_eq!(data.circle_instances.len(), 3);
+
+        // Should have at least 2 draw commands for the 2 mark batches.
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+        assert_eq!(
+            circle_cmds.len(),
+            2,
+            "expected 2 circle draw commands, got {}",
+            circle_cmds.len()
+        );
+    }
+
+    #[test]
+    fn draw_commands_normal_batch_not_additive() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // First circle batch: 1 circle, normal blend.
+        assert_eq!(circle_cmds[0].instance_count, 1);
+        assert!(
+            !circle_cmds[0].additive,
+            "first batch should use normal blend"
+        );
+    }
+
+    #[test]
+    fn draw_commands_additive_batch_flagged() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // Second circle batch: 2 circles, additive blend.
+        assert_eq!(circle_cmds[1].instance_count, 2);
+        assert!(
+            circle_cmds[1].additive,
+            "second batch should use additive blend"
+        );
+    }
+
+    #[test]
+    fn draw_commands_instance_ranges_are_contiguous() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // First batch starts at 0, second batch starts where first ended.
+        assert_eq!(circle_cmds[0].instance_start, 0);
+        assert_eq!(
+            circle_cmds[1].instance_start,
+            circle_cmds[0].instance_start + circle_cmds[0].instance_count,
+            "second batch should start where first batch ended"
+        );
+    }
+
+    #[test]
+    fn draw_commands_cover_all_instances() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let total_circles: u32 = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .map(|c| c.instance_count)
+            .sum();
+        assert_eq!(
+            total_circles,
+            data.circle_instances.len() as u32,
+            "draw commands must cover all circle instances"
+        );
+    }
+
+    #[test]
+    fn draw_commands_rect_batch_with_blend() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
+            MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+
+        let rect_node = SceneNode::Rect {
+            x: 10.0, y: 10.0, w: 20.0, h: 30.0,
+            style,
+            corner_radius: 0.0,
+        };
+
+        let scene = SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Bar,
+                    nodes: vec![rect_node],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Additive,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        let rect_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Rect)
+            .collect();
+        assert_eq!(rect_cmds.len(), 1);
+        assert!(rect_cmds[0].additive, "rect batch should be additive");
+        assert_eq!(rect_cmds[0].instance_count, 1);
     }
 }

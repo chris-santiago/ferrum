@@ -260,15 +260,19 @@ impl SvgBuffer {
         self.buf.push_str("</text>");
     }
 
-    /// Embed a PNG as <image href="data:image/png;base64,..." x=... y=... width=... height=.../>.
-    /// `png_bytes` must be a valid PNG-encoded buffer (use render::rasterize::encode_png).
+    /// Embed an image as `<image href="data:<mime>;base64,..." .../>`.
+    /// `mime` controls whether the data URL uses `image/png` or `image/jpeg`.
     /// Attribute order is pinned: x, y, width, height, href.
-    pub fn image(&mut self, x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) {
+    pub fn image(&mut self, x: f64, y: f64, w: f64, h: f64, bytes: &[u8], mime: ferrum_scene::ImageMime) {
         use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        let mime_str = match mime {
+            ferrum_scene::ImageMime::Png => "image/png",
+            ferrum_scene::ImageMime::Jpeg => "image/jpeg",
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         self.buf.push_str(&format!(
-            r#"<image x="{}" y="{}" width="{}" height="{}" href="data:image/png;base64,{}"/>"#,
-            fmt_f(x), fmt_f(y), fmt_f(w), fmt_f(h), b64
+            r#"<image x="{}" y="{}" width="{}" height="{}" href="data:{};base64,{}"/>"#,
+            fmt_f(x), fmt_f(y), fmt_f(w), fmt_f(h), mime_str, b64
         ));
     }
 
@@ -578,10 +582,11 @@ mod tests {
     #[test]
     fn image_emits_data_url_with_fixed_attribute_order() {
         use base64::Engine;
+        use ferrum_scene::ImageMime;
         let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let mut svg = SvgBuffer::new(viewport, None, false);
         let png_bytes: &[u8] = b"\x89PNG\r\n\x1a\n";  // PNG magic bytes (truncated)
-        svg.image(10.0, 20.0, 50.0, 30.0, png_bytes);
+        svg.image(10.0, 20.0, 50.0, 30.0, png_bytes, ImageMime::Png);
         let out = svg.finish();
 
         let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
@@ -594,11 +599,12 @@ mod tests {
 
     #[test]
     fn image_byte_identical_across_runs() {
+        use ferrum_scene::ImageMime;
         let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let png: &[u8] = b"\x89PNG\r\n\x1a\nfoo";
         let make = || {
             let mut svg = SvgBuffer::new(viewport, None, false);
-            svg.image(0.0, 0.0, 10.0, 10.0, png);
+            svg.image(0.0, 0.0, 10.0, 10.0, png, ImageMime::Png);
             svg.finish()
         };
         assert_eq!(make(), make(), "image emission must be deterministic");
@@ -606,9 +612,10 @@ mod tests {
 
     #[test]
     fn image_does_not_emit_whitespace_in_href() {
+        use ferrum_scene::ImageMime;
         let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let mut svg = SvgBuffer::new(viewport, None, false);
-        svg.image(0.0, 0.0, 10.0, 10.0, b"\x89PNG\r\n\x1a\nx");
+        svg.image(0.0, 0.0, 10.0, 10.0, b"\x89PNG\r\n\x1a\nx", ImageMime::Png);
         let out = svg.finish();
         let href_start = out.find("data:image/png;base64,").expect("href missing");
         let href_end = out[href_start..].find('"').unwrap() + href_start;
@@ -708,5 +715,41 @@ mod tests {
             svg.finish()
         };
         assert_eq!(make(), make(), "beeswarm must be deterministic");
+    }
+
+    // --- W13: image MIME type must match the ImageMime variant ---
+
+    /// W13: image() with PNG mime must emit data:image/png;base64,...
+    #[test]
+    fn w13_image_png_mime_emitted_correctly() {
+        use ferrum_scene::ImageMime;
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        buf.image(10.0, 20.0, 30.0, 40.0, b"\x89PNG", ImageMime::Png);
+        let out = buf.finish();
+        assert!(
+            out.contains("data:image/png;base64,"),
+            "PNG mime type must appear in href; got: {out}"
+        );
+        assert!(
+            !out.contains("data:image/jpeg;base64,"),
+            "JPEG mime must not appear for PNG image; got: {out}"
+        );
+    }
+
+    /// W13: image() with JPEG mime must emit data:image/jpeg;base64,...
+    #[test]
+    fn w13_image_jpeg_mime_emitted_correctly() {
+        use ferrum_scene::ImageMime;
+        let mut buf = SvgBuffer::new(vp(), None, false);
+        buf.image(0.0, 0.0, 50.0, 50.0, b"\xFF\xD8\xFF", ImageMime::Jpeg);
+        let out = buf.finish();
+        assert!(
+            out.contains("data:image/jpeg;base64,"),
+            "JPEG mime type must appear in href; got: {out}"
+        );
+        assert!(
+            !out.contains("data:image/png;base64,"),
+            "PNG mime must not appear for JPEG image; got: {out}"
+        );
     }
 }

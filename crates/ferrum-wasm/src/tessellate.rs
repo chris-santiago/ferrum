@@ -19,7 +19,7 @@ pub fn tessellate_line(
     style: &StrokeStyle,
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) {
-    let color = color_to_f32(&style.color, style.opacity);
+    let color = color_to_f32(&style.color, style.opacity * style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(x1 as f32, y1 as f32));
     builder.line_to(point(x2 as f32, y2 as f32));
@@ -71,7 +71,7 @@ pub fn tessellate_polyline(
     if points.len() < 2 {
         return;
     }
-    let color = color_to_f32(&style.color, style.opacity);
+    let color = color_to_f32(&style.color, style.opacity * style.stroke_opacity);
     let mut builder = LyonPath::builder();
     builder.begin(point(points[0].0 as f32, points[0].1 as f32));
     for p in &points[1..] {
@@ -358,6 +358,98 @@ fn flatten_cubic(
         let next = point(x, y);
         out.push((prev, next));
         prev = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrum_scene::{Color, StrokeStyle};
+
+    fn make_stroke_style(opacity: f64, stroke_opacity: f64) -> StrokeStyle {
+        StrokeStyle {
+            color: Color { r: 255, g: 255, b: 255, a: 255 },
+            width: 2.0,
+            opacity,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity,
+        }
+    }
+
+    // ── W10: stroke_opacity factored into tessellated mesh color ─────────
+
+    /// A line with stroke_opacity=0.5 and opacity=1.0 must produce a mesh
+    /// vertex with alpha ≈ 0.5, not 1.0.
+    #[test]
+    fn w10_line_tessellation_uses_stroke_opacity() {
+        let style = make_stroke_style(1.0, 0.5);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "tessellate_line must produce vertices");
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 0.5).abs() < 0.05,
+                "vertex alpha must reflect stroke_opacity (0.5), got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// When both opacity=0.8 and stroke_opacity=0.5 are set, the effective
+    /// alpha must be opacity * stroke_opacity = 0.4.
+    #[test]
+    fn w10_line_tessellation_multiplies_opacity_and_stroke_opacity() {
+        let style = make_stroke_style(0.8, 0.5);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty());
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 0.4).abs() < 0.05,
+                "alpha must be opacity*stroke_opacity = 0.4, got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// A polyline with stroke_opacity=0.3 and opacity=1.0 must produce vertices
+    /// with alpha ≈ 0.3.
+    #[test]
+    fn w10_polyline_tessellation_uses_stroke_opacity() {
+        let style = make_stroke_style(1.0, 0.3);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        let points = vec![(0.0, 0.0), (50.0, 0.0), (100.0, 50.0)];
+        tessellate_polyline(&points, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty());
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 0.3).abs() < 0.05,
+                "polyline vertex alpha must reflect stroke_opacity (0.3), got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// stroke_opacity=1.0 and opacity=1.0 must give full alpha (no regression).
+    #[test]
+    fn w10_line_tessellation_full_opacity_unchanged() {
+        let style = make_stroke_style(1.0, 1.0);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty());
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 1.0).abs() < 0.05,
+                "full opacity must give alpha=1.0, got {}",
+                v.color[3]
+            );
+        }
     }
 }
 

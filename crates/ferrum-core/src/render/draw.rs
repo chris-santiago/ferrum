@@ -257,7 +257,14 @@ impl MetadataColumns {
     /// Read tooltip/href/description columns from the RecordBatch when the
     /// corresponding encoding is present. Falls back to f64 → string
     /// conversion when the column is numeric.
+    ///
+    /// For numeric columns, the `format` and `format_type` fields on each
+    /// tooltip `EncodingSpec` are honored (matching the same logic as text
+    /// mark labels). If no format is specified, the default behavior trims
+    /// trailing zeros (e.g. `1.5` not `1.5000`).
     pub fn from_ctx(ctx: &DrawCtx) -> Self {
+        use crate::render::format::{format_numeric, format_time, format_with_spec};
+
         // Collect tooltip columns: use tooltip_fields if present, fall back to single tooltip.
         let tooltip_specs: Vec<&crate::spec::encoding::EncodingSpec> =
             if let Some(fields) = ctx.spec.encoding.tooltip_fields.as_ref() {
@@ -268,14 +275,21 @@ impl MetadataColumns {
                 vec![]
             };
 
-        let read_col = |field: &str| -> Option<Vec<Option<String>>> {
+        // Read a single tooltip column, applying format/format_type from the spec.
+        let read_col_with_spec = |field: &str, fmt: Option<&str>, fmt_type: Option<&str>| -> Option<Vec<Option<String>>> {
             col_as_str(ctx.batch, field)
                 .ok()
                 .or_else(|| {
                     col_as_f64(ctx.batch, field).ok().map(|vals| {
                         vals.into_iter()
                             .map(|v| v.map(|f| {
-                                format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()
+                                if fmt_type == Some("time") {
+                                    format_time(f as i64, 86_400_000)
+                                } else if fmt.is_some() {
+                                    format_with_spec(f, fmt)
+                                } else {
+                                    format_numeric(f)
+                                }
                             }))
                             .collect()
                     })
@@ -284,7 +298,11 @@ impl MetadataColumns {
 
         let tooltip_cols: Vec<(String, Vec<Option<String>>)> = tooltip_specs
             .iter()
-            .filter_map(|e| read_col(&e.field).map(|col| (e.field.clone(), col)))
+            .filter_map(|e| {
+                let fmt = e.format.as_deref();
+                let fmt_type = e.format_type.as_deref();
+                read_col_with_spec(&e.field, fmt, fmt_type).map(|col| (e.field.clone(), col))
+            })
             .collect();
 
         let href = ctx.spec.encoding.href.as_ref().and_then(|e| {
@@ -296,7 +314,7 @@ impl MetadataColumns {
                 .or_else(|| {
                     col_as_f64(ctx.batch, &e.field).ok().map(|vals| {
                         vals.into_iter()
-                            .map(|v| v.map(|f| format!("{:.4}", f).trim_end_matches('0').trim_end_matches('.').to_string()))
+                            .map(|v| v.map(format_numeric))
                             .collect()
                     })
                 })
@@ -595,5 +613,143 @@ mod tests {
         let overrides = MarkKwargsSpec { stroke_dash: Some(vec![]), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
         assert!(style.stroke_dash.is_none(), "empty stroke_dash override must clear the dash");
+    }
+
+    // --- B6: tooltip format/format_type must be honored ---
+
+    /// B6: When a tooltip encoding has `format: ".2f"`, numeric values must be
+    /// formatted with 2 decimal places, not the hardcoded `"{:.4}"` fallback.
+    #[test]
+    fn b6_tooltip_format_spec_applied_to_numeric_column() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec {
+                    field: "val".into(),
+                    type_: Some(SDT::Quantitative),
+                    format: Some(".2f".to_string()),
+                    format_type: Some("number".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![3.14159, 2.71828])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let meta = MetadataColumns::from_ctx(&ctx);
+        assert_eq!(meta.tooltip_cols.len(), 1, "expected 1 tooltip column");
+        let (field_name, values) = &meta.tooltip_cols[0];
+        assert_eq!(field_name, "val");
+
+        // With format ".2f", 3.14159 should appear as "3.14", NOT "3.1416" (the old hardcoded .4 pattern).
+        let formatted_pi = values[0].as_deref().expect("value[0] must be Some");
+        assert_eq!(
+            formatted_pi, "3.14",
+            "tooltip format '.2f' must produce 2 decimal places; got: '{formatted_pi}'"
+        );
+        let formatted_e = values[1].as_deref().expect("value[1] must be Some");
+        assert_eq!(
+            formatted_e, "2.72",
+            "tooltip format '.2f' must produce 2 decimal places; got: '{formatted_e}'"
+        );
+    }
+
+    /// B6: When no format is specified, the existing default behavior (trim trailing zeros)
+    /// must be preserved — this verifies we do not break the fallback path.
+    #[test]
+    fn b6_tooltip_default_format_trims_trailing_zeros() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec {
+                    field: "val".into(),
+                    type_: Some(SDT::Quantitative),
+                    // No format or format_type set.
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(Float64Array::from(vec![1.5])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let meta = MetadataColumns::from_ctx(&ctx);
+        let (_, values) = &meta.tooltip_cols[0];
+        // Default: 1.5 → "1.5" (trimmed, not "1.5000")
+        let formatted = values[0].as_deref().expect("must have value");
+        assert!(
+            !formatted.contains("0000"),
+            "default tooltip format must trim trailing zeros; got: '{formatted}'"
+        );
     }
 }

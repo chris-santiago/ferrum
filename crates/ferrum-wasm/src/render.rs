@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 use crate::error::WasmRenderError;
 use crate::gpu::GpuContext;
 use crate::pipelines::RenderPipelines;
-use crate::scene_load::SceneData;
+use crate::scene_load::{DrawCommand, DrawKind, SceneData};
 
 struct ImageGpu {
     vertex_buffer: wgpu::Buffer,
@@ -15,13 +15,13 @@ pub struct GpuBuffers {
     uniform_bind_group: wgpu::BindGroup,
     quad_vertex_buffer: wgpu::Buffer,
     circle_instance_buffer: Option<wgpu::Buffer>,
-    circle_count: u32,
     rect_instance_buffer: Option<wgpu::Buffer>,
-    rect_count: u32,
     mesh_vertex_buffer: Option<wgpu::Buffer>,
     mesh_index_buffer: Option<wgpu::Buffer>,
     mesh_index_count: u32,
     image_draws: Vec<ImageGpu>,
+    /// Ordered draw commands for per-batch pipeline selection.
+    draw_commands: Vec<DrawCommand>,
 }
 
 /// Uniform data uploaded to the GPU once per panel draw.
@@ -156,13 +156,12 @@ impl GpuBuffers {
             uniform_bind_group,
             quad_vertex_buffer,
             circle_instance_buffer,
-            circle_count: scene.circle_instances.len() as u32,
             rect_instance_buffer,
-            rect_count: scene.rect_instances.len() as u32,
             mesh_vertex_buffer,
             mesh_index_buffer,
             mesh_index_count: scene.mesh_buffers.indices.len() as u32,
             image_draws,
+            draw_commands: scene.draw_commands.clone(),
         }
     }
 }
@@ -290,7 +289,9 @@ pub fn render_frame(
             multiview_mask: None,
         });
 
-        // Draw order: mesh (areas/lines) → images → rect (bars) → circle (points on top)
+        // Draw order: mesh (areas/lines) → images → per-batch circle/rect
+        // commands (painter's-algorithm order from the scene graph, with
+        // correct blend pipeline selection per batch).
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {
@@ -309,20 +310,42 @@ pub fn render_frame(
             pass.draw(0..4, 0..1);
         }
 
-        if let Some(ib) = &buffers.rect_instance_buffer {
-            pass.set_pipeline(&pipelines.instanced_rect);
-            pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
-            pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, ib.slice(..));
-            pass.draw(0..4, 0..buffers.rect_count);
-        }
-
-        if let Some(ib) = &buffers.circle_instance_buffer {
-            pass.set_pipeline(&pipelines.instanced_circle);
-            pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
-            pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, ib.slice(..));
-            pass.draw(0..4, 0..buffers.circle_count);
+        for cmd in &buffers.draw_commands {
+            if cmd.instance_count == 0 {
+                continue;
+            }
+            let start = cmd.instance_start;
+            let end = start + cmd.instance_count;
+            match cmd.kind {
+                DrawKind::Rect => {
+                    if let Some(ib) = &buffers.rect_instance_buffer {
+                        let pipeline = if cmd.additive {
+                            &pipelines.instanced_rect_additive
+                        } else {
+                            &pipelines.instanced_rect
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
+                        pass.set_vertex_buffer(1, ib.slice(..));
+                        pass.draw(0..4, start..end);
+                    }
+                }
+                DrawKind::Circle => {
+                    if let Some(ib) = &buffers.circle_instance_buffer {
+                        let pipeline = if cmd.additive {
+                            &pipelines.instanced_circle_additive
+                        } else {
+                            &pipelines.instanced_circle
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
+                        pass.set_vertex_buffer(1, ib.slice(..));
+                        pass.draw(0..4, start..end);
+                    }
+                }
+            }
         }
     }
 
