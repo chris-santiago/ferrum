@@ -279,18 +279,28 @@ export class WasmRenderer {
         }
     }
     /**
-     * Begin a GPU-interpolated transition from the currently loaded scene to a
-     * new scene JSON string.
+     * Begin a GPU-interpolated transition from an old scene to the currently
+     * loaded scene.
      *
-     * Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+     * `old_scene_json` is the **previous** scene JSON string. The transition
+     * target is `self.loaded.data` (the scene already loaded via `loadScene`).
+     *
+     * B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
+     * as old. But `loadScene(new_json)` was already called before
+     * `startTransition`, so `loaded.data` was already the new scene — making
+     * old == new and the transition a no-op (self-to-self interpolation).
+     * Now the caller passes the *old* scene JSON and we use `loaded.data` as
+     * the transition target.
+     *
+     * Call ``tick_transition(t)`` (t in [0, 1]) from a requestAnimationFrame loop
      * to drive the animation.  ``start_transition`` does not start the loop —
      * the JavaScript caller owns the timing.
      *
      * Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
-     * @param {string} new_scene_json
+     * @param {string} old_scene_json
      */
-    startTransition(new_scene_json) {
-        const ptr0 = passStringToWasm0(new_scene_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    startTransition(old_scene_json) {
+        const ptr0 = passStringToWasm0(old_scene_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmrenderer_startTransition(this.__wbg_ptr, ptr0, len0);
         if (ret[1]) {
