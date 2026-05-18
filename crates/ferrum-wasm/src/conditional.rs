@@ -299,6 +299,394 @@ mod tests {
     // The test documents the EXPECTED behavior: marks inside the brush rectangle
     // get the if_selected color, marks outside get if_not.
 
+    // ── Linked-selection conditional tests ────────────────────────────
+
+    // Test 6: Field-value matching selects correct marks.
+    #[test]
+    fn field_value_matching_selects_correct_marks() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+            TooltipContent, TooltipField,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Three circles with tooltips: mark 0 group="a", mark 1 group="b", mark 2 group="a".
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 250.0, cy: 50.0, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1, 2]),
+                tooltips: Some(vec![
+                    TooltipContent {
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "a".to_string(),
+                        }],
+                    },
+                    TooltipContent {
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "b".to_string(),
+                        }],
+                    },
+                    TooltipContent {
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "a".to_string(),
+                        }],
+                    },
+                ]),
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".to_string(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Color { value: red },
+            if_not: EncodingValue::Color { value: grey },
+        }];
+
+        // Point selection with field_values indicating group="a".
+        let mut selections = HashMap::new();
+        selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![0, 2],
+                field_values: vec![(
+                    "group".to_string(),
+                    FieldValue::String { value: "a".to_string() },
+                )],
+            },
+        );
+
+        let neutral = [0.0_f32, 0.0, 0.0, 1.0];
+        let base_circles: Vec<CircleInstance> = (0..3)
+            .map(|i| CircleInstance {
+                center: [50.0 + i as f32 * 100.0, 50.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            })
+            .collect();
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+
+        let red_r = srgb_to_linear(1.0); // sRGB 255/255 = 1.0 → linear 1.0
+        let grey_linear = srgb_to_linear(128.0 / 255.0);
+
+        // Mark 0 (group="a") should be red.
+        assert!(
+            (result.circle_instances[0].fill_color[0] - red_r).abs() < 0.01,
+            "mark 0 (group=a) should be red, got {:?}",
+            result.circle_instances[0].fill_color
+        );
+        // Mark 1 (group="b") should be grey.
+        assert!(
+            (result.circle_instances[1].fill_color[0] - grey_linear).abs() < 0.01,
+            "mark 1 (group=b) should be grey, got {:?}",
+            result.circle_instances[1].fill_color
+        );
+        // Mark 2 (group="a") should be red.
+        assert!(
+            (result.circle_instances[2].fill_color[0] - red_r).abs() < 0.01,
+            "mark 2 (group=a) should be red, got {:?}",
+            result.circle_instances[2].fill_color
+        );
+    }
+
+    // Test 7: Empty selection skips conditional (all marks retain original colors).
+    #[test]
+    fn empty_selection_skips_conditional() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".to_string(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Color { value: red },
+            if_not: EncodingValue::Color { value: grey },
+        }];
+
+        // Selection is Empty — conditional should be skipped entirely.
+        let mut selections = HashMap::new();
+        selections.insert("sel".to_string(), SelectionState::Empty);
+
+        let original_fill = [0.5_f32, 0.3, 0.1, 1.0];
+        let base_circles = vec![
+            CircleInstance {
+                center: [50.0, 50.0],
+                radius: 5.0,
+                fill_color: original_fill,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+            CircleInstance {
+                center: [150.0, 50.0],
+                radius: 5.0,
+                fill_color: original_fill,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+        ];
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+
+        // Both marks should retain their original colors unchanged.
+        assert_eq!(
+            result.circle_instances[0].fill_color, original_fill,
+            "empty selection must not alter mark 0 fill color"
+        );
+        assert_eq!(
+            result.circle_instances[1].fill_color, original_fill,
+            "empty selection must not alter mark 1 fill color"
+        );
+    }
+
+    // Test 8: Mixed point + interval selections — two conditionals apply independently.
+    #[test]
+    fn mixed_point_and_interval_selections_apply_independently() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Two circles: (50,50) and (200,200).
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle { cx: 200.0, cy: 200.0, r: 5.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        // Point selection selects index 0 only.
+        // Interval selection covers (100..300, 100..300) — only circle at (200,200) is inside.
+        let mut selections = HashMap::new();
+        selections.insert(
+            "point_sel".to_string(),
+            SelectionState::Point {
+                indices: vec![0],
+                field_values: Vec::new(),
+            },
+        );
+        selections.insert(
+            "brush_sel".to_string(),
+            SelectionState::Interval {
+                x_range: Some((100.0, 300.0)),
+                y_range: Some((100.0, 300.0)),
+            },
+        );
+
+        // Conditional 1: point_sel → opacity 1.0 if selected, 0.2 if not.
+        // Conditional 2: brush_sel → color red if selected, grey if not.
+        let conditionals = vec![
+            ConditionalEncoding {
+                selection_name: "point_sel".to_string(),
+                channel: ChannelName::Opacity,
+                if_selected: EncodingValue::Opacity { value: 1.0 },
+                if_not: EncodingValue::Opacity { value: 0.2 },
+            },
+            ConditionalEncoding {
+                selection_name: "brush_sel".to_string(),
+                channel: ChannelName::Color,
+                if_selected: EncodingValue::Color {
+                    value: Color { r: 255, g: 0, b: 0, a: 255 },
+                },
+                if_not: EncodingValue::Color {
+                    value: Color { r: 128, g: 128, b: 128, a: 255 },
+                },
+            },
+        ];
+
+        let neutral = [0.0_f32, 0.0, 0.0, 1.0];
+        let base_circles = vec![
+            CircleInstance {
+                center: [50.0, 50.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+            CircleInstance {
+                center: [200.0, 200.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            },
+        ];
+
+        let result = resolve_conditionals(&panels, &conditionals, &selections, &base_circles, &[]);
+
+        // Circle 0 at (50,50):
+        //   - point_sel: index 0 is selected → opacity = 1.0
+        //   - brush_sel: (50,50) is outside (100..300) → grey color
+        assert!(
+            (result.circle_instances[0].opacity - 1.0).abs() < 0.01,
+            "circle 0: point_sel selected → opacity=1.0, got {}",
+            result.circle_instances[0].opacity
+        );
+        let grey_linear = srgb_to_linear(128.0 / 255.0);
+        assert!(
+            (result.circle_instances[0].fill_color[0] - grey_linear).abs() < 0.01,
+            "circle 0: brush_sel not selected → grey, got {:?}",
+            result.circle_instances[0].fill_color
+        );
+
+        // Circle 1 at (200,200):
+        //   - point_sel: index 1 is NOT selected → opacity = 0.2
+        //   - brush_sel: (200,200) is inside (100..300) → red color
+        assert!(
+            (result.circle_instances[1].opacity - 0.2).abs() < 0.01,
+            "circle 1: point_sel not selected → opacity=0.2, got {}",
+            result.circle_instances[1].opacity
+        );
+        assert!(
+            (result.circle_instances[1].fill_color[0] - 1.0).abs() < 0.01,
+            "circle 1: brush_sel selected → red, got {:?}",
+            result.circle_instances[1].fill_color
+        );
+    }
+
     #[test]
     fn r3_interval_conditional_encoding_applies() {
         use ferrum_scene::{

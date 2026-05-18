@@ -2084,6 +2084,72 @@ mod tests {
         assert_eq!(json, "{}");
     }
 
+    // ── sRGB round-trip and opt_color_to_f32 regression tests ──────────
+
+    /// Inverse of srgb_to_linear: convert linear light back to sRGB.
+    /// Used only in tests to verify round-trip accuracy.
+    fn linear_to_srgb(l: f32) -> f32 {
+        if l <= 0.0031308 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    // Test 9: srgb_to_linear round-trip accuracy for known sRGB values.
+    #[test]
+    fn srgb_to_linear_round_trip_accuracy() {
+        let test_values: [u8; 5] = [0, 64, 128, 192, 255];
+        for &srgb_byte in &test_values {
+            let s = srgb_byte as f32 / 255.0;
+            let linear = srgb_to_linear(s);
+            let back = linear_to_srgb(linear);
+            assert!(
+                (back - s).abs() < 1e-5,
+                "round-trip failed for sRGB byte {srgb_byte}: {s} → linear {linear} → {back}, delta {}",
+                (back - s).abs()
+            );
+        }
+    }
+
+    // Test 10: opt_color_to_f32 produces linear values (catches double-gamma bug).
+    #[test]
+    fn opt_color_to_f32_produces_linear_mid_grey() {
+        let mid_grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let result = opt_color_to_f32(Some(&mid_grey), 1.0);
+        // sRGB 128/255 ≈ 0.502 → linear ≈ 0.216.
+        // If double-gamma were applied, the value would be ~0.0397 (way too dark).
+        // If sRGB were passed through raw, the value would be ~0.502 (way too bright).
+        // The correct linear value is ~0.216.
+        assert!(
+            result[0] < 0.5,
+            "opt_color_to_f32 r=128 must produce linear < 0.5 (not raw sRGB), got {}",
+            result[0]
+        );
+        assert!(
+            result[0] > 0.1,
+            "opt_color_to_f32 r=128 must produce linear > 0.1 (not double-gamma), got {}",
+            result[0]
+        );
+        assert!(
+            (result[0] - 0.216).abs() < 0.01,
+            "opt_color_to_f32 r=128 should produce ~0.216 (linear mid-grey), got {}",
+            result[0]
+        );
+        // All RGB channels should be equal for a neutral grey.
+        assert!(
+            (result[0] - result[1]).abs() < 1e-6 && (result[1] - result[2]).abs() < 1e-6,
+            "neutral grey must have equal RGB channels, got {:?}",
+            result
+        );
+        // Alpha should be 1.0 (fully opaque) and NOT gamma-corrected.
+        assert!(
+            (result[3] - 1.0).abs() < 1e-6,
+            "alpha must be 1.0 for a=255, opacity=1.0, got {}",
+            result[3]
+        );
+    }
+
     #[test]
     fn parse_tooltip_json_escapes_quotes() {
         let bytes = build_tooltip_bytes(

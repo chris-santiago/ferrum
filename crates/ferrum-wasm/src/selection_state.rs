@@ -807,4 +807,228 @@ mod tests {
     }
 
     // R6: Skipped — already covered by bug_hunt_to_json_produces_valid_json_for_interval_selection.
+
+    // ── Linked-selection interaction tests ──────────────────────────────
+
+    // Test 1: handle_drag with reversed coordinates normalizes lo < hi.
+    #[test]
+    fn handle_drag_reversed_coords_normalizes_ranges() {
+        let specs = vec![interval_spec("brush")];
+        let mut state = InteractionState::new(&specs);
+        // Drag from bottom-right to top-left: x0 > x1, y0 > y1.
+        state.handle_drag(&specs, 0, 400.0, 300.0, 100.0, 50.0);
+        match state.selections.get("brush") {
+            Some(SelectionState::Interval {
+                x_range: Some((x_lo, x_hi)),
+                y_range: Some((y_lo, y_hi)),
+            }) => {
+                assert!(
+                    x_lo <= x_hi,
+                    "x_range lo must be <= hi after reversed drag, got ({x_lo}, {x_hi})"
+                );
+                assert!(
+                    y_lo <= y_hi,
+                    "y_range lo must be <= hi after reversed drag, got ({y_lo}, {y_hi})"
+                );
+                assert!(
+                    (x_lo - 100.0).abs() < 1e-10,
+                    "x_lo must be min(400,100)=100, got {x_lo}"
+                );
+                assert!(
+                    (x_hi - 400.0).abs() < 1e-10,
+                    "x_hi must be max(400,100)=400, got {x_hi}"
+                );
+                assert!(
+                    (y_lo - 50.0).abs() < 1e-10,
+                    "y_lo must be min(300,50)=50, got {y_lo}"
+                );
+                assert!(
+                    (y_hi - 300.0).abs() < 1e-10,
+                    "y_hi must be max(300,50)=300, got {y_hi}"
+                );
+            }
+            other => panic!("expected Interval with both ranges, got {other:?}"),
+        }
+    }
+
+    // Test 2: contains_point with partial ranges (x only, y unconstrained).
+    #[test]
+    fn contains_point_partial_range_x_only() {
+        let sel = SelectionState::Interval {
+            x_range: Some((10.0, 50.0)),
+            y_range: None,
+        };
+        // Point at any y should be contained if x is in range.
+        assert!(
+            sel.contains_point(30.0, 0.0),
+            "x=30 in [10,50], y unconstrained → must be contained"
+        );
+        assert!(
+            sel.contains_point(30.0, 99999.0),
+            "x=30 in [10,50], y unconstrained (large y) → must be contained"
+        );
+        assert!(
+            sel.contains_point(10.0, -100.0),
+            "x=10 on boundary, y unconstrained → must be contained"
+        );
+        // Point outside x range should not be contained.
+        assert!(
+            !sel.contains_point(5.0, 30.0),
+            "x=5 outside [10,50] → must NOT be contained"
+        );
+        assert!(
+            !sel.contains_point(55.0, 30.0),
+            "x=55 outside [10,50] → must NOT be contained"
+        );
+    }
+
+    // Test 3: contains_point with both ranges None (unconstrained = everything).
+    #[test]
+    fn contains_point_both_ranges_none_contains_everything() {
+        let sel = SelectionState::Interval {
+            x_range: None,
+            y_range: None,
+        };
+        assert!(
+            sel.contains_point(0.0, 0.0),
+            "unconstrained interval must contain (0, 0)"
+        );
+        assert!(
+            sel.contains_point(1000.0, -500.0),
+            "unconstrained interval must contain arbitrary point"
+        );
+        assert!(
+            sel.contains_point(f64::MAX, f64::MIN),
+            "unconstrained interval must contain extreme values"
+        );
+    }
+
+    // Test 4: handle_click clears on background miss (pre-seeded Point selection).
+    #[test]
+    fn handle_click_clears_preseeded_selection_on_background_miss() {
+        let specs = vec![point_spec("sel")];
+        let mut state = InteractionState::new(&specs);
+        // Pre-seed a Point selection with indices [0, 1, 2].
+        state.selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![0, 1, 2],
+                field_values: Vec::new(),
+            },
+        );
+        // Click at coordinates that miss all marks (empty panels = no marks to hit).
+        let zoom = crate::zoom_pan::ZoomPanState::new(
+            0,
+            &ferrum_scene::InteractionConfig::default(),
+        );
+        state.handle_click(&[], &specs, 999.0, 999.0, &zoom, false);
+        assert!(
+            matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
+            "background click on pre-seeded [0,1,2] must clear to Empty"
+        );
+    }
+
+    // Test 5: handle_click with fields populates field_values.
+    #[test]
+    fn handle_click_with_fields_populates_field_values() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            TooltipContent, TooltipField,
+        };
+        let style = FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        // Build a panel with one circle that has a tooltip containing group="a".
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![ferrum_scene::SceneNode::Circle {
+                    cx: 100.0,
+                    cy: 100.0,
+                    r: 10.0,
+                    style: style.clone(),
+                }],
+                data_indices: Some(vec![0]),
+                tooltips: Some(vec![TooltipContent {
+                    fields: vec![TooltipField {
+                        name: "group".to_string(),
+                        value: "a".to_string(),
+                    }],
+                }]),
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        // Point spec with fields: Some(vec!["group"]).
+        let specs = vec![SelectionSpec::Point {
+            name: "sel".to_string(),
+            fields: Some(vec!["group".to_string()]),
+            encodings: None,
+            nearest: false,
+            toggle: ferrum_scene::EventExpr::Click,
+            on: ferrum_scene::EventExpr::Click,
+            clear: ferrum_scene::EventExpr::Mouseout,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }];
+        let mut state = InteractionState::new(&specs);
+        let zoom = crate::zoom_pan::ZoomPanState::new(
+            1,
+            &ferrum_scene::InteractionConfig::default(),
+        );
+
+        // Click on the mark.
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, false);
+        match state.selections.get("sel") {
+            Some(SelectionState::Point {
+                field_values,
+                indices,
+                ..
+            }) => {
+                assert!(
+                    !field_values.is_empty(),
+                    "field_values must be non-empty after clicking mark with tooltip, got empty"
+                );
+                assert!(
+                    !indices.is_empty(),
+                    "indices must be non-empty after clicking mark"
+                );
+                // Check that field_values contains ("group", String("a")).
+                let has_group = field_values.iter().any(|(name, val)| {
+                    name == "group"
+                        && matches!(val, FieldValue::String { value } if value == "a")
+                });
+                assert!(
+                    has_group,
+                    "field_values must contain (\"group\", String(\"a\")), got {field_values:?}"
+                );
+            }
+            other => panic!("expected Point selection with field_values, got {other:?}"),
+        }
+    }
 }
