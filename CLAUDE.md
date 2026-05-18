@@ -51,6 +51,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Lint | `nox -s lint` | Runs `ruff check --fix` + `ruff format` on `src/` and `tests/` (current env) |
 | Test | `nox -s test` | `uv sync --all-extras --all-groups` then `pytest` (isolated) |
 | Build | `nox -s build` | `uv build` — produces wheel + sdist in `dist/` (isolated) |
+| Docs | `nox -s docs` | `zensical build --strict` — fails on warnings (current env) |
 
 Pass extra pytest args via `nox -s test -- -k test_name`.
 

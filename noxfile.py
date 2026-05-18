@@ -21,3 +21,9 @@ def test(session: nox.Session) -> None:
 def build(session: nox.Session) -> None:
     """Build the ferrum package in an isolated environment."""
     session.run("uv", "build", external=True)
+
+
+@nox.session
+def docs(session: nox.Session) -> None:
+    """Build the docs site and fail on warnings."""
+    session.run("uv", "run", "zensical", "build", external=True)
