@@ -30,6 +30,22 @@ fn linearize_color_channels(color: &mut [f32; 4]) {
     // color[3] (alpha) stays as-is.
 }
 
+/// Convert a scene `Color` + opacity to a linearized `[f32; 4]` suitable for
+/// GPU upload. RGB channels are converted from sRGB to linear; the alpha
+/// channel combines the color's own alpha with the provided opacity.
+///
+/// This is the single canonical path for "Color → GPU color". All call sites
+/// that previously inlined `srgb_to_linear(c.r as f32 / 255.0)` should use
+/// this instead.
+pub(crate) fn color_to_linear(c: &Color, opacity: f64) -> [f32; 4] {
+    [
+        srgb_to_linear(c.r as f32 / 255.0),
+        srgb_to_linear(c.g as f32 / 255.0),
+        srgb_to_linear(c.b as f32 / 255.0),
+        (c.a as f32 / 255.0) * opacity as f32,
+    ]
+}
+
 /// Stroke-dash palette: maps palette index (0–3) to a `stroke-dasharray`
 /// pattern string, shared with the SVG renderer for cross-renderer consistency.
 ///
@@ -160,14 +176,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     // Unpack binary instance data (passed as raw bytes, not base64).
     unpack_binary_instances(packed_data, &mut circles, &mut rects, &mut batch_meta);
 
-    let background = scene.background.as_ref().map(|c| {
-        [
-            srgb_to_linear(c.r as f32 / 255.0),
-            srgb_to_linear(c.g as f32 / 255.0),
-            srgb_to_linear(c.b as f32 / 255.0),
-            c.a as f32 / 255.0,
-        ]
-    });
+    let background = scene.background.as_ref().map(|c| color_to_linear(c, 1.0));
 
     collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
 
@@ -548,12 +557,7 @@ pub fn batch_uses_additive_blend(blend: BlendMode) -> bool {
 
 fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     match color {
-        Some(c) => [
-            srgb_to_linear(c.r as f32 / 255.0),
-            srgb_to_linear(c.g as f32 / 255.0),
-            srgb_to_linear(c.b as f32 / 255.0),
-            (c.a as f32 / 255.0) * opacity as f32,
-        ],
+        Some(c) => color_to_linear(c, opacity),
         None => [0.0, 0.0, 0.0, 0.0],
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ferrum_scene::{FieldValue, SelectionSpec};
 
@@ -208,6 +208,17 @@ impl InteractionState {
     }
 }
 
+/// Navigate panels → batch → tooltips to retrieve the tooltip entry for a hit.
+/// Returns `None` when any step of the chain is absent.
+fn tooltip_for_hit<'a>(
+    panels: &'a [ferrum_scene::Panel],
+    hit: &crate::hit_test::HitResult,
+) -> Option<&'a ferrum_scene::TooltipContent> {
+    let panel = panels.get(hit.panel_id)?;
+    let batch = panel.marks.get(hit.batch_idx)?;
+    batch.tooltips.as_ref()?.get(hit.node_idx)
+}
+
 /// Extract field values from the clicked mark's tooltip, converting each
 /// tooltip string to a typed `FieldValue` (number if parseable, else string).
 fn extract_field_values(
@@ -215,16 +226,7 @@ fn extract_field_values(
     hit: &crate::hit_test::HitResult,
     field_names: &[String],
 ) -> Vec<(String, FieldValue)> {
-    let Some(panel) = panels.get(hit.panel_id) else {
-        return Vec::new();
-    };
-    let Some(batch) = panel.marks.get(hit.batch_idx) else {
-        return Vec::new();
-    };
-    let Some(tooltips) = &batch.tooltips else {
-        return Vec::new();
-    };
-    let Some(tooltip) = tooltips.get(hit.node_idx) else {
+    let Some(tooltip) = tooltip_for_hit(panels, hit) else {
         return Vec::new();
     };
 
@@ -260,15 +262,8 @@ fn collect_matching_indices(
     field_names: &[String],
     clicked_data_idx: usize,
 ) -> Vec<usize> {
-    let Some(panel) = panels.get(hit.panel_id) else {
-        return vec![clicked_data_idx];
-    };
-
     // Get the field values for the clicked mark from its tooltip.
-    let hit_batch = panel.marks.get(hit.batch_idx);
-    let clicked_values: Vec<(&str, &str)> = hit_batch
-        .and_then(|b| b.tooltips.as_ref())
-        .and_then(|tips| tips.get(hit.node_idx))
+    let clicked_values: Vec<(&str, &str)> = tooltip_for_hit(panels, hit)
         .map(|tip| {
             field_names.iter()
                 .filter_map(|fname| {
@@ -287,6 +282,12 @@ fn collect_matching_indices(
     // Scan all mark batches across ALL panels; collect data indices whose
     // tooltip fields match every (field_name, field_value) pair from the
     // clicked mark. This enables cross-panel linked selection.
+    //
+    // A HashSet tracks already-seen indices so membership checks stay O(1),
+    // avoiding an O(n²) scan when many marks match across large batches.
+    // Insertion order is preserved by pushing to `matching` only on first
+    // encounter (`seen.insert` returns true exactly once per unique index).
+    let mut seen: HashSet<usize> = HashSet::new();
     let mut matching: Vec<usize> = Vec::new();
     for p in panels {
         for batch in &p.marks {
@@ -306,7 +307,7 @@ fn collect_matching_indices(
                         .and_then(|di| di.get(node_idx))
                         .copied()
                         .unwrap_or(node_idx);
-                    if !matching.contains(&data_idx) {
+                    if seen.insert(data_idx) {
                         matching.push(data_idx);
                     }
                 }
@@ -325,20 +326,24 @@ fn toggle_points(
     indices: &[usize],
     new_field_values: &[(String, FieldValue)],
 ) {
-    let already_all = match sel {
-        SelectionState::Point {
-            indices: existing, ..
-        } => indices.iter().all(|i| existing.contains(i)),
-        _ => false,
+    // Build a HashSet from the existing indices once so all membership checks
+    // below are O(1) rather than O(n) per query.
+    let existing_set: HashSet<usize> = match sel {
+        SelectionState::Point { indices: existing, .. } => existing.iter().copied().collect(),
+        _ => HashSet::new(),
     };
+
+    let already_all = !indices.is_empty() && indices.iter().all(|i| existing_set.contains(i));
+
     if already_all {
-        // Deselect — remove all from set.
+        // Deselect — remove all toggle indices from the existing set.
+        let remove_set: HashSet<usize> = indices.iter().copied().collect();
         if let SelectionState::Point {
             indices: existing,
             field_values,
         } = sel
         {
-            existing.retain(|i| !indices.contains(i));
+            existing.retain(|i| !remove_set.contains(i));
             if existing.is_empty() {
                 *sel = SelectionState::Empty;
             } else {
@@ -348,14 +353,14 @@ fn toggle_points(
             }
         }
     } else {
-        // Add missing.
+        // Add missing indices (O(1) membership via existing_set).
         match sel {
             SelectionState::Point {
                 indices: existing,
                 field_values,
             } => {
                 for &idx in indices {
-                    if !existing.contains(&idx) {
+                    if !existing_set.contains(&idx) {
                         existing.push(idx);
                     }
                 }

@@ -209,36 +209,7 @@ impl WasmRenderer {
             shift_held,
         );
 
-        // Apply conditional encodings to produce dimmed/highlighted instance colors.
-        let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals(
-            &loaded.scene.panels,
-            conditionals,
-            &self.interaction_state.selections,
-            &loaded.data.circle_instances,
-            &loaded.data.rect_instances,
-        );
-
-        // Rebuild GPU buffers with updated colors and re-render.
-        let updated_data = SceneData {
-            circle_instances: updates.circle_instances,
-            rect_instances: updates.rect_instances,
-            mesh_buffers: loaded.data.mesh_buffers.clone(),
-            text_elements: loaded.data.text_elements.clone(),
-            image_quads: loaded.data.image_quads.clone(),
-            background: loaded.data.background,
-            width: loaded.data.width,
-            height: loaded.data.height,
-            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
-        };
-        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
-        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
-            .map_err(JsValue::from)?;
-        loaded.buffers = new_buffers;
-
-        // Serialize current selection state for Python sync.
-        let state_json = self.interaction_state.to_json();
-        Ok(state_json)
+        self.apply_conditionals_and_render()
     }
 
     /// Handle a brush-drag on a panel: update interval selection state, apply
@@ -253,9 +224,9 @@ impl WasmRenderer {
         x1: f32,
         y1: f32,
     ) -> Result<String, JsValue> {
-        let Some(loaded) = self.loaded.as_mut() else {
+        if self.loaded.is_none() {
             return Ok("{}".to_string());
-        };
+        }
 
         // Update interval selection state.
         self.interaction_state.handle_drag(
@@ -267,36 +238,7 @@ impl WasmRenderer {
             y1 as f64,
         );
 
-        // Apply conditional encodings to produce dimmed/highlighted instance colors.
-        let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals(
-            &loaded.scene.panels,
-            conditionals,
-            &self.interaction_state.selections,
-            &loaded.data.circle_instances,
-            &loaded.data.rect_instances,
-        );
-
-        // Rebuild GPU buffers with updated colors and re-render.
-        let updated_data = SceneData {
-            circle_instances: updates.circle_instances,
-            rect_instances: updates.rect_instances,
-            mesh_buffers: loaded.data.mesh_buffers.clone(),
-            text_elements: loaded.data.text_elements.clone(),
-            image_quads: loaded.data.image_quads.clone(),
-            background: loaded.data.background,
-            width: loaded.data.width,
-            height: loaded.data.height,
-            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
-        };
-        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
-        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
-            .map_err(JsValue::from)?;
-        loaded.buffers = new_buffers;
-
-        // Serialize current selection state for Python sync.
-        let state_json = self.interaction_state.to_json();
-        Ok(state_json)
+        self.apply_conditionals_and_render()
     }
 
     /// Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
@@ -435,9 +377,54 @@ impl WasmRenderer {
     }
 }
 
-/// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
+/// Private helpers that share implementation across public `wasm_bindgen` methods.
 #[cfg(target_arch = "wasm32")]
 impl WasmRenderer {
+    /// Resolve conditional encodings against the current selection state,
+    /// rebuild GPU buffers with updated instance colors, render a frame, and
+    /// return the serialized selection state JSON.
+    ///
+    /// Called by both `handle_click` and `handle_drag` after they update the
+    /// selection state. Centralising this ensures that if `SceneData` gains a
+    /// field, only one site needs updating.
+    fn apply_conditionals_and_render(&mut self) -> Result<String, JsValue> {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok("{}".to_string());
+        };
+
+        // Apply conditional encodings to produce dimmed/highlighted instance colors.
+        let conditionals = &loaded.scene.interaction.conditionals;
+        let updates = resolve_conditionals(
+            &loaded.scene.panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data.circle_instances,
+            &loaded.data.rect_instances,
+        );
+
+        // Rebuild GPU buffers with updated colors and re-render.
+        let updated_data = SceneData {
+            circle_instances: updates.circle_instances,
+            rect_instances: updates.rect_instances,
+            mesh_buffers: loaded.data.mesh_buffers.clone(),
+            text_elements: loaded.data.text_elements.clone(),
+            image_quads: loaded.data.image_quads.clone(),
+            background: loaded.data.background,
+            width: loaded.data.width,
+            height: loaded.data.height,
+            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
+        };
+        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
+        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
+            .map_err(JsValue::from)?;
+        loaded.buffers = new_buffers;
+
+        // Serialize current selection state for Python sync.
+        let state_json = self.interaction_state.to_json();
+        Ok(state_json)
+    }
+
+    /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         let transform = self.zoom.transforms.get(panel_id)

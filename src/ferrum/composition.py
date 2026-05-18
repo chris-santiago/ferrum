@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json as _json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -1437,35 +1438,8 @@ def _merge_child_scenes(
     for scene in child_scenes:
         dx = x_offset if layout == "horizontal" else 0.0
         dy = y_offset if layout == "vertical" else 0.0
-        _merge_scene_panels(merged, scene, dx, dy, panel_id_offset)
-        panel_id_offset += len(scene.get("panels", []))
-
-        merged["selections"].extend(scene.get("selections", []))
-        child_interaction = scene.get("interaction", {})
-        merged["interaction"]["conditionals"].extend(
-            child_interaction.get("conditionals", [])
-        )
-        for tl in child_interaction.get("tick_levels", []):
-            tl_copy = dict(tl)
-            tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
-            merged["interaction"]["tick_levels"].append(tl_copy)
-        if merged["background"] is None and scene.get("background"):
-            merged["background"] = scene["background"]
-
-        # Offset and merge title, legend, and decoration nodes.
-        import copy
-        for node in scene.get("title", []):
-            n = copy.deepcopy(node)
-            _offset_node(n, dx, dy)
-            merged["title"].append(n)
-        for node in scene.get("legend", []):
-            n = copy.deepcopy(node)
-            _offset_node(n, dx, dy)
-            merged["legend"].append(n)
-        for node in scene.get("decorations", []):
-            n = copy.deepcopy(node)
-            _offset_node(n, dx, dy)
-            merged["decorations"].append(n)
+        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
+        panel_id_offset += n_panels
 
         w = scene.get("width", 0)
         h = scene.get("height", 0)
@@ -1536,33 +1510,8 @@ def _merge_child_scenes_grid(
         x_offset = 0.0
 
         for scene, packed in row:
-            _merge_scene_panels(merged, scene, x_offset, y_offset, panel_id_offset)
-            n_panels = len(scene.get("panels", []))
-            merged["selections"].extend(scene.get("selections", []))
-            child_interaction = scene.get("interaction", {})
-            merged["interaction"]["conditionals"].extend(
-                child_interaction.get("conditionals", [])
-            )
-            for tl in child_interaction.get("tick_levels", []):
-                tl_copy = dict(tl)
-                tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
-                merged["interaction"]["tick_levels"].append(tl_copy)
+            n_panels = _merge_one_child(merged, scene, x_offset, y_offset, panel_id_offset)
             panel_id_offset += n_panels
-            if merged["background"] is None and scene.get("background"):
-                merged["background"] = scene["background"]
-            import copy
-            for node in scene.get("title", []):
-                n = copy.deepcopy(node)
-                _offset_node(n, x_offset, y_offset)
-                merged["title"].append(n)
-            for node in scene.get("legend", []):
-                n = copy.deepcopy(node)
-                _offset_node(n, x_offset, y_offset)
-                merged["legend"].append(n)
-            for node in scene.get("decorations", []):
-                n = copy.deepcopy(node)
-                _offset_node(n, x_offset, y_offset)
-                merged["decorations"].append(n)
 
             w = scene.get("width", 0)
             h = scene.get("height", 0)
@@ -1578,6 +1527,47 @@ def _merge_child_scenes_grid(
     all_packed = [p for _, p in rendered]
     merged_packed = _merge_packed_data(all_packed)
     return _json.dumps(merged), merged_packed
+
+
+def _merge_one_child(
+    merged: dict,
+    scene: dict,
+    dx: float,
+    dy: float,
+    panel_id_offset: int,
+) -> int:
+    """Merge a single child scene into *merged* at the given offset.
+
+    Handles panels, selections, interaction conditionals, tick_levels,
+    background, and title/legend/decoration nodes.
+
+    Returns
+    -------
+    int
+        The number of panels merged (so the caller can update
+        ``panel_id_offset``).
+    """
+    _merge_scene_panels(merged, scene, dx, dy, panel_id_offset)
+    n_panels = len(scene.get("panels", []))
+
+    merged["selections"].extend(scene.get("selections", []))
+    child_interaction = scene.get("interaction", {})
+    merged["interaction"]["conditionals"].extend(child_interaction.get("conditionals", []))
+    for tl in child_interaction.get("tick_levels", []):
+        tl_copy = dict(tl)
+        tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
+        merged["interaction"]["tick_levels"].append(tl_copy)
+    if merged["background"] is None and scene.get("background"):
+        merged["background"] = scene["background"]
+
+    # Offset and merge title, legend, and decoration nodes.
+    for key in ("title", "legend", "decorations"):
+        for node in scene.get(key, []):
+            n = copy.deepcopy(node)
+            _offset_node(n, dx, dy)
+            merged[key].append(n)
+
+    return n_panels
 
 
 def _empty_scene() -> dict:
@@ -1608,8 +1598,15 @@ def _merge_scene_panels(
     dy: float,
     panel_id_offset: int,
 ) -> None:
-    """Offset and append panels from *scene* into *merged*."""
+    """Offset and append panels from *scene* into *merged*.
+
+    Each panel is deep-copied before mutation so the original *scene*
+    dict is not modified in place — callers may re-read it (e.g.
+    ``_merge_one_child`` counts ``scene.get("panels", [])`` after this
+    call returns).
+    """
     for panel in scene.get("panels", []):
+        panel = copy.deepcopy(panel)
         panel["id"] = panel.get("id", 0) + panel_id_offset
 
         for area_key in ("plot_area", "clip"):

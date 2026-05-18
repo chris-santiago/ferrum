@@ -53,7 +53,7 @@ def save_chart(
         path.write_bytes(chart.show_png())
     elif fmt == "html":
         scene_json, packed_data = _render_scene_json(chart)
-        from ferrum._html import assemble_html
+        from ferrum._html import assemble_html, _copy_wasm_sidecar
 
         html = assemble_html(
             scene_json,
@@ -63,14 +63,7 @@ def save_chart(
         )
         path.write_text(html)
         if not embed_wasm:
-            import shutil
-
-            wasm_src = Path(__file__).parent / "_wasm" / "ferrum_wasm_bg.wasm"
-            if wasm_src.exists():
-                shutil.copy2(wasm_src, path.parent / "ferrum_wasm_bg.wasm")
-            js_src = Path(__file__).parent / "_wasm" / "ferrum_wasm.js"
-            if js_src.exists():
-                shutil.copy2(js_src, path.parent / "ferrum_wasm.js")
+            _copy_wasm_sidecar(path)
     elif fmt == "json":
         scene_json, _ = _render_scene_json(chart)
         path.write_text(scene_json)

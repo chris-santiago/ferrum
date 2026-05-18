@@ -211,13 +211,7 @@ fn pathcmds_to_lyon(cmds: &[PathCmd], closed: bool) -> LyonPath {
 }
 
 fn color_to_f32(c: &Color, opacity: f64) -> [f32; 4] {
-    use crate::scene_load::srgb_to_linear;
-    [
-        srgb_to_linear(c.r as f32 / 255.0),
-        srgb_to_linear(c.g as f32 / 255.0),
-        srgb_to_linear(c.b as f32 / 255.0),
-        (c.a as f32 / 255.0) * opacity as f32,
-    ]
+    crate::scene_load::color_to_linear(c, opacity)
 }
 
 fn stroke_path_dashed(

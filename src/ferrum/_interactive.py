@@ -35,9 +35,8 @@ def _build_anywidget_esm() -> str:
     lives in source files in ``_wasm/`` — never as embedded strings in Python.
     """
     import base64
-    import re
 
-    from ferrum._html import _read_wasm_artifact
+    from ferrum._html import _convert_d3_exports, _read_wasm_artifact
 
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     wasm_b64 = base64.b64encode(_read_wasm_artifact("ferrum_wasm_bg.wasm")).decode("ascii")
@@ -45,15 +44,7 @@ def _build_anywidget_esm() -> str:
     # D3 bundle: convert `export { ri as brush, ... }` to `var brush=ri, ...;`
     # so D3 functions are module-scoped (accessible to anywidget JS below).
     d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
-    d3_js = re.sub(
-        r"export\{([^}]+)\}",
-        lambda m: "var " + ",".join(
-            f"{parts[-1].strip()}={parts[0].strip()}" if len(parts := p.split(" as ")) > 1
-            else p.strip()
-            for p in m.group(1).split(",")
-        ) + ";",
-        d3_source,
-    )
+    d3_js = _convert_d3_exports(d3_source)
 
     anywidget_js = (_WASM_DIR / "ferrum-anywidget.js").read_text()
 
@@ -178,20 +169,11 @@ class InteractiveChart:
     def _extract_interaction_config(scene_json: str) -> str:
         """Extract interaction config + top-level selections from a scene JSON string.
 
-        The JS click handler reads `config.selections` (array of SelectionSpec
-        objects with `name` and `fields`) to know which field values to capture
-        when a mark is clicked.
+        Delegates to :func:`ferrum._html._extract_interaction_config`.
         """
-        import json as _json
+        from ferrum._html import _extract_interaction_config
 
-        try:
-            scene = _json.loads(scene_json)
-            config = dict(scene.get("interaction", {}))
-            config["selections"] = scene.get("selections", [])
-            return _json.dumps(config)
-        except Exception as exc:
-            _log.debug("could not extract interaction config: %s", exc)
-            return "{}"
+        return _extract_interaction_config(scene_json)
 
     @property
     def scene_json(self) -> str:
@@ -245,7 +227,7 @@ class InteractiveChart:
         """
         from pathlib import Path as _Path
 
-        from ferrum._html import assemble_html
+        from ferrum._html import assemble_html, _copy_wasm_sidecar
 
         embed_wasm = kwargs.pop("embed_wasm", True)
         title = getattr(self._chart, "_title", None) or "Ferrum chart"
@@ -258,15 +240,7 @@ class InteractiveChart:
         dest = _Path(path)
         dest.write_text(html)
         if not embed_wasm:
-            import shutil
-
-            wasm_dir = _Path(__file__).parent / "_wasm"
-            wasm_src = wasm_dir / "ferrum_wasm_bg.wasm"
-            if wasm_src.exists():
-                shutil.copy2(wasm_src, dest.parent / "ferrum_wasm_bg.wasm")
-            js_src = wasm_dir / "ferrum_wasm.js"
-            if js_src.exists():
-                shutil.copy2(js_src, dest.parent / "ferrum_wasm.js")
+            _copy_wasm_sidecar(dest)
 
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
         if self._widget is None:

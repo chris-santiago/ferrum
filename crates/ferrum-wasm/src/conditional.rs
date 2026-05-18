@@ -2,7 +2,7 @@ use ferrum_scene::{
     ChannelName, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode,
 };
 
-use crate::scene_load::{srgb_to_linear, CircleInstance, RectInstance};
+use crate::scene_load::{color_to_linear, CircleInstance, RectInstance};
 use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
@@ -10,6 +10,16 @@ use std::collections::HashMap;
 pub struct ConditionalUpdates {
     pub circle_instances: Vec<CircleInstance>,
     pub rect_instances: Vec<RectInstance>,
+}
+
+/// Mutable references to the circle and rect instance buffers together with
+/// the current write offsets. Groups the four mutable-state parameters that
+/// `apply_conditional_to_batch` needs, keeping its signature manageable.
+struct InstanceBuffers<'a> {
+    circles: &'a mut [CircleInstance],
+    circle_offset: usize,
+    rects: &'a mut [RectInstance],
+    rect_offset: usize,
 }
 
 pub fn resolve_conditionals(
@@ -37,6 +47,12 @@ pub fn resolve_conditionals(
                     continue;
                 }
                 if let Some(indices) = &batch.data_indices {
+                    let mut bufs = InstanceBuffers {
+                        circles: &mut circles,
+                        circle_offset,
+                        rects: &mut rects,
+                        rect_offset,
+                    };
                     apply_conditional_to_batch(
                         &cond.channel,
                         &cond.if_selected,
@@ -44,10 +60,7 @@ pub fn resolve_conditionals(
                         sel,
                         indices,
                         batch,
-                        &mut circles,
-                        circle_offset,
-                        &mut rects,
-                        rect_offset,
+                        &mut bufs,
                     );
                 }
             }
@@ -76,7 +89,6 @@ fn count_instances(batch: &MarkBatch) -> (usize, usize) {
     (nc, nr)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn apply_conditional_to_batch(
     channel: &ChannelName,
     if_selected: &EncodingValue,
@@ -84,10 +96,7 @@ fn apply_conditional_to_batch(
     sel: &SelectionState,
     data_indices: &[usize],
     batch: &MarkBatch,
-    circles: &mut [CircleInstance],
-    circle_offset: usize,
-    rects: &mut [RectInstance],
-    rect_offset: usize,
+    bufs: &mut InstanceBuffers<'_>,
 ) {
     let mut ci = 0usize;
     let mut ri = 0usize;
@@ -130,13 +139,13 @@ fn apply_conditional_to_batch(
 
         match node {
             SceneNode::Circle { .. } => {
-                if let Some(inst) = circles.get_mut(circle_offset + ci) {
+                if let Some(inst) = bufs.circles.get_mut(bufs.circle_offset + ci) {
                     apply_value_to_circle(inst, channel, value);
                 }
                 ci += 1;
             }
             SceneNode::Rect { .. } => {
-                if let Some(inst) = rects.get_mut(rect_offset + ri) {
+                if let Some(inst) = bufs.rects.get_mut(bufs.rect_offset + ri) {
                     apply_value_to_rect(inst, channel, value);
                 }
                 ri += 1;
@@ -149,12 +158,7 @@ fn apply_conditional_to_batch(
 fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value: &EncodingValue) {
     match (channel, value) {
         (ChannelName::Color, EncodingValue::Color { value: c }) => {
-            inst.fill_color = [
-                srgb_to_linear(c.r as f32 / 255.0),
-                srgb_to_linear(c.g as f32 / 255.0),
-                srgb_to_linear(c.b as f32 / 255.0),
-                c.a as f32 / 255.0,
-            ];
+            inst.fill_color = color_to_linear(c, 1.0);
         }
         (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
             inst.opacity = *o as f32;
@@ -178,7 +182,7 @@ fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) ->
         FieldValue::Number { value } => tooltip_value
             .parse::<f64>()
             .ok()
-            .is_some_and(|n| n == *value),
+            .is_some_and(|n| (n - *value).abs() < 1e-10),
         FieldValue::Bool { value } => tooltip_value
             .parse::<bool>()
             .ok()
@@ -190,12 +194,7 @@ fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) ->
 fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &EncodingValue) {
     match (channel, value) {
         (ChannelName::Color, EncodingValue::Color { value: c }) => {
-            inst.fill_color = [
-                srgb_to_linear(c.r as f32 / 255.0),
-                srgb_to_linear(c.g as f32 / 255.0),
-                srgb_to_linear(c.b as f32 / 255.0),
-                c.a as f32 / 255.0,
-            ];
+            inst.fill_color = color_to_linear(c, 1.0);
         }
         (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
             inst.opacity = *o as f32;
@@ -216,7 +215,8 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrum_scene::Color;
+    use crate::scene_load::srgb_to_linear;
+    use ferrum_scene::{Color, FieldValue};
 
     #[test]
     fn apply_color_to_circle() {
@@ -821,6 +821,28 @@ mod tests {
             (result.circle_instances[2].fill_color[0] - red_fill[0]).abs() < 0.01,
             "circle at (30,40) should be red (inside brush), got {:?}",
             result.circle_instances[2].fill_color
+        );
+    }
+
+    // ── f64 epsilon comparison in field_value_matches_tooltip ─────────
+
+    #[test]
+    fn field_value_matches_number_with_epsilon() {
+        // "0.1" + "0.2" = 0.30000000000000004 in f64, which != 0.3 exactly.
+        // The epsilon comparison should still match.
+        let sum = 0.1_f64 + 0.2_f64;
+        assert!(
+            field_value_matches_tooltip("0.3", &FieldValue::Number { value: sum }),
+            "0.3 should match 0.1+0.2 ({sum}) via epsilon comparison"
+        );
+    }
+
+    #[test]
+    fn field_value_does_not_match_distant_number() {
+        // Numbers far apart should not match.
+        assert!(
+            !field_value_matches_tooltip("1.0", &FieldValue::Number { value: 2.0 }),
+            "1.0 should not match 2.0"
         );
     }
 }

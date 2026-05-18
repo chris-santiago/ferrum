@@ -83,25 +83,72 @@ def _strip_anywidget_for_standalone(source: str) -> str:
     return source.strip()
 
 
+def _convert_d3_exports(source: str) -> str:
+    """Convert ``export{...}`` blocks to ``var ...;`` declarations.
+
+    D3 interaction bundles use ESM ``export { ri as brush, ... }`` syntax.
+    For inline ``<script type="module">`` and anywidget ESM contexts we need
+    those names as module-scoped variables instead.
+    """
+    return re.sub(
+        r"export\{([^}]+)\}",
+        lambda m: (
+            "var "
+            + ",".join(
+                f"{parts[-1].strip()}={parts[0].strip()}"
+                if len(parts := p.split(" as ")) > 1
+                else p.strip()
+                for p in m.group(1).split(",")
+            )
+            + ";"
+        ),
+        source,
+    )
+
+
+def _background_css_from_dict(scene: dict) -> str:
+    """Extract a CSS background color from a parsed scene dict, defaulting to white."""
+    bg = scene.get("background")
+    if bg:
+        return f"rgba({bg['r']},{bg['g']},{bg['b']},{bg['a'] / 255.0})"
+    return "#ffffff"
+
+
+def _copy_wasm_sidecar(dest: Path) -> None:
+    """Copy WASM sidecar files alongside an HTML export at *dest*.
+
+    Copies ``ferrum_wasm_bg.wasm`` and ``ferrum_wasm.js`` from the
+    package's ``_wasm/`` directory into ``dest.parent``, if they exist.
+    Used by ``InteractiveChart.save()`` and ``display.save_chart()``
+    when ``embed_wasm=False``.
+    """
+    import shutil
+
+    for name in ("ferrum_wasm_bg.wasm", "ferrum_wasm.js"):
+        src = _WASM_DIR / name
+        if src.exists():
+            shutil.copy2(src, dest.parent / name)
+
+
 def _extract_background_css(scene_json: str) -> str:
     """Extract a CSS background color from the scene JSON, defaulting to white."""
     try:
-        scene = _json.loads(scene_json)
-        bg = scene.get("background")
-        if bg:
-            return f"rgba({bg['r']},{bg['g']},{bg['b']},{bg['a'] / 255.0})"
+        return _background_css_from_dict(_json.loads(scene_json))
     except Exception:
-        pass
-    return "#ffffff"
+        return "#ffffff"
+
+
+def _interaction_config_from_dict(scene: dict) -> str:
+    """Extract selections + conditionals from a parsed scene dict."""
+    config: dict = dict(scene.get("interaction", {}))
+    config["selections"] = scene.get("selections", [])
+    return _json.dumps(config)
 
 
 def _extract_interaction_config(scene_json: str) -> str:
     """Extract selections + conditionals from scene JSON for the standalone adapter."""
     try:
-        scene = _json.loads(scene_json)
-        config: dict = dict(scene.get("interaction", {}))
-        config["selections"] = scene.get("selections", [])
-        return _json.dumps(config)
+        return _interaction_config_from_dict(_json.loads(scene_json))
     except Exception:
         return "{}"
 
@@ -137,15 +184,7 @@ def assemble_html(
 
     # Inline the D3 interactions bundle with exports converted to module-scoped vars.
     d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
-    d3_js = re.sub(
-        r"export\{([^}]+)\}",
-        lambda m: "var " + ",".join(
-            f"{parts[-1].strip()}={parts[0].strip()}" if len(parts := p.split(" as ")) > 1
-            else p.strip()
-            for p in m.group(1).split(",")
-        ) + ";",
-        d3_source,
-    )
+    d3_js = _convert_d3_exports(d3_source)
 
     # Inline the anywidget JS with ESM exports stripped for standalone use.
     anywidget_source = (_WASM_DIR / "ferrum-anywidget.js").read_text()
@@ -176,13 +215,19 @@ def assemble_html(
     # Packed data as base64 for the standalone adapter.
     packed_b64 = base64.b64encode(packed_data).decode("ascii") if packed_data else ""
 
+    # Parse scene JSON once for interaction config and background extraction.
+    try:
+        scene_dict = _json.loads(scene_json)
+    except Exception:
+        scene_dict = {}
+
     # Interaction config for the standalone adapter.
-    interaction_config = _extract_interaction_config(scene_json)
+    interaction_config = _interaction_config_from_dict(scene_dict)
     # Escape for embedding in a JS single-quoted string.
     interaction_config_escaped = interaction_config.replace("\\", "\\\\").replace("'", "\\'")
 
     # Background color for the HTML body.
-    bg_css = _extract_background_css(scene_json)
+    bg_css = _background_css_from_dict(scene_dict)
 
     return (
         "<!DOCTYPE html>\n"
