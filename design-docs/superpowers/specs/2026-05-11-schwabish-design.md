@@ -195,7 +195,7 @@ findings:
 - **T1 — Active title.** Does the title communicate a finding, or just name the chart type? `"ROC curve"` → `"ROC — AUC 0.94 (good separation)"`. **Subjective** by default; objective when a single metric is computable and a clear template exists.
 - **T2 — Direct labels.** When ≤4 series and the chart has labeled lines/bars, can the legend be replaced by text at line endpoints? **Objective** when series count is small and labels are short strings.
 - **T3 — Callouts.** Is there a specific data point (max, threshold-crossing, anomaly) that deserves an annotated label? **Subjective** — depends on dataset and user intent.
-- **T4 — Inline metrics.** Is a domain-expected metric absent (AUC, AP, Brier, R², cell counts)? **Objective** — overlaps with existing gallery-audit B-rubric, but Schwabish reframes it as text-integration. When defaults from Section 2 ship, T4 findings on figure-level-function output drop to zero.
+- **T4 — Inline metrics.** Is a domain-expected metric absent (AUC, AP, Brier, R², cell counts)? **Objective** — overlaps with existing audit-gallery B-rubric, but Schwabish reframes it as text-integration. When defaults from Section 2 ship, T4 findings on figure-level-function output drop to zero.
 
 ### 3.5 Objectivity flag
 
@@ -229,7 +229,7 @@ The skill dispatches a `schwabish-judge` agent (parallel to `gallery-judge`) tha
 .claude/agents/schwabish-fixer.md   # gallery-mode autonomous fixer (§4)
 ```
 
-Mirrors the `gallery-audit` skill layout.
+Mirrors the `audit-gallery` skill layout.
 
 ---
 
@@ -242,7 +242,7 @@ Mirrors the `gallery-audit` skill layout.
 ### 4.2 Flow
 
 1. **Discover.** Walk `gallery/plots/`. Skip rows where `config.toml` marks the row as BLOCKED or NOT_WIRED (per RESUME.md convention).
-2. **Judge in parallel.** Dispatch one `schwabish-judge` agent per row (mirrors `gallery-audit`'s parallel-dispatch pattern). Each agent reads the row's PNG + panel script + rubric, writes a `schwabish_verdict.md` into `gallery/output/<row>/`.
+2. **Judge in parallel.** Dispatch one `schwabish-judge` agent per row (mirrors `audit-gallery`'s parallel-dispatch pattern). Each agent reads the row's PNG + panel script + rubric, writes a `schwabish_verdict.md` into `gallery/output/<row>/`.
 3. **Filter to objective findings.** For each verdict, keep only findings where `objective: true`. Subjective findings are kept in the verdict (for the user) but not actioned.
 4. **Apply via fixer.** Dispatch `schwabish-fixer` agent per row that has ≥1 objective finding. Fixer edits `gallery/plots/<row>/ferrum_panel.py` to add the missing primitive.
 5. **Regenerate.** Re-run `audit.py generate --row <id>` for each touched row.
@@ -285,11 +285,11 @@ Mirrors the `gallery-audit` skill layout.
 - Per-row verdicts: `gallery/output/<row>/schwabish_verdict.md`
 - Per-row diff snapshot: `gallery/output/<row>/schwabish_applied.diff`
 - Aggregate report: `gallery/output/SCHWABISH_REPORT.md`
-- Lite-review verdicts: `.claude/skills/gallery-audit/output/_review_lite/<ISO>_python.md` (reuses existing audit-trail convention)
+- Lite-review verdicts: `.claude/skills/audit-gallery/output/_review_lite/<ISO>_python.md` (reuses existing audit-trail convention)
 
 ### 4.7 Interaction with `gallery-fixer`
 
-`gallery-fixer` closes findings from `/gallery-audit`'s REPORT.md (comparative parity). `schwabish-fixer` closes objective findings from `schwabish-judge`'s verdicts (text-integration). They operate on the same panel scripts but with non-overlapping change types — `gallery-fixer` adds primitives the *peer libraries* already ship; `schwabish-fixer` adds primitives *no peer ships* (Schwabish's distinguishing axis).
+`gallery-fixer` closes findings from `/audit-gallery`'s REPORT.md (comparative parity). `schwabish-fixer` closes objective findings from `schwabish-judge`'s verdicts (text-integration). They operate on the same panel scripts but with non-overlapping change types — `gallery-fixer` adds primitives the *peer libraries* already ship; `schwabish-fixer` adds primitives *no peer ships* (Schwabish's distinguishing axis).
 
 In practice, after Section 2 defaults land, both fixers find fewer to do — the figure-level functions ship Schwabish-compliant + peer-parity by default, and only hand-rolled panel scripts need either fixer.
 

@@ -462,6 +462,7 @@ fn apply_polar_node_transform(
 
     /// Map a single Cartesian pixel point to polar pixel coordinates.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn map_pt(px: f64, py: f64, plot_x: f64, plot_y: f64, plot_w: f64, plot_h: f64,
               center_x: f64, center_y: f64, outer_r: f64, tau: f64) -> (f64, f64) {
         let theta = (px - plot_x) / plot_w * tau;
@@ -535,6 +536,82 @@ fn apply_polar_node_transform(
                 }
                 // Left radial edge closes back to start (polygon auto-closes).
                 replacements.push((idx, SceneNode::Polygon { rings: vec![pts], style: fill_stroke }));
+            }
+            SceneNode::Path { ref mut commands, .. } => {
+                // Transform each PathCmd endpoint and control point through the
+                // polar projection. HLineTo/VLineTo change both axes under polar
+                // (x offset → angle, y → radius) so they are converted to LineTo.
+                // The current y for HLineTo / current x for VLineTo is unknown at
+                // this level, so we instead perform the single-coordinate transform
+                // treating the unchanged axis as its untransformed value — which
+                // gives the correct polar result since map_pt() takes both coords.
+                // To handle HLineTo/VLineTo we need to track current position.
+                let mut cx_cur = 0.0_f64;
+                let mut cy_cur = 0.0_f64;
+                for cmd in commands.iter_mut() {
+                    match cmd {
+                        ferrum_scene::PathCmd::MoveTo { ref mut x, ref mut y } => {
+                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = *x; cy_cur = *y;
+                            *x = nx; *y = ny;
+                        }
+                        ferrum_scene::PathCmd::LineTo { ref mut x, ref mut y } => {
+                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = *x; cy_cur = *y;
+                            *x = nx; *y = ny;
+                        }
+                        ferrum_scene::PathCmd::QuadTo { ref mut cx, ref mut cy, ref mut x, ref mut y } => {
+                            let (ncx, ncy) = map_pt(*cx, *cy, plot_x, plot_y, plot_w, plot_h,
+                                                    center_x, center_y, outer_r, TAU);
+                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = *x; cy_cur = *y;
+                            *cx = ncx; *cy = ncy;
+                            *x = nx; *y = ny;
+                        }
+                        ferrum_scene::PathCmd::CubicTo { ref mut c1x, ref mut c1y, ref mut c2x, ref mut c2y, ref mut x, ref mut y } => {
+                            let (nc1x, nc1y) = map_pt(*c1x, *c1y, plot_x, plot_y, plot_w, plot_h,
+                                                      center_x, center_y, outer_r, TAU);
+                            let (nc2x, nc2y) = map_pt(*c2x, *c2y, plot_x, plot_y, plot_w, plot_h,
+                                                      center_x, center_y, outer_r, TAU);
+                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = *x; cy_cur = *y;
+                            *c1x = nc1x; *c1y = nc1y;
+                            *c2x = nc2x; *c2y = nc2y;
+                            *x = nx; *y = ny;
+                        }
+                        ferrum_scene::PathCmd::ArcTo { ref mut x, ref mut y, .. } => {
+                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = *x; cy_cur = *y;
+                            *x = nx; *y = ny;
+                        }
+                        ferrum_scene::PathCmd::HLineTo { x: target_x } => {
+                            // Polar changes both axes, so convert to LineTo using the
+                            // current y position tracked above.
+                            let old_x = *target_x;
+                            let (nx, ny) = map_pt(old_x, cy_cur, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cx_cur = old_x;
+                            *cmd = ferrum_scene::PathCmd::LineTo { x: nx, y: ny };
+                        }
+                        ferrum_scene::PathCmd::VLineTo { y: target_y } => {
+                            // Polar changes both axes, so convert to LineTo using the
+                            // current x position tracked above.
+                            let old_y = *target_y;
+                            let (nx, ny) = map_pt(cx_cur, old_y, plot_x, plot_y, plot_w, plot_h,
+                                                  center_x, center_y, outer_r, TAU);
+                            cy_cur = old_y;
+                            *cmd = ferrum_scene::PathCmd::LineTo { x: nx, y: ny };
+                        }
+                        ferrum_scene::PathCmd::Close => {
+                            // No coordinates to transform.
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -616,4 +693,164 @@ fn build_polar_axes(
     }
 
     nodes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrum_scene::{FillStroke, PathCmd, SceneNode};
+    use crate::layout::Rect;
+
+    fn default_fill_stroke() -> ferrum_scene::FillStroke {
+        FillStroke {
+            fill: None,
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+
+    /// B5: Path nodes inside apply_polar_node_transform must have their
+    /// x/y coordinates remapped through the polar projection. The previous
+    /// catch-all `_ => {}` left Path nodes at their original Cartesian coords.
+    #[test]
+    fn b5_path_nodes_are_polar_transformed() {
+        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        // A Path node placed at the top-left corner of the plot area in Cartesian space.
+        // After polar transform this coordinate will NOT remain at (0, 0).
+        let cartesian_x = 0.0_f64;
+        let cartesian_y = 0.0_f64;
+
+        let mut nodes = vec![
+            SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: cartesian_x, y: cartesian_y },
+                    PathCmd::LineTo { x: 100.0, y: 100.0 },
+                    PathCmd::Close,
+                ],
+                style: default_fill_stroke(),
+                closed: true,
+            }
+        ];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        // The Path node must still be a Path node (no type change).
+        match &nodes[0] {
+            SceneNode::Path { commands, .. } => {
+                // The MoveTo endpoint for (0, 0) in Cartesian maps to a non-zero polar
+                // coordinate. Specifically: theta = 0, r = 1 * outer_r → (cx, cy - r).
+                let outer_r = plot_area.w.min(plot_area.h) / 2.0; // 100.0
+                let center_x = plot_area.x + plot_area.w / 2.0;   // 100.0
+                let center_y = plot_area.y + plot_area.h / 2.0;   // 100.0
+                // theta = 0 / 200 * TAU = 0; r = (0 + 200 - 0) / 200 * 100 = 100
+                // nx = center_x + r * sin(0) = 100; ny = center_y - r * cos(0) = 0
+                let expected_x = center_x + outer_r * 0_f64.sin(); // 100.0
+                let expected_y = center_y - outer_r * 0_f64.cos(); // 0.0
+                match &commands[0] {
+                    PathCmd::MoveTo { x, y } => {
+                        assert!(
+                            (x - expected_x).abs() < 1e-9,
+                            "MoveTo x after polar transform: expected {expected_x}, got {x}"
+                        );
+                        assert!(
+                            (y - expected_y).abs() < 1e-9,
+                            "MoveTo y after polar transform: expected {expected_y}, got {y}"
+                        );
+                    }
+                    other => panic!("expected MoveTo, got {other:?}"),
+                }
+            }
+            other => panic!("expected Path node after transform, got {other:?}"),
+        }
+    }
+
+    /// B5: HLineTo and VLineTo inside a Path must be converted to LineTo after
+    /// polar transform (since polar changes both x and y).
+    #[test]
+    fn b5_hlineto_vlineto_converted_to_lineto_under_polar() {
+        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let mut nodes = vec![
+            SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: 50.0, y: 100.0 },
+                    PathCmd::HLineTo { x: 150.0 },
+                    PathCmd::VLineTo { y: 50.0 },
+                    PathCmd::Close,
+                ],
+                style: default_fill_stroke(),
+                closed: true,
+            }
+        ];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Path { commands, .. } => {
+                // HLineTo and VLineTo must not survive the polar transform.
+                for cmd in commands {
+                    assert!(
+                        !matches!(cmd, PathCmd::HLineTo { .. } | PathCmd::VLineTo { .. }),
+                        "HLineTo/VLineTo must be converted to LineTo under polar, found: {cmd:?}"
+                    );
+                }
+                // The converted HLineTo/VLineTo must become LineTo variants.
+                assert!(
+                    matches!(commands[1], PathCmd::LineTo { .. }),
+                    "HLineTo must become LineTo, got: {:?}", commands[1]
+                );
+                assert!(
+                    matches!(commands[2], PathCmd::LineTo { .. }),
+                    "VLineTo must become LineTo, got: {:?}", commands[2]
+                );
+            }
+            other => panic!("expected Path node, got {other:?}"),
+        }
+    }
+
+    /// B5: Control points in QuadTo/CubicTo must also be transformed.
+    #[test]
+    fn b5_quadto_control_points_are_transformed() {
+        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let mut nodes = vec![
+            SceneNode::Path {
+                commands: vec![
+                    PathCmd::MoveTo { x: 0.0, y: 100.0 },
+                    PathCmd::QuadTo { cx: 50.0, cy: 0.0, x: 100.0, y: 100.0 },
+                    PathCmd::Close,
+                ],
+                style: default_fill_stroke(),
+                closed: true,
+            }
+        ];
+
+        apply_polar_node_transform(&mut nodes, &plot_area);
+
+        match &nodes[0] {
+            SceneNode::Path { commands, .. } => {
+                match &commands[1] {
+                    PathCmd::QuadTo { cx, cy, x, y } => {
+                        // The control point (50, 0) in Cartesian must have been transformed.
+                        // In Cartesian: cx=50, cy=0 → theta=TAU/4, r=outer_r → nx = center + r, ny = center.
+                        // Just verify the control point differs from the original values.
+                        assert!(
+                            (*cx - 50.0).abs() > 1e-6 || (*cy - 0.0).abs() > 1e-6,
+                            "QuadTo control point must be polar-transformed, still at ({cx},{cy})"
+                        );
+                        // Endpoint (100, 100) → theta=TAU/2, r=outer_r/2 → verify it changed.
+                        assert!(
+                            (*x - 100.0).abs() > 1e-6 || (*y - 100.0).abs() > 1e-6,
+                            "QuadTo endpoint must be polar-transformed, still at ({x},{y})"
+                        );
+                    }
+                    other => panic!("expected QuadTo, got {other:?}"),
+                }
+            }
+            other => panic!("expected Path node, got {other:?}"),
+        }
+    }
 }

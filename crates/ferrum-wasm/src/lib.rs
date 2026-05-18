@@ -127,10 +127,20 @@ impl WasmRenderer {
         Ok(())
     }
 
-    /// Begin a GPU-interpolated transition from the currently loaded scene to a
-    /// new scene JSON string.
+    /// Begin a GPU-interpolated transition from an old scene to the currently
+    /// loaded scene.
     ///
-    /// Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+    /// `old_scene_json` is the **previous** scene JSON string. The transition
+    /// target is `self.loaded.data` (the scene already loaded via `loadScene`).
+    ///
+    /// B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
+    /// as old. But `loadScene(new_json)` was already called before
+    /// `startTransition`, so `loaded.data` was already the new scene — making
+    /// old == new and the transition a no-op (self-to-self interpolation).
+    /// Now the caller passes the *old* scene JSON and we use `loaded.data` as
+    /// the transition target.
+    ///
+    /// Call ``tick_transition(t)`` (t in [0, 1]) from a requestAnimationFrame loop
     /// to drive the animation.  ``start_transition`` does not start the loop —
     /// the JavaScript caller owns the timing.
     ///
@@ -138,16 +148,20 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "startTransition")]
     pub fn start_transition(
         &mut self,
-        new_scene_json: &str,
+        old_scene_json: &str,
     ) -> Result<(), JsValue> {
         let Some(loaded) = &self.loaded else {
             return Ok(());
         };
-        let old_data = loaded.data.clone();
-        let new_scene: ferrum_scene::SceneGraph = serde_json::from_str(new_scene_json)
+        // B4+B5 fix: the new scene (transition target) is already in loaded.data,
+        // which was populated by loadScene with full packed data. Parse the old
+        // scene from JSON (no packed data needed — it is only the animation source
+        // for a brief 300ms transition).
+        let new_data = loaded.data.clone();
+        let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
-        let new_data = scene_load::load_scene(&new_scene);
-        self.transition = Some(ActiveTransition { old_data, new_data, new_scene });
+        let old_data = scene_load::load_scene(&old_scene);
+        self.transition = Some(ActiveTransition { old_data, new_data, new_scene: loaded.scene.clone() });
         Ok(())
     }
 
@@ -172,6 +186,7 @@ impl WasmRenderer {
                 width: tr.new_data.width,
                 height: tr.new_data.height,
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
+                draw_commands: tr.new_data.draw_commands.clone(),
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -194,7 +209,7 @@ impl WasmRenderer {
     /// The returned JSON is a map of `selection_name → {field_name: field_value}`.
     /// The JS caller should forward this to `model.set('selection_state', ...)`.
     #[wasm_bindgen(js_name = "handleClick")]
-    pub fn handle_click(&mut self, x: f32, y: f32) -> Result<String, JsValue> {
+    pub fn handle_click(&mut self, x: f32, y: f32, shift_held: bool) -> Result<String, JsValue> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok("{}".to_string());
         };
@@ -206,38 +221,48 @@ impl WasmRenderer {
             x as f64,
             y as f64,
             &self.zoom,
+            shift_held,
         );
 
-        // Apply conditional encodings to produce dimmed/highlighted instance colors.
-        let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals(
-            &loaded.scene.panels,
-            conditionals,
-            &self.interaction_state.selections,
-            &loaded.data.circle_instances,
-            &loaded.data.rect_instances,
+        self.apply_conditionals_and_render()
+    }
+
+    /// Handle a brush-drag on a panel: update interval selection state, apply
+    /// conditional encodings, rebuild GPU buffers, re-render, and return
+    /// the new selection state as JSON.
+    #[wasm_bindgen(js_name = "handleDrag")]
+    pub fn handle_drag(
+        &mut self,
+        panel_id: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Result<String, JsValue> {
+        if self.loaded.is_none() {
+            return Ok("{}".to_string());
+        }
+
+        // Convert canvas-space brush coordinates to scene-space so
+        // contains_point comparisons in conditional resolution use
+        // the same coordinate space as mark positions.
+        let (sx0, sy0) = self.zoom.transforms
+            .get(panel_id as usize)
+            .map(|t| t.inverse_apply(x0 as f64, y0 as f64))
+            .unwrap_or((x0 as f64, y0 as f64));
+        let (sx1, sy1) = self.zoom.transforms
+            .get(panel_id as usize)
+            .map(|t| t.inverse_apply(x1 as f64, y1 as f64))
+            .unwrap_or((x1 as f64, y1 as f64));
+
+        // Update interval selection state in scene-space.
+        self.interaction_state.handle_drag(
+            &self.selections,
+            panel_id as usize,
+            sx0, sy0, sx1, sy1,
         );
 
-        // Rebuild GPU buffers with updated colors and re-render.
-        let updated_data = SceneData {
-            circle_instances: updates.circle_instances,
-            rect_instances: updates.rect_instances,
-            mesh_buffers: loaded.data.mesh_buffers.clone(),
-            text_elements: loaded.data.text_elements.clone(),
-            image_quads: loaded.data.image_quads.clone(),
-            background: loaded.data.background,
-            width: loaded.data.width,
-            height: loaded.data.height,
-            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
-        };
-        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
-        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
-            .map_err(JsValue::from)?;
-        loaded.buffers = new_buffers;
-
-        // Serialize current selection state for Python sync.
-        let state_json = self.interaction_state.to_json();
-        Ok(state_json)
+        self.apply_conditionals_and_render()
     }
 
     /// Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
@@ -287,6 +312,21 @@ impl WasmRenderer {
         Ok(build_text_json(&loaded.data))
     }
 
+    /// Set an absolute zoom+pan transform from D3-zoom.
+    ///
+    /// `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+    /// This replaces the accumulated state from `onWheel`/`onPan` and is the
+    /// entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+    ///
+    /// Operates on panel 0 (single-panel charts; multi-panel support later).
+    /// Returns updated text-element JSON so the JS overlay can reposition labels.
+    #[wasm_bindgen(js_name = "setTransform")]
+    pub fn set_transform(&mut self, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
+        let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        self.zoom.set_absolute(0, k as f64, tx as f64, ty as f64);
+        self.upload_transform_and_render(0)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.config.width = width.max(1);
         self.gpu.config.height = height.max(1);
@@ -320,10 +360,21 @@ impl WasmRenderer {
         let mut best: Option<(f64, u32, u32, usize)> = None; // (dist, panel, batch, idx)
         for (&(panel_id, batch_idx), meta) in &loaded.data.packed_batch_meta {
             if meta.kind != 0 { continue; } // only circles for now
+            // B1 fix: convert canvas-space (px, py) to scene-space before comparing
+            // against mark positions. The scene-node path (above) uses
+            // hit_test::hit_test_nearest which applies self.zoom internally, but
+            // this packed-circle fallback operates on raw instance data in
+            // scene-space coordinates. Without the inverse transform, zoomed/panned
+            // charts would miss hits because canvas pixels no longer align with
+            // scene-space mark positions.
+            let (sx, sy) = self.zoom.transforms
+                .get(panel_id as usize)
+                .map(|t| t.inverse_apply(px, py))
+                .unwrap_or((px, py));
             for i in 0..meta.instance_count {
                 let ci = &loaded.data.circle_instances[meta.instance_start + i];
-                let dx = px - ci.center[0] as f64;
-                let dy = py - ci.center[1] as f64;
+                let dx = sx - ci.center[0] as f64;
+                let dy = sy - ci.center[1] as f64;
                 let dist = (dx * dx + dy * dy).sqrt();
                 let r = ci.radius as f64;
                 if dist <= r * 3.0 { // generous hit radius for dense scatter
@@ -361,9 +412,55 @@ impl WasmRenderer {
     }
 }
 
-/// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
+/// Private helpers that share implementation across public `wasm_bindgen` methods.
 #[cfg(target_arch = "wasm32")]
 impl WasmRenderer {
+    /// Resolve conditional encodings against the current selection state,
+    /// rebuild GPU buffers with updated instance colors, render a frame, and
+    /// return the serialized selection state JSON.
+    ///
+    /// Called by both `handle_click` and `handle_drag` after they update the
+    /// selection state. Centralising this ensures that if `SceneData` gains a
+    /// field, only one site needs updating.
+    fn apply_conditionals_and_render(&mut self) -> Result<String, JsValue> {
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok("{}".to_string());
+        };
+
+        // Apply conditional encodings to produce dimmed/highlighted instance colors.
+        let conditionals = &loaded.scene.interaction.conditionals;
+        let updates = resolve_conditionals(
+            &loaded.scene.panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data.circle_instances,
+            &loaded.data.rect_instances,
+        );
+
+        // Rebuild GPU buffers with updated colors and re-render.
+        let updated_data = SceneData {
+            circle_instances: updates.circle_instances,
+            rect_instances: updates.rect_instances,
+            mesh_buffers: loaded.data.mesh_buffers.clone(),
+            text_elements: loaded.data.text_elements.clone(),
+            image_quads: loaded.data.image_quads.clone(),
+            background: loaded.data.background,
+            width: loaded.data.width,
+            height: loaded.data.height,
+            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
+            draw_commands: loaded.data.draw_commands.clone(),
+        };
+        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
+        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
+            .map_err(JsValue::from)?;
+        loaded.buffers = new_buffers;
+
+        // Serialize current selection state for Python sync.
+        let state_json = self.interaction_state.to_json();
+        Ok(state_json)
+    }
+
+    /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         let transform = self.zoom.transforms.get(panel_id)
@@ -553,12 +650,12 @@ fn text_element_to_json(t: &crate::scene_load::TextElementData) -> serde_json::V
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn tick_label_json(
     x: f64, y: f64, label: &str, anchor: &str,
     style: Option<&ferrum_scene::TextStyle>,
 ) -> serde_json::Value {
-    let (font_size, font_weight, font_family, baseline, color) = match style {
+    let (font_size, font_weight, font_family, baseline, angle, color) = match style {
         Some(s) => (
             s.font_size,
             match &s.font_weight {
@@ -574,15 +671,82 @@ fn tick_label_json(
                 ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
                 ferrum_scene::TextBaseline::Custom(v) => v.clone(),
             },
+            s.angle,
             format!("rgba({},{},{},{})", s.color.r, s.color.g, s.color.b, s.opacity),
         ),
         None => (11.0, "normal".to_string(), "sans-serif".to_string(),
-                 "alphabetic".to_string(), "rgba(51,51,51,1)".to_string()),
+                 "alphabetic".to_string(), 0.0, "rgba(51,51,51,1)".to_string()),
     };
     serde_json::json!({
         "x": x, "y": y, "content": label,
         "fontSize": font_size, "fontWeight": font_weight,
         "fontFamily": font_family, "anchor": anchor,
-        "baseline": baseline, "angle": 0.0, "color": color,
+        "baseline": baseline, "angle": angle, "color": color,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── W1: tick_label_json preserves text element angle ─────────────────
+
+    /// tick_label_json must forward the style's angle, not hardcode 0.0.
+    #[test]
+    fn w1_tick_label_json_preserves_angle() {
+        use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
+
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            opacity: 1.0,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 45.0,
+        };
+
+        let json = tick_label_json(100.0, 200.0, "label", "center", Some(&style));
+        let angle = json["angle"].as_f64().expect("angle must be present");
+        assert!(
+            (angle - 45.0).abs() < 0.01,
+            "tick_label_json must preserve style.angle (45.0), got {angle}"
+        );
+    }
+
+    /// When no style is provided, the default angle must be 0.0.
+    #[test]
+    fn w1_tick_label_json_defaults_angle_to_zero() {
+        let json = tick_label_json(0.0, 0.0, "0", "center", None);
+        let angle = json["angle"].as_f64().expect("angle must be present");
+        assert!(
+            angle.abs() < 0.01,
+            "tick_label_json with no style must have angle=0.0, got {angle}"
+        );
+    }
+
+    /// tick_label_json with zero angle must still include the angle field.
+    #[test]
+    fn w1_tick_label_json_zero_angle_still_present() {
+        use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
+
+        let style = TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            opacity: 1.0,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+        };
+
+        let json = tick_label_json(50.0, 300.0, "tick", "end", Some(&style));
+        let angle = json["angle"].as_f64().expect("angle field must be present");
+        assert!(
+            angle.abs() < 0.01,
+            "zero angle must produce angle=0.0 in JSON, got {angle}"
+        );
+    }
 }

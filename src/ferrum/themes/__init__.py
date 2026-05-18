@@ -12,6 +12,14 @@ class Theme:
     ``set_default_theme(t)``. Per-chart ``.theme()`` always wins at render
     time.
 
+    **Cascade behavior:** ``Chart.theme(t)`` replaces the entire active theme
+    with ``t`` — it does not merge individual keys. To override a subset of
+    keys on top of an existing theme, use ``Theme.update()``::
+
+        base = fm.themes.paper_ink
+        custom = base.update(grid=False, padding=20)
+        chart.theme(custom)
+
     All keys listed in ``ferrum-spec.md`` §3.13 are plumbed end-to-end to
     the Rust renderer. Unknown keys raise ``ValueError`` at construction.
 
@@ -24,7 +32,8 @@ class Theme:
         Default mark fill/stroke color for marks that have no explicit color
         encoding.
     font_family, font_weight, font_color, font_size : optional
-        Default text styling for body text (axis titles, etc.).
+        Default text styling. ``font_size`` sets the default font size for
+        tick labels and body text.
     title_font_family, title_font_size, title_font_weight, title_color, \
 title_anchor, title_offset : optional
         Chart title styling. ``title_anchor`` ∈ {"start", "middle", "end"}.
@@ -68,6 +77,10 @@ area_opacity, opacity : optional
         Spacing in pixels.
     strip_background_color : optional
         Facet strip-title background color.
+    strip_text_size : float, optional
+        Font size for facet strip titles (default 12).
+    strip_padding : float, optional
+        Vertical padding around facet strip titles (default 6).
 
     Raises
     ------
@@ -132,6 +145,8 @@ area_opacity, opacity : optional
             "diverging_scheme",
             # Strip
             "strip_background_color",
+            "strip_text_size",
+            "strip_padding",
             # Legend
             "legend_orient",
             "legend_direction",

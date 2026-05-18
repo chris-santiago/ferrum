@@ -29,7 +29,7 @@ pub fn hit_test(
                     .as_ref()
                     .and_then(|ids| ids.get(ni).copied());
                 return Some(HitResult {
-                    panel_id: panel.id,
+                    panel_id: panel_pos,
                     batch_idx: bi,
                     node_idx: ni,
                     data_idx,
@@ -67,7 +67,7 @@ pub fn hit_test_nearest(
                     best = Some((
                         dist,
                         HitResult {
-                            panel_id: panel.id,
+                            panel_id: panel_pos,
                             batch_idx: bi,
                             node_idx: ni,
                             data_idx,
@@ -623,6 +623,115 @@ mod bug_hunt_tests {
         assert_eq!(result.data_idx, Some(0));
     }
 
+    // ── hit_test with zoom transform: coordinate-space correctness ──────────
+
+    fn zoom_with_n(n: usize, sx: f64, sy: f64, tx: f64, ty: f64) -> crate::zoom_pan::ZoomPanState {
+        let config = ferrum_scene::InteractionConfig::default();
+        let mut z = crate::zoom_pan::ZoomPanState::new(n, &config);
+        if n > 0 {
+            z.transforms[0] = crate::zoom_pan::Affine2 { sx, sy, tx, ty };
+        }
+        z
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_with_zoom_2x_and_translation() {
+        // Circle at scene-space (100, 100). Zoom 2x with tx=50, ty=30.
+        // Visual position = 2*100+50 = 250, 2*100+30 = 230.
+        // Click at (250, 230) must hit; click at (100, 100) must miss.
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = zoom_with_n(1, 2.0, 2.0, 50.0, 30.0);
+        let hit_at_visual = hit_test(&panels, 250.0, 230.0, &zoom);
+        assert!(hit_at_visual.is_some(), "click at zoomed+translated visual pos must hit");
+        assert_eq!(hit_at_visual.as_ref().map(|h| h.data_idx), Some(Some(0)));
+
+        let miss_at_original = hit_test(&panels, 100.0, 100.0, &zoom);
+        assert!(miss_at_original.is_none(), "click at pre-zoom pos must miss");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_nearest_with_zoom_returns_closest_in_scene_space() {
+        // Two circles at (100, 100) and (300, 300). Zoom 2x, no translation.
+        // Click at canvas (200, 200) maps to scene (100, 100) — must select first circle.
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = zoom_with_n(1, 2.0, 2.0, 0.0, 0.0);
+        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom);
+        let r = result.expect("must find nearest mark under zoom");
+        assert_eq!(r.data_idx, Some(0), "canvas (200,200) / scene (100,100) must be nearest to circle 0");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_zoom_out_half_nearest_picks_correct_circle() {
+        // Zoom out 0.5x: circle at scene (100, 100) appears at canvas (50, 50).
+        // Circle at scene (300, 300) appears at canvas (150, 150).
+        // Click at canvas (145, 145) maps to scene (290, 290) — nearest to (300, 300).
+        let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
+        let zoom = zoom_with_n(1, 0.5, 0.5, 0.0, 0.0);
+        let result = hit_test_nearest(&panels, 145.0, 145.0, &zoom);
+        let r = result.expect("must find nearest mark");
+        assert_eq!(r.data_idx, Some(1), "canvas (145,145) / scene (290,290) nearest to circle 1");
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_pan_only_nearest() {
+        // Pan tx=100, ty=0. Circle at scene (50, 50) appears at canvas (150, 50).
+        // Click at canvas (150, 50) maps to scene (50, 50) — must hit circle 0.
+        let panels = make_panel_two_circles((50.0, 50.0), (400.0, 400.0));
+        let zoom = zoom_with_n(1, 1.0, 1.0, 100.0, 0.0);
+        let result = hit_test_nearest(&panels, 150.0, 50.0, &zoom);
+        let r = result.expect("must find nearest mark under pan");
+        assert_eq!(r.data_idx, Some(0));
+    }
+
+    #[test]
+    fn bug_hunt_hit_test_multi_panel_zoom_independence() {
+        // Two panels, only panel 0 zoomed. Click should use correct zoom per panel.
+        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        let style = FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None, stroke_width: 0.0, opacity: 1.0,
+            stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0,
+        };
+        let panels = vec![
+            Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() }],
+                    data_indices: Some(vec![0]), tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal, descriptions: None,
+                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                }],
+            },
+            Panel {
+                id: 1,
+                plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![SceneNode::Circle { cx: 350.0, cy: 100.0, r: 5.0, style: style.clone() }],
+                    data_indices: Some(vec![10]), tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal, descriptions: None,
+                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                }],
+            },
+        ];
+        let config = ferrum_scene::InteractionConfig::default();
+        let mut zoom = crate::zoom_pan::ZoomPanState::new(2, &config);
+        // Zoom panel 0 to 2x; panel 1 stays identity
+        zoom.transforms[0] = crate::zoom_pan::Affine2 { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        // Click at panel 1's circle at identity position (350, 100)
+        let result = hit_test(&panels, 350.0, 100.0, &zoom);
+        assert!(result.is_some(), "panel 1 click at identity position must hit");
+        assert_eq!(result.as_ref().map(|h| h.panel_id), Some(1));
+    }
+
     // ── newly wired mark kinds ──────────────────────────────────────────────
 
     fn stroke_style() -> ferrum_scene::StrokeStyle {
@@ -1024,6 +1133,88 @@ mod tests {
         let mut z = ZoomPanState::new(1, &config);
         z.transforms[0] = Affine2 { sx, sy, tx, ty };
         z
+    }
+
+    // ── B6: panel_id must be array position, not panel.id ─────────────────
+
+    /// Build a two-panel scene where panel.id diverges from array position.
+    /// Panel 0 (array pos 0) has id=0, panel 1 (array pos 1) has id=5.
+    /// A circle is placed only in panel 1 (id=5).
+    fn two_panels_with_id_gap() -> Vec<Panel> {
+        vec![
+            Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![],  // no marks in panel 0
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            },
+            Panel {
+                id: 5,  // logical id diverges from array position (1)
+                plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![circle_node(350.0, 250.0, 10.0)],
+                    data_indices: Some(vec![42]),
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
+                    blend: ferrum_scene::BlendMode::Normal,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn hit_test_returns_array_position_not_panel_id() {
+        // B6: When panel.id diverges from array index (e.g. skipped panels),
+        // hit_test must return the array position (1) not the logical id (5),
+        // because consumers (tooltip_for_hit, zoom_pan) index panels by position.
+        let panels = two_panels_with_id_gap();
+        let config = ferrum_scene::InteractionConfig::default();
+        let zoom = ZoomPanState::new(2, &config);
+        // Click at circle center in panel 1 (array pos 1, id 5)
+        let result = hit_test(&panels, 350.0, 250.0, &zoom)
+            .expect("must hit circle in panel 1");
+        assert_eq!(
+            result.panel_id, 1,
+            "panel_id must be array position (1), not panel.id (5)"
+        );
+        assert_eq!(result.data_idx, Some(42));
+    }
+
+    #[test]
+    fn hit_test_nearest_returns_array_position_not_panel_id() {
+        // Same as above but for hit_test_nearest.
+        let panels = two_panels_with_id_gap();
+        let config = ferrum_scene::InteractionConfig::default();
+        let zoom = ZoomPanState::new(2, &config);
+        // Click at circle center in panel 1 (array pos 1, id 5)
+        let result = hit_test_nearest(&panels, 350.0, 250.0, &zoom)
+            .expect("must find nearest in panel 1");
+        assert_eq!(
+            result.panel_id, 1,
+            "panel_id must be array position (1), not panel.id (5)"
+        );
+        assert_eq!(result.data_idx, Some(42));
     }
 
     // ── inverse-transform hit-test tests ─────────────────────────────────────

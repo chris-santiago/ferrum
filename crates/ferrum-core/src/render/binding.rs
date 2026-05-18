@@ -260,6 +260,8 @@ struct ThemeOverridesSpec {
 
     // Strip
     strip_background_color: Option<String>,
+    strip_text_size: Option<f64>,
+    strip_padding: Option<f64>,
 
     // Legend
     legend_orient: Option<String>,
@@ -369,6 +371,8 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
 
     // Strip
     if let Some(s) = spec.strip_background_color { t.strip_background_color = parse_hex(&s)?; }
+    if let Some(v) = spec.strip_text_size { t.strip_text_size = v; }
+    if let Some(v) = spec.strip_padding { t.strip_padding = v; }
 
     // Legend
     if let Some(s) = spec.legend_orient {

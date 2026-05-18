@@ -51,6 +51,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Lint | `nox -s lint` | Runs `ruff check --fix` + `ruff format` on `src/` and `tests/` (current env) |
 | Test | `nox -s test` | `uv sync --all-extras --all-groups` then `pytest` (isolated) |
 | Build | `nox -s build` | `uv build` — produces wheel + sdist in `dist/` (isolated) |
+| Docs | `nox -s docs` | `zensical build --strict` — fails on warnings (current env) |
 
 Pass extra pytest args via `nox -s test -- -k test_name`.
 
@@ -134,21 +135,39 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
 | Review verdicts (gitignored) | `.claude/output/review-lite/` |
 | Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
-| Gallery audit skill | `.claude/skills/gallery-audit/` |
+| Gallery audit skill | `.claude/skills/audit-gallery/` |
 | Gallery audit agents | `.claude/agents/gallery-{judge,fixer}.md` |
 | Bug-hunt skill | `.claude/skills/bug-hunt/` |
 | Bug-hunter agent | `.claude/agents/bug-hunter.md` |
 | Test-sweep skill | `.claude/skills/test-sweep/` |
+| Interactive wiring audit | `.claude/skills/audit-interactive/` |
+| Interactive auditor agent | `.claude/agents/auditor-interactive.md` |
+| PyO3 binding audit | `.claude/skills/audit-pyo3/` |
+| PyO3 binding auditor agent | `.claude/agents/auditor-pyo3-binding.md` |
+| Scene pipeline audit | `.claude/skills/audit-scene-pipeline/` |
+| Scene pipeline auditor agent | `.claude/agents/auditor-scene-pipeline.md` |
+| Theme wiring audit | `.claude/skills/audit-theme/` |
+| Theme wiring auditor agent | `.claude/agents/auditor-theme-wiring.md` |
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
 | **Code archaeology report** | **`design-docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
-| Docs audit skill | `.claude/skills/docs-audit/` |
+| Docs audit skill | `.claude/skills/audit-docs/` |
 | Regression test skill | `.claude/skills/regression-test/` |
 | Release skill | `.claude/skills/release/` |
 | Nox sessions | `noxfile.py` |
 | Publish workflow | `.github/workflows/publish.yaml` |
 | Automations index | `.claude/README.md` |
+
+---
+
+## Known interactive-export limitations (2026-05-18 wiring audit)
+
+These were identified by a 4-agent wiring audit and intentionally deferred. They are **feature gaps requiring design work**, not bugs. Fix them when the relevant subsystem is next touched.
+
+- **W4 — `_offset_node` ignores image/polygon/polyline/raw node types.** These scene node types are silently left at their original coordinates in composed interactive renders. Rare today (heatmaps use image, geo uses polygon), but will matter as more chart types gain `.interactive()`. File: `src/ferrum/composition.py` `_offset_node`.
+
+- **W5 — JointChart interactive layout is flat horizontal, not 2x2 grid.** `JointChart._render_interactive` merges center + top + right in a flat horizontal layout. The SVG path uses a proper 2x2 grid. Fixing requires a grid-aware merge (like `_merge_child_scenes_grid` but with explicit row/col placement). File: `src/ferrum/composition.py` `JointChart._render_interactive`.
 
 ---
 
@@ -169,10 +188,10 @@ When fixing a bug or adding a feature that overlaps with an open item, update th
 
 A reproducible side-by-side audit of ferrum's default plot output against canonical Python libraries (sklearn, seaborn, yellowbrick, scikit-plot). Use it to find where ferrum's defaults lack information or visual quality that competitors ship out of the box — missing AUC annotations, missing reference lines, wrong axis labels, missing per-cell counts on confusion matrices, etc.
 
-- **Skill** — `.claude/skills/gallery-audit/`. Trigger with `/gallery-audit` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
+- **Skill** — `.claude/skills/audit-gallery/`. Trigger with `/audit-gallery` or "audit our plots / compare ferrum to seaborn-sklearn-yellowbrick / what's missing from our default plots". 38 rows, all wired (see `RESUME.md` for the full table). Generation is a PEP 723 script (`audit.py generate`); judging runs as `gallery-judge` subagents in-session (no `ANTHROPIC_API_KEY` needed); report is a script (`audit.py report`).
 - **Agent `gallery-judge`** — judges one row by reading panel PNGs and applying `rubric.md`. Dispatched in parallel, one per row, to keep parent context clean. Writes `verdict.md` with YAML frontmatter + prose.
 - **Agent `gallery-fixer`** — works through `REPORT.md`'s prioritized punchlist autonomously after an audit run, closing default-behavior gaps (Python composite-mark expansion preferred over Rust changes — see `design-docs/architecture/ARCHITECTURE.md` "Composite marks" section).
-- **Output** — `gallery/` symlink at repo root → `.claude/output/gallery-audit/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
+- **Output** — `gallery/` symlink at repo root → `.claude/output/audit-gallery/`. Contains `REPORT.md`, per-row PNGs, per-row `verdict.md`. Gitignored.
 - **Comparator isolation** — sklearn, seaborn, yellowbrick, scikit-plot run in isolated PEP 723 envs via `uv run --no-project --script`. **Never add any of them to `pyproject.toml`** — they exist solely as audit comparators. Matplotlib stays out of ferrum's deps per the hard constraint above.
 - **When new ferrum APIs land** that unblock previously-BLOCKED rows, kick off a session with `"Wire row <N> — ferrum.<func> just landed"`. Claude reads `RESUME.md`, follows the Resume protocol there (copy `plots/01_roc/<library>_panel.py` as a template, swap calls, update the row's `config.toml`, regenerate). The skill auto-detects unwired READY rows on invocation and offers to wire them before running.
 
@@ -223,23 +242,3 @@ For the full surface comparison table, severity rubric (S1–S5), audit trail pa
 ## Key architectural decisions
 
 See **`design-docs/architecture/ARCHITECTURE.md`** for decisions (transport, serialization, layer/transform pipeline, composite-mark desugaring, linalg backend, randomness contract, etc.) and **`design-docs/architecture/computation-layer.md`** for the concrete data-flow diagram. Read either before touching those subsystems.
-
-
-## Docs site work in progress
-
-  - **Worktree**: `../ferrum-worktree-docs-continue/` (sibling of repo root — `git worktree list` to confirm)
-  - **Branch**: `docs/continue` (based on `main`)
-  - **Spec**: `design-docs/superpowers/DOCS_SITE_PLAN.md` (in worktree, not main branch)
-  - **Zensical config**: `zensical.toml` (in worktree root)
-
-  **Status (paused 2026-05-11, unblocked 2026-05-15):**
-  - Scaffold + 6 source-independent pages landed on the worktree branch.
-  - Previously-blocked pages (source-backed examples, model diagnostics, interactive rendering, gallery comparisons) are now unblocked — Phases 10 and 11 are done and on `main`.
-
-  **Resume path:**
-  1. From the docs worktree: `git fetch && git rebase origin/main`.
-  2. Expect conflicts in `pyproject.toml` (dev deps — usually auto-mergeable), `uv.lock` (resolve with `git checkout --theirs uv.lock && uv sync`), and `.gitignore` (additive).
-  3. Run `uv run zensical build --clean` to verify and check the `griffe` warning count from Phase 10/11 visualizers.
-  4. Author the previously-blocked pages against the now-real API surface.
-
-  **Do not** delete the worktree or branch until the docs work merges to `main`.

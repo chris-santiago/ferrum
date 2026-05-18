@@ -283,7 +283,7 @@ Entries marked *(variable name)* use the user's actual column name — these are
 - **Golden SVG updates:** Every chart whose default output changes needs its golden regenerated, rasterized to PNG via `scripts/snapshot-goldens.py`, and visually inspected before committing (per CLAUDE.md hard constraint)
 - **Existing tests:** `pytest` must pass after each tier. No test should break — these are additive default changes, not API changes
 - **New tests:** Each Tier C fix that adds new behavior (elbow detection, log-scale auto-detect, CV fold bars) gets a targeted test
-- **Gallery re-audit:** After all tiers land, re-run `/gallery-audit` on affected rows to verify the gaps closed
+- **Gallery re-audit:** After all tiers land, re-run `/audit-gallery` on affected rows to verify the gaps closed
 
 ## Scope Exclusions
 

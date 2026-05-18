@@ -30,19 +30,25 @@ def _build_anywidget_esm() -> str:
     """Build a self-contained anywidget ESM with inlined WASM.
 
     Reads ``ferrum-anywidget.js`` (the real JS source file in ``_wasm/``),
-    prepends the wasm-bindgen glue, and substitutes ``__B64__`` with the
-    base64-encoded WASM blob.  All JS lives in ``ferrum-anywidget.js`` —
-    never as embedded strings in Python.
+    prepends the wasm-bindgen glue and the D3 interactions bundle, and
+    substitutes ``__B64__`` with the base64-encoded WASM blob.  All JS
+    lives in source files in ``_wasm/`` — never as embedded strings in Python.
     """
     import base64
 
-    from ferrum._html import _read_wasm_artifact
+    from ferrum._html import _convert_d3_exports, _read_wasm_artifact
 
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     wasm_b64 = base64.b64encode(_read_wasm_artifact("ferrum_wasm_bg.wasm")).decode("ascii")
+
+    # D3 bundle: convert `export { ri as brush, ... }` to `var brush=ri, ...;`
+    # so D3 functions are module-scoped (accessible to anywidget JS below).
+    d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
+    d3_js = _convert_d3_exports(d3_source)
+
     anywidget_js = (_WASM_DIR / "ferrum-anywidget.js").read_text()
 
-    return js_glue + "\n\n" + anywidget_js.replace("'__B64__'", f"'{wasm_b64}'")
+    return js_glue + "\n\n" + d3_js + "\n\n" + anywidget_js.replace("'__B64__'", f"'{wasm_b64}'")
 
 
 def _get_widget_class() -> Any:
@@ -97,8 +103,8 @@ class InteractiveChart:
 
     Parameters
     ----------
-    chart : Chart
-        The chart to render interactively.
+    chart : Chart or _ChartLike
+        A chart or composition to render interactively.
     """
 
     def __init__(self, chart: "Chart") -> None:
@@ -123,6 +129,10 @@ class InteractiveChart:
     def _on_zoom_change(self, change: Any) -> None:
         """Rebuild the scene with updated domain when the JS zoom state changes."""
         import json as _json
+
+        # Compositions don't support zoom rebuild (no _clone / coord override).
+        if not hasattr(self._chart, "_clone"):
+            return
 
         zoom = _json.loads(change.get("new", "{}"))
         if not zoom:
@@ -159,20 +169,11 @@ class InteractiveChart:
     def _extract_interaction_config(scene_json: str) -> str:
         """Extract interaction config + top-level selections from a scene JSON string.
 
-        The JS click handler reads `config.selections` (array of SelectionSpec
-        objects with `name` and `fields`) to know which field values to capture
-        when a mark is clicked.
+        Delegates to :func:`ferrum._html._extract_interaction_config`.
         """
-        import json as _json
+        from ferrum._html import _extract_interaction_config
 
-        try:
-            scene = _json.loads(scene_json)
-            config = dict(scene.get("interaction", {}))
-            config["selections"] = scene.get("selections", [])
-            return _json.dumps(config)
-        except Exception as exc:
-            _log.debug("could not extract interaction config: %s", exc)
-            return "{}"
+        return _extract_interaction_config(scene_json)
 
     @property
     def scene_json(self) -> str:
@@ -218,10 +219,32 @@ class InteractiveChart:
             )
 
     def save(self, path: str, **kwargs: Any) -> None:
-        """Save as self-contained HTML file."""
-        from ferrum.display import save_chart
+        """Save as self-contained HTML file.
 
-        save_chart(self._chart, path, format="html", **kwargs)
+        Uses the pre-rendered scene JSON and packed data so this works
+        for both plain ``Chart`` objects and composition types that lack
+        ``_render_inputs()``.
+        """
+        from pathlib import Path as _Path
+
+        from ferrum._html import assemble_html, _copy_wasm_sidecar
+
+        from ferrum.display import _extract_title_text
+
+        embed_wasm = kwargs.pop("embed_wasm", True)
+        csp_nonce = kwargs.pop("csp_nonce", None)
+        title = _extract_title_text(getattr(self._chart, "_title", None))
+        html = assemble_html(
+            self._scene_json,
+            packed_data=self._packed_data,
+            title=title,
+            embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
+        )
+        dest = _Path(path)
+        dest.write_text(html)
+        if not embed_wasm:
+            _copy_wasm_sidecar(dest)
 
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
         if self._widget is None:
@@ -237,11 +260,21 @@ class InteractiveChart:
         return self._widget._repr_mimebundle_(**kwargs)
 
     def __repr__(self) -> str:
-        return f"InteractiveChart(selections={len(self._chart._selections)})"
+        selections = getattr(self._chart, "_selections", [])
+        return f"InteractiveChart(selections={len(selections)})"
 
 
 def _render_scene(chart: "Chart") -> tuple[str, bytes]:
-    """Return (scene_json, packed_bytes) for the interactive renderer."""
+    """Return (scene_json, packed_bytes) for the interactive renderer.
+
+    Dispatches to ``_render_interactive()`` when the object is a
+    composition type (HConcat, VConcat, Layer, etc.), and falls through
+    to the standard Rust ``render_interactive`` for plain ``Chart``.
+    """
+    # Composition types implement _render_interactive(); plain Charts do not.
+    if hasattr(chart, "_render_interactive"):
+        return chart._render_interactive()
+
     import json as _json
 
     from ferrum._core import render_interactive
@@ -249,5 +282,23 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
     spec, data, viewport, theme_dict = chart._render_inputs()
     if data.num_rows == 0:
         w, h = viewport
-        return _json.dumps({"panels": [], "width": w, "height": h}), b""
+        return _json.dumps(
+            {
+                "panels": [],
+                "width": w,
+                "height": h,
+                "background": None,
+                "title": [],
+                "legend": [],
+                "decorations": [],
+                "selections": [],
+                "interaction": {
+                    "zoom_enabled": True,
+                    "pan_enabled": True,
+                    "conditionals": [],
+                    "linked_panels": [],
+                    "tick_levels": [],
+                },
+            }
+        ), b""
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

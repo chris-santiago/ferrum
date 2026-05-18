@@ -78,7 +78,7 @@ uv run pytest                                            # run tests
 
 ## How this was built
 
-Ferrum was designed and implemented in 9 days by one human and an agentic Claude framework — 918 commits, ~97k lines of source, 3,358 tests. The project uses a six-layer automation architecture with language-specific coding agents, commit-level review gates, and repeatable quality campaigns. See [design-docs/development-meta-analysis.md](design-docs/development-meta-analysis.md) for the full retrospective.
+Ferrum was designed and implemented in 10 days by one human and an agentic Claude framework — 975 commits, ~103k lines of source, 3,829 tests. The project uses a six-layer automation architecture with 13 agents and 16 skills, including language-specific coding agents, commit-level review gates, structural audits, and repeatable quality campaigns. See [design-docs/development-meta-analysis.md](design-docs/development-meta-analysis.md) for the full retrospective.
 
 ## Documentation
 

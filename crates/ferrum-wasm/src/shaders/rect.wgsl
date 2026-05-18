@@ -35,6 +35,7 @@ struct VertexOutput {
     @location(6) opacity: f32,
     @location(7) stroke_opacity: f32,
     @location(8) stroke_dash: f32,
+    @location(9) scene_pos: vec2<f32>,
 };
 
 @vertex
@@ -73,6 +74,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.opacity = in.opacity;
     out.stroke_opacity = in.stroke_opacity;
     out.stroke_dash = in.stroke_dash;
+    // Pass pre-transform position for fragment-stage panel clipping.
+    out.scene_pos = px_local;
     return out;
 }
 
@@ -83,6 +86,11 @@ fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Clip to panel boundaries (scene-space, pre-transform).
+    if (in.scene_pos.x < u.clip.x || in.scene_pos.x > u.clip.x + u.clip.z ||
+        in.scene_pos.y < u.clip.y || in.scene_pos.y > u.clip.y + u.clip.w) {
+        discard;
+    }
     let sdf = sdf_rounded_rect(in.local_pos, in.half_size, in.corner_radius);
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, sdf);
     var color = in.fill_color * fill_alpha;

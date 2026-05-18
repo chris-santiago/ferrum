@@ -1,5 +1,3 @@
-import pytest
-
 from ferrum.themes import Theme
 
 
@@ -148,6 +146,93 @@ def test_chart_theme_per_chart_overrides_default():
         # When show_svg is called, c's theme (minimal) is used, not dark.
         assert c._theme is minimal
         assert get_default_theme() is dark
+
+
+def test_set_default_theme_affects_rendered_svg():
+    """W14 regression: set_default_theme must change rendered SVG output."""
+    import polars as pl
+    from ferrum import Chart, set_default_theme
+    from ferrum.themes import Theme
+
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    bg_color = "#1a1a2e"
+    with set_default_theme(Theme(background=bg_color)):
+        svg = Chart(df).mark_point().encode(x="a", y="b").show_svg()
+    assert bg_color in svg, (
+        f"Expected background color {bg_color!r} in SVG from set_default_theme "
+        "but it was not found. set_default_theme is disconnected from rendering."
+    )
+
+
+def test_theme_context_affects_rendered_svg():
+    """W13 regression: theme_context must change rendered SVG output."""
+    import polars as pl
+    from ferrum import Chart
+    from ferrum.themes import Theme, theme_context
+
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    bg_color = "#2d2d44"
+    with theme_context(Theme(background=bg_color)):
+        svg = Chart(df).mark_point().encode(x="a", y="b").show_svg()
+    assert bg_color in svg, (
+        f"Expected background color {bg_color!r} in SVG from theme_context "
+        "but it was not found. theme_context is disconnected from rendering."
+    )
+
+
+def test_per_chart_theme_overrides_default_in_svg():
+    """Cascade: per-chart .theme() must override set_default_theme in SVG."""
+    import polars as pl
+    from ferrum import Chart, set_default_theme
+    from ferrum.themes import Theme
+
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    default_bg = "#1a1a2e"
+    chart_bg = "#ffffff"
+    with set_default_theme(Theme(background=default_bg)):
+        svg = (
+            Chart(df).mark_point().encode(x="a", y="b").theme(Theme(background=chart_bg)).show_svg()
+        )
+    assert chart_bg in svg, "Per-chart theme background must appear in SVG"
+    assert default_bg not in svg, "Default theme background must be overridden"
+
+
+def test_theme_strip_text_size_accepted():
+    """B2: strip_text_size must be a valid Theme key."""
+    from ferrum.themes import Theme
+
+    t = Theme(strip_text_size=16.0)
+    assert t._props == {"strip_text_size": 16.0}
+
+
+def test_theme_strip_padding_accepted():
+    """B3: strip_padding must be a valid Theme key."""
+    from ferrum.themes import Theme
+
+    t = Theme(strip_padding=10.0)
+    assert t._props == {"strip_padding": 10.0}
+
+
+def test_strip_text_size_reaches_rust():
+    """B2 end-to-end: strip_text_size must not be rejected by Rust serde."""
+    import polars as pl
+    from ferrum import Chart
+    from ferrum.themes import Theme
+
+    df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
+    svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(strip_text_size=16.0)).show_svg()
+    assert svg.startswith("<svg")
+
+
+def test_strip_padding_reaches_rust():
+    """B3 end-to-end: strip_padding must not be rejected by Rust serde."""
+    import polars as pl
+    from ferrum import Chart
+    from ferrum.themes import Theme
+
+    df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
+    svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(strip_padding=10.0)).show_svg()
+    assert svg.startswith("<svg")
 
 
 def test_theme_background_appears_in_rendered_svg():

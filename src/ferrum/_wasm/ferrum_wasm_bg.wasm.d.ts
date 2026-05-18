@@ -4,7 +4,8 @@ export const memory: WebAssembly.Memory;
 export const __wbg_wasmrenderer_free: (a: number, b: number) => void;
 export const wasmrenderer_create: (a: any) => any;
 export const wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
-export const wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
+export const wasmrenderer_handleClick: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
 export const wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -12,6 +13,7 @@ export const wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, 
 export const wasmrenderer_renderFrame: (a: number) => [number, number];
 export const wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
 export const wasmrenderer_resize: (a: number, b: number, c: number) => void;
+export const wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
 export const wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
 export const wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];

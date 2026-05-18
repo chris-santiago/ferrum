@@ -73,6 +73,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![],

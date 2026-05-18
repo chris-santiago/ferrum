@@ -165,11 +165,12 @@ class ConditionalSpec:
 
     def to_spec_dict(self) -> dict:
         """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape."""
+        channel = _resolve_channel(self.if_selected)
         return {
             "selection_name": self.selection_name,
-            "channel": _resolve_channel(self.if_selected),
-            "if_selected": _resolve_encoding_value(self.if_selected),
-            "if_not": _resolve_encoding_value(self.if_not),
+            "channel": channel,
+            "if_selected": _resolve_encoding_value(self.if_selected, channel=channel),
+            "if_not": _resolve_encoding_value(self.if_not, channel=channel),
         }
 
 
@@ -458,7 +459,17 @@ def _hex_to_color_dict(hex_str: str) -> dict[str, int]:
 
 
 def _resolve_channel(enc: Any) -> str:
-    from ferrum.encoding.appearance import Color, Opacity, Size
+    from ferrum.encoding.appearance import (
+        Angle,
+        Color,
+        FillOpacity,
+        Opacity,
+        Shape,
+        Size,
+        StrokeDash,
+        StrokeOpacity,
+        StrokeWidth,
+    )
 
     if isinstance(enc, Color) or (
         isinstance(enc, _LiteralValue) and isinstance(enc.val, str) and enc.val.startswith("#")
@@ -468,16 +479,48 @@ def _resolve_channel(enc: Any) -> str:
         return "opacity"
     if isinstance(enc, Size):
         return "size"
+    if isinstance(enc, Shape):
+        return "shape"
+    if isinstance(enc, StrokeWidth):
+        return "stroke_width"
+    if isinstance(enc, StrokeOpacity):
+        return "stroke_opacity"
+    if isinstance(enc, StrokeDash):
+        return "stroke_dash"
+    if isinstance(enc, FillOpacity):
+        return "fill_opacity"
+    if isinstance(enc, Angle):
+        return "angle"
     return "color"
 
 
-def _resolve_encoding_value(enc: Any) -> dict:
+def _resolve_encoding_value(enc: Any, *, channel: str | None = None) -> dict:
+    """Serialize a conditional encoding value to the Rust wire dict.
+
+    Parameters
+    ----------
+    enc:
+        A ``_LiteralValue`` (from ``fm.value(...)``) or a ``ChannelBase`` subclass.
+    channel:
+        The resolved channel string (e.g. ``"size"``, ``"opacity"``).  Used to
+        tag numeric literals correctly so the Rust resolver maps them to the right
+        ``EncodingValue`` variant.  When ``None``, numeric literals fall back to
+        the ``"opacity"`` tag (backward-compatible default).
+    """
     if isinstance(enc, _LiteralValue):
         v = enc.val
         if isinstance(v, str) and v.startswith("#"):
             return {"kind": "color", "value": _hex_to_color_dict(v)}
         if isinstance(v, (int, float)):
-            return {"kind": "opacity", "value": float(v)}
+            fv = float(v)
+            if channel == "size":
+                return {"kind": "size", "value": fv}
+            if channel == "stroke_width":
+                return {"kind": "stroke_width", "value": fv}
+            if channel == "stroke_dash":
+                return {"kind": "stroke_dash", "value": [fv]}
+            # Default (opacity, or any unrecognized channel): tag as opacity.
+            return {"kind": "opacity", "value": fv}
         return {"kind": "opacity", "value": 1.0}
     from ferrum.encoding.base import ChannelBase
 

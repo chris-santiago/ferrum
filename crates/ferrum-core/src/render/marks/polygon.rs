@@ -155,6 +155,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // Per-row opacity encoding (first row of each group used, mirroring color).
+    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
@@ -162,7 +167,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let mut indices = Vec::new();
 
     // --- Emit one polygon per group ---
-    for (_id, group_indices) in &groups {
+    for group_indices in groups.values() {
         let ring: Vec<(f64, f64)> = group_indices
             .iter()
             .filter_map(|&i| {
@@ -177,9 +182,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             continue;
         }
 
+        let first_row = group_indices[0];
+
         // Resolve fill for this group.
         let fill = if color_is_quantitative {
-            let first_row = group_indices[0];
             if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
                 if a.is_null(first_row) {
                     ctx.mark_style.fill
@@ -194,7 +200,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else if let (Some(values), Some(scale)) =
             (color_str_values.as_ref(), &ctx.scales.color)
         {
-            let first_row = group_indices[0];
             match values.get(first_row).and_then(|v| v.as_deref()) {
                 Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
                 None => ctx.mark_style.fill,
@@ -202,7 +207,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         } else {
             ctx.mark_style.fill
         };
-        let fill = with_opacity(fill, ctx.mark_style.opacity);
+
+        // Resolve per-group opacity through the scale if present.
+        let group_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values.get(first_row).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+
+        let fill = with_opacity(fill, group_opacity);
 
         let exterior: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
         nodes.push(SceneNode::Polygon {
@@ -211,11 +227,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 Some(fill),
                 ctx.mark_style.stroke,
                 ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
+                group_opacity,
                 None,
             ),
         });
-        indices.push(group_indices[0]);
+        indices.push(first_row);
     }
 
     MarkBuildResult {
@@ -231,8 +247,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 mod tests {
     use super::*;
     use crate::layout::{PanelLayout, Rect, ThemeInputs};
-    use crate::render::draw::resolve_mark_style;
-    use crate::render::scale_resolve::resolve_scales;
+    use crate::render::draw::{resolve_mark_style, DrawCtx};
+    use crate::render::scale_resolve::{resolve_scales, OpacityScale, ResolvedScales, ScaleKind};
+    use crate::scale::linear::LinearScale;
     use crate::spec::chart::ChartSpec;
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
@@ -413,6 +430,70 @@ mod tests {
             }
         }
         assert_eq!(fills.len(), 3, "expected 3 distinct polygon fills, got {}: {:?}", fills.len(), fills);
+    }
+
+    // --- W18: opacity encoding must be applied per-group ---
+
+    /// W18: When an opacity encoding is present, each polygon group must have
+    /// a different alpha in its fill color. Previously opacity was always taken
+    /// from mark_style.opacity (a single value for all polygons).
+    #[test]
+    fn w18_polygon_opacity_encoding_applied_per_group() {
+        use crate::render::scale_resolve::{OpacityScale, ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+
+        let mut spec = polygon_spec(Some("group_id"), None);
+        // Add opacity encoding.
+        spec.encoding.opacity = Some(EncodingSpec {
+            field: "op".into(),
+            type_: Some(SDT::Quantitative),
+            ..Default::default()
+        });
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("group_id", DataType::UInt32, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5,    2.0, 3.0, 2.5])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0,    0.0, 0.0, 1.0])),
+            Arc::new(UInt32Array::from(vec![0u32, 0, 0,        1, 1, 1])),
+            Arc::new(Float64Array::from(vec![0.2, 0.2, 0.2,    0.8, 0.8, 0.8])),
+        ]).unwrap();
+
+        let theme = crate::layout::ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: Some(OpacityScale {
+                inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.8], vec![0.2, 0.8], false, false)),
+            }),
+            x2: None,
+            y2: None,
+        };
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let polys: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Polygon { style, .. } = n { Some(style.clone()) } else { None }
+        }).collect();
+        assert_eq!(polys.len(), 2, "expected 2 polygon nodes");
+
+        // ferrum_scene::Color uses .a for alpha.
+        let alpha0 = polys[0].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        let alpha1 = polys[1].fill.as_ref().map(|c| c.a).unwrap_or(0);
+        assert_ne!(
+            alpha0, alpha1,
+            "per-row opacity encoding must produce different alphas on polygons; both were {alpha0}"
+        );
     }
 
     #[test]

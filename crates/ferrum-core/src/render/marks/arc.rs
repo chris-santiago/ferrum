@@ -58,6 +58,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         _ => None,
     };
 
+    // Per-row opacity encoding.
+    let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
     // Collect tooltip column data up front so we can index by row later.
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -92,7 +97,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             }
             _ => ctx.mark_style.fill,
         };
-        let fill_color = with_opacity(fill_base, ctx.mark_style.opacity);
+        // Resolve per-row opacity through scale if present; fall back to mark_style.opacity.
+        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values.get(i).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+        let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(cx, cy, inner_radius, outer_radius, angle_start, angle_end);
         nodes.push(SceneNode::Path {
@@ -101,7 +115,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 Some(fill_color),
                 ctx.mark_style.stroke,
                 ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
+                row_opacity,
                 ctx.mark_style.stroke_dash.as_deref(),
             ),
             closed: true,
@@ -198,4 +212,149 @@ fn wedge_path(
 
     cmds.push(PathCmd::Close);
     cmds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    use crate::render::draw::{resolve_mark_style, DrawCtx};
+    use crate::render::scale_resolve::{OpacityScale, ResolvedScales, ScaleKind};
+    use crate::scale::linear::LinearScale;
+    use crate::spec::chart::ChartSpec;
+    use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use ferrum_scene::{PolarDirection, SceneNode};
+    use std::sync::Arc;
+
+    fn polar_spec(with_opacity: bool) -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                opacity: if with_opacity {
+                    Some(EncodingSpec { field: "op".into(), type_: Some(SDT::Quantitative), ..Default::default() })
+                } else {
+                    None
+                },
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    fn make_batch(with_opacity: bool) -> arrow::record_batch::RecordBatch {
+        let mut fields = vec![
+            Field::new("val", DataType::Float64, false),
+        ];
+        let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
+            Arc::new(Float64Array::from(vec![10.0, 30.0, 60.0])),
+        ];
+        if with_opacity {
+            fields.push(Field::new("op", DataType::Float64, false));
+            arrays.push(Arc::new(Float64Array::from(vec![0.2, 0.5, 0.9])));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        arrow::record_batch::RecordBatch::try_new(schema, arrays).unwrap()
+    }
+
+    fn make_scales(with_opacity: bool) -> ResolvedScales {
+        ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![100.0, 0.0], false, false)),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: if with_opacity {
+                Some(OpacityScale {
+                    inner: ScaleKind::Linear(LinearScale::new_internal(
+                        vec![0.2, 0.9], vec![0.2, 0.9], false, false,
+                    )),
+                })
+            } else {
+                None
+            },
+            x2: None,
+            y2: None,
+        }
+    }
+
+    fn make_panel() -> PanelLayout {
+        PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        }
+    }
+
+    /// Basic smoke test: 3 slices → 3 Path nodes.
+    #[test]
+    fn arc_emits_one_path_per_slice() {
+        let spec = polar_spec(false);
+        let batch = make_batch(false);
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+        let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
+        assert_eq!(paths, 3, "expected 3 arc Path nodes, got {paths}");
+    }
+
+    /// W18: When an opacity encoding is present, arc slices must have different
+    /// alpha values in their fill color (per-row opacity applied through scale).
+    #[test]
+    fn w18_arc_opacity_encoding_applied_per_slice() {
+        let spec = polar_spec(true);
+        let batch = make_batch(true);
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(true);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        let paths: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Path { style, .. } = n { Some(style.clone()) } else { None }
+        }).collect();
+        assert_eq!(paths.len(), 3, "expected 3 Path nodes");
+
+        // With opacity values [0.2, 0.5, 0.9] the alphas must all differ.
+        // ferrum_scene::Color uses .a for alpha.
+        let alphas: Vec<u8> = paths.iter()
+            .map(|s| s.fill.as_ref().map(|c| c.a).unwrap_or(255))
+            .collect();
+        let all_same = alphas.iter().all(|&a| a == alphas[0]);
+        assert!(
+            !all_same,
+            "per-row opacity encoding must produce different alphas on arc slices; all were {:?}",
+            alphas
+        );
+    }
 }

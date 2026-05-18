@@ -54,13 +54,43 @@ export class WasmRenderer {
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      * @param {number} x
      * @param {number} y
+     * @param {boolean} shift_held
      * @returns {string}
      */
-    handleClick(x, y) {
+    handleClick(x, y, shift_held) {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ret = wasm.wasmrenderer_handleClick(this.__wbg_ptr, x, y);
+            const ret = wasm.wasmrenderer_handleClick(this.__wbg_ptr, x, y, shift_held);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * Handle a brush-drag on a panel: update interval selection state, apply
+     * conditional encodings, rebuild GPU buffers, re-render, and return
+     * the new selection state as JSON.
+     * @param {number} panel_id
+     * @param {number} x0
+     * @param {number} y0
+     * @param {number} x1
+     * @param {number} y1
+     * @returns {string}
+     */
+    handleDrag(panel_id, x0, y0, x1, y1) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_handleDrag(this.__wbg_ptr, panel_id, x0, y0, x1, y1);
             var ptr1 = ret[0];
             var len1 = ret[1];
             if (ret[3]) {
@@ -217,18 +247,60 @@ export class WasmRenderer {
         wasm.wasmrenderer_resize(this.__wbg_ptr, width, height);
     }
     /**
-     * Begin a GPU-interpolated transition from the currently loaded scene to a
-     * new scene JSON string.
+     * Set an absolute zoom+pan transform from D3-zoom.
      *
-     * Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+     * `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+     *
+     * Operates on panel 0 (single-panel charts; multi-panel support later).
+     * Returns updated text-element JSON so the JS overlay can reposition labels.
+     * @param {number} k
+     * @param {number} tx
+     * @param {number} ty
+     * @returns {string}
+     */
+    setTransform(k, tx, ty) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_setTransform(this.__wbg_ptr, k, tx, ty);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * Begin a GPU-interpolated transition from an old scene to the currently
+     * loaded scene.
+     *
+     * `old_scene_json` is the **previous** scene JSON string. The transition
+     * target is `self.loaded.data` (the scene already loaded via `loadScene`).
+     *
+     * B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
+     * as old. But `loadScene(new_json)` was already called before
+     * `startTransition`, so `loaded.data` was already the new scene — making
+     * old == new and the transition a no-op (self-to-self interpolation).
+     * Now the caller passes the *old* scene JSON and we use `loaded.data` as
+     * the transition target.
+     *
+     * Call ``tick_transition(t)`` (t in [0, 1]) from a requestAnimationFrame loop
      * to drive the animation.  ``start_transition`` does not start the loop —
      * the JavaScript caller owns the timing.
      *
      * Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
-     * @param {string} new_scene_json
+     * @param {string} old_scene_json
      */
-    startTransition(new_scene_json) {
-        const ptr0 = passStringToWasm0(new_scene_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    startTransition(old_scene_json) {
+        const ptr0 = passStringToWasm0(old_scene_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmrenderer_startTransition(this.__wbg_ptr, ptr0, len0);
         if (ret[1]) {
@@ -1263,7 +1335,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 174, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 175, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02);
             return ret;
         },

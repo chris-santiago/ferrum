@@ -136,3 +136,16 @@ def _valid_layer_names(chart: "Chart") -> set[str]:
     if kind and kind in LAYER_NAME_CATALOG:
         return set(LAYER_NAME_CATALOG[kind])
     return {ly.name for ly in (chart._layers or []) if ly.name}
+
+
+def _populate_catalog() -> None:
+    """Eagerly import mark modules that register layer names at module scope."""
+    import ferrum.marks.composite  # noqa: F401
+    import ferrum.marks.heavy_stat  # noqa: F401
+    import ferrum.marks.diagnostic._classification  # noqa: F401
+    import ferrum.marks.diagnostic._regression  # noqa: F401
+    import ferrum.marks.diagnostic._explanation  # noqa: F401
+    import ferrum.marks.diagnostic._selection  # noqa: F401
+
+
+_populate_catalog()

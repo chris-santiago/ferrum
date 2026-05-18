@@ -5,6 +5,47 @@ use lyon::tessellation::VertexBuffers;
 
 use crate::tessellate::{self, MeshVertex};
 
+/// Convert a single sRGB channel value (0.0..1.0) to linear light.
+///
+/// WebGPU with an sRGB surface format automatically applies linear-to-sRGB
+/// conversion on output. If we feed sRGB values directly, the gamma curve
+/// is applied twice and colors appear washed-out. This function undoes the
+/// sRGB encoding so the GPU's automatic conversion produces correct output.
+///
+/// The alpha channel is NOT converted — alpha is linear in both spaces.
+pub(crate) fn srgb_to_linear(s: f32) -> f32 {
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Convert the RGB channels of a `[r, g, b, a]` color array from sRGB to
+/// linear. Alpha is left untouched (it is already linear in both spaces).
+fn linearize_color_channels(color: &mut [f32; 4]) {
+    color[0] = srgb_to_linear(color[0]);
+    color[1] = srgb_to_linear(color[1]);
+    color[2] = srgb_to_linear(color[2]);
+    // color[3] (alpha) stays as-is.
+}
+
+/// Convert a scene `Color` + opacity to a linearized `[f32; 4]` suitable for
+/// GPU upload. RGB channels are converted from sRGB to linear; the alpha
+/// channel combines the color's own alpha with the provided opacity.
+///
+/// This is the single canonical path for "Color → GPU color". All call sites
+/// that previously inlined `srgb_to_linear(c.r as f32 / 255.0)` should use
+/// this instead.
+pub(crate) fn color_to_linear(c: &Color, opacity: f64) -> [f32; 4] {
+    [
+        srgb_to_linear(c.r as f32 / 255.0),
+        srgb_to_linear(c.g as f32 / 255.0),
+        srgb_to_linear(c.b as f32 / 255.0),
+        (c.a as f32 / 255.0) * opacity as f32,
+    ]
+}
+
 /// Stroke-dash palette: maps palette index (0–3) to a `stroke-dasharray`
 /// pattern string, shared with the SVG renderer for cross-renderer consistency.
 ///
@@ -85,6 +126,12 @@ pub struct SceneData {
     /// Per-batch metadata from the packed binary sidecar, keyed by
     /// `(panel_idx, batch_idx)`.
     pub packed_batch_meta: HashMap<(u32, u32), PackedBatchMeta>,
+    /// Ordered draw commands for circle/rect batches. The render loop
+    /// iterates these to select the correct blend pipeline per batch.
+    /// Non-mark instances (grid, axes, legend, title) are emitted as
+    /// normal-blend commands; mark batches carry their scene-graph
+    /// `BlendMode`.
+    pub draw_commands: Vec<DrawCommand>,
 }
 
 #[derive(Clone)]
@@ -120,6 +167,33 @@ pub struct PackedBatchMeta {
     pub instance_count: usize,
 }
 
+/// Which GPU instance buffer a draw command targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawKind {
+    Circle,
+    Rect,
+}
+
+/// A single instanced draw call for circle or rect batches.
+///
+/// `render_frame` iterates these in order to select the correct pipeline
+/// (normal vs. additive blend) and draw the correct instance slice. The
+/// ordering preserves the painter's algorithm: batches appear in panel order,
+/// then batch order within each panel, matching the scene-graph walk in
+/// `load_scene_with_packed`.
+#[derive(Clone, Debug)]
+pub struct DrawCommand {
+    pub kind: DrawKind,
+    /// First instance index in the corresponding flat array
+    /// (`circle_instances` or `rect_instances`).
+    pub instance_start: u32,
+    /// Number of instances to draw.
+    pub instance_count: u32,
+    /// When `true`, the additive-blend pipeline is used instead of the
+    /// normal alpha-blend pipeline.
+    pub additive: bool,
+}
+
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
     load_scene_with_packed(scene, &[])
 }
@@ -131,39 +205,66 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let mut images = Vec::new();
     let mut texts = Vec::new();
     let mut batch_meta = HashMap::new();
+    let mut draw_commands: Vec<DrawCommand> = Vec::new();
 
     // Unpack binary instance data (passed as raw bytes, not base64).
+    // Draw commands for packed batches are emitted in the scene-graph walk
+    // below, where the MarkBatch.blend mode is available.
     unpack_binary_instances(packed_data, &mut circles, &mut rects, &mut batch_meta);
 
-    let background = scene.background.as_ref().map(|c| {
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            c.a as f32 / 255.0,
-        ]
-    });
+    let background = scene.background.as_ref().map(|c| color_to_linear(c, 1.0));
+
+    // Snapshot counters: used to emit draw commands for each collect_nodes call.
+    let mut prev_c = circles.len();
+    let mut prev_r = rects.len();
 
     collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
-    for panel in &scene.panels {
+    for (panel_idx, panel) in scene.panels.iter().enumerate() {
         collect_nodes(&panel.grid, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
-        for batch in &panel.marks {
-            collect_nodes(
-                &batch.nodes,
-                &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
-                batch.stroke_cap, batch.stroke_join,
-            );
+        for (batch_idx, batch) in panel.marks.iter().enumerate() {
+            let additive = batch_uses_additive_blend(batch.blend);
+
+            // If this batch has packed binary instances, emit a draw command
+            // from the packed metadata (the instances were already added by
+            // unpack_binary_instances above). Otherwise, collect from nodes.
+            let key = (panel_idx as u32, batch_idx as u32);
+            if let Some(meta) = batch_meta.get(&key) {
+                let kind = match meta.kind {
+                    0 => DrawKind::Circle,
+                    _ => DrawKind::Rect,
+                };
+                draw_commands.push(DrawCommand {
+                    kind,
+                    instance_start: meta.instance_start as u32,
+                    instance_count: meta.instance_count as u32,
+                    additive,
+                });
+            } else {
+                collect_nodes(
+                    &batch.nodes,
+                    &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
+                    batch.stroke_cap, batch.stroke_join,
+                );
+                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, &mut draw_commands);
+            }
         }
 
         collect_nodes(&panel.axes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
         collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
         collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
     }
 
     collect_nodes(&scene.legend, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
     collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
 
     SceneData {
         circle_instances: circles,
@@ -175,7 +276,39 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         width: scene.width as f32,
         height: scene.height as f32,
         packed_batch_meta: batch_meta,
+        draw_commands,
     }
+}
+
+/// Emit draw commands for any circles/rects added since the previous snapshot.
+fn emit_draw_commands(
+    circles: &[CircleInstance],
+    rects: &[RectInstance],
+    prev_c: &mut usize,
+    prev_r: &mut usize,
+    additive: bool,
+    commands: &mut Vec<DrawCommand>,
+) {
+    let new_c = circles.len();
+    if new_c > *prev_c {
+        commands.push(DrawCommand {
+            kind: DrawKind::Circle,
+            instance_start: *prev_c as u32,
+            instance_count: (new_c - *prev_c) as u32,
+            additive,
+        });
+    }
+    *prev_c = new_c;
+    let new_r = rects.len();
+    if new_r > *prev_r {
+        commands.push(DrawCommand {
+            kind: DrawKind::Rect,
+            instance_start: *prev_r as u32,
+            instance_count: (new_r - *prev_r) as u32,
+            additive,
+        });
+    }
+    *prev_r = new_r;
 }
 
 /// Flag: tooltips string table follows instance data (+ optional data_indices).
@@ -200,6 +333,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 /// based on `flags`.
 ///
 /// kind=0 → CircleInstance, kind=1 → RectInstance.
+///
 fn unpack_binary_instances(
     data: &[u8],
     circles: &mut Vec<CircleInstance>,
@@ -221,8 +355,13 @@ fn unpack_binary_instances(
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = circles.len();
-                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                if let Ok(instances) = bytemuck::try_cast_slice::<_, CircleInstance>(&data[offset..offset+byte_len]) {
                     circles.extend_from_slice(instances);
+                    // Packed instance color channels are sRGB — convert to linear.
+                    for ci in &mut circles[start..] {
+                        linearize_color_channels(&mut ci.fill_color);
+                        linearize_color_channels(&mut ci.stroke_color);
+                    }
                 }
                 (byte_len, start)
             }
@@ -230,8 +369,13 @@ fn unpack_binary_instances(
                 let byte_len = count * std::mem::size_of::<RectInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = rects.len();
-                if let Ok(instances) = bytemuck::try_cast_slice(&data[offset..offset+byte_len]) {
+                if let Ok(instances) = bytemuck::try_cast_slice::<_, RectInstance>(&data[offset..offset+byte_len]) {
                     rects.extend_from_slice(instances);
+                    // Packed instance color channels are sRGB — convert to linear.
+                    for ri in &mut rects[start..] {
+                        linearize_color_channels(&mut ri.fill_color);
+                        linearize_color_channels(&mut ri.stroke_color);
+                    }
                 }
                 (byte_len, start)
             }
@@ -311,7 +455,7 @@ fn collect_nodes(
                 circles.push(CircleInstance {
                     center: [*cx as f32, *cy as f32],
                     radius: *r as f32,
-                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.opacity),
+                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
@@ -325,7 +469,7 @@ fn collect_nodes(
                     position: [*x as f32, *y as f32],
                     size: [*w as f32, *h as f32],
                     corner_radius: *corner_radius as f32,
-                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.opacity),
+                    fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
                     stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
@@ -361,9 +505,16 @@ fn collect_nodes(
                 });
             }
             SceneNode::Image { x, y, w, h, data } => {
-                if let ImageData::Inline { bytes, .. } = data {
-                    if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
-                        images.push(quad);
+                match data {
+                    ImageData::Inline { bytes, .. } => {
+                        if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
+                            images.push(quad);
+                        }
+                    }
+                    ImageData::Url { .. } => {
+                        web_sys::console::warn_1(
+                            &"ferrum: ImageData::Url not supported in WASM renderer".into(),
+                        );
                     }
                 }
             }
@@ -513,12 +664,7 @@ pub fn batch_uses_additive_blend(blend: BlendMode) -> bool {
 
 fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
     match color {
-        Some(c) => [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            (c.a as f32 / 255.0) * opacity as f32,
-        ],
+        Some(c) => color_to_linear(c, opacity),
         None => [0.0, 0.0, 0.0, 0.0],
     }
 }
@@ -528,7 +674,7 @@ fn opt_color_to_f32(color: Option<&Color>, opacity: f64) -> [f32; 4] {
 /// `None` / empty vec → 0.0 (solid). Otherwise matches the first non-empty
 /// palette pattern by round-trip string comparison of the vec joined with ",".
 /// Falls back to 0.0 (solid) for unrecognised patterns.
-fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
+pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
     match dash {
         None => 0.0,
         Some(v) if v.is_empty() => 0.0,
@@ -559,6 +705,43 @@ fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── sRGB-to-linear conversion ────────────────────────────────────
+
+    #[test]
+    fn srgb_to_linear_boundary_values() {
+        // 0.0 maps to 0.0 (black stays black).
+        assert!((srgb_to_linear(0.0)).abs() < 1e-7);
+        // 1.0 maps to 1.0 (white stays white).
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_to_linear_mid_grey() {
+        // sRGB 0.5 ≈ linear 0.214
+        let linear = srgb_to_linear(0.5);
+        assert!((linear - 0.214).abs() < 0.002, "sRGB 0.5 → linear ~0.214, got {linear}");
+    }
+
+    #[test]
+    fn srgb_to_linear_low_range_uses_linear_segment() {
+        // Below 0.04045 the function is s/12.92 (linear segment).
+        let s = 0.03;
+        let expected = 0.03 / 12.92;
+        assert!((srgb_to_linear(s) - expected).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_to_linear_monotonic() {
+        // The conversion must be monotonically increasing.
+        let mut prev = 0.0_f32;
+        for i in 1..=100 {
+            let s = i as f32 / 100.0;
+            let l = srgb_to_linear(s);
+            assert!(l >= prev, "srgb_to_linear must be monotonic: f({s}) = {l} < f({}) = {prev}", (i - 1) as f32 / 100.0);
+            prev = l;
+        }
+    }
 
     // ── Task 1: instance struct layout and round-trip ─────────────────
 
@@ -2012,6 +2195,72 @@ mod tests {
         assert_eq!(json, "{}");
     }
 
+    // ── sRGB round-trip and opt_color_to_f32 regression tests ──────────
+
+    /// Inverse of srgb_to_linear: convert linear light back to sRGB.
+    /// Used only in tests to verify round-trip accuracy.
+    fn linear_to_srgb(l: f32) -> f32 {
+        if l <= 0.0031308 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    // Test 9: srgb_to_linear round-trip accuracy for known sRGB values.
+    #[test]
+    fn srgb_to_linear_round_trip_accuracy() {
+        let test_values: [u8; 5] = [0, 64, 128, 192, 255];
+        for &srgb_byte in &test_values {
+            let s = srgb_byte as f32 / 255.0;
+            let linear = srgb_to_linear(s);
+            let back = linear_to_srgb(linear);
+            assert!(
+                (back - s).abs() < 1e-5,
+                "round-trip failed for sRGB byte {srgb_byte}: {s} → linear {linear} → {back}, delta {}",
+                (back - s).abs()
+            );
+        }
+    }
+
+    // Test 10: opt_color_to_f32 produces linear values (catches double-gamma bug).
+    #[test]
+    fn opt_color_to_f32_produces_linear_mid_grey() {
+        let mid_grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let result = opt_color_to_f32(Some(&mid_grey), 1.0);
+        // sRGB 128/255 ≈ 0.502 → linear ≈ 0.216.
+        // If double-gamma were applied, the value would be ~0.0397 (way too dark).
+        // If sRGB were passed through raw, the value would be ~0.502 (way too bright).
+        // The correct linear value is ~0.216.
+        assert!(
+            result[0] < 0.5,
+            "opt_color_to_f32 r=128 must produce linear < 0.5 (not raw sRGB), got {}",
+            result[0]
+        );
+        assert!(
+            result[0] > 0.1,
+            "opt_color_to_f32 r=128 must produce linear > 0.1 (not double-gamma), got {}",
+            result[0]
+        );
+        assert!(
+            (result[0] - 0.216).abs() < 0.01,
+            "opt_color_to_f32 r=128 should produce ~0.216 (linear mid-grey), got {}",
+            result[0]
+        );
+        // All RGB channels should be equal for a neutral grey.
+        assert!(
+            (result[0] - result[1]).abs() < 1e-6 && (result[1] - result[2]).abs() < 1e-6,
+            "neutral grey must have equal RGB channels, got {:?}",
+            result
+        );
+        // Alpha should be 1.0 (fully opaque) and NOT gamma-corrected.
+        assert!(
+            (result[3] - 1.0).abs() < 1e-6,
+            "alpha must be 1.0 for a=255, opacity=1.0, got {}",
+            result[3]
+        );
+    }
+
     #[test]
     fn parse_tooltip_json_escapes_quotes() {
         let bytes = build_tooltip_bytes(
@@ -2023,5 +2272,508 @@ mod tests {
             json,
             r#"{"fields":[{"name":"label","value":"say \"hello\""}]}"#,
         );
+    }
+
+    // ── bug_hunt: srgb_to_linear boundary and extreme values ─────────────
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_negative_input() {
+        // Negative input: the sRGB spec doesn't define this, but the function
+        // should not panic and should return a negative or zero value.
+        let result = srgb_to_linear(-0.5);
+        assert!(result.is_finite(), "srgb_to_linear(-0.5) must be finite");
+    }
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_above_one() {
+        // Input > 1.0: out-of-spec but should not panic.
+        let result = srgb_to_linear(1.5);
+        assert!(result.is_finite(), "srgb_to_linear(1.5) must be finite");
+        assert!(result > 1.0, "srgb_to_linear(1.5) must be > 1.0");
+    }
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_at_knee_point() {
+        // The knee point is at 0.04045 where the two branches meet.
+        // Both branches should produce the same value (continuity).
+        let below = srgb_to_linear(0.04045);
+        let above = srgb_to_linear(0.04046);
+        // The two branches should produce nearly the same value at the knee.
+        assert!(
+            (below - above).abs() < 0.001,
+            "srgb_to_linear must be continuous at knee: below={below}, above={above}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_full_white() {
+        let white = Color { r: 255, g: 255, b: 255, a: 255 };
+        let result = color_to_linear(&white, 1.0);
+        assert!((result[0] - 1.0).abs() < 1e-5, "white r must be ~1.0 linear");
+        assert!((result[1] - 1.0).abs() < 1e-5, "white g must be ~1.0 linear");
+        assert!((result[2] - 1.0).abs() < 1e-5, "white b must be ~1.0 linear");
+        assert!((result[3] - 1.0).abs() < 1e-5, "white a must be ~1.0");
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_full_black() {
+        let black = Color { r: 0, g: 0, b: 0, a: 255 };
+        let result = color_to_linear(&black, 1.0);
+        assert!(result[0].abs() < 1e-7, "black r must be ~0.0 linear");
+        assert!(result[1].abs() < 1e-7, "black g must be ~0.0 linear");
+        assert!(result[2].abs() < 1e-7, "black b must be ~0.0 linear");
+    }
+
+    #[test]
+    fn bug_hunt_color_to_linear_opacity_scales_alpha() {
+        let color = Color { r: 128, g: 128, b: 128, a: 128 };
+        let result = color_to_linear(&color, 0.5);
+        // a = (128/255) * 0.5 = ~0.251
+        let expected_a = (128.0 / 255.0) * 0.5;
+        assert!(
+            (result[3] - expected_a).abs() < 0.01,
+            "alpha must combine color alpha with opacity: expected ~{expected_a}, got {}",
+            result[3]
+        );
+    }
+
+    // ── bug_hunt: parse_tooltip_json edge cases ─────────────────────────────
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_truncated_field_name() {
+        // Header says 1 field, but the string length exceeds the buffer.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // num_fields = 1
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // string length = 100 (but buffer is short)
+        bytes.extend_from_slice(b"short");
+        let result = parse_tooltip_json(&bytes, 0);
+        assert_eq!(result, "{}", "truncated field name must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_zero_fields() {
+        // num_fields = 0 must return empty JSON.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let result = parse_tooltip_json(&bytes, 0);
+        assert_eq!(result, "{}", "zero fields must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_row_idx_exactly_at_count() {
+        // 2 rows, requesting row 2 (out of bounds)
+        let bytes = build_tooltip_bytes(
+            &["x"],
+            &[vec!["1"], vec!["2"]],
+        );
+        let result = parse_tooltip_json(&bytes, 2);
+        assert_eq!(result, "{}", "row_idx == count must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_large_row_idx() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["val"]]);
+        let result = parse_tooltip_json(&bytes, 999999);
+        assert_eq!(result, "{}", "very large row_idx must return empty JSON");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_utf8_content() {
+        // Unicode content in field names and values
+        let bytes = build_tooltip_bytes(
+            &["name"],
+            &[vec!["hello world"]],
+        );
+        let result = parse_tooltip_json(&bytes, 0);
+        assert!(result.contains("hello world"), "ASCII content must appear in JSON");
+    }
+
+    // ── bug_hunt: unpack_binary_instances edge cases ─────────────────────────
+
+    #[test]
+    fn bug_hunt_unpack_empty_data_is_noop() {
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&[], &mut circles, &mut rects, &mut meta);
+        assert!(circles.is_empty());
+        assert!(rects.is_empty());
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn bug_hunt_unpack_unknown_kind_stops_parsing() {
+        // kind=99 is unknown; parser should stop at this batch.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());  // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes());  // batch_idx
+        buf.extend_from_slice(&99u32.to_le_bytes()); // kind = unknown
+        buf.extend_from_slice(&1u32.to_le_bytes());  // count = 1
+        buf.extend_from_slice(&0u32.to_le_bytes());  // flags
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&buf, &mut circles, &mut rects, &mut meta);
+        assert!(circles.is_empty(), "unknown kind must not produce circles");
+        assert!(rects.is_empty(), "unknown kind must not produce rects");
+    }
+
+    #[test]
+    fn bug_hunt_load_scene_empty_scenegraph() {
+        use ferrum_scene::{InteractionConfig, SceneGraph};
+        let scene = SceneGraph {
+            width: 100.0, height: 100.0, background: None, title: vec![],
+            panels: vec![], legend: vec![], decorations: vec![],
+            selections: vec![], interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+        let data = load_scene(&scene);
+        assert!(data.circle_instances.is_empty());
+        assert!(data.rect_instances.is_empty());
+        assert!(data.text_elements.is_empty());
+        assert!((data.width - 100.0).abs() < 1e-3);
+        assert!((data.height - 100.0).abs() < 1e-3);
+    }
+
+    // ── B2: fill_opacity is used for fill color alpha, not overall opacity ──
+
+    /// A circle with fill_opacity=0.5 and opacity=1.0 must produce a fill
+    /// color with alpha ≈ 0.5, not 1.0 (the overall opacity value).
+    #[test]
+    fn b2_circle_fill_color_uses_fill_opacity_not_opacity() {
+        use ferrum_scene::{Color, FillStroke, SceneNode};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.5, // half-transparent fill
+            angle: 0.0,
+        };
+
+        let nodes = vec![SceneNode::Circle {
+            cx: 10.0,
+            cy: 10.0,
+            r: 5.0,
+            style,
+        }];
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut mesh = lyon::tessellation::VertexBuffers::new();
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+
+        assert_eq!(circles.len(), 1);
+        // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
+        assert!(
+            (circles[0].fill_color[3] - 0.5).abs() < 0.02,
+            "fill_color alpha must use fill_opacity (0.5), got {}",
+            circles[0].fill_color[3]
+        );
+        // overall opacity field must reflect the opacity field (1.0).
+        assert!(
+            (circles[0].opacity - 1.0).abs() < 0.01,
+            "instance opacity must reflect style.opacity (1.0), got {}",
+            circles[0].opacity
+        );
+    }
+
+    /// Same check for Rect nodes.
+    #[test]
+    fn b2_rect_fill_color_uses_fill_opacity_not_opacity() {
+        use ferrum_scene::{Color, FillStroke, SceneNode};
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.25, // quarter-transparent fill
+            angle: 0.0,
+        };
+
+        let nodes = vec![SceneNode::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 20.0,
+            h: 10.0,
+            corner_radius: 0.0,
+            style,
+        }];
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut mesh = lyon::tessellation::VertexBuffers::new();
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+
+        assert_eq!(rects.len(), 1);
+        assert!(
+            (rects[0].fill_color[3] - 0.25).abs() < 0.02,
+            "rect fill_color alpha must use fill_opacity (0.25), got {}",
+            rects[0].fill_color[3]
+        );
+        assert!(
+            (rects[0].opacity - 1.0).abs() < 0.01,
+            "rect instance opacity must reflect style.opacity (1.0), got {}",
+            rects[0].opacity
+        );
+    }
+
+    // ── B3: draw commands populated with correct blend mode ──────────
+
+    /// Helper: build a scene with two panels, each having one normal and one
+    /// additive circle batch, to test that draw_commands correctly records
+    /// per-batch blend mode and instance ranges.
+    fn make_blend_test_scene() -> SceneGraph {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
+            MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+
+        let circle_a = SceneNode::Circle { cx: 10.0, cy: 10.0, r: 5.0, style: style.clone() };
+        let circle_b = SceneNode::Circle { cx: 20.0, cy: 20.0, r: 5.0, style: style.clone() };
+        let circle_c = SceneNode::Circle { cx: 30.0, cy: 30.0, r: 5.0, style };
+
+        SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle_a],
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle_b, circle_c],
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
+                        blend: BlendMode::Additive,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
+                    },
+                ],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    #[test]
+    fn draw_commands_created_for_each_batch() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        // 3 circles total across 2 batches.
+        assert_eq!(data.circle_instances.len(), 3);
+
+        // Should have at least 2 draw commands for the 2 mark batches.
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+        assert_eq!(
+            circle_cmds.len(),
+            2,
+            "expected 2 circle draw commands, got {}",
+            circle_cmds.len()
+        );
+    }
+
+    #[test]
+    fn draw_commands_normal_batch_not_additive() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // First circle batch: 1 circle, normal blend.
+        assert_eq!(circle_cmds[0].instance_count, 1);
+        assert!(
+            !circle_cmds[0].additive,
+            "first batch should use normal blend"
+        );
+    }
+
+    #[test]
+    fn draw_commands_additive_batch_flagged() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // Second circle batch: 2 circles, additive blend.
+        assert_eq!(circle_cmds[1].instance_count, 2);
+        assert!(
+            circle_cmds[1].additive,
+            "second batch should use additive blend"
+        );
+    }
+
+    #[test]
+    fn draw_commands_instance_ranges_are_contiguous() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+
+        // First batch starts at 0, second batch starts where first ended.
+        assert_eq!(circle_cmds[0].instance_start, 0);
+        assert_eq!(
+            circle_cmds[1].instance_start,
+            circle_cmds[0].instance_start + circle_cmds[0].instance_count,
+            "second batch should start where first batch ended"
+        );
+    }
+
+    #[test]
+    fn draw_commands_cover_all_instances() {
+        let scene = make_blend_test_scene();
+        let data = load_scene(&scene);
+
+        let total_circles: u32 = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .map(|c| c.instance_count)
+            .sum();
+        assert_eq!(
+            total_circles,
+            data.circle_instances.len() as u32,
+            "draw commands must cover all circle instances"
+        );
+    }
+
+    #[test]
+    fn draw_commands_rect_batch_with_blend() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
+            MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 255, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+
+        let rect_node = SceneNode::Rect {
+            x: 10.0, y: 10.0, w: 20.0, h: 30.0,
+            style,
+            corner_radius: 0.0,
+        };
+
+        let scene = SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Bar,
+                    nodes: vec![rect_node],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Additive,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        let rect_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Rect)
+            .collect();
+        assert_eq!(rect_cmds.len(), 1);
+        assert!(rect_cmds[0].additive, "rect batch should be additive");
+        assert_eq!(rect_cmds[0].instance_count, 1);
     }
 }

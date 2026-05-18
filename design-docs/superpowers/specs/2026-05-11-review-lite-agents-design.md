@@ -80,7 +80,7 @@ The agents do **not** read the wider package, neighbor files, or git history bey
 3. **Run linters** if available:
    - python-review-lite: `ruff check <files>` (existing dev dep)
    - rust-review-lite: `cargo clippy --message-format=short -- -D warnings` on the affected crate
-4. **Write `verdict.md`** at `.claude/skills/gallery-audit/output/_review_lite/<date>_<agent>.md` (timestamped, so multiple cycles are preserved as audit trail).
+4. **Write `verdict.md`** at `.claude/skills/audit-gallery/output/_review_lite/<date>_<agent>.md` (timestamped, so multiple cycles are preserved as audit trail).
 5. **Return a one-line summary** plus the status word to the parent.
 
 No architecture map. No proposal-before-execute. No multi-phase review. No write access.
@@ -174,7 +174,7 @@ The heavyweight `heuristics.md` files remain unchanged and continue to inform th
    - Documents the four review surfaces: `python-review` (skill), `rust-review` (skill), `python-review-lite` (agent), `rust-review-lite` (agent). The two heavyweight skills are not currently documented in `CLAUDE.md` either; this section backfills that gap.
    - Explains when each is used: skills for human-invoked subsystem audits; lite agents auto-invoked between `gallery-fixer`'s return and the parent's commit.
    - States the block / escalate semantics.
-   - Notes the audit-trail location (`.claude/skills/gallery-audit/output/_review_lite/`).
+   - Notes the audit-trail location (`.claude/skills/audit-gallery/output/_review_lite/`).
 3. **`README.md`** — no change (these are internal tooling).
 
 ### What the lite agents deliberately do not do

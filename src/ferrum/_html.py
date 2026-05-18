@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import base64
+import json as _json
+import re
 from pathlib import Path
+
+_WASM_DIR = Path(__file__).parent / "_wasm"
 
 
 def _read_wasm_artifact(name: str) -> bytes:
-    wasm_dir = Path(__file__).parent / "_wasm"
-    artifact = wasm_dir / name
+    artifact = _WASM_DIR / name
     if not artifact.exists():
         raise FileNotFoundError(
             f"WASM artifact {name!r} not found at {artifact}. "
@@ -18,11 +21,168 @@ def _read_wasm_artifact(name: str) -> bytes:
     return artifact.read_bytes()
 
 
+def _strip_anywidget_for_standalone(source: str) -> str:
+    """Strip ESM exports and anywidget-only code from ferrum-anywidget.js.
+
+    The returned JS is suitable for inlining in a ``<script type="module">``
+    block.  Specifically:
+
+    1. Remove the top-level ``const _B64 = ...`` WASM bootstrap block
+       (lines 11-14 in the source) — the HTML template has its own init.
+    2. Remove ``let _ready`` / ``_initP`` and the ``_ensureWasm`` function —
+       standalone HTML calls ``__wbg_init`` directly before ``_render``.
+    3. Strip the ``export`` keyword from ``export function createStandaloneAdapter``.
+    4. Remove the ``export { _render as renderChart };`` re-export line.
+    5. Remove the entire ``export async function render({ model, el }) { ... }``
+       anywidget entry point (everything from that line to end of file).
+    """
+    # 1. Remove _B64 bootstrap block (4 lines: const _B64 through the for loop)
+    source = re.sub(
+        r"^const _B64 = .*\n"
+        r"const _raw = .*\n"
+        r"const _bytes = .*\n"
+        r"for \(let i = 0; i < _raw\.length.*\n",
+        "",
+        source,
+        flags=re.MULTILINE,
+    )
+
+    # 2. Remove _ensureWasm and its state variables, and replace call sites
+    source = re.sub(r"^let _ready = false.*\n", "", source, flags=re.MULTILINE)
+    source = re.sub(
+        r"^async function _ensureWasm\(\) \{.*?\n\}\n",
+        "",
+        source,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    # Replace calls to _ensureWasm() — WASM is already initialized in main()
+    source = source.replace("await _ensureWasm();", "// WASM already initialized")
+
+    # 3. Strip `export` from `export function createStandaloneAdapter`
+    source = source.replace(
+        "export function createStandaloneAdapter",
+        "function createStandaloneAdapter",
+    )
+
+    # 4. Remove the re-export line
+    source = re.sub(
+        r"^export \{ _render as renderChart \};\n?",
+        "",
+        source,
+        flags=re.MULTILINE,
+    )
+
+    # 5. Remove the entire anywidget `render` export (last function in file)
+    source = re.sub(
+        r"// ── anywidget entry point ──.*",
+        "",
+        source,
+        flags=re.DOTALL,
+    )
+
+    result = source.strip()
+
+    # Guard: verify critical transforms applied.  If the JS source was
+    # reformatted and a regex missed, these catch it at build time rather
+    # than producing silently broken HTML.
+    for line in result.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("export ") or stripped.startswith("export{"):
+            raise RuntimeError(
+                f"_strip_anywidget_for_standalone: residual export found: "
+                f"{stripped[:80]!r}. The ferrum-anywidget.js source may have "
+                "been reformatted — update the regex patterns in _html.py."
+            )
+    if "_ensureWasm" in result and "// WASM already initialized" not in result:
+        raise RuntimeError(
+            "_strip_anywidget_for_standalone: _ensureWasm was not stripped. "
+            "The ferrum-anywidget.js source may have been reformatted."
+        )
+
+    return result
+
+
+def _convert_d3_exports(source: str) -> str:
+    """Convert ``export{...}`` blocks to ``var ...;`` declarations.
+
+    D3 interaction bundles use ESM ``export { ri as brush, ... }`` syntax.
+    For inline ``<script type="module">`` and anywidget ESM contexts we need
+    those names as module-scoped variables instead.
+    """
+    return re.sub(
+        r"export\{([^}]+)\}",
+        lambda m: (
+            "var "
+            + ",".join(
+                f"{parts[-1].strip()}={parts[0].strip()}"
+                if len(parts := p.split(" as ")) > 1
+                else p.strip()
+                for p in m.group(1).split(",")
+            )
+            + ";"
+        ),
+        source,
+    )
+
+
+def _background_css_from_dict(scene: dict) -> str:
+    """Extract a CSS background color from a parsed scene dict, defaulting to white."""
+    bg = scene.get("background")
+    if bg:
+        r = bg.get("r", 0)
+        g = bg.get("g", 0)
+        b = bg.get("b", 0)
+        a = bg.get("a", 255)
+        return f"rgba({r},{g},{b},{a / 255.0})"
+    return "#ffffff"
+
+
+def _copy_wasm_sidecar(dest: Path) -> None:
+    """Copy WASM sidecar files alongside an HTML export at *dest*.
+
+    Copies ``ferrum_wasm_bg.wasm`` and ``ferrum_wasm.js`` from the
+    package's ``_wasm/`` directory into ``dest.parent``, if they exist.
+    Used by ``InteractiveChart.save()`` and ``display.save_chart()``
+    when ``embed_wasm=False``.
+    """
+    import shutil
+
+    for name in ("ferrum_wasm_bg.wasm", "ferrum_wasm.js"):
+        src = _WASM_DIR / name
+        if src.exists():
+            shutil.copy2(src, dest.parent / name)
+
+
+def _extract_background_css(scene_json: str) -> str:
+    """Extract a CSS background color from the scene JSON, defaulting to white."""
+    try:
+        return _background_css_from_dict(_json.loads(scene_json))
+    except Exception:
+        return "#ffffff"
+
+
+def _interaction_config_from_dict(scene: dict) -> str:
+    """Extract selections + conditionals from a parsed scene dict."""
+    config: dict = dict(scene.get("interaction", {}))
+    config["selections"] = scene.get("selections", [])
+    return _json.dumps(config)
+
+
+def _extract_interaction_config(scene_json: str) -> str:
+    """Extract selections + conditionals from scene JSON for the standalone adapter."""
+    try:
+        return _interaction_config_from_dict(_json.loads(scene_json))
+    except Exception:
+        return "{}"
+
+
 def assemble_html(
     scene_json: str,
     *,
+    packed_data: bytes = b"",
     title: str = "Ferrum chart",
     embed_wasm: bool = True,
+    csp_nonce: str | None = None,
 ) -> str:
     """Build a self-contained HTML string that renders a chart via WASM.
 
@@ -30,16 +190,35 @@ def assemble_html(
     ----------
     scene_json
         Serialized SceneGraph JSON from ``render_interactive``.
+    packed_data
+        Binary packed mark data from ``render_interactive``.  Embedded as
+        a base64 string and passed to the WASM renderer via the standalone
+        adapter.
     title
         HTML ``<title>`` content.
     embed_wasm
         When True (default), base64-encode the ``.wasm`` binary inline for
         single-file distribution.  When False, the HTML references an
         adjacent ``ferrum_wasm_bg.wasm`` sidecar file.
+    csp_nonce
+        Optional Content-Security-Policy nonce.  When provided, both the
+        ``<style>`` and ``<script type="module">`` tags receive a
+        ``nonce="..."`` attribute so they pass strict CSP headers.
     """
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
-    css = (Path(__file__).parent / "_wasm" / "ferrum-interactive.css").read_text()
+    css = (_WASM_DIR / "ferrum-interactive.css").read_text()
 
+    # Inter @font-face is embedded in ferrum-interactive.css (shared by Jupyter and HTML).
+
+    # Inline the D3 interactions bundle with exports converted to module-scoped vars.
+    d3_source = (_WASM_DIR / "d3-interactions.js").read_text()
+    d3_js = _convert_d3_exports(d3_source)
+
+    # Inline the anywidget JS with ESM exports stripped for standalone use.
+    anywidget_source = (_WASM_DIR / "ferrum-anywidget.js").read_text()
+    anywidget_js = _strip_anywidget_for_standalone(anywidget_source)
+
+    # WASM initialization block.
     if embed_wasm:
         wasm_bytes = _read_wasm_artifact("ferrum_wasm_bg.wasm")
         wasm_b64 = base64.b64encode(wasm_bytes).decode("ascii")
@@ -48,11 +227,12 @@ def assemble_html(
             "  const raw = atob(wasmB64);\n"
             "  const wasmBytes = new Uint8Array(raw.length);\n"
             "  for (let i = 0; i < raw.length; i++) wasmBytes[i] = raw.charCodeAt(i);\n"
-            "  await __wbg_init(wasmBytes);"
+            "  await __wbg_init({{ module_or_path: wasmBytes }});"
         ).format(b64=wasm_b64)
     else:
         wasm_init_block = "await __wbg_init();"
 
+    # Escape scene JSON for embedding in a JS template literal.
     escaped_json = (
         scene_json.replace("\\", "\\\\")
         .replace("</", "<\\/")
@@ -60,18 +240,43 @@ def assemble_html(
         .replace("${", "\\${")
     )
 
+    # Packed data as base64 for the standalone adapter.
+    packed_b64 = base64.b64encode(packed_data).decode("ascii") if packed_data else ""
+
+    # Parse scene JSON once for interaction config and background extraction.
+    try:
+        scene_dict = _json.loads(scene_json)
+    except Exception:
+        scene_dict = {}
+
+    # Interaction config for the standalone adapter.
+    interaction_config = _interaction_config_from_dict(scene_dict)
+    # Escape for embedding in a JS single-quoted string.
+    interaction_config_escaped = interaction_config.replace("\\", "\\\\").replace("'", "\\'")
+
+    # Background color for the HTML body.
+    bg_css = _background_css_from_dict(scene_dict)
+
+    # Build optional nonce attributes for <style> and <script>.
+    nonce_attr = f' nonce="{csp_nonce}"' if csp_nonce else ""
+
     return (
         "<!DOCTYPE html>\n"
         "<html>\n"
         "<head>\n"
         '<meta charset="utf-8">\n'
         f"<title>{title}</title>\n"
-        f"<style>{css}</style>\n"
+        f"<style{nonce_attr}>{css}</style>\n"
         "</head>\n"
-        "<body>\n"
-        '<div id="ferrum-root"></div>\n'
-        '<script type="module">\n'
+        f'<body style="background:{bg_css};margin:0;display:flex;'
+        'justify-content:center;align-items:center;min-height:100vh">\n'
+        f'<div id="ferrum-root" style="background:{bg_css}"></div>\n'
+        f'<script type="module"{nonce_attr}>\n'
         f"{js_glue}\n"
+        "\n"
+        f"{d3_js}\n"
+        "\n"
+        f"{anywidget_js}\n"
         "\n"
         f"const SCENE_JSON = `{escaped_json}`;\n"
         "\n"
@@ -79,104 +284,9 @@ def assemble_html(
         f"  {wasm_init_block}\n"
         "\n"
         "  const container = document.getElementById('ferrum-root');\n"
-        "  container.style.position = 'relative';\n"
-        "  const scene = JSON.parse(SCENE_JSON);\n"
-        "  const width = scene.width || 640;\n"
-        "  const height = scene.height || 480;\n"
-        "\n"
-        "  const canvas = document.createElement('canvas');\n"
-        "  canvas.width = width;\n"
-        "  canvas.height = height;\n"
-        "  canvas.style.display = 'block';\n"
-        "  container.appendChild(canvas);\n"
-        "\n"
-        "  const overlay = document.createElement('div');\n"
-        "  overlay.className = 'ferrum-overlay';\n"
-        "  overlay.style.position = 'absolute';\n"
-        "  overlay.style.top = '0';\n"
-        "  overlay.style.left = '0';\n"
-        "  overlay.style.width = width + 'px';\n"
-        "  overlay.style.height = height + 'px';\n"
-        "  overlay.style.pointerEvents = 'none';\n"
-        "  container.appendChild(overlay);\n"
-        "\n"
-        "  const renderer = await WasmRenderer.create(canvas);\n"
-        "  const textJson = renderer.loadScene(SCENE_JSON);\n"
-        "  const textElements = JSON.parse(textJson);\n"
-        "\n"
-        "  for (const t of textElements) {\n"
-        "    const div = document.createElement('div');\n"
-        "    div.className = 'ferrum-text';\n"
-        "    div.style.position = 'absolute';\n"
-        "    div.style.left = t.x + 'px';\n"
-        "    div.style.top = t.y + 'px';\n"
-        "    div.style.fontSize = t.fontSize + 'px';\n"
-        "    div.style.fontWeight = t.fontWeight;\n"
-        "    div.style.fontFamily = t.fontFamily;\n"
-        "    div.style.color = t.color;\n"
-        "    div.style.whiteSpace = 'nowrap';\n"
-        "    div.style.pointerEvents = 'none';\n"
-        "    div.style.lineHeight = '1';\n"
-        "    div.textContent = t.content;\n"
-        "    overlay.appendChild(div);\n"
-        "  }\n"
-        "\n"
-        "  // Tooltip + href\n"
-        "  const tip = document.createElement('div');\n"
-        "  tip.className = 'ferrum-tooltip';\n"
-        "  tip.style.position = 'absolute';\n"
-        "  tip.style.pointerEvents = 'none';\n"
-        "  tip.style.opacity = '0';\n"
-        "  tip.style.transition = 'opacity 0.1s ease';\n"
-        "  container.appendChild(tip);\n"
-        "  const marks = scene.panels ? scene.panels.flatMap(p => p.marks || []) : [];\n"
-        "  function hitTest(x, y) {\n"
-        "    for (let bi = marks.length - 1; bi >= 0; bi--) {\n"
-        "      const b = marks[bi];\n"
-        "      if (!b.nodes) continue;\n"
-        "      for (let ni = b.nodes.length - 1; ni >= 0; ni--) {\n"
-        "        const n = b.nodes[ni];\n"
-        "        let hit = false;\n"
-        "        if (n.type === 'circle') {\n"
-        "          const dx = x - n.cx, dy = y - n.cy;\n"
-        "          hit = dx*dx + dy*dy <= n.r*n.r;\n"
-        "        } else if (n.type === 'rect') {\n"
-        "          hit = x >= n.x && x <= n.x+n.w && y >= n.y && y <= n.y+n.h;\n"
-        "        }\n"
-        "        if (hit) return { batch: b, idx: ni };\n"
-        "      }\n"
-        "    }\n"
-        "    return null;\n"
-        "  }\n"
-        "  canvas.style.pointerEvents = 'auto';\n"
-        "  canvas.addEventListener('mousemove', e => {\n"
-        "    const r = canvas.getBoundingClientRect();\n"
-        "    const h = hitTest(e.clientX - r.left, e.clientY - r.top);\n"
-        "    if (h && h.batch.tooltips && h.batch.tooltips[h.idx]) {\n"
-        "      const t = h.batch.tooltips[h.idx];\n"
-        "      tip.replaceChildren();\n"
-        "      const tbl = document.createElement('table');\n"
-        "      for (const f of t.fields) {\n"
-        "        const tr = document.createElement('tr');\n"
-        "        const k = document.createElement('td');\n"
-        "        k.textContent = f.name; k.style.fontWeight = 'bold'; k.style.paddingRight = '6px';\n"
-        "        const v = document.createElement('td'); v.textContent = f.value;\n"
-        "        tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);\n"
-        "      }\n"
-        "      tip.appendChild(tbl);\n"
-        "      tip.style.left = (e.clientX - r.left + 12) + 'px';\n"
-        "      tip.style.top = (e.clientY - r.top - 12) + 'px';\n"
-        "      tip.style.opacity = '1';\n"
-        "    } else { tip.style.opacity = '0'; }\n"
-        "  });\n"
-        "  canvas.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });\n"
-        "  canvas.addEventListener('click', e => {\n"
-        "    const r = canvas.getBoundingClientRect();\n"
-        "    const h = hitTest(e.clientX - r.left, e.clientY - r.top);\n"
-        "    if (h && h.batch.hrefs && h.batch.hrefs[h.idx]) {\n"
-        "      window.open(h.batch.hrefs[h.idx], '_blank', 'noopener,noreferrer');\n"
-        "    }\n"
-        "  });\n"
+        f"  const adapter = createStandaloneAdapter('{packed_b64}', "
+        f"'{interaction_config_escaped}');\n"
+        "  await _render(container, SCENE_JSON, adapter);\n"
         "}\n"
         "\n"
         "main().catch(e => {\n"

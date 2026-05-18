@@ -19,7 +19,13 @@ export class WasmRenderer {
      * The returned JSON is a map of `selection_name → {field_name: field_value}`.
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      */
-    handleClick(x: number, y: number): string;
+    handleClick(x: number, y: number, shift_held: boolean): string;
+    /**
+     * Handle a brush-drag on a panel: update interval selection state, apply
+     * conditional encodings, rebuild GPU buffers, re-render, and return
+     * the new selection state as JSON.
+     */
+    handleDrag(panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
     /**
      * Return tooltip JSON for a specific mark instance.
      *
@@ -50,16 +56,37 @@ export class WasmRenderer {
     resetZoom(panel_id: number): string;
     resize(width: number, height: number): void;
     /**
-     * Begin a GPU-interpolated transition from the currently loaded scene to a
-     * new scene JSON string.
+     * Set an absolute zoom+pan transform from D3-zoom.
      *
-     * Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+     * `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+     *
+     * Operates on panel 0 (single-panel charts; multi-panel support later).
+     * Returns updated text-element JSON so the JS overlay can reposition labels.
+     */
+    setTransform(k: number, tx: number, ty: number): string;
+    /**
+     * Begin a GPU-interpolated transition from an old scene to the currently
+     * loaded scene.
+     *
+     * `old_scene_json` is the **previous** scene JSON string. The transition
+     * target is `self.loaded.data` (the scene already loaded via `loadScene`).
+     *
+     * B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
+     * as old. But `loadScene(new_json)` was already called before
+     * `startTransition`, so `loaded.data` was already the new scene — making
+     * old == new and the transition a no-op (self-to-self interpolation).
+     * Now the caller passes the *old* scene JSON and we use `loaded.data` as
+     * the transition target.
+     *
+     * Call ``tick_transition(t)`` (t in [0, 1]) from a requestAnimationFrame loop
      * to drive the animation.  ``start_transition`` does not start the loop —
      * the JavaScript caller owns the timing.
      *
      * Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
      */
-    startTransition(new_scene_json: string): void;
+    startTransition(old_scene_json: string): void;
     /**
      * Advance the transition to fractional progress ``t`` ∈ [0, 1].
      *
@@ -77,7 +104,8 @@ export interface InitOutput {
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
     readonly wasmrenderer_create: (a: any) => any;
     readonly wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly wasmrenderer_handleClick: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly wasmrenderer_handleClick: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -85,6 +113,7 @@ export interface InitOutput {
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];
     readonly wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
     readonly wasmrenderer_resize: (a: number, b: number, c: number) => void;
+    readonly wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];

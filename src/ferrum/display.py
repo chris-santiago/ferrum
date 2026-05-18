@@ -17,6 +17,7 @@ def save_chart(
     *,
     format: str | None = None,
     embed_wasm: bool = True,
+    csp_nonce: str | None = None,
 ) -> None:
     """Save a chart to disk.
 
@@ -35,6 +36,10 @@ def save_chart(
         For ``"html"`` format only.  When True (default), the WASM binary is
         base64-inlined for single-file distribution.  When False, an adjacent
         ``ferrum_wasm_bg.wasm`` sidecar file is required.
+    csp_nonce : str, optional
+        For ``"html"`` format only.  When provided, both the ``<style>`` and
+        ``<script type="module">`` tags receive a ``nonce="..."`` attribute
+        so they pass strict Content-Security-Policy headers.
 
     Examples
     --------
@@ -52,26 +57,22 @@ def save_chart(
     elif fmt == "png":
         path.write_bytes(chart.show_png())
     elif fmt == "html":
-        scene_json = _render_scene_json(chart)
-        from ferrum._html import assemble_html
+        scene_json, packed_data = _render_scene_json(chart)
+        from ferrum._html import assemble_html, _copy_wasm_sidecar
 
+        title = _extract_title_text(chart._title)
         html = assemble_html(
             scene_json,
-            title=chart._title or "Ferrum chart",
+            packed_data=packed_data,
+            title=title,
             embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
         )
         path.write_text(html)
         if not embed_wasm:
-            import shutil
-
-            wasm_src = Path(__file__).parent / "_wasm" / "ferrum_wasm_bg.wasm"
-            if wasm_src.exists():
-                shutil.copy2(wasm_src, path.parent / "ferrum_wasm_bg.wasm")
-            js_src = Path(__file__).parent / "_wasm" / "ferrum_wasm.js"
-            if js_src.exists():
-                shutil.copy2(js_src, path.parent / "ferrum_wasm.js")
+            _copy_wasm_sidecar(path)
     elif fmt == "json":
-        scene_json = _render_scene_json(chart)
+        scene_json, _ = _render_scene_json(chart)
         path.write_text(scene_json)
     elif fmt == "":
         raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
@@ -111,9 +112,21 @@ def show_chart(chart: "Chart") -> None:
             pass
     # Browser fallback: write temp HTML, open in browser
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as f:
-        f.write(_wrap_svg_in_html(chart.show_svg(), title=chart._title or "Ferrum chart"))
+        f.write(_wrap_svg_in_html(chart.show_svg(), title=_extract_title_text(chart._title)))
         url = f"file://{f.name}"
     webbrowser.open(url)
+
+
+def _extract_title_text(raw_title: object) -> str:
+    """Extract a plain text string from a Title dataclass or fallback.
+
+    ``Chart._title`` is a ``Title`` dataclass (with a ``.text`` attribute)
+    or ``None``.  This helper avoids embedding ``Title(text='...', ...)``
+    repr into HTML ``<title>`` tags and headings.
+    """
+    if raw_title is not None and hasattr(raw_title, "text"):
+        return raw_title.text or "Ferrum chart"
+    return str(raw_title) if raw_title else "Ferrum chart"
 
 
 def _is_jupyter() -> bool:
@@ -139,10 +152,38 @@ def _wrap_svg_in_html(svg: str, *, title: str = "Ferrum chart") -> str:
     )
 
 
-def _render_scene_json(chart: "Chart") -> str:
-    """Render a chart to SceneGraph JSON for the WASM renderer."""
+def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
+    """Render a chart to SceneGraph JSON + packed binary data for the WASM renderer.
+
+    Returns
+    -------
+    tuple[str, bytes]
+        (scene_json, packed_data) from ``render_interactive``.
+    """
+    import json as _json
+
     from ferrum._core import render_interactive
 
     spec, data, viewport, theme_dict = chart._render_inputs()
-    json_str, _packed = render_interactive(spec, data, viewport=viewport, theme=theme_dict)
-    return json_str
+    if data.num_rows == 0:
+        w, h = viewport
+        return _json.dumps(
+            {
+                "panels": [],
+                "width": w,
+                "height": h,
+                "background": None,
+                "title": [],
+                "legend": [],
+                "decorations": [],
+                "selections": [],
+                "interaction": {
+                    "zoom_enabled": True,
+                    "pan_enabled": True,
+                    "conditionals": [],
+                    "linked_panels": [],
+                    "tick_levels": [],
+                },
+            }
+        ), b""
+    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

@@ -7,29 +7,8 @@
 
 use crate::layout::TextAnchor;
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
-use crate::render::format::{format_numeric, format_time};
+use crate::render::format::{format_numeric, format_time, format_with_spec};
 use crate::render::scale_resolve::ScaleKind;
-
-/// Format a numeric value per a tiny subset of d3-format specs. The full grammar
-/// is deliberately out of scope; we honor only ".Nf" (fixed N decimals) and
-/// ".Ne" (scientific N digits) — the patterns Phase 9 `heatmap(annot=True)`
-/// uses (".2f") and a couple of common variants. Falls back to format_numeric.
-fn format_with_spec(v: f64, spec: Option<&str>) -> String {
-    let Some(s) = spec else { return format_numeric(v) };
-    let trimmed = s.strip_prefix('.').unwrap_or(s);
-    // Match the trailing format character.
-    let (digits_part, fmt_char) = match trimmed.chars().last() {
-        Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
-        _ => return format_numeric(v),
-    };
-    let n: usize = digits_part.parse().unwrap_or(2);
-    match fmt_char {
-        'f' => format!("{v:.*}", n),
-        'e' => format!("{v:.*e}", n),
-        'g' => format_numeric(v),
-        _ => format_numeric(v),
-    }
-}
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};

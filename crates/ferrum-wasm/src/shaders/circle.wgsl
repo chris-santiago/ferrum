@@ -33,7 +33,7 @@ struct VertexOutput {
     @location(5) opacity: f32,
     @location(6) stroke_opacity: f32,
     @location(7) stroke_dash: f32,
-    // angle is consumed entirely in the vertex stage (no per-fragment use)
+    @location(8) scene_pos: vec2<f32>,
 };
 
 @vertex
@@ -70,11 +70,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.opacity = in.opacity;
     out.stroke_opacity = in.stroke_opacity;
     out.stroke_dash = in.stroke_dash;
+    // Pass pre-transform position for fragment-stage panel clipping.
+    out.scene_pos = px_local;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Clip to panel boundaries (scene-space, pre-transform).
+    if (in.scene_pos.x < u.clip.x || in.scene_pos.x > u.clip.x + u.clip.z ||
+        in.scene_pos.y < u.clip.y || in.scene_pos.y > u.clip.y + u.clip.w) {
+        discard;
+    }
     let dist = length(in.local_pos);
     let sdf = dist - in.radius;
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, sdf);

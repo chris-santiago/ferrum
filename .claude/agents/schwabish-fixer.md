@@ -24,11 +24,11 @@ You apply **objective** Schwabish findings to one gallery row's panel script. Yo
    - Otherwise, delegate the code change to the `python-coder` agent with a clear description of the edit (what to append/flip, where in the file). The coding agent embeds review principles and produces code that passes the lite-review gate on first attempt. Do not write code directly.
 4. After all eligible findings are applied, regenerate the row's panel:
    ```bash
-   uv run python .claude/skills/gallery-audit/audit.py generate --row <row>
+   uv run python .claude/skills/audit-gallery/audit.py generate --row <row>
    ```
 5. Write a diff snapshot for the orchestrator's audit trail:
    ```bash
-   git diff -- gallery/plots/<row>/ > .claude/output/gallery-audit/<row>/schwabish_applied.diff
+   git diff -- gallery/plots/<row>/ > .claude/output/audit-gallery/<row>/schwabish_applied.diff
    ```
 6. Return a structured summary listing applied finding IDs and skipped (idempotent) finding IDs so the orchestrator can populate `SCHWABISH_REPORT.md`.
 

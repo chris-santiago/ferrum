@@ -7,7 +7,7 @@ description: >
   Use when the user says "gallery feedback", "walk through the gallery", "review gallery
   plots", "collect feedback on plots", "what should we fix in our defaults", "compare our
   plots and tell me what to change", or wants to interactively decide which comparator
-  concepts to adopt. Also use after a /gallery-audit run when the user wants to turn
+  concepts to adopt. Also use after a /audit-gallery run when the user wants to turn
   visual gaps into an actionable punchlist with their input on each row.
 ---
 
@@ -30,7 +30,7 @@ The gallery audit must have already been run. Verify that the output directory e
 contains row subdirectories with PNG panels:
 
 ```
-.claude/output/gallery-audit/
+.claude/output/audit-gallery/
   01_roc/
     ferrum.png
     sklearn.png
@@ -40,7 +40,7 @@ contains row subdirectories with PNG panels:
     ...
 ```
 
-If the output directory is empty or missing, tell the user to run `/gallery-audit` first.
+If the output directory is empty or missing, tell the user to run `/audit-gallery` first.
 
 ---
 
@@ -48,7 +48,7 @@ If the output directory is empty or missing, tell the user to run `/gallery-audi
 
 ### Phase 1 — Discovery
 
-1. List all subdirectories in `.claude/output/gallery-audit/`.
+1. List all subdirectories in `.claude/output/audit-gallery/`.
 2. Filter to row directories only (pattern: `NN_name`, e.g. `01_roc`). Skip utility
    directories like `_review_lite`.
 3. For each row directory, inventory which PNGs exist. Every row should have `ferrum.png`;

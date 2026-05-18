@@ -1,18 +1,18 @@
 ---
 name: gallery-fixer
-description: Use this agent after the /gallery-audit skill has produced a REPORT.md to work through HIGH-severity "ferrum lacks X" findings autonomously — locate the relevant ferrum source, implement the missing default (annotation, reference line, error band, axis label, etc.), and re-run the affected audit rows to verify the gap closed. Invoke when the user says "fix the gallery findings", "work the punchlist", "close the ferrum/seaborn gaps", or after a gallery audit run when they want the issues addressed.
+description: Use this agent after the /audit-gallery skill has produced a REPORT.md to work through HIGH-severity "ferrum lacks X" findings autonomously — locate the relevant ferrum source, implement the missing default (annotation, reference line, error band, axis label, etc.), and re-run the affected audit rows to verify the gap closed. Invoke when the user says "fix the gallery findings", "work the punchlist", "close the ferrum/seaborn gaps", or after a gallery audit run when they want the issues addressed.
 ---
 
 # Gallery fixer
 
-You are a subagent dispatched by the main session after a gallery audit run. Your job is to **close the gap** between ferrum's default plot output and the canonical reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) on the findings flagged in `.claude/output/gallery-audit/REPORT.md`.
+You are a subagent dispatched by the main session after a gallery audit run. Your job is to **close the gap** between ferrum's default plot output and the canonical reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) on the findings flagged in `.claude/output/audit-gallery/REPORT.md`.
 
 ## Your inputs
 
-- **Primary:** `.claude/output/gallery-audit/REPORT.md` — the prioritized punchlist. Each row entry has YAML frontmatter (`severity`, `ferrum_missing`, `ferrum_status`) and a prose verdict.
-- **Per-row detail:** `.claude/output/gallery-audit/<row>/verdict.md` — full per-row verdict if you need more context.
-- **Per-row panels:** `.claude/output/gallery-audit/<row>/{ferrum,sklearn,yellowbrick,skp}.png` — read these to see exactly what's missing.
-- **Row metadata:** `.claude/skills/gallery-audit/plots/<row>/{config.toml,TODO.md}` — what the row tests, which ferrum API it exercises.
+- **Primary:** `.claude/output/audit-gallery/REPORT.md` — the prioritized punchlist. Each row entry has YAML frontmatter (`severity`, `ferrum_missing`, `ferrum_status`) and a prose verdict.
+- **Per-row detail:** `.claude/output/audit-gallery/<row>/verdict.md` — full per-row verdict if you need more context.
+- **Per-row panels:** `.claude/output/audit-gallery/<row>/{ferrum,sklearn,yellowbrick,skp}.png` — read these to see exactly what's missing.
+- **Row metadata:** `.claude/skills/audit-gallery/plots/<row>/{config.toml,TODO.md}` — what the row tests, which ferrum API it exercises.
 - **Ferrum source:** `src/ferrum/figures.py`, `src/ferrum/_diagnostics/charts.py`, `src/ferrum/_diagnostics/visualizers/`, and the Rust render core at `crates/ferrum-core/src/render/`.
 
 ## What "fixing a finding" means
@@ -56,7 +56,7 @@ For each iteration:
    - Never write Python or Rust code directly — the coding agents embed review principles and produce code that passes the lite-review gate on first attempt.
 
 6. **Verify.**
-   - Re-run the affected row: `unset CONDA_PREFIX && uv run --no-sync python .claude/skills/gallery-audit/audit.py all --rows <N>`
+   - Re-run the affected row: `unset CONDA_PREFIX && uv run --no-sync python .claude/skills/audit-gallery/audit.py all --rows <N>`
    - Read the new `output/<row>/verdict.md` and confirm the targeted rubric item moved from `ferrum_missing` to satisfied.
    - If goldens were touched, run `python scripts/snapshot-goldens.py` and read the rasterized PNGs.
    - If Rust was touched, run `cargo test` (with `DYLD_LIBRARY_PATH` as above).

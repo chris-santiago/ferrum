@@ -166,7 +166,7 @@ Zooming recomputes the visible domain and re-renders the scene with updated axis
 
 Because selections live in the chart spec and composition operators pass the spec through, linked views fall out of composition with no extra API.
 
-Declare a selection in one chart, reference it in another, and compose them:
+Declare a selection with `fields` in one chart, reference the same selection object in another, and compose them:
 
 ```python
 import ferrum as fm
@@ -178,14 +178,14 @@ df = pl.DataFrame({
     "category": ["a", "b", "a", "b", "a", "b", "a", "b"],
 })
 
-brush = fm.selection_interval()
+sel = fm.selection_point(fields=["category"])
 
 scatter = (
     fm.Chart(df)
-    .mark_point()
+    .mark_point(size=80)
     .encode(x="x", y="y", color="category:N")
-    .add_selection(brush)
-    .conditional(brush.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
+    .add_selection(sel)
+    .conditional(sel.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
 )
 
 bars = (
@@ -194,13 +194,15 @@ bars = (
     .transform(fm.transform_aggregate(
         {"field": "category", "fn": "count", "as": "n"}, groupby=["category"]
     ))
-    .encode(x="category:N", y="n:Q")
+    .encode(x="category:N", y="n:Q", color="category:N")
+    .add_selection(sel)
+    .conditional(sel.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
 )
 
 linked = scatter | bars
 ```
 
-Brushing on the scatter highlights points by category. The `|` operator composes both charts into a side-by-side view — the same operator used for static concatenation, no separate "link API." Selections declared in the scatter carry through the composition; the bar chart reacts because it shares the same data source.
+Clicking a point in the scatter selects all marks that share the same `category` value — in both panels. The `|` operator composes both charts into a side-by-side view — the same operator used for static concatenation, no separate "link API." The `fields=["category"]` parameter tells the selection to match marks by field value rather than by data index, which is what enables cross-panel linking even when the two charts have different data shapes (the bar chart uses an aggregate transform).
 
 ## Listening for selections in Python
 

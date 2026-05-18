@@ -4,7 +4,7 @@ use ferrum_scene::{
 };
 
 use super::color::from_rgba;
-use super::svg::{fmt_f, FillStroke, Stroke, SvgBuffer, TextStyle};
+use super::svg::{escape_attr, fmt_f, FillStroke, Stroke, SvgBuffer, TextStyle};
 use super::CLIP_ID_PREFIX;
 use crate::layout::{Rect, TextAnchor};
 
@@ -104,7 +104,7 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
                     svg.g_open(None);
                     if let Some(tt) = tooltip {
                         let text: String = tt.fields.iter()
-                            .map(|f| f.value.clone())
+                            .map(|f| format!("{}: {}", f.name, f.value))
                             .collect::<Vec<_>>()
                             .join(", ");
                         if !text.is_empty() {
@@ -146,7 +146,7 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
                     if let Some(url) = href { svg.a_open(url); }
                     svg.g_open(None);
                     if let Some(tt) = tooltip {
-                        let text: String = tt.fields.iter().map(|f| f.value.clone()).collect::<Vec<_>>().join(", ");
+                        let text: String = tt.fields.iter().map(|f| format!("{}: {}", f.name, f.value)).collect::<Vec<_>>().join(", ");
                         if !text.is_empty() { svg.title_elem(&text); }
                     }
                     if let Some(d) = desc { svg.desc_elem(d); }
@@ -207,8 +207,8 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
         }
         SceneNode::Image { x, y, w, h, data } => {
             match data {
-                ImageData::Inline { bytes, .. } => {
-                    svg.image(*x, *y, *w, *h, bytes);
+                ImageData::Inline { bytes, mime } => {
+                    svg.image(*x, *y, *w, *h, bytes, *mime);
                 }
                 ImageData::Url { url } => {
                     svg.image_data_url(*x, *y, *w, *h, url);
@@ -239,7 +239,7 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
                 svg.g_open(None);
             } else {
                 let attr_str: String = attrs.iter()
-                    .map(|(k, v)| format!(" {}=\"{}\"", k, v))
+                    .map(|(k, v)| format!(" {}=\"{}\"", k, escape_attr(v)))
                     .collect();
                 svg.raw(&format!("<g{}>", attr_str));
             }

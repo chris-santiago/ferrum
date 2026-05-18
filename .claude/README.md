@@ -11,13 +11,17 @@ The automation system has six layers, from innermost (every task) to outermost (
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 6: Utility skills (human-invoked, standalone)            │
-│  /ferrum-docstrings  /regression-test  /docs-audit  /release    │
+│  /ferrum-docstrings  /regression-test  /audit-docs  /release    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 5: Remediation agents (dispatched by campaigns)          │
 │  gallery-fixer  schwabish-fixer  bug-hunter                     │
 ├─────────────────────────────────────────────────────────────────┤
-│  Layer 4: Quality campaigns (human-invoked, parallel dispatch)  │
-│  /bug-hunt  /test-sweep  /gallery-audit  /schwabish-improve     │
+│  Layer 4b: Wiring audits (human-invoked, parallel forensic)     │
+│  /audit-interactive  /audit-pyo3  /audit-scene-pipeline         │
+│  /audit-theme                                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 4a: Quality campaigns (human-invoked, parallel dispatch) │
+│  /bug-hunt  /test-sweep  /audit-gallery  /schwabish-improve     │
 │  /code-archaeology                                              │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Heavyweight review skills (human-invoked)             │
@@ -48,13 +52,13 @@ User request (coding task)
   │
   ├─ Phase boundary? ──→ /python-review or /rust-review (heavyweight)
   │
-  └─ Quality sweep? ──→ /bug-hunt, /gallery-audit, /schwabish-improve, /test-sweep
+  └─ Quality sweep? ──→ /bug-hunt, /audit-gallery, /schwabish-improve, /test-sweep
 ```
 
 ### Campaign flows
 
 ```
-/gallery-audit
+/audit-gallery
   └─ audit.py generate          (renders all panels)
   └─ gallery-judge × N          (one per row, parallel)
   └─ audit.py report            (builds REPORT.md)
@@ -84,6 +88,22 @@ User request (coding task)
 /code-archaeology
   └─ 3 parallel sweep agents    (Python, Rust, Tests+Docs)
   └─ consolidated report
+
+/audit-interactive
+  └─ auditor-interactive × 4    (js-wasm, python-rust-data, rust-state-machine, html-assembly)
+  └─ consolidated GOOD/WARN/BUG report → .claude/output/audit-interactive/
+
+/audit-pyo3
+  └─ auditor-pyo3-binding × 3   (chart-spec, transforms, scene-types)
+  └─ consolidated report → .claude/output/audit-pyo3/
+
+/audit-scene-pipeline
+  └─ auditor-scene-pipeline × 4  (spec-to-scene, scene-to-svg, scene-to-wasm, composition-merge)
+  └─ consolidated report → .claude/output/audit-scene-pipeline/
+
+/audit-theme
+  └─ auditor-theme-wiring × 4   (python-to-rust, rust-layout, rust-render, cascade)
+  └─ consolidated report + key inventory table → .claude/output/audit-theme/
 ```
 
 ---
@@ -94,10 +114,14 @@ User request (coding task)
 |---|---|
 | Implement a Python feature/fix | Orchestrator dispatches `python-coder` |
 | Implement a Rust feature/fix | Orchestrator dispatches `rust-coder` |
+| Audit interactive HTML export wiring | `/audit-interactive` |
+| Audit PyO3 binding boundary | `/audit-pyo3` |
+| Audit rendering pipeline data flow | `/audit-scene-pipeline` |
+| Audit theme key wiring end-to-end | `/audit-theme` |
 | Find edge-case bugs across the pipeline | `/bug-hunt` |
 | Find edge-case bugs in one subsystem | `/bug-hunt <subsystem>` |
 | Multi-round combinatorial test-and-fix | `/test-sweep` |
-| Compare ferrum plots to sklearn/seaborn/yellowbrick | `/gallery-audit` |
+| Compare ferrum plots to sklearn/seaborn/yellowbrick | `/audit-gallery` |
 | Walk through audit results and decide what to fix | `/gallery-feedback` |
 | Apply Schwabish text-integration principles | `/schwabish-improve <target>` |
 | Apply to the entire gallery autonomously | `/schwabish-improve --from-audit` |
@@ -105,7 +129,7 @@ User request (coding task)
 | Senior Rust code review on a crate/module | `/rust-review` |
 | Add or update a docstring | `/ferrum-docstrings` |
 | Surface unimplemented features, silent drops, spec gaps | `/code-archaeology` |
-| Audit docs site for staleness | `/docs-audit` |
+| Audit docs site for staleness | `/audit-docs` |
 | Write regression tests after a bug fix | `/regression-test` (also auto-triggered) |
 | Cut a release | `/release` |
 
@@ -179,7 +203,45 @@ Same structure for Rust. Targets a crate, module, or subsystem. Looks for naming
 
 ---
 
-## Layer 4 — Quality campaigns
+## Layer 4b — Wiring audits
+
+Forensic parallel audits of integration seams. Each dispatches multiple auditor agents that read entire files, trace every connection point, and report GOOD/WARN/BUG findings with file:line citations.
+
+### `/audit-interactive`
+
+**File:** `skills/audit-interactive/SKILL.md`
+
+Audits the interactive HTML export pipeline across 4 seams: JS↔WASM wiring, Python→Rust data flow, Rust selection state machine, HTML assembly. Dispatches `auditor-interactive` × 4.
+
+**Output:** `output/audit-interactive/YYYY-MM-DD-audit.md`
+
+### `/audit-pyo3`
+
+**File:** `skills/audit-pyo3/SKILL.md`
+
+Audits the PyO3 FFI boundary across 3 binding groups: chart-spec, transforms, scene-types. Verifies types, kwargs, return shapes match across Python↔Rust. Dispatches `auditor-pyo3-binding` × 3.
+
+**Output:** `output/audit-pyo3/YYYY-MM-DD-audit.md`
+
+### `/audit-scene-pipeline`
+
+**File:** `skills/audit-scene-pipeline/SKILL.md`
+
+Audits the rendering pipeline across 4 stages: spec-to-scene, scene-to-svg, scene-to-wasm, composition-merge. Traces data from DataFrame to final output, flags silent data loss. Dispatches `auditor-scene-pipeline` × 4.
+
+**Output:** `output/audit-scene-pipeline/YYYY-MM-DD-audit.md`
+
+### `/audit-theme`
+
+**File:** `skills/audit-theme/SKILL.md`
+
+Audits theme key wiring across 4 segments: python-to-rust, rust-layout, rust-render, cascade. Builds a complete key inventory (can user set it? reaches Rust? affects output?). Dispatches `auditor-theme-wiring` × 4.
+
+**Output:** `output/audit-theme/YYYY-MM-DD-audit.md` (includes key inventory table)
+
+---
+
+## Layer 4a — Quality campaigns
 
 Systematic sweeps that dispatch agents in parallel. Human-invoked.
 
@@ -199,19 +261,19 @@ Parallel edge-case test campaign. Dispatches one `bug-hunter` agent per subsyste
 
 Iterative combinatorial test-and-fix campaign. Writes systematic test modules targeting cross-cutting dimensions (mark×channel, mark×coord, composite×channel, etc.), runs them, fixes all failures via TDD, then uses failure patterns to derive the next test suite. Repeats for N rounds or until convergence. Delegates code fixes to `python-coder` / `rust-coder`.
 
-### `/gallery-audit`
+### `/audit-gallery`
 
-**File:** `skills/gallery-audit/SKILL.md`
+**File:** `skills/audit-gallery/SKILL.md`
 
 Renders the same plot in ferrum and reference libraries (sklearn, seaborn, yellowbrick, scikit-plot) using default settings, then dispatches `gallery-judge` agents in parallel to score each row against a fixed rubric. Produces a prioritized `REPORT.md` punchlist. 38 plot types.
 
-**Output:** `output/gallery-audit/` — `REPORT.md`, per-row `verdict.md`, panel PNGs
+**Output:** `output/audit-gallery/` — `REPORT.md`, per-row `verdict.md`, panel PNGs
 
 ### `/gallery-feedback`
 
 **File:** `skills/gallery-feedback/SKILL.md`
 
-Human-in-the-loop follow-up to `/gallery-audit`. Walks through every row, shows ferrum's panel alongside comparator panels, and asks what should change. Compiles decisions into a structured remediation plan.
+Human-in-the-loop follow-up to `/audit-gallery`. Walks through every row, shows ferrum's panel alongside comparator panels, and asks what should change. Compiles decisions into a structured remediation plan.
 
 ### `/schwabish-improve`
 
@@ -239,7 +301,7 @@ Agents dispatched by campaigns or the user to close findings. All delegate actua
 
 **File:** `agents/gallery-fixer.md`
 
-Dispatched after `/gallery-audit` to close HIGH-severity findings. Reads `REPORT.md` and panel PNGs, plans each fix, then dispatches `python-coder` or `rust-coder` for the code change. Does not commit — orchestrator handles the lite-review gate.
+Dispatched after `/audit-gallery` to close HIGH-severity findings. Reads `REPORT.md` and panel PNGs, plans each fix, then dispatches `python-coder` or `rust-coder` for the code change. Does not commit — orchestrator handles the lite-review gate.
 
 Trigger: "fix the gallery findings", "work the punchlist", "close the ferrum/seaborn gaps"
 
@@ -257,11 +319,35 @@ Dispatched by `/bug-hunt`, one per subsystem. Writes edge-case test files, runs 
 
 **Tools:** Read, Edit, Write, Bash, Glob, Grep
 
+### `auditor-interactive`
+
+**File:** `agents/auditor-interactive.md`
+
+Dispatched by `/audit-interactive`, one per seam (4 total). Forensic code-tracing agent — reads entire files, verifies every call signature, traces coordinate spaces, reports GOOD/WARN/BUG. Read-only.
+
+### `auditor-pyo3-binding`
+
+**File:** `agents/auditor-pyo3-binding.md`
+
+Dispatched by `/audit-pyo3`, one per binding group (3 total). Traces kwargs, types, and return values across the Python↔Rust FFI boundary. Read-only.
+
+### `auditor-scene-pipeline`
+
+**File:** `agents/auditor-scene-pipeline.md`
+
+Dispatched by `/audit-scene-pipeline`, one per pipeline stage (4 total). Traces data from input to output at each rendering stage. Read-only.
+
+### `auditor-theme-wiring`
+
+**File:** `agents/auditor-theme-wiring.md`
+
+Dispatched by `/audit-theme`, one per theme segment (4 total). Traces every theme key from Python declaration through Rust consumption. Read-only.
+
 ### `gallery-judge`
 
 **File:** `agents/gallery-judge.md`
 
-Dispatched by `/gallery-audit`, one per row. Reads panel PNGs, applies rubric, writes `verdict.md`. Read-only.
+Dispatched by `/audit-gallery`, one per row. Reads panel PNGs, applies rubric, writes `verdict.md`. Read-only.
 
 ### `schwabish-judge`
 
@@ -287,9 +373,9 @@ Reference for adding or updating docstrings. NumPy convention, PyO3 placement ru
 
 Auto-invoked after any bug fix. Writes regression tests that pin the corrected behavior. Should be triggered without the user asking whenever a bug is fixed.
 
-### `/docs-audit`
+### `/audit-docs`
 
-**File:** `skills/docs-audit/SKILL.md`
+**File:** `skills/audit-docs/SKILL.md`
 
 Audits the docs site (`docs/site/`) for staleness against current source code. Checks for stale phase references, outdated claims, missing API pages, stale docstrings, comparison-page drift, and PNG staleness.
 
@@ -338,6 +424,10 @@ Lite-agent verdicts are written to `.claude/output/review-lite/<ISO-timestamp>_{
 │   ├── rust-coder.md                  ← Layer 1: Rust coding agent
 │   ├── python-review-lite.md          ← Layer 2: Python commit gate
 │   ├── rust-review-lite.md            ← Layer 2: Rust commit gate
+│   ├── auditor-interactive.md         ← Layer 4b: interactive wiring auditor
+│   ├── auditor-pyo3-binding.md        ← Layer 4b: PyO3 binding auditor
+│   ├── auditor-scene-pipeline.md      ← Layer 4b: scene pipeline auditor
+│   ├── auditor-theme-wiring.md        ← Layer 4b: theme wiring auditor
 │   ├── gallery-fixer.md               ← Layer 5: gallery remediation
 │   ├── gallery-judge.md               ← Layer 5: gallery audit judge
 │   ├── schwabish-fixer.md             ← Layer 5: Schwabish remediation
@@ -346,19 +436,27 @@ Lite-agent verdicts are written to `.claude/output/review-lite/<ISO-timestamp>_{
 ├── skills/
 │   ├── python-review/                 ← Layer 3: heavyweight Python review
 │   ├── rust-review/                   ← Layer 3: heavyweight Rust review
-│   ├── bug-hunt/                      ← Layer 4: parallel test campaign
-│   ├── test-sweep/                    ← Layer 4: combinatorial TDD campaign
-│   ├── gallery-audit/                 ← Layer 4: default-output comparison
-│   ├── gallery-feedback/              ← Layer 4: interactive audit walkthrough
-│   ├── schwabish/                     ← Layer 4: text-integration audit
-│   ├── code-archaeology/              ← Layer 4: unimplemented feature sweep
+│   ├── audit-interactive/             ← Layer 4b: interactive wiring audit
+│   ├── audit-pyo3/                    ← Layer 4b: PyO3 binding audit
+│   ├── audit-scene-pipeline/          ← Layer 4b: scene pipeline audit
+│   ├── audit-theme/                   ← Layer 4b: theme wiring audit
+│   ├── bug-hunt/                      ← Layer 4a: parallel test campaign
+│   ├── test-sweep/                    ← Layer 4a: combinatorial TDD campaign
+│   ├── audit-gallery/                 ← Layer 4a: default-output comparison
+│   ├── gallery-feedback/              ← Layer 4a: interactive audit walkthrough
+│   ├── schwabish/                     ← Layer 4a: text-integration audit
+│   ├── code-archaeology/              ← Layer 4a: unimplemented feature sweep
 │   ├── ferrum-docstrings/             ← Layer 6: docstring conventions
 │   ├── regression-test/               ← Layer 6: post-fix regression tests
-│   ├── docs-audit/                    ← Layer 6: docs staleness check
+│   ├── audit-docs/                    ← Layer 6: docs staleness check
 │   └── release/                       ← Layer 6: version bump + changelog
 └── output/                                ← all ephemeral output (gitignored)
     ├── review-lite/                   ← commit-gate verdicts
-    ├── gallery-audit/                 ← panel PNGs, verdicts, REPORT.md
+    ├── audit-interactive/             ← wiring audit reports
+    ├── audit-pyo3/                    ← binding audit reports
+    ├── audit-scene-pipeline/          ← pipeline audit reports
+    ├── audit-theme/                   ← theme audit reports
+    ├── audit-gallery/                 ← panel PNGs, verdicts, REPORT.md
     ├── bug-hunt/                      ← BUG_REPORT.md
     └── test-sweep/                    ← TEST_SWEEP_REPORT.md
 ```

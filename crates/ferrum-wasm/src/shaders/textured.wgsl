@@ -17,6 +17,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
+    @location(1) scene_pos: vec2<f32>,
 };
 
 @vertex
@@ -32,6 +33,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     );
     out.clip_pos = vec4<f32>(ndc, 0.0, 1.0);
     out.tex_coord = in.tex_coord;
+    // Pass pre-transform position for fragment-stage panel clipping.
+    out.scene_pos = in.position;
     return out;
 }
 
@@ -40,5 +43,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Clip to panel boundaries (scene-space, pre-transform).
+    if (in.scene_pos.x < u.clip.x || in.scene_pos.x > u.clip.x + u.clip.z ||
+        in.scene_pos.y < u.clip.y || in.scene_pos.y > u.clip.y + u.clip.w) {
+        discard;
+    }
     return textureSample(t_diffuse, s_diffuse, in.tex_coord);
 }
