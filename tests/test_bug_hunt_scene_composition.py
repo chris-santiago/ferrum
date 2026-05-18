@@ -75,7 +75,9 @@ def test_offset_node_polygon_type():  # BUG: _offset_node ignores polygon node t
     }
     _offset_node(node, 100.0, 50.0)
     # Exterior ring
-    assert node["rings"][0][0] == [100.0, 50.0], f"polygon ring[0][0] not offset: {node['rings'][0][0]}"
+    assert node["rings"][0][0] == [100.0, 50.0], (
+        f"polygon ring[0][0] not offset: {node['rings'][0][0]}"
+    )
     assert node["rings"][0][1] == [110.0, 50.0]
     assert node["rings"][0][2] == [110.0, 60.0]
     # Hole ring
@@ -272,7 +274,7 @@ def test_merge_child_scenes_grid_empty():
 
 def test_merge_packed_data_all_empty():
     """_merge_packed_data with all-empty packed data returns empty bytes."""
-    result = _merge_packed_data([b"", b"", b""])
+    result = _merge_packed_data([b"", b"", b""], [0, 1, 2])
     assert result == b""
 
 
@@ -281,11 +283,11 @@ def test_merge_packed_data_all_empty():
 # ===========================================================================
 
 
-def test_merge_packed_data_mixed_returns_empty():
-    """_merge_packed_data with a mix of empty and non-empty packed data
-    returns empty bytes (fallback -- binary header rewriting not implemented)."""
-    result = _merge_packed_data([b"", b"\x01\x02\x03", b""])
-    assert result == b"", "mixed packed data must fall back to empty bytes"
+def test_merge_packed_data_mixed_returns_empty_for_invalid_data():
+    """_merge_packed_data with a mix of empty and non-empty but invalid
+    packed data (too short for a 20-byte header) returns empty bytes."""
+    result = _merge_packed_data([b"", b"\x01\x02\x03", b""], [0, 1, 2])
+    assert result == b"", "invalid packed data (too short for header) must produce empty bytes"
 
 
 # ===========================================================================
@@ -293,11 +295,11 @@ def test_merge_packed_data_mixed_returns_empty():
 # ===========================================================================
 
 
-def test_merge_packed_data_all_nonempty_returns_empty():
-    """_merge_packed_data with all non-empty packed data still returns empty
-    bytes because binary header rewriting is not implemented."""
-    result = _merge_packed_data([b"\x01\x02", b"\x03\x04"])
-    assert result == b"", "all non-empty packed data must fall back to empty bytes"
+def test_merge_packed_data_all_nonempty_invalid_returns_empty():
+    """_merge_packed_data with all non-empty but invalid packed data (too
+    short for a 20-byte header) returns empty bytes."""
+    result = _merge_packed_data([b"\x01\x02", b"\x03\x04"], [0, 1])
+    assert result == b"", "invalid packed data (too short for header) must produce empty bytes"
 
 
 # ===========================================================================
@@ -307,7 +309,7 @@ def test_merge_packed_data_all_nonempty_returns_empty():
 
 def test_merge_packed_data_empty_list():
     """_merge_packed_data with an empty list must return empty bytes."""
-    result = _merge_packed_data([])
+    result = _merge_packed_data([], [])
     assert result == b""
 
 
@@ -359,12 +361,28 @@ def test_empty_scene_has_all_required_keys():
     """_empty_scene must return a dict with all keys required by the WASM
     SceneGraph deserializer."""
     scene = _empty_scene()
-    required_top = {"width", "height", "background", "title", "panels", "legend", "decorations", "selections", "interaction"}
+    required_top = {
+        "width",
+        "height",
+        "background",
+        "title",
+        "panels",
+        "legend",
+        "decorations",
+        "selections",
+        "interaction",
+    }
     for key in required_top:
         assert key in scene, f"_empty_scene missing top-level key: {key!r}"
 
     interaction = scene["interaction"]
-    required_interaction = {"zoom_enabled", "pan_enabled", "conditionals", "linked_panels", "tick_levels"}
+    required_interaction = {
+        "zoom_enabled",
+        "pan_enabled",
+        "conditionals",
+        "linked_panels",
+        "tick_levels",
+    }
     for key in required_interaction:
         assert key in interaction, f"_empty_scene.interaction missing key: {key!r}"
 

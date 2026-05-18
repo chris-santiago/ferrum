@@ -862,6 +862,16 @@ class RepeatChart(_ChartLike):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by expanding cells and merging scenes."""
         cells = self.expand()
+
+        if self.corner and self.row is not None and self.column is not None:
+            # Corner mode: cells must be placed at their true (row, col) grid
+            # coordinates with gaps for the upper triangle.  Map field names
+            # back to integer indices for the sparse grid merge.
+            row_index = {v: i for i, v in enumerate(self.row)}
+            col_index = {v: i for i, v in enumerate(self.column)}
+            indexed = [(row_index[r], col_index[c], chart) for r, c, chart in cells]
+            return _merge_child_scenes_sparse_grid(indexed, self.spacing)
+
         expanded_charts = [chart for _, _, chart in cells]
         if self.row is not None and self.column is not None:
             n_cols = len(self.column)
@@ -1434,8 +1444,10 @@ def _merge_child_scenes(
     x_offset = 0.0
     y_offset = 0.0
     panel_id_offset = 0
+    child_offsets: list[int] = []
 
     for scene in child_scenes:
+        child_offsets.append(panel_id_offset)
         dx = x_offset if layout == "horizontal" else 0.0
         dy = y_offset if layout == "vertical" else 0.0
         n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
@@ -1452,7 +1464,7 @@ def _merge_child_scenes(
             merged["height"] = y_offset - spacing
             merged["width"] = max(merged["width"], w)
 
-    merged_packed = _merge_packed_data(child_packed)
+    merged_packed = _merge_packed_data(child_packed, child_offsets)
     return _json.dumps(merged), merged_packed
 
 
@@ -1503,6 +1515,7 @@ def _merge_child_scenes_grid(
     merged = _empty_scene()
     y_offset = 0.0
     panel_id_offset = 0
+    child_offsets: list[int] = []
 
     for row in rows:
         row_width = 0.0
@@ -1510,6 +1523,7 @@ def _merge_child_scenes_grid(
         x_offset = 0.0
 
         for scene, packed in row:
+            child_offsets.append(panel_id_offset)
             n_panels = _merge_one_child(merged, scene, x_offset, y_offset, panel_id_offset)
             panel_id_offset += n_panels
 
@@ -1525,7 +1539,71 @@ def _merge_child_scenes_grid(
     merged["height"] = y_offset - spacing
 
     all_packed = [p for _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed)
+    merged_packed = _merge_packed_data(all_packed, child_offsets)
+    return _json.dumps(merged), merged_packed
+
+
+def _merge_child_scenes_sparse_grid(
+    cells: list[tuple[int, int, object]],
+    spacing: float,
+) -> tuple[str, bytes]:
+    """Render child charts in a sparse grid layout (for corner-mode repeat).
+
+    Each cell carries explicit ``(row, col)`` grid coordinates.  Cells are
+    positioned at ``(col * cell_w + col * spacing, row * cell_h + row * spacing)``
+    using uniform cell dimensions (the max width/height across all children).
+    Grid positions without a cell (upper triangle in corner mode) are left empty.
+
+    Parameters
+    ----------
+    cells : list of (row, col, chart)
+        Each element is a ``(row_index, col_index, chart)`` triple.
+    spacing : float
+        Pixel gap between adjacent cells.
+
+    Returns
+    -------
+    tuple[str, bytes]
+        ``(merged_scene_json, merged_packed_data)``
+    """
+    from ferrum._interactive import _render_scene
+
+    if not cells:
+        return '{"panels":[],"width":0,"height":0}', b""
+
+    # Render all children up front.
+    rendered: list[tuple[int, int, dict, bytes]] = []
+    for row_idx, col_idx, chart in cells:
+        scene_json, packed = _render_scene(chart)
+        rendered.append((row_idx, col_idx, _json.loads(scene_json), packed))
+
+    # Uniform cell dimensions (max across all children).
+    cell_w = max(s.get("width", 0) for _, _, s, _ in rendered)
+    cell_h = max(s.get("height", 0) for _, _, s, _ in rendered)
+
+    # Grid extents.
+    max_row = max(r for r, _, _, _ in rendered)
+    max_col = max(c for _, c, _, _ in rendered)
+    n_rows = max_row + 1
+    n_cols = max_col + 1
+
+    # Merge each cell at its (row, col) position.
+    merged = _empty_scene()
+    panel_id_offset = 0
+    child_offsets: list[int] = []
+
+    for _row_idx, col_idx, scene, _packed in rendered:
+        child_offsets.append(panel_id_offset)
+        dx = col_idx * (cell_w + spacing)
+        dy = _row_idx * (cell_h + spacing)
+        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
+        panel_id_offset += n_panels
+
+    merged["width"] = n_cols * cell_w + (n_cols - 1) * spacing
+    merged["height"] = n_rows * cell_h + (n_rows - 1) * spacing
+
+    all_packed = [p for _, _, _, p in rendered]
+    merged_packed = _merge_packed_data(all_packed, child_offsets)
     return _json.dumps(merged), merged_packed
 
 
@@ -1539,6 +1617,7 @@ def _merge_one_child(
     """Merge a single child scene into *merged* at the given offset.
 
     Handles panels, selections, interaction conditionals, tick_levels,
+    linked_panels, zoom_enabled/pan_enabled propagation,
     background, and title/legend/decoration nodes.
 
     Returns
@@ -1557,6 +1636,12 @@ def _merge_one_child(
         tl_copy = dict(tl)
         tl_copy["panel_id"] = tl_copy.get("panel_id", 0) + panel_id_offset
         merged["interaction"]["tick_levels"].append(tl_copy)
+    for lp in child_interaction.get("linked_panels", []):
+        merged["interaction"]["linked_panels"].append([p + panel_id_offset for p in lp])
+    if not child_interaction.get("zoom_enabled", True):
+        merged["interaction"]["zoom_enabled"] = False
+    if not child_interaction.get("pan_enabled", True):
+        merged["interaction"]["pan_enabled"] = False
     if merged["background"] is None and scene.get("background"):
         merged["background"] = scene["background"]
 
@@ -1623,6 +1708,8 @@ def _merge_scene_panels(
             _offset_node(node, dx, dy)
         for node in panel.get("annotations", []):
             _offset_node(node, dx, dy)
+        for node in panel.get("strip_title", []):
+            _offset_node(node, dx, dy)
 
         merged["panels"].append(panel)
 
@@ -1671,20 +1758,70 @@ def _offset_node(node: dict, dx: float, dy: float) -> None:
             _offset_node(child, dx, dy)
 
 
-def _merge_packed_data(packed_list: list[bytes]) -> bytes:
+def _merge_packed_data(packed_list: list[bytes], panel_id_offsets: list[int]) -> bytes:
     """Merge packed binary data from multiple child scenes.
 
-    For the initial implementation, packed data is only preserved when all
-    children have empty packed data (the common case for small charts).
-    When any child has non-empty packed data the binary header would need
-    panel-index rewriting, so we return empty bytes and let the WASM
-    renderer fall back to per-node rendering from the scene JSON.
+    Rewrites the ``panel_idx`` field in each batch's 20-byte header to
+    account for the panel-id offset of each child in the composed layout.
+
+    Binary format per batch::
+
+        [header 20B][instance_data][data_indices?][tooltips?]
+
+    Header layout (20 bytes, all u32 little-endian)::
+
+        [panel_idx][batch_idx][kind][count][flags]
+
+    After the header:
+    - Instance data: ``count * 64`` bytes for kind=0 (CircleInstance),
+      ``count * 72`` bytes for kind=1 (RectInstance).
+    - If ``flags & 0x2``: ``count * 4`` bytes of u32 data indices.
+    - If ``flags & 0x1``: tooltip string table (u32 byte-length prefix,
+      then that many bytes of content).
+
+    Parameters
+    ----------
+    packed_list : list[bytes]
+        Packed binary data from each child scene.
+    panel_id_offsets : list[int]
+        Cumulative panel-id offset for each child (same length as
+        *packed_list*).
     """
-    if all(len(p) == 0 for p in packed_list):
-        return b""
-    # Non-empty packed data requires binary header rewriting (panel indices).
-    # The WASM renderer falls back gracefully to per-node JSON rendering.
-    return b""
+    import struct
+
+    _INSTANCE_SIZES = {0: 64, 1: 72}  # kind -> sizeof(Instance)
+
+    result = bytearray()
+    for packed, offset in zip(packed_list, panel_id_offsets):
+        if not packed:
+            continue
+        pos = 0
+        while pos + 20 <= len(packed):
+            panel_idx, batch_idx, kind, count, flags = struct.unpack_from("<5I", packed, pos)
+            if kind not in _INSTANCE_SIZES:
+                break  # unknown kind — stop parsing this child
+
+            # Rewrite panel_idx with the composition offset
+            header = struct.pack("<5I", panel_idx + offset, batch_idx, kind, count, flags)
+
+            batch_end = pos + 20 + count * _INSTANCE_SIZES[kind]
+
+            if flags & 0x2:
+                batch_end += count * 4  # u32 data indices
+
+            if flags & 0x1:
+                if batch_end + 4 <= len(packed):
+                    tooltip_len = struct.unpack_from("<I", packed, batch_end)[0]
+                    batch_end += 4 + tooltip_len
+
+            if batch_end > len(packed):
+                break  # truncated data — stop parsing this child
+
+            result.extend(header)
+            result.extend(packed[pos + 20 : batch_end])
+            pos = batch_end
+
+    return bytes(result)
 
 
 # ---------------------------------------------------------------------------

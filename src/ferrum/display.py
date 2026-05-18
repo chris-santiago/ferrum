@@ -17,6 +17,7 @@ def save_chart(
     *,
     format: str | None = None,
     embed_wasm: bool = True,
+    csp_nonce: str | None = None,
 ) -> None:
     """Save a chart to disk.
 
@@ -35,6 +36,10 @@ def save_chart(
         For ``"html"`` format only.  When True (default), the WASM binary is
         base64-inlined for single-file distribution.  When False, an adjacent
         ``ferrum_wasm_bg.wasm`` sidecar file is required.
+    csp_nonce : str, optional
+        For ``"html"`` format only.  When provided, both the ``<style>`` and
+        ``<script type="module">`` tags receive a ``nonce="..."`` attribute
+        so they pass strict Content-Security-Policy headers.
 
     Examples
     --------
@@ -61,6 +66,7 @@ def save_chart(
             packed_data=packed_data,
             title=title,
             embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
         )
         path.write_text(html)
         if not embed_wasm:
@@ -161,5 +167,23 @@ def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
     spec, data, viewport, theme_dict = chart._render_inputs()
     if data.num_rows == 0:
         w, h = viewport
-        return _json.dumps({"panels": [], "width": w, "height": h}), b""
+        return _json.dumps(
+            {
+                "panels": [],
+                "width": w,
+                "height": h,
+                "background": None,
+                "title": [],
+                "legend": [],
+                "decorations": [],
+                "selections": [],
+                "interaction": {
+                    "zoom_enabled": True,
+                    "pan_enabled": True,
+                    "conditionals": [],
+                    "linked_panels": [],
+                    "tick_levels": [],
+                },
+            }
+        ), b""
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

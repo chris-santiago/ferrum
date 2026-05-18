@@ -182,6 +182,7 @@ def assemble_html(
     packed_data: bytes = b"",
     title: str = "Ferrum chart",
     embed_wasm: bool = True,
+    csp_nonce: str | None = None,
 ) -> str:
     """Build a self-contained HTML string that renders a chart via WASM.
 
@@ -199,6 +200,10 @@ def assemble_html(
         When True (default), base64-encode the ``.wasm`` binary inline for
         single-file distribution.  When False, the HTML references an
         adjacent ``ferrum_wasm_bg.wasm`` sidecar file.
+    csp_nonce
+        Optional Content-Security-Policy nonce.  When provided, both the
+        ``<style>`` and ``<script type="module">`` tags receive a
+        ``nonce="..."`` attribute so they pass strict CSP headers.
     """
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     css = (_WASM_DIR / "ferrum-interactive.css").read_text()
@@ -252,18 +257,21 @@ def assemble_html(
     # Background color for the HTML body.
     bg_css = _background_css_from_dict(scene_dict)
 
+    # Build optional nonce attributes for <style> and <script>.
+    nonce_attr = f' nonce="{csp_nonce}"' if csp_nonce else ""
+
     return (
         "<!DOCTYPE html>\n"
         "<html>\n"
         "<head>\n"
         '<meta charset="utf-8">\n'
         f"<title>{title}</title>\n"
-        f"<style>{css}</style>\n"
+        f"<style{nonce_attr}>{css}</style>\n"
         "</head>\n"
         f'<body style="background:{bg_css};margin:0;display:flex;'
         'justify-content:center;align-items:center;min-height:100vh">\n'
         f'<div id="ferrum-root" style="background:{bg_css}"></div>\n'
-        '<script type="module">\n'
+        f'<script type="module"{nonce_attr}>\n'
         f"{js_glue}\n"
         "\n"
         f"{d3_js}\n"

@@ -232,12 +232,14 @@ class InteractiveChart:
         from ferrum.display import _extract_title_text
 
         embed_wasm = kwargs.pop("embed_wasm", True)
+        csp_nonce = kwargs.pop("csp_nonce", None)
         title = _extract_title_text(getattr(self._chart, "_title", None))
         html = assemble_html(
             self._scene_json,
             packed_data=self._packed_data,
             title=title,
             embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
         )
         dest = _Path(path)
         dest.write_text(html)
@@ -280,5 +282,23 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
     spec, data, viewport, theme_dict = chart._render_inputs()
     if data.num_rows == 0:
         w, h = viewport
-        return _json.dumps({"panels": [], "width": w, "height": h}), b""
+        return _json.dumps(
+            {
+                "panels": [],
+                "width": w,
+                "height": h,
+                "background": None,
+                "title": [],
+                "legend": [],
+                "decorations": [],
+                "selections": [],
+                "interaction": {
+                    "zoom_enabled": True,
+                    "pan_enabled": True,
+                    "conditionals": [],
+                    "linked_panels": [],
+                    "tick_levels": [],
+                },
+            }
+        ), b""
     return render_interactive(spec, data, viewport=viewport, theme=theme_dict)

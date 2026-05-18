@@ -1142,3 +1142,648 @@ def test_strip_anywidget_real_source_strips_cleanly():
         assert not stripped.startswith("export ") and not stripped.startswith("export{"), (
             f"residual export found in stripped JS: {stripped[:80]!r}"
         )
+
+
+# ── B2 (empty-data SceneGraph). Empty-data scene JSON missing required fields ──
+
+
+_REQUIRED_SCENE_KEYS = {
+    "panels",
+    "width",
+    "height",
+    "background",
+    "title",
+    "legend",
+    "decorations",
+    "selections",
+    "interaction",
+}
+
+_REQUIRED_INTERACTION_KEYS = {
+    "zoom_enabled",
+    "pan_enabled",
+    "conditionals",
+    "linked_panels",
+    "tick_levels",
+}
+
+
+def test_b2_empty_data_scene_json_has_all_required_keys():
+    """Empty-DataFrame charts must produce scene JSON with ALL required
+    SceneGraph fields, not just panels/width/height.  The Rust SceneGraph
+    struct has no #[serde(default)] — omitting background, title, legend,
+    decorations, selections, or interaction causes WASM loadScene to fail."""
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Float64),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    scene_json, packed = _render_scene(chart)
+    scene = json.loads(scene_json)
+
+    # All required top-level keys must be present
+    missing = _REQUIRED_SCENE_KEYS - scene.keys()
+    assert not missing, f"empty-data scene JSON missing required keys: {missing}"
+
+    # panels must be empty list
+    assert scene["panels"] == []
+    assert scene["width"] == 300
+    assert scene["height"] == 200
+
+    # interaction sub-object must have all required keys
+    interaction = scene["interaction"]
+    missing_int = _REQUIRED_INTERACTION_KEYS - interaction.keys()
+    assert not missing_int, f"interaction missing required keys: {missing_int}"
+
+    # packed data must be empty bytes
+    assert packed == b""
+
+
+def test_b2_empty_data_interactive_chart_does_not_crash():
+    """Creating an InteractiveChart from an empty-DataFrame chart must not
+    crash and must produce valid scene JSON with all required SceneGraph
+    fields."""
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Float64),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    ic = chart.interactive()
+    assert isinstance(ic, InteractiveChart)
+
+    scene = json.loads(ic.scene_json)
+    missing = _REQUIRED_SCENE_KEYS - scene.keys()
+    assert not missing, f"InteractiveChart scene JSON missing required keys: {missing}"
+
+    interaction = scene["interaction"]
+    missing_int = _REQUIRED_INTERACTION_KEYS - interaction.keys()
+    assert not missing_int, f"interaction missing required keys: {missing_int}"
+
+
+# ── W20: CSP nonce support ────────────────────────────────────────────────────
+
+
+def test_w20_csp_nonce_on_style_and_script():
+    """assemble_html with csp_nonce="abc123" must add nonce="abc123" to
+    both the <style> and <script type="module"> tags."""
+    from ferrum._html import assemble_html
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    scene_json, packed = _render(chart)
+
+    html = assemble_html(scene_json, packed_data=packed, csp_nonce="abc123")
+
+    assert '<style nonce="abc123">' in html, (
+        'HTML must contain <style nonce="abc123"> when csp_nonce is provided'
+    )
+    assert '<script type="module" nonce="abc123">' in html, (
+        'HTML must contain <script type="module" nonce="abc123"> when csp_nonce is provided'
+    )
+
+
+def test_w20_no_nonce_by_default():
+    """assemble_html with no csp_nonce must produce <style> and
+    <script type="module"> without a nonce attribute."""
+    from ferrum._html import assemble_html
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    scene_json, packed = _render(chart)
+
+    html = assemble_html(scene_json, packed_data=packed)
+
+    assert "<style>" in html, "HTML must contain plain <style> when no csp_nonce"
+    assert "nonce=" not in html, "HTML must not contain nonce= attribute when csp_nonce is not set"
+
+
+def test_w20_csp_nonce_via_interactive_save(tmp_path):
+    """InteractiveChart.save() with csp_nonce="test123" kwarg must produce
+    HTML containing nonce="test123" on style and script tags."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "nonce_test.html"
+    chart.interactive().save(str(out), csp_nonce="test123")
+    content = out.read_text()
+    assert 'nonce="test123"' in content, (
+        'HTML saved via InteractiveChart.save() must contain nonce="test123"'
+    )
+
+
+# ── B4. _merge_scene_panels must offset strip_title nodes ───────────────
+
+
+def test_b4_strip_title_offset_in_composition():
+    """_merge_scene_panels must offset strip_title nodes the same way it
+    offsets marks, axes, grid, and annotations.  Faceted charts in composed
+    interactive views would otherwise have strip titles stuck at their
+    original coordinates."""
+    from ferrum.composition import _merge_scene_panels
+
+    panel = {
+        "id": 0,
+        "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+        "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+        "marks": [],
+        "axes": [],
+        "grid": [],
+        "annotations": [],
+        "strip_title": [
+            {
+                "type": "text",
+                "x": 10.0,
+                "y": 5.0,
+                "content": "cat=A",
+                "style": {"font_size": 12, "color": {"r": 0, "g": 0, "b": 0, "a": 255}},
+            }
+        ],
+    }
+    scene = {"panels": [panel]}
+    merged = {"panels": []}
+
+    _merge_scene_panels(merged, scene, dx=300.0, dy=0.0, panel_id_offset=0)
+
+    strip = merged["panels"][0]["strip_title"]
+    assert len(strip) == 1
+    assert strip[0]["x"] == 310.0, f"strip_title x not offset: {strip[0]['x']}"
+    assert strip[0]["y"] == 5.0, f"strip_title y should be unchanged: {strip[0]['y']}"
+
+
+# ── Merge gap: linked_panels offset ──────────────────────────────────────
+
+
+def test_merge_linked_panels_offset():
+    """_merge_one_child must propagate linked_panels from child scenes with
+    panel indices offset by panel_id_offset."""
+    import copy
+
+    from ferrum.composition import _empty_scene, _merge_one_child
+
+    child_a = {
+        "panels": [
+            {
+                "id": 0,
+                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "marks": [],
+                "axes": [],
+                "grid": [],
+                "annotations": [],
+            }
+        ],
+        "selections": [],
+        "interaction": {
+            "conditionals": [],
+            "tick_levels": [],
+            "linked_panels": [[0]],
+        },
+        "title": [],
+        "legend": [],
+        "decorations": [],
+        "background": None,
+    }
+    child_b = copy.deepcopy(child_a)
+    child_b["interaction"]["linked_panels"] = [[0]]
+
+    merged = _empty_scene()
+    _merge_one_child(merged, child_a, dx=0.0, dy=0.0, panel_id_offset=0)
+    _merge_one_child(merged, child_b, dx=300.0, dy=0.0, panel_id_offset=1)
+
+    lp = merged["interaction"]["linked_panels"]
+    assert len(lp) == 2, f"expected 2 linked_panels groups; got {len(lp)}"
+    assert lp[0] == [0], f"first group should be [0]; got {lp[0]}"
+    assert lp[1] == [1], f"second group should be [1] (offset); got {lp[1]}"
+
+
+# ── Merge gap: zoom_enabled/pan_enabled propagation ──────────────────────
+
+
+def test_merge_zoom_disabled_propagates():
+    """If any child scene disables zoom_enabled, the merged scene must also
+    have zoom_enabled=False."""
+    import copy
+
+    from ferrum.composition import _empty_scene, _merge_one_child
+
+    child_zoom_off = {
+        "panels": [
+            {
+                "id": 0,
+                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "marks": [],
+                "axes": [],
+                "grid": [],
+                "annotations": [],
+            }
+        ],
+        "selections": [],
+        "interaction": {
+            "conditionals": [],
+            "tick_levels": [],
+            "linked_panels": [],
+            "zoom_enabled": False,
+            "pan_enabled": True,
+        },
+        "title": [],
+        "legend": [],
+        "decorations": [],
+        "background": None,
+    }
+    child_zoom_on = copy.deepcopy(child_zoom_off)
+    child_zoom_on["interaction"]["zoom_enabled"] = True
+
+    merged = _empty_scene()
+    _merge_one_child(merged, child_zoom_on, dx=0.0, dy=0.0, panel_id_offset=0)
+    _merge_one_child(merged, child_zoom_off, dx=300.0, dy=0.0, panel_id_offset=1)
+
+    assert merged["interaction"]["zoom_enabled"] is False, (
+        "merged zoom_enabled must be False when any child disables it"
+    )
+
+
+def test_merge_pan_disabled_propagates():
+    """If any child scene disables pan_enabled, the merged scene must also
+    have pan_enabled=False."""
+    import copy
+
+    from ferrum.composition import _empty_scene, _merge_one_child
+
+    child_pan_off = {
+        "panels": [
+            {
+                "id": 0,
+                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
+                "marks": [],
+                "axes": [],
+                "grid": [],
+                "annotations": [],
+            }
+        ],
+        "selections": [],
+        "interaction": {
+            "conditionals": [],
+            "tick_levels": [],
+            "linked_panels": [],
+            "zoom_enabled": True,
+            "pan_enabled": False,
+        },
+        "title": [],
+        "legend": [],
+        "decorations": [],
+        "background": None,
+    }
+    child_pan_on = copy.deepcopy(child_pan_off)
+    child_pan_on["interaction"]["pan_enabled"] = True
+
+    merged = _empty_scene()
+    _merge_one_child(merged, child_pan_on, dx=0.0, dy=0.0, panel_id_offset=0)
+    _merge_one_child(merged, child_pan_off, dx=300.0, dy=0.0, panel_id_offset=1)
+
+    assert merged["interaction"]["pan_enabled"] is False, (
+        "merged pan_enabled must be False when any child disables it"
+    )
+
+
+# ── B5. _merge_packed_data must rewrite panel_idx in binary headers ──────
+
+
+def test_b5_packed_data_preserved_in_composition():
+    """Composed charts with >1000 marks must produce non-empty packed data
+    so large scatter plots are visible in interactive HTML exports."""
+    df = pl.DataFrame({"x": list(range(1500)), "y": list(range(1500))})
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    composed = left | right
+    scene_json, packed = composed._render_interactive()
+    assert len(packed) > 0, "composed 1500-point charts must have non-empty packed data"
+    # Verify scene has 2 panels
+    scene = json.loads(scene_json)
+    assert len(scene["panels"]) == 2
+
+
+def test_b5_packed_data_panel_idx_rewritten():
+    """Packed data headers must have panel_idx rewritten with composition offset."""
+    import struct
+
+    df = pl.DataFrame({"x": list(range(1500)), "y": list(range(1500))})
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    composed = left | right
+    _, packed = composed._render_interactive()
+    # Read first two headers -- first should have panel_idx=0, second should have panel_idx=1
+    assert len(packed) >= 40, f"packed data too short ({len(packed)} bytes) for 2 batches"
+    pi0 = struct.unpack_from("<I", packed, 0)[0]
+    # Find second header by skipping first batch
+    _, _, kind0, count0, flags0 = struct.unpack_from("<5I", packed, 0)
+    batch_size = 20 + count0 * (64 if kind0 == 0 else 72)
+    if flags0 & 0x2:
+        batch_size += count0 * 4
+    if flags0 & 0x1 and batch_size + 4 <= len(packed):
+        tl = struct.unpack_from("<I", packed, batch_size)[0]
+        batch_size += 4 + tl
+    assert batch_size + 20 <= len(packed), (
+        f"packed data too short for second batch header (batch_size={batch_size}, total={len(packed)})"
+    )
+    pi1 = struct.unpack_from("<I", packed, batch_size)[0]
+    assert pi0 == 0, f"first batch panel_idx should be 0, got {pi0}"
+    assert pi1 == 1, f"second batch panel_idx should be 1 (rewritten), got {pi1}"
+
+
+def test_b5_merge_packed_data_unit():
+    """Unit test for _merge_packed_data: verify it concatenates and rewrites panel_idx."""
+    import struct
+
+    from ferrum.composition import _merge_packed_data
+
+    # Build a synthetic packed batch: kind=0 (circle), count=2, flags=0
+    header_a = struct.pack("<5I", 0, 0, 0, 2, 0)  # panel_idx=0, batch_idx=0
+    instance_data_a = b"\x00" * (2 * 64)  # 2 CircleInstances
+    packed_a = header_a + instance_data_a
+
+    header_b = struct.pack("<5I", 0, 0, 0, 3, 0)  # panel_idx=0, batch_idx=0
+    instance_data_b = b"\x00" * (3 * 64)  # 3 CircleInstances
+    packed_b = header_b + instance_data_b
+
+    result = _merge_packed_data([packed_a, packed_b], [0, 1])
+    assert len(result) == len(packed_a) + len(packed_b), (
+        f"merged packed data length mismatch: {len(result)} != {len(packed_a) + len(packed_b)}"
+    )
+
+    # First batch: panel_idx should remain 0 (offset=0)
+    pi0 = struct.unpack_from("<I", result, 0)[0]
+    assert pi0 == 0, f"first batch panel_idx should be 0; got {pi0}"
+
+    # Second batch: panel_idx should be 0+1=1 (offset=1)
+    offset2 = len(packed_a)
+    pi1 = struct.unpack_from("<I", result, offset2)[0]
+    assert pi1 == 1, f"second batch panel_idx should be 1; got {pi1}"
+
+
+def test_b5_merge_packed_data_with_flags():
+    """Unit test for _merge_packed_data with data_indices and tooltips flags."""
+    import struct
+
+    from ferrum.composition import _merge_packed_data
+
+    # Build a packed batch with flags=0x3 (data_indices + tooltips), kind=1 (rect), count=1
+    flags = 0x3
+    header = struct.pack("<5I", 0, 0, 1, 1, flags)  # panel_idx=0, kind=rect, count=1
+    instance_data = b"\x01" * 72  # 1 RectInstance (72 bytes)
+    data_indices = struct.pack("<I", 42)  # 1 data index
+    tooltip_content = b"hello"
+    tooltips = struct.pack("<I", len(tooltip_content)) + tooltip_content
+    packed = header + instance_data + data_indices + tooltips
+
+    result = _merge_packed_data([packed], [5])
+    assert len(result) == len(packed), f"length mismatch: {len(result)} != {len(packed)}"
+
+    # panel_idx should be 0+5=5
+    pi = struct.unpack_from("<I", result, 0)[0]
+    assert pi == 5, f"panel_idx should be 5; got {pi}"
+
+    # Rest of the data should be identical
+    assert result[20:] == packed[20:], "data after header should be unchanged"
+
+
+def test_b5_merge_packed_data_empty_inputs():
+    """_merge_packed_data with all-empty inputs returns empty bytes."""
+    from ferrum.composition import _merge_packed_data
+
+    result = _merge_packed_data([b"", b""], [0, 1])
+    assert result == b""
+
+
+def test_b3_repeat_corner_interactive_sparse_layout():
+    """RepeatChart corner=True interactive layout must place cells at correct
+    (row, col) grid positions with gaps for the upper triangle, matching the
+    SVG layout.
+
+    Bug: _render_interactive feeds corner cells as a flat list into
+    _merge_child_scenes_grid which wraps linearly (row 0 = cells 0-2,
+    row 1 = cells 3-5), but the SVG path places them at their true grid
+    coordinates: (0,0), (1,0), (1,1), (2,0), (2,1), (2,2).
+    """
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": [7.0, 8.0, 9.0]})
+    template = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.Repeat.column, y=fm.Repeat.row)
+        .properties(width=100, height=100)
+    )
+    chart = fm.RepeatChart(template, row=["a", "b", "c"], column=["a", "b", "c"], corner=True)
+    scene_json, _ = chart._render_interactive()
+    scene = json.loads(scene_json)
+
+    # Corner mode for 3 vars produces 6 cells:
+    # (0,0), (1,0), (1,1), (2,0), (2,1), (2,2)
+    panels = scene["panels"]
+    assert len(panels) == 6, f"expected 6 panels for 3x3 corner; got {len(panels)}"
+
+    pa = [p["plot_area"] for p in panels]
+
+    # Row 0: 1 cell at col 0  -> panel 0
+    # Row 1: 2 cells at col 0, col 1 -> panels 1, 2
+    # Row 2: 3 cells at col 0, col 1, col 2 -> panels 3, 4, 5
+
+    # Cells in the same row must share the same y offset.
+    assert abs(pa[1]["y"] - pa[2]["y"]) < 1.0, "row 1 cells must have same y offset"
+    assert abs(pa[3]["y"] - pa[4]["y"]) < 1.0, "row 2 cells must have same y offset"
+    assert abs(pa[4]["y"] - pa[5]["y"]) < 1.0, "row 2 cells must have same y offset"
+
+    # Rows must be stacked vertically in order.
+    assert pa[1]["y"] > pa[0]["y"], "row 1 must be below row 0"
+    assert pa[3]["y"] > pa[1]["y"], "row 2 must be below row 1"
+
+    # Within row 1, col 1 must be right of col 0.
+    assert pa[2]["x"] > pa[1]["x"], "col 1 must be right of col 0 in row 1"
+
+    # Column alignment across rows: cells in the same column should share
+    # approximate x.  Tolerance is wider than row-y checks because cells
+    # render independently and axis-label widths differ per field.
+    # col 0: panels 0, 1, 3
+    assert abs(pa[0]["x"] - pa[1]["x"]) < 5.0, "col 0 panels must share approximate x"
+    assert abs(pa[1]["x"] - pa[3]["x"]) < 5.0, "col 0 panels must share approximate x"
+    # col 1: panels 2, 4
+    assert abs(pa[2]["x"] - pa[4]["x"]) < 5.0, "col 1 panels must share approximate x"
+
+
+def test_b3_repeat_corner_2var_interactive_layout():
+    """Corner repeat with 2 vars produces 3 cells in a lower triangle."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    template = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.Repeat.column, y=fm.Repeat.row)
+        .properties(width=100, height=100)
+    )
+    chart = fm.RepeatChart(template, row=["a", "b"], column=["a", "b"], corner=True)
+    scene_json, _ = chart._render_interactive()
+    scene = json.loads(scene_json)
+
+    panels = scene["panels"]
+    assert len(panels) == 3, f"expected 3 panels for 2x2 corner; got {len(panels)}"
+
+    pa = [p["plot_area"] for p in panels]
+
+    # (0,0), (1,0), (1,1)
+    # Row 1 cells must share y.
+    assert abs(pa[1]["y"] - pa[2]["y"]) < 1.0, "row 1 cells must share y"
+    # Row 1 below row 0.
+    assert pa[1]["y"] > pa[0]["y"], "row 1 below row 0"
+    # Within row 1, col 1 right of col 0.
+    assert pa[2]["x"] > pa[1]["x"], "col 1 right of col 0"
+    # Col 0 alignment: panel 0 and panel 1 should be at similar x.
+    # Tolerance is wider than row-y checks because cells render independently
+    # and axis-label widths differ by field, shifting plot_area.x slightly.
+    assert abs(pa[0]["x"] - pa[1]["x"]) < 5.0, "col 0 panels share approximate x"
+
+
+def test_b5_vconcat_packed_data_preserved():
+    """VConcatChart with >1000 marks must also produce non-empty packed data."""
+    df = pl.DataFrame({"x": list(range(1500)), "y": list(range(1500))})
+    top = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    bot = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
+    composed = top & bot
+    scene_json, packed = composed._render_interactive()
+    assert len(packed) > 0, "VConcat 1500-point charts must have non-empty packed data"
+    scene = json.loads(scene_json)
+    assert len(scene["panels"]) == 2
+
+
+# ── W2. Multi-panel brush overlays for interval selection ──────────────────
+
+
+def test_w2_multi_panel_brush_js_iterates_panels(tmp_path):
+    """Composed charts with interval selection must produce HTML whose JS
+    iterates over all panels to create per-panel brush overlays, not a
+    single brush hardcoded to panel 0.
+
+    Since the HTML is static (D3 creates <g> elements at runtime), we verify
+    the JS source structure: the per-panel loop, the ferrum-brush class name,
+    the panelIdx variable, and that the scene JSON has multiple panels."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    sel = selection_interval(name="brush_sel")
+    left = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    right = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    composed = left | right
+    out = tmp_path / "multi_brush.html"
+    composed.interactive().save(str(out))
+    content = out.read_text()
+
+    # JS must contain the per-panel brush loop, not a single hardcoded brush
+    assert "ferrum-brush" in content, (
+        "JS must use 'ferrum-brush' class for per-panel brush overlays"
+    )
+    assert "handleDrag(panelIdx," in content, (
+        "brush handler must pass panelIdx to handleDrag, not hardcoded 0"
+    )
+    assert "data-panel" in content, (
+        "brush groups must have data-panel attribute for panel identification"
+    )
+    # The old hardcoded single-panel pattern must be gone
+    assert "handleDrag(0," not in content, (
+        "must not have hardcoded handleDrag(0, ...) -- use panelIdx instead"
+    )
+
+
+def test_w2_single_panel_brush_in_html(tmp_path):
+    """A single chart with interval selection must produce HTML containing
+    the per-panel brush loop (which will create exactly one brush at runtime)."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    sel = selection_interval(name="brush_sel")
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    out = tmp_path / "single_brush.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    # Must have the per-panel brush loop in JS
+    assert "ferrum-brush" in content, (
+        "single chart with interval selection must have ferrum-brush in JS"
+    )
+    assert "handleDrag(panelIdx," in content, "brush handler must use panelIdx variable"
+
+
+def test_w2_vconcat_multi_panel_brush(tmp_path):
+    """VConcat composed charts with interval selection must produce HTML
+    with per-panel brush loop and 2 panels in scene JSON."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    sel = selection_interval(name="brush_sel")
+    top = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    bot = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    composed = top & bot
+    out = tmp_path / "vconcat_brush.html"
+    composed.interactive().save(str(out))
+    content = out.read_text()
+    assert "ferrum-brush" in content, "VConcat JS must use ferrum-brush class"
+    assert "handleDrag(panelIdx," in content, "VConcat brush handler must use panelIdx"
+
+
+def test_w2_scene_json_has_multiple_panels_for_composition():
+    """Composed charts with interval selection produce scene JSON with
+    multiple panels, each having its own plot_area for brush extent."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    sel = selection_interval(name="brush_sel")
+    left = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    right = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel)
+        .properties(width=200, height=200)
+    )
+    composed = left | right
+    scene_json, _ = composed._render_interactive()
+    scene = json.loads(scene_json)
+    panels = scene["panels"]
+    assert len(panels) == 2, f"expected 2 panels; got {len(panels)}"
+    # Each panel must have a plot_area (used as brush extent)
+    for i, panel in enumerate(panels):
+        pa = panel.get("plot_area")
+        assert pa is not None, f"panel {i} must have plot_area"
+        assert pa["w"] > 0, f"panel {i} plot_area width must be > 0"
+        assert pa["h"] > 0, f"panel {i} plot_area height must be > 0"
+    # Panels must have distinct plot_area positions (not overlapping)
+    assert panels[1]["plot_area"]["x"] > panels[0]["plot_area"]["x"], (
+        "panel 1 must be offset to the right of panel 0"
+    )

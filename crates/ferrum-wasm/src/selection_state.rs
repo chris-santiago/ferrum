@@ -130,7 +130,7 @@ impl InteractionState {
     pub fn handle_drag(
         &mut self,
         specs: &[SelectionSpec],
-        panel_id: usize,
+        _panel_id: usize,
         x0: f64,
         y0: f64,
         x1: f64,
@@ -142,7 +142,6 @@ impl InteractionState {
                 let x_hi = x0.max(x1);
                 let y_lo = y0.min(y1);
                 let y_hi = y0.max(y1);
-                let _ = panel_id;
                 self.selections.insert(
                     name.clone(),
                     SelectionState::Interval {

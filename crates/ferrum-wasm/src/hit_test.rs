@@ -29,7 +29,7 @@ pub fn hit_test(
                     .as_ref()
                     .and_then(|ids| ids.get(ni).copied());
                 return Some(HitResult {
-                    panel_id: panel.id,
+                    panel_id: panel_pos,
                     batch_idx: bi,
                     node_idx: ni,
                     data_idx,
@@ -67,7 +67,7 @@ pub fn hit_test_nearest(
                     best = Some((
                         dist,
                         HitResult {
-                            panel_id: panel.id,
+                            panel_id: panel_pos,
                             batch_idx: bi,
                             node_idx: ni,
                             data_idx,
@@ -1133,6 +1133,88 @@ mod tests {
         let mut z = ZoomPanState::new(1, &config);
         z.transforms[0] = Affine2 { sx, sy, tx, ty };
         z
+    }
+
+    // ── B6: panel_id must be array position, not panel.id ─────────────────
+
+    /// Build a two-panel scene where panel.id diverges from array position.
+    /// Panel 0 (array pos 0) has id=0, panel 1 (array pos 1) has id=5.
+    /// A circle is placed only in panel 1 (id=5).
+    fn two_panels_with_id_gap() -> Vec<Panel> {
+        vec![
+            Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![],  // no marks in panel 0
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            },
+            Panel {
+                id: 5,  // logical id diverges from array position (1)
+                plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![circle_node(350.0, 250.0, 10.0)],
+                    data_indices: Some(vec![42]),
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
+                    blend: ferrum_scene::BlendMode::Normal,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn hit_test_returns_array_position_not_panel_id() {
+        // B6: When panel.id diverges from array index (e.g. skipped panels),
+        // hit_test must return the array position (1) not the logical id (5),
+        // because consumers (tooltip_for_hit, zoom_pan) index panels by position.
+        let panels = two_panels_with_id_gap();
+        let config = ferrum_scene::InteractionConfig::default();
+        let zoom = ZoomPanState::new(2, &config);
+        // Click at circle center in panel 1 (array pos 1, id 5)
+        let result = hit_test(&panels, 350.0, 250.0, &zoom)
+            .expect("must hit circle in panel 1");
+        assert_eq!(
+            result.panel_id, 1,
+            "panel_id must be array position (1), not panel.id (5)"
+        );
+        assert_eq!(result.data_idx, Some(42));
+    }
+
+    #[test]
+    fn hit_test_nearest_returns_array_position_not_panel_id() {
+        // Same as above but for hit_test_nearest.
+        let panels = two_panels_with_id_gap();
+        let config = ferrum_scene::InteractionConfig::default();
+        let zoom = ZoomPanState::new(2, &config);
+        // Click at circle center in panel 1 (array pos 1, id 5)
+        let result = hit_test_nearest(&panels, 350.0, 250.0, &zoom)
+            .expect("must find nearest in panel 1");
+        assert_eq!(
+            result.panel_id, 1,
+            "panel_id must be array position (1), not panel.id (5)"
+        );
+        assert_eq!(result.data_idx, Some(42));
     }
 
     // ── inverse-transform hit-test tests ─────────────────────────────────────

@@ -205,46 +205,49 @@ async function _render(container, sceneJson, adapter) {
     select(container).call(zoomBehavior.transform, zoomIdentity);
   });
 
-  // ── D3-brush on SVG (when interval selections exist) ──────────────
-  if (hasInterval) {
-    const plotArea = scene.panels && scene.panels[0] && scene.panels[0].plot_area;
-    if (plotArea) {
-      // Extract brush styling from the interval selection's SelectionMark.
-      let brushFill = 'rgba(51, 136, 204, 0.2)';
-      let brushStroke = 'rgba(51, 136, 204, 0.6)';
-      const intervalSel = (cfg.selections || []).find(s => s.type === 'interval');
-      if (intervalSel && intervalSel.mark) {
-        if (intervalSel.mark.fill) brushFill = intervalSel.mark.fill;
-        if (intervalSel.mark.stroke) brushStroke = intervalSel.mark.stroke;
-      }
+  // ── D3-brush on SVG (per-panel overlays for interval selections) ────
+  if (hasInterval && scene.panels) {
+    // Extract brush styling from the interval selection's SelectionMark.
+    let brushFill = 'rgba(51, 136, 204, 0.2)';
+    let brushStroke = 'rgba(51, 136, 204, 0.6)';
+    const intervalSel = (cfg.selections || []).find(s => s.type === 'interval');
+    if (intervalSel && intervalSel.mark) {
+      if (intervalSel.mark.fill) brushFill = intervalSel.mark.fill;
+      if (intervalSel.mark.stroke) brushStroke = intervalSel.mark.stroke;
+    }
+
+    // Enable pointer events on the SVG so brushes can capture gestures.
+    svgEl.style.pointerEvents = 'all';
+
+    for (let pi = 0; pi < scene.panels.length; pi++) {
+      const pa = scene.panels[pi].plot_area;
+      if (!pa) continue;
 
       const brushBehavior = brush()
-        .extent([
-          [plotArea.x, plotArea.y],
-          [plotArea.x + plotArea.w, plotArea.y + plotArea.h],
-        ])
-        .filter(event => !event.altKey && !event.metaKey && event.button === 0)
-        .on('end', event => {
-          if (!renderer) return;
-          if (!event.selection) return;
-          const [[x0, y0], [x1, y1]] = event.selection;
-          try {
-            const resultJson = renderer.handleDrag(0, x0, y0, x1, y1);
-            adapter.onSelectionChange(JSON.parse(resultJson));
-            // Re-render text with current zoom preserved.
-            const t = zoomTransform(container);
-            const textJson = renderer.setTransform(t.k, t.x, t.y);
-            _placeTextSvg(svgEl, JSON.parse(textJson));
-          } catch (err) {
-            console.warn('[ferrum] handleDrag error:', err);
-          }
-        });
+        .extent([[pa.x, pa.y], [pa.x + pa.w, pa.y + pa.h]])
+        .filter(event => !event.altKey && !event.metaKey && event.button === 0);
 
-      // Enable pointer events on the SVG so the brush can capture gestures.
-      svgEl.style.pointerEvents = 'all';
+      // Capture panel index for the closure.
+      const panelIdx = pi;
+      brushBehavior.on('end', function(event) {
+        if (!renderer) return;
+        if (!event.selection) return;
+        const [[x0, y0], [x1, y1]] = event.selection;
+        try {
+          const resultJson = renderer.handleDrag(panelIdx, x0, y0, x1, y1);
+          adapter.onSelectionChange(JSON.parse(resultJson));
+          // Re-render text with current zoom preserved.
+          const t = zoomTransform(container);
+          const textJson = renderer.setTransform(t.k, t.x, t.y);
+          _placeTextSvg(svgEl, JSON.parse(textJson));
+        } catch (err) {
+          console.warn('[ferrum] handleDrag error:', err);
+        }
+      });
 
       const brushG = select(svgEl).append('g')
-        .attr('class', 'brush')
+        .attr('class', 'ferrum-brush')
+        .attr('data-panel', panelIdx)
         .call(brushBehavior);
 
       // Style the brush rectangle.
@@ -433,7 +436,7 @@ export async function render({ model, el }) {
           const t0 = performance.now();
           function _step() {
             const t = Math.min((performance.now() - t0) / dur, 1.0);
-            _state.renderer.tickTransition(t).catch(() => {});
+            try { _state.renderer.tickTransition(t); } catch (_) {}
             if (t < 1.0) requestAnimationFrame(_step);
           }
           requestAnimationFrame(_step);
