@@ -16,7 +16,7 @@ for (let i = 0; i < _raw.length; i++) _bytes[i] = _raw.charCodeAt(i);
 let _ready = false, _initP = null;
 async function _ensureWasm() {
   if (_ready) return;
-  if (!_initP) _initP = __wbg_init(_bytes).then(() => { _ready = true; });
+  if (!_initP) _initP = __wbg_init({ module_or_path: _bytes }).then(() => { _ready = true; });
   await _initP;
 }
 
@@ -423,9 +423,12 @@ export async function render({ model, el }) {
       _state = await _render(container, s, adapter);
 
       if (_state && prev && _state.renderer) {
-        // Animate transition from previous scene.
+        // Animate transition from previous scene to the current one.
+        // B4 fix: pass `prev` (the OLD scene JSON), not `s` (the new scene).
+        // loadScene(s) already loaded the new scene into the renderer, so
+        // startTransition needs the old scene to interpolate FROM.
         try {
-          _state.renderer.startTransition(s);
+          _state.renderer.startTransition(prev);
           const dur = 300;
           const t0 = performance.now();
           function _step() {

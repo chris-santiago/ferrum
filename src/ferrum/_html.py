@@ -80,7 +80,26 @@ def _strip_anywidget_for_standalone(source: str) -> str:
         flags=re.DOTALL,
     )
 
-    return source.strip()
+    result = source.strip()
+
+    # Guard: verify critical transforms applied.  If the JS source was
+    # reformatted and a regex missed, these catch it at build time rather
+    # than producing silently broken HTML.
+    for line in result.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("export ") or stripped.startswith("export{"):
+            raise RuntimeError(
+                f"_strip_anywidget_for_standalone: residual export found: "
+                f"{stripped[:80]!r}. The ferrum-anywidget.js source may have "
+                "been reformatted — update the regex patterns in _html.py."
+            )
+    if "_ensureWasm" in result and "// WASM already initialized" not in result:
+        raise RuntimeError(
+            "_strip_anywidget_for_standalone: _ensureWasm was not stripped. "
+            "The ferrum-anywidget.js source may have been reformatted."
+        )
+
+    return result
 
 
 def _convert_d3_exports(source: str) -> str:

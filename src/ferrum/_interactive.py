@@ -229,8 +229,10 @@ class InteractiveChart:
 
         from ferrum._html import assemble_html, _copy_wasm_sidecar
 
+        from ferrum.display import _extract_title_text
+
         embed_wasm = kwargs.pop("embed_wasm", True)
-        title = getattr(self._chart, "_title", None) or "Ferrum chart"
+        title = _extract_title_text(getattr(self._chart, "_title", None))
         html = assemble_html(
             self._scene_json,
             packed_data=self._packed_data,

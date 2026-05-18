@@ -258,6 +258,111 @@ mod bug_hunt_tests {
     }
 }
 
+/// B4 regression: when old_data == new_data, lerp produces no visible change.
+/// This demonstrates the symptom: transition from a scene to itself is a no-op.
+/// The root cause is that start_transition cloned loaded.data (already the new
+/// scene) as old_data, then parsed the same JSON as new_data.
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod b4_transition_tests {
+    use super::*;
+
+    fn make_circle(cx: f32, cy: f32, r: f32, fill_r: f32) -> CircleInstance {
+        CircleInstance {
+            center: [cx, cy],
+            radius: r,
+            fill_color: [fill_r, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }
+    }
+
+    fn make_rect(x: f32, y: f32, w: f32, h: f32) -> RectInstance {
+        RectInstance {
+            position: [x, y],
+            size: [w, h],
+            corner_radius: 0.0,
+            fill_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }
+    }
+
+    /// Self-to-self interpolation produces no visible change at any t.
+    /// This is the symptom of B4: when old == new, the animation is a no-op.
+    #[test]
+    fn self_to_self_lerp_circles_produces_no_change() {
+        let scene = vec![make_circle(100.0, 200.0, 10.0, 0.5)];
+        let mid = lerp_circles(&scene, &scene, 0.5);
+        // At t=0.5 of a self-transition, the result is identical to the input.
+        assert!(
+            (mid[0].center[0] - 100.0).abs() < 1e-6,
+            "self-lerp must not move the circle"
+        );
+    }
+
+    /// When old != new, lerp_circles at t=0.5 MUST produce midpoint values.
+    /// This is the correct behavior after B4 is fixed: start_transition
+    /// passes different old/new data to the interpolation.
+    #[test]
+    fn different_scenes_lerp_circles_produces_midpoint() {
+        let old = vec![make_circle(0.0, 0.0, 10.0, 0.0)];
+        let new = vec![make_circle(200.0, 400.0, 30.0, 1.0)];
+        let mid = lerp_circles(&old, &new, 0.5);
+        assert!(
+            (mid[0].center[0] - 100.0).abs() < 0.01,
+            "midpoint x should be 100.0, got {}", mid[0].center[0]
+        );
+        assert!(
+            (mid[0].center[1] - 200.0).abs() < 0.01,
+            "midpoint y should be 200.0, got {}", mid[0].center[1]
+        );
+        assert!(
+            (mid[0].radius - 20.0).abs() < 0.01,
+            "midpoint radius should be 20.0, got {}", mid[0].radius
+        );
+        assert!(
+            (mid[0].fill_color[0] - 0.5).abs() < 0.01,
+            "midpoint fill_color[0] should be 0.5, got {}", mid[0].fill_color[0]
+        );
+    }
+
+    /// Same test for rects: self-interpolation is a no-op.
+    #[test]
+    fn self_to_self_lerp_rects_produces_no_change() {
+        let scene = vec![make_rect(50.0, 60.0, 100.0, 80.0)];
+        let mid = lerp_rects(&scene, &scene, 0.5);
+        assert!(
+            (mid[0].position[0] - 50.0).abs() < 1e-6,
+            "self-lerp must not move the rect"
+        );
+    }
+
+    /// When old != new, lerp_rects at t=0.5 MUST produce midpoint values.
+    #[test]
+    fn different_scenes_lerp_rects_produces_midpoint() {
+        let old = vec![make_rect(0.0, 0.0, 100.0, 50.0)];
+        let new = vec![make_rect(200.0, 300.0, 400.0, 250.0)];
+        let mid = lerp_rects(&old, &new, 0.5);
+        assert!(
+            (mid[0].position[0] - 100.0).abs() < 0.01,
+            "midpoint x should be 100.0, got {}", mid[0].position[0]
+        );
+        assert!(
+            (mid[0].size[0] - 250.0).abs() < 0.01,
+            "midpoint width should be 250.0, got {}", mid[0].size[0]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3992,6 +3992,15 @@ class Chart(_RenderMixin):
             _merge_top_transforms(new, rhs_top_xforms)
 
         new._layers = lhs_layers + rhs_layers
+        # Merge RHS selections and conditionals into the layered chart
+        # so interactive features from all layers are preserved.
+        if rhs._selections:
+            existing_names = {s.name for s in new._selections}
+            for s in rhs._selections:
+                if s.name not in existing_names:
+                    new._selections.append(s)
+        if rhs._conditionals:
+            new._conditionals.extend(rhs._conditionals)
         _warn_on_layer_conflicts(lhs, rhs)
         return new
 

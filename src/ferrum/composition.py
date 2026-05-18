@@ -1648,10 +1648,12 @@ def _offset_node(node: dict, dx: float, dy: float) -> None:
         node["y"] = node.get("y", 0) + dy
     elif t == "path":
         for cmd in node.get("commands", []):
-            if "x" in cmd:
-                cmd["x"] = cmd["x"] + dx
-            if "y" in cmd:
-                cmd["y"] = cmd["y"] + dy
+            for xkey in ("x", "cx", "c1x", "c2x"):
+                if xkey in cmd:
+                    cmd[xkey] = cmd[xkey] + dx
+            for ykey in ("y", "cy", "c1y", "c2y"):
+                if ykey in cmd:
+                    cmd[ykey] = cmd[ykey] + dy
     elif t == "group":
         for child in node.get("children", []):
             _offset_node(child, dx, dy)

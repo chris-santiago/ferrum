@@ -127,10 +127,20 @@ impl WasmRenderer {
         Ok(())
     }
 
-    /// Begin a GPU-interpolated transition from the currently loaded scene to a
-    /// new scene JSON string.
+    /// Begin a GPU-interpolated transition from an old scene to the currently
+    /// loaded scene.
     ///
-    /// Call ``tick_transition(t)`` (t ∈ [0, 1]) from a requestAnimationFrame loop
+    /// `old_scene_json` is the **previous** scene JSON string. The transition
+    /// target is `self.loaded.data` (the scene already loaded via `loadScene`).
+    ///
+    /// B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
+    /// as old. But `loadScene(new_json)` was already called before
+    /// `startTransition`, so `loaded.data` was already the new scene — making
+    /// old == new and the transition a no-op (self-to-self interpolation).
+    /// Now the caller passes the *old* scene JSON and we use `loaded.data` as
+    /// the transition target.
+    ///
+    /// Call ``tick_transition(t)`` (t in [0, 1]) from a requestAnimationFrame loop
     /// to drive the animation.  ``start_transition`` does not start the loop —
     /// the JavaScript caller owns the timing.
     ///
@@ -138,16 +148,20 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "startTransition")]
     pub fn start_transition(
         &mut self,
-        new_scene_json: &str,
+        old_scene_json: &str,
     ) -> Result<(), JsValue> {
         let Some(loaded) = &self.loaded else {
             return Ok(());
         };
-        let old_data = loaded.data.clone();
-        let new_scene: ferrum_scene::SceneGraph = serde_json::from_str(new_scene_json)
+        // B4+B5 fix: the new scene (transition target) is already in loaded.data,
+        // which was populated by loadScene with full packed data. Parse the old
+        // scene from JSON (no packed data needed — it is only the animation source
+        // for a brief 300ms transition).
+        let new_data = loaded.data.clone();
+        let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
-        let new_data = scene_load::load_scene(&new_scene);
-        self.transition = Some(ActiveTransition { old_data, new_data, new_scene });
+        let old_data = scene_load::load_scene(&old_scene);
+        self.transition = Some(ActiveTransition { old_data, new_data, new_scene: loaded.scene.clone() });
         Ok(())
     }
 
@@ -228,14 +242,23 @@ impl WasmRenderer {
             return Ok("{}".to_string());
         }
 
-        // Update interval selection state.
+        // Convert canvas-space brush coordinates to scene-space so
+        // contains_point comparisons in conditional resolution use
+        // the same coordinate space as mark positions.
+        let (sx0, sy0) = self.zoom.transforms
+            .get(panel_id as usize)
+            .map(|t| t.inverse_apply(x0 as f64, y0 as f64))
+            .unwrap_or((x0 as f64, y0 as f64));
+        let (sx1, sy1) = self.zoom.transforms
+            .get(panel_id as usize)
+            .map(|t| t.inverse_apply(x1 as f64, y1 as f64))
+            .unwrap_or((x1 as f64, y1 as f64));
+
+        // Update interval selection state in scene-space.
         self.interaction_state.handle_drag(
             &self.selections,
             panel_id as usize,
-            x0 as f64,
-            y0 as f64,
-            x1 as f64,
-            y1 as f64,
+            sx0, sy0, sx1, sy1,
         );
 
         self.apply_conditionals_and_render()
@@ -336,10 +359,21 @@ impl WasmRenderer {
         let mut best: Option<(f64, u32, u32, usize)> = None; // (dist, panel, batch, idx)
         for (&(panel_id, batch_idx), meta) in &loaded.data.packed_batch_meta {
             if meta.kind != 0 { continue; } // only circles for now
+            // B1 fix: convert canvas-space (px, py) to scene-space before comparing
+            // against mark positions. The scene-node path (above) uses
+            // hit_test::hit_test_nearest which applies self.zoom internally, but
+            // this packed-circle fallback operates on raw instance data in
+            // scene-space coordinates. Without the inverse transform, zoomed/panned
+            // charts would miss hits because canvas pixels no longer align with
+            // scene-space mark positions.
+            let (sx, sy) = self.zoom.transforms
+                .get(panel_id as usize)
+                .map(|t| t.inverse_apply(px, py))
+                .unwrap_or((px, py));
             for i in 0..meta.instance_count {
                 let ci = &loaded.data.circle_instances[meta.instance_start + i];
-                let dx = px - ci.center[0] as f64;
-                let dy = py - ci.center[1] as f64;
+                let dx = sx - ci.center[0] as f64;
+                let dy = sy - ci.center[1] as f64;
                 let dist = (dx * dx + dy * dy).sqrt();
                 let r = ci.radius as f64;
                 if dist <= r * 3.0 { // generous hit radius for dense scatter

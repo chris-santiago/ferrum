@@ -55,10 +55,11 @@ def save_chart(
         scene_json, packed_data = _render_scene_json(chart)
         from ferrum._html import assemble_html, _copy_wasm_sidecar
 
+        title = _extract_title_text(chart._title)
         html = assemble_html(
             scene_json,
             packed_data=packed_data,
-            title=chart._title or "Ferrum chart",
+            title=title,
             embed_wasm=embed_wasm,
         )
         path.write_text(html)
@@ -105,9 +106,21 @@ def show_chart(chart: "Chart") -> None:
             pass
     # Browser fallback: write temp HTML, open in browser
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as f:
-        f.write(_wrap_svg_in_html(chart.show_svg(), title=chart._title or "Ferrum chart"))
+        f.write(_wrap_svg_in_html(chart.show_svg(), title=_extract_title_text(chart._title)))
         url = f"file://{f.name}"
     webbrowser.open(url)
+
+
+def _extract_title_text(raw_title: object) -> str:
+    """Extract a plain text string from a Title dataclass or fallback.
+
+    ``Chart._title`` is a ``Title`` dataclass (with a ``.text`` attribute)
+    or ``None``.  This helper avoids embedding ``Title(text='...', ...)``
+    repr into HTML ``<title>`` tags and headings.
+    """
+    if raw_title is not None and hasattr(raw_title, "text"):
+        return raw_title.text or "Ferrum chart"
+    return str(raw_title) if raw_title else "Ferrum chart"
 
 
 def _is_jupyter() -> bool:

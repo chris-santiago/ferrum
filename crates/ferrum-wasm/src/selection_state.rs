@@ -933,6 +933,54 @@ mod tests {
         );
     }
 
+    // W1: handle_drag stores scene-space coordinates for interval selection.
+    //
+    // The coordinate conversion from canvas-space to scene-space happens in
+    // lib.rs (WasmRenderer::handle_drag) using Affine2::inverse_apply before
+    // calling InteractionState::handle_drag. This test verifies that the
+    // InteractionState correctly stores whatever coordinates it receives,
+    // and that contains_point uses those stored coordinates consistently.
+    // The inverse_apply math itself is tested in zoom_pan.rs.
+    #[test]
+    fn w1_handle_drag_stores_coords_and_contains_point_uses_them() {
+        let specs = vec![interval_spec("brush")];
+        let mut state = InteractionState::new(&specs);
+
+        // Simulate what lib.rs does after inverse_apply: pass scene-space
+        // coordinates (100, 50) to (300, 250) to handle_drag.
+        state.handle_drag(&specs, 0, 100.0, 50.0, 300.0, 250.0);
+
+        // The stored interval must match the scene-space coords.
+        match state.selections.get("brush") {
+            Some(SelectionState::Interval {
+                x_range: Some((x_lo, x_hi)),
+                y_range: Some((y_lo, y_hi)),
+            }) => {
+                assert!(
+                    (x_lo - 100.0).abs() < 1e-10 && (x_hi - 300.0).abs() < 1e-10,
+                    "stored x_range must be scene-space (100, 300), got ({x_lo}, {x_hi})"
+                );
+                assert!(
+                    (y_lo - 50.0).abs() < 1e-10 && (y_hi - 250.0).abs() < 1e-10,
+                    "stored y_range must be scene-space (50, 250), got ({y_lo}, {y_hi})"
+                );
+            }
+            other => panic!("expected Interval with both ranges, got {other:?}"),
+        }
+
+        // A scene-space point inside the interval must be contained.
+        let sel = state.selections.get("brush").expect("brush must exist");
+        assert!(sel.contains_point(200.0, 150.0), "scene-space point inside interval must be contained");
+
+        // A canvas-space point that would be inside the brush at 2x zoom
+        // (e.g., 400, 300 in canvas-space maps to 200, 150 in scene-space
+        // at identity) is OUTSIDE the stored scene-space interval.
+        // This is the bug W1 prevents: without inverse_apply, the stored
+        // range would be in canvas-space and the comparison would use
+        // scene-space mark positions, causing a mismatch.
+        assert!(!sel.contains_point(400.0, 300.0), "canvas-space point must be outside scene-space interval");
+    }
+
     // Test 5: handle_click with fields populates field_values.
     #[test]
     fn handle_click_with_fields_populates_field_values() {

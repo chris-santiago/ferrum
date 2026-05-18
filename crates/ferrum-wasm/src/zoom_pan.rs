@@ -467,4 +467,44 @@ mod tests {
         assert!((t.tx - 42.0).abs() < 1e-10);
         assert!((t.ty - (-17.0)).abs() < 1e-10);
     }
+
+    /// B1 regression: When zoomed 2x with translation, canvas-space coordinates
+    /// must be converted to scene-space via inverse_apply before comparing against
+    /// mark positions. This test exercises the exact math that hit_test_at must use
+    /// for packed-circle fallback: set_absolute(2x, +50, +30) then inverse_apply
+    /// a canvas-space point to recover the scene-space position.
+    #[test]
+    fn inverse_apply_converts_canvas_to_scene_space_under_zoom() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(1, &config);
+        // Simulate D3-zoom: 2x scale with translation (50, 30)
+        state.set_absolute(0, 2.0, 50.0, 30.0);
+        let t = &state.transforms[0];
+
+        // A scene-space point at (100, 200) maps to canvas-space:
+        //   canvas_x = 2.0 * 100 + 50 = 250
+        //   canvas_y = 2.0 * 200 + 30 = 430
+        let (canvas_x, canvas_y) = t.apply(100.0, 200.0);
+        assert!((canvas_x - 250.0).abs() < 1e-10);
+        assert!((canvas_y - 430.0).abs() < 1e-10);
+
+        // inverse_apply must recover the scene-space point from canvas-space
+        let (scene_x, scene_y) = t.inverse_apply(canvas_x, canvas_y);
+        assert!(
+            (scene_x - 100.0).abs() < 1e-10,
+            "inverse_apply must recover scene x=100.0, got {scene_x}"
+        );
+        assert!(
+            (scene_y - 200.0).abs() < 1e-10,
+            "inverse_apply must recover scene y=200.0, got {scene_y}"
+        );
+
+        // Critically: the raw canvas coords (250, 430) differ from scene coords (100, 200).
+        // If hit_test_at compares canvas coords directly against scene-space mark positions,
+        // it will miss hits that are actually under the cursor.
+        assert!(
+            (canvas_x - 100.0).abs() > 1.0,
+            "canvas x must differ from scene x to demonstrate the bug"
+        );
+    }
 }

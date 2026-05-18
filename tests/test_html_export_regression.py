@@ -43,6 +43,9 @@ Covers:
 - Empty DataFrame .interactive() (P40)
 - No encoding .interactive() raises cleanly (P41)
 - InteractiveChart.save() with .html extension (P42)
+- _offset_node must offset path control points cx/cy/c1x/c1y/c2x/c2y (B2)
+- Chart.__add__ preserves RHS selections and conditionals (B3)
+- LayerChart._render_interactive preserves both layers' selections (B3)
 """
 
 from __future__ import annotations
@@ -925,3 +928,217 @@ def test_p42_interactive_chart_save_html(tmp_path):
     content = out.read_text()
     assert "<!DOCTYPE html>" in content, "must be a valid HTML document"
     assert "_render" in content, "HTML must contain _render call"
+
+
+# ── B2. _offset_node missing path control points ─────────────────────────
+
+
+def test_offset_node_path_control_points():
+    """_offset_node must offset ALL coordinate keys in path commands,
+    including QuadTo cx/cy and CubicTo c1x/c1y/c2x/c2y."""
+    from ferrum.composition import _offset_node
+
+    node = {
+        "type": "path",
+        "commands": [
+            {"type": "MoveTo", "x": 10.0, "y": 20.0},
+            {"type": "LineTo", "x": 30.0, "y": 40.0},
+            {"type": "QuadTo", "cx": 50.0, "cy": 60.0, "x": 70.0, "y": 80.0},
+            {
+                "type": "CubicTo",
+                "c1x": 90.0,
+                "c1y": 100.0,
+                "c2x": 110.0,
+                "c2y": 120.0,
+                "x": 130.0,
+                "y": 140.0,
+            },
+            {"type": "HLineTo", "x": 150.0},
+            {"type": "VLineTo", "y": 160.0},
+            {"type": "Close"},
+        ],
+    }
+    _offset_node(node, 100.0, 50.0)
+
+    cmds = node["commands"]
+    # MoveTo
+    assert cmds[0]["x"] == 110.0
+    assert cmds[0]["y"] == 70.0
+    # LineTo
+    assert cmds[1]["x"] == 130.0
+    assert cmds[1]["y"] == 90.0
+    # QuadTo — control point AND endpoint
+    assert cmds[2]["cx"] == 150.0, f"QuadTo cx not offset: {cmds[2]['cx']}"
+    assert cmds[2]["cy"] == 110.0, f"QuadTo cy not offset: {cmds[2]['cy']}"
+    assert cmds[2]["x"] == 170.0
+    assert cmds[2]["y"] == 130.0
+    # CubicTo — both control points AND endpoint
+    assert cmds[3]["c1x"] == 190.0, f"CubicTo c1x not offset: {cmds[3]['c1x']}"
+    assert cmds[3]["c1y"] == 150.0, f"CubicTo c1y not offset: {cmds[3]['c1y']}"
+    assert cmds[3]["c2x"] == 210.0, f"CubicTo c2x not offset: {cmds[3]['c2x']}"
+    assert cmds[3]["c2y"] == 170.0, f"CubicTo c2y not offset: {cmds[3]['c2y']}"
+    assert cmds[3]["x"] == 230.0
+    assert cmds[3]["y"] == 190.0
+    # HLineTo
+    assert cmds[4]["x"] == 250.0
+    # VLineTo
+    assert cmds[5]["y"] == 210.0
+    # Close — no coordinates
+    assert cmds[6] == {"type": "Close"}
+
+
+# ── B3. LayerChart.__add__ drops RHS selections and conditionals ──────────
+
+
+def test_layer_add_preserves_rhs_selections_and_conditionals():
+    """Chart.__add__ (used by LayerChart._build_merged) must preserve
+    selections and conditionals from BOTH the LHS and RHS charts."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "g": ["a", "b", "c"]})
+
+    sel_a = fm.selection_point(fields=["g"], name="sel_a")
+    cond_a = sel_a.when(fm.Color("g")).otherwise(fm.value("#cccccc"))
+    chart_a = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel_a)
+        .conditional(cond_a)
+        .properties(width=200, height=200)
+    )
+
+    sel_b = fm.selection_point(fields=["g"], name="sel_b")
+    cond_b = sel_b.when(fm.Opacity("g")).otherwise(fm.value(0.2))
+    chart_b = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel_b)
+        .conditional(cond_b)
+        .properties(width=200, height=200)
+    )
+
+    merged = chart_a + chart_b
+
+    # Both selections must be present
+    sel_names = {s.name for s in (merged._selections or [])}
+    assert "sel_a" in sel_names, f"LHS selection 'sel_a' missing from merged; got {sel_names}"
+    assert "sel_b" in sel_names, f"RHS selection 'sel_b' missing from merged; got {sel_names}"
+
+    # Both conditionals must be present
+    assert len(merged._conditionals or []) >= 2, (
+        f"expected >= 2 conditionals (one from each layer); got {len(merged._conditionals or [])}"
+    )
+
+
+def test_layer_chart_interactive_preserves_both_selections():
+    """LayerChart._render_interactive must produce scene JSON containing
+    selections from all layers, not just the first."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "g": ["a", "b", "c"]})
+
+    sel_a = fm.selection_point(fields=["g"], name="layer_sel_a")
+    chart_a = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel_a)
+        .properties(width=200, height=200)
+    )
+
+    sel_b = fm.selection_point(fields=["g"], name="layer_sel_b")
+    chart_b = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x:Q", y="y:Q")
+        .add_selection(sel_b)
+        .properties(width=200, height=200)
+    )
+
+    layer = fm.LayerChart(chart_a, chart_b)
+    scene_json, _ = layer._render_interactive()
+    scene = json.loads(scene_json)
+
+    sel_names = {s["name"] for s in scene.get("selections", [])}
+    assert "layer_sel_a" in sel_names, f"LHS selection missing from layered scene; got {sel_names}"
+    assert "layer_sel_b" in sel_names, f"RHS selection missing from layered scene; got {sel_names}"
+
+
+# ── W6. HTML <title> uses text, not Title dataclass repr ─────────────────
+
+
+def test_html_title_uses_text_not_repr(tmp_path):
+    """HTML <title> must contain the title text, not the Title dataclass repr."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .properties(title="My Custom Title", width=300, height=200)
+    )
+    out = tmp_path / "title_test.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "<title>My Custom Title</title>" in content, (
+        "HTML title must be 'My Custom Title', not Title dataclass repr"
+    )
+    assert "Title(" not in content, "HTML must not contain Title dataclass repr"
+
+
+def test_html_title_via_save_chart_uses_text(tmp_path):
+    """display.save_chart HTML path must also extract Title.text, not repr."""
+    from ferrum.display import save_chart
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .properties(title="Save Chart Title", width=300, height=200)
+    )
+    out = tmp_path / "save_chart_title.html"
+    save_chart(chart, str(out))
+    content = out.read_text()
+    assert "<title>Save Chart Title</title>" in content, (
+        "save_chart HTML title must be 'Save Chart Title'"
+    )
+    assert "Title(" not in content, "save_chart HTML must not contain Title dataclass repr"
+
+
+def test_html_title_without_title_defaults_to_ferrum(tmp_path):
+    """A chart with no title must use 'Ferrum chart' as the HTML title."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=300, height=200)
+    out = tmp_path / "no_title.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "<title>Ferrum chart</title>" in content, (
+        "Chart with no title must use 'Ferrum chart' as HTML title"
+    )
+
+
+# ── W8. _strip_anywidget_for_standalone post-transform assertions ────────
+
+
+def test_strip_anywidget_raises_on_residual_export():
+    """_strip_anywidget_for_standalone must raise RuntimeError if
+    a residual 'export' keyword remains after stripping."""
+    from ferrum._html import _strip_anywidget_for_standalone
+
+    # Feed it JS that has an export the regexes won't match
+    bad_js = "export function foo() {}\nexport function createStandaloneAdapter() {}"
+    with pytest.raises(RuntimeError, match="residual export"):
+        _strip_anywidget_for_standalone(bad_js)
+
+
+def test_strip_anywidget_real_source_strips_cleanly():
+    """The real ferrum-anywidget.js must strip without residual exports."""
+    from ferrum._html import _strip_anywidget_for_standalone, _WASM_DIR
+
+    source = (_WASM_DIR / "ferrum-anywidget.js").read_text()
+    result = _strip_anywidget_for_standalone(source)
+    # If we get here without RuntimeError, the strip was clean.
+    # Also verify no export keywords remain on non-comment lines.
+    for line in result.splitlines():
+        stripped = line.lstrip()
+        assert not stripped.startswith("export ") and not stripped.startswith("export{"), (
+            f"residual export found in stripped JS: {stripped[:80]!r}"
+        )

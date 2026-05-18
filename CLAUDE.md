@@ -152,6 +152,18 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 ---
 
+## Known interactive-export limitations (2026-05-18 wiring audit)
+
+These were identified by a 4-agent wiring audit and intentionally deferred. They are **feature gaps requiring design work**, not bugs. Fix them when the relevant subsystem is next touched.
+
+- **W2 — Brush hardcoded to panel 0.** D3 brush overlay only covers `scene.panels[0].plot_area`. Multi-panel compositions (HConcat, VConcat, facets) with `selection_interval` can only brush the first panel. Fixing requires per-panel brush overlays and routing `panel_id` through `handleDrag`. Files: `src/ferrum/_wasm/ferrum-anywidget.js` (brush setup), `crates/ferrum-wasm/src/selection_state.rs` (`handle_drag` ignores `panel_id`).
+
+- **W4 — `_offset_node` ignores image/polygon/polyline/raw node types.** These scene node types are silently left at their original coordinates in composed interactive renders. Rare today (heatmaps use image, geo uses polygon), but will matter as more chart types gain `.interactive()`. File: `src/ferrum/composition.py` `_offset_node`.
+
+- **W5 — JointChart interactive layout is flat horizontal, not 2x2 grid.** `JointChart._render_interactive` merges center + top + right in a flat horizontal layout. The SVG path uses a proper 2x2 grid. Fixing requires a grid-aware merge (like `_merge_child_scenes_grid` but with explicit row/col placement). File: `src/ferrum/composition.py` `JointChart._render_interactive`.
+
+---
+
 ## Known open gaps (code archaeology)
 
 **Read `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
