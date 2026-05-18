@@ -4680,6 +4680,30 @@ class Chart(_RenderMixin):
             kw["chart_description"] = resolved._description
         if resolved._selections:
             kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
+            # Auto-inject selection fields into tooltip so cross-panel linked
+            # selection can match marks by field values (not just data indices).
+            sel_fields = set()
+            for s in resolved._selections:
+                if hasattr(s, "params") and s.params.get("fields"):
+                    sel_fields.update(s.params["fields"])
+            if sel_fields:
+                existing = set()
+                if "tooltip_fields" in kw:
+                    for entry in json.loads(kw["tooltip_fields"]):
+                        existing.add(entry.get("field", ""))
+                elif "tooltip" in kw:
+                    existing.add(getattr(kw["tooltip"], "field", ""))
+                missing = sel_fields - existing
+                if missing:
+                    tf_list = []
+                    if "tooltip_fields" in kw:
+                        tf_list = json.loads(kw["tooltip_fields"])
+                    elif "tooltip" in kw:
+                        tf_list = [{"field": getattr(kw["tooltip"], "field", "")}]
+                        del kw["tooltip"]
+                    for f in sorted(missing):
+                        tf_list.append({"field": f})
+                    kw["tooltip_fields"] = json.dumps(tf_list)
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
         return ChartSpec(**kw)

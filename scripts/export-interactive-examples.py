@@ -26,6 +26,8 @@ chart2 = (
     .mark_point(size=100)
     .encode(x="x", y="y", color="group:N")
     .add_selection(sel2)
+    .conditional(sel2.when(fm.Color("group")).otherwise(fm.value("#cccccc")))
+    .properties(title="Point Selection")
     .interactive()
 )
 chart2.save(str(OUT / "02_point_selection.html"))
@@ -39,9 +41,11 @@ df3 = pl.DataFrame({
 brush3 = fm.selection_interval()
 chart3 = (
     fm.Chart(df3)
-    .mark_point()
+    .mark_point(size=60)
     .encode(x="x", y="y")
     .add_selection(brush3)
+    .conditional(brush3.when(fm.value("#2563eb")).otherwise(fm.value("#cccccc")))
+    .properties(title="Brush Selection")
     .interactive()
 )
 chart3.save(str(OUT / "03_interval_selection.html"))
@@ -90,7 +94,7 @@ sel6 = fm.selection_point(fields=["category"])
 scatter6 = (
     fm.Chart(df6)
     .mark_point(size=80)
-    .encode(x="x", y="y", color="category:N", tooltip="category:N")
+    .encode(x="x", y="y", color="category:N")
     .add_selection(sel6)
     .conditional(sel6.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
     .properties(title="Scatter (click to select)")
@@ -101,7 +105,7 @@ bars6 = (
     .transform(fm.transform_aggregate(
         {"field": "category", "fn": "count", "as": "n"}, groupby=["category"]
     ))
-    .encode(x="category:N", y="n:Q", color="category:N", tooltip="category:N")
+    .encode(x="category:N", y="n:Q", color="category:N")
     .add_selection(sel6)
     .conditional(sel6.when(fm.Color("category")).otherwise(fm.value("#cccccc")))
     .properties(title="Bar (linked)")
@@ -130,8 +134,8 @@ print("7/8 brush with conditional color")
 
 # 8. VConcat composition
 df8 = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [5, 3, 4, 2, 1], "g": ["a", "b", "a", "b", "a"]})
-top8 = fm.Chart(df8).mark_point().encode(x="x:Q", y="y:Q", color="g:N")
-bottom8 = fm.Chart(df8).mark_bar().encode(x="g:N", y="y:Q")
+top8 = fm.Chart(df8).mark_point().encode(x="x:Q", y="y:Q", color="g:N").properties(title="Scatter")
+bottom8 = fm.Chart(df8).mark_bar().encode(x="g:N", y="y:Q", color="g:N").properties(title="Bars")
 vconcat8 = top8 & bottom8
 vconcat8.interactive().save(str(OUT / "08_vconcat.html"))
 print("8/8 VConcat composition")
