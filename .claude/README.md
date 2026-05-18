@@ -16,7 +16,11 @@ The automation system has six layers, from innermost (every task) to outermost (
 │  Layer 5: Remediation agents (dispatched by campaigns)          │
 │  gallery-fixer  schwabish-fixer  bug-hunter                     │
 ├─────────────────────────────────────────────────────────────────┤
-│  Layer 4: Quality campaigns (human-invoked, parallel dispatch)  │
+│  Layer 4b: Wiring audits (human-invoked, parallel forensic)     │
+│  /interactive-audit  /pyo3-audit  /scene-pipeline-audit         │
+│  /theme-audit                                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 4a: Quality campaigns (human-invoked, parallel dispatch) │
 │  /bug-hunt  /test-sweep  /gallery-audit  /schwabish-improve     │
 │  /code-archaeology                                              │
 ├─────────────────────────────────────────────────────────────────┤
@@ -84,6 +88,22 @@ User request (coding task)
 /code-archaeology
   └─ 3 parallel sweep agents    (Python, Rust, Tests+Docs)
   └─ consolidated report
+
+/interactive-audit
+  └─ interactive-auditor × 4    (js-wasm, python-rust-data, rust-state-machine, html-assembly)
+  └─ consolidated GOOD/WARN/BUG report → .claude/output/interactive-audit/
+
+/pyo3-audit
+  └─ pyo3-binding-auditor × 3   (chart-spec, transforms, scene-types)
+  └─ consolidated report → .claude/output/pyo3-audit/
+
+/scene-pipeline-audit
+  └─ scene-pipeline-auditor × 4  (spec-to-scene, scene-to-svg, scene-to-wasm, composition-merge)
+  └─ consolidated report → .claude/output/scene-pipeline-audit/
+
+/theme-audit
+  └─ theme-wiring-auditor × 4   (python-to-rust, rust-layout, rust-render, cascade)
+  └─ consolidated report + key inventory table → .claude/output/theme-audit/
 ```
 
 ---
@@ -94,6 +114,10 @@ User request (coding task)
 |---|---|
 | Implement a Python feature/fix | Orchestrator dispatches `python-coder` |
 | Implement a Rust feature/fix | Orchestrator dispatches `rust-coder` |
+| Audit interactive HTML export wiring | `/interactive-audit` |
+| Audit PyO3 binding boundary | `/pyo3-audit` |
+| Audit rendering pipeline data flow | `/scene-pipeline-audit` |
+| Audit theme key wiring end-to-end | `/theme-audit` |
 | Find edge-case bugs across the pipeline | `/bug-hunt` |
 | Find edge-case bugs in one subsystem | `/bug-hunt <subsystem>` |
 | Multi-round combinatorial test-and-fix | `/test-sweep` |
@@ -179,7 +203,45 @@ Same structure for Rust. Targets a crate, module, or subsystem. Looks for naming
 
 ---
 
-## Layer 4 — Quality campaigns
+## Layer 4b — Wiring audits
+
+Forensic parallel audits of integration seams. Each dispatches multiple auditor agents that read entire files, trace every connection point, and report GOOD/WARN/BUG findings with file:line citations.
+
+### `/interactive-audit`
+
+**File:** `skills/interactive-audit/SKILL.md`
+
+Audits the interactive HTML export pipeline across 4 seams: JS↔WASM wiring, Python→Rust data flow, Rust selection state machine, HTML assembly. Dispatches `interactive-auditor` × 4.
+
+**Output:** `output/interactive-audit/YYYY-MM-DD-audit.md`
+
+### `/pyo3-audit`
+
+**File:** `skills/pyo3-audit/SKILL.md`
+
+Audits the PyO3 FFI boundary across 3 binding groups: chart-spec, transforms, scene-types. Verifies types, kwargs, return shapes match across Python↔Rust. Dispatches `pyo3-binding-auditor` × 3.
+
+**Output:** `output/pyo3-audit/YYYY-MM-DD-audit.md`
+
+### `/scene-pipeline-audit`
+
+**File:** `skills/scene-pipeline-audit/SKILL.md`
+
+Audits the rendering pipeline across 4 stages: spec-to-scene, scene-to-svg, scene-to-wasm, composition-merge. Traces data from DataFrame to final output, flags silent data loss. Dispatches `scene-pipeline-auditor` × 4.
+
+**Output:** `output/scene-pipeline-audit/YYYY-MM-DD-audit.md`
+
+### `/theme-audit`
+
+**File:** `skills/theme-audit/SKILL.md`
+
+Audits theme key wiring across 4 segments: python-to-rust, rust-layout, rust-render, cascade. Builds a complete key inventory (can user set it? reaches Rust? affects output?). Dispatches `theme-wiring-auditor` × 4.
+
+**Output:** `output/theme-audit/YYYY-MM-DD-audit.md` (includes key inventory table)
+
+---
+
+## Layer 4a — Quality campaigns
 
 Systematic sweeps that dispatch agents in parallel. Human-invoked.
 
@@ -256,6 +318,30 @@ Dispatched by `/schwabish-improve --from-audit`. Reads each row's `schwabish_ver
 Dispatched by `/bug-hunt`, one per subsystem. Writes edge-case test files, runs them, reports failures as bugs. Never fixes bugs — only surfaces them.
 
 **Tools:** Read, Edit, Write, Bash, Glob, Grep
+
+### `interactive-auditor`
+
+**File:** `agents/interactive-auditor.md`
+
+Dispatched by `/interactive-audit`, one per seam (4 total). Forensic code-tracing agent — reads entire files, verifies every call signature, traces coordinate spaces, reports GOOD/WARN/BUG. Read-only.
+
+### `pyo3-binding-auditor`
+
+**File:** `agents/pyo3-binding-auditor.md`
+
+Dispatched by `/pyo3-audit`, one per binding group (3 total). Traces kwargs, types, and return values across the Python↔Rust FFI boundary. Read-only.
+
+### `scene-pipeline-auditor`
+
+**File:** `agents/scene-pipeline-auditor.md`
+
+Dispatched by `/scene-pipeline-audit`, one per pipeline stage (4 total). Traces data from input to output at each rendering stage. Read-only.
+
+### `theme-wiring-auditor`
+
+**File:** `agents/theme-wiring-auditor.md`
+
+Dispatched by `/theme-audit`, one per theme segment (4 total). Traces every theme key from Python declaration through Rust consumption. Read-only.
 
 ### `gallery-judge`
 
@@ -338,6 +424,10 @@ Lite-agent verdicts are written to `.claude/output/review-lite/<ISO-timestamp>_{
 │   ├── rust-coder.md                  ← Layer 1: Rust coding agent
 │   ├── python-review-lite.md          ← Layer 2: Python commit gate
 │   ├── rust-review-lite.md            ← Layer 2: Rust commit gate
+│   ├── interactive-auditor.md         ← Layer 4b: interactive wiring auditor
+│   ├── pyo3-binding-auditor.md        ← Layer 4b: PyO3 binding auditor
+│   ├── scene-pipeline-auditor.md      ← Layer 4b: scene pipeline auditor
+│   ├── theme-wiring-auditor.md        ← Layer 4b: theme wiring auditor
 │   ├── gallery-fixer.md               ← Layer 5: gallery remediation
 │   ├── gallery-judge.md               ← Layer 5: gallery audit judge
 │   ├── schwabish-fixer.md             ← Layer 5: Schwabish remediation
@@ -346,18 +436,26 @@ Lite-agent verdicts are written to `.claude/output/review-lite/<ISO-timestamp>_{
 ├── skills/
 │   ├── python-review/                 ← Layer 3: heavyweight Python review
 │   ├── rust-review/                   ← Layer 3: heavyweight Rust review
-│   ├── bug-hunt/                      ← Layer 4: parallel test campaign
-│   ├── test-sweep/                    ← Layer 4: combinatorial TDD campaign
-│   ├── gallery-audit/                 ← Layer 4: default-output comparison
-│   ├── gallery-feedback/              ← Layer 4: interactive audit walkthrough
-│   ├── schwabish/                     ← Layer 4: text-integration audit
-│   ├── code-archaeology/              ← Layer 4: unimplemented feature sweep
+│   ├── interactive-audit/             ← Layer 4b: interactive wiring audit
+│   ├── pyo3-audit/                    ← Layer 4b: PyO3 binding audit
+│   ├── scene-pipeline-audit/          ← Layer 4b: scene pipeline audit
+│   ├── theme-audit/                   ← Layer 4b: theme wiring audit
+│   ├── bug-hunt/                      ← Layer 4a: parallel test campaign
+│   ├── test-sweep/                    ← Layer 4a: combinatorial TDD campaign
+│   ├── gallery-audit/                 ← Layer 4a: default-output comparison
+│   ├── gallery-feedback/              ← Layer 4a: interactive audit walkthrough
+│   ├── schwabish/                     ← Layer 4a: text-integration audit
+│   ├── code-archaeology/              ← Layer 4a: unimplemented feature sweep
 │   ├── ferrum-docstrings/             ← Layer 6: docstring conventions
 │   ├── regression-test/               ← Layer 6: post-fix regression tests
 │   ├── docs-audit/                    ← Layer 6: docs staleness check
 │   └── release/                       ← Layer 6: version bump + changelog
 └── output/                                ← all ephemeral output (gitignored)
     ├── review-lite/                   ← commit-gate verdicts
+    ├── interactive-audit/             ← wiring audit reports
+    ├── pyo3-audit/                    ← binding audit reports
+    ├── scene-pipeline-audit/          ← pipeline audit reports
+    ├── theme-audit/                   ← theme audit reports
     ├── gallery-audit/                 ← panel PNGs, verdicts, REPORT.md
     ├── bug-hunt/                      ← BUG_REPORT.md
     └── test-sweep/                    ← TEST_SWEEP_REPORT.md

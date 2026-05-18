@@ -139,6 +139,14 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Bug-hunt skill | `.claude/skills/bug-hunt/` |
 | Bug-hunter agent | `.claude/agents/bug-hunter.md` |
 | Test-sweep skill | `.claude/skills/test-sweep/` |
+| Interactive wiring audit | `.claude/skills/interactive-audit/` |
+| Interactive auditor agent | `.claude/agents/interactive-auditor.md` |
+| PyO3 binding audit | `.claude/skills/pyo3-audit/` |
+| PyO3 binding auditor agent | `.claude/agents/pyo3-binding-auditor.md` |
+| Scene pipeline audit | `.claude/skills/scene-pipeline-audit/` |
+| Scene pipeline auditor agent | `.claude/agents/scene-pipeline-auditor.md` |
+| Theme wiring audit | `.claude/skills/theme-audit/` |
+| Theme wiring auditor agent | `.claude/agents/theme-wiring-auditor.md` |
 | Schwabish text-integration skill | `.claude/skills/schwabish/` |
 | Schwabish agents | `.claude/agents/schwabish-{judge,fixer}.md` |
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
