@@ -4379,7 +4379,7 @@ class Chart(_RenderMixin):
         out = []
         for layer in self._layers or []:
             encoding_dict: dict = {}
-            for axis in ("x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"):
+            for axis in _RENDERER_HONORED_CHANNELS:
                 ch = layer.encoding.get(axis)
                 if ch is None:
                     continue

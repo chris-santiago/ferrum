@@ -188,7 +188,10 @@ class _RenderMixin:
         spec = chart.to_spec()
         data = to_arrow_table(chart._data)
         viewport = (chart._width or 600.0, chart._height or 400.0)
-        theme_dict = chart._theme.to_spec_dict() if chart._theme else {}
+        from ferrum.themes._defaults import get_default_theme
+
+        effective_theme = chart._theme or get_default_theme()
+        theme_dict = effective_theme.to_spec_dict() if effective_theme else {}
         return spec, data, viewport, theme_dict
 
     def show_svg(self, *, raster: bool | None = None) -> str:
