@@ -10,7 +10,7 @@ There are excellent Python plotting libraries today. Each is best at one thing. 
 
 ### 1. One grammar that scales to production data size
 
-Every existing library breaks at some point — Altair around 5,000 rows, seaborn or matplotlib around 100,000 marks, plotly around 500,000. So you swap tools or APIs as data grows, and your plotting code changes with your data size. (See [benchmarks](../guide/concepts/performance-scale.md) for methodology and numbers.)
+Every existing library breaks at some point — plotnine and seaborn (both matplotlib-bound) around 100,000 marks, Altair around 5,000 rows, plotly around 500,000. The library closest to Ferrum's grammar philosophy — plotnine, a faithful ggplot2 port — inherits matplotlib's rendering ceiling, so the grammar stops scaling before the data does. (See [benchmarks](../guide/concepts/performance-scale.md) for methodology and numbers.)
 
 Ferrum keeps the same chart spec working at 100 rows and at 10,000,000 rows. Auto-raster and GPU rendering happen transparently behind the same spec — you don't author for one scale and rewrite for another.
 
@@ -42,7 +42,7 @@ Ferrum declares intent and computes in Rust before rendering. KDE, LOESS, bootst
 
 ## What Ferrum takes from prior art
 
-Ferrum is not built in opposition to prior libraries so much as in response to the seams between them. It inherits grammar-of-graphics layering, explicit scales, and faceting ideas from plotnine and ggplot2; typed encodings, selections, and composition ideas from Altair; statistical vocabulary and figure-level helpers from Seaborn; interactive output ideas from Plotly; and diagnostic vocabulary from Yellowbrick and scikit-plot.
+Ferrum is not built in opposition to prior libraries so much as in response to the seams between them. Its closest ancestor is plotnine — the grammar-of-graphics layering, explicit scales, and faceting philosophy come directly from plotnine and ggplot2. But plotnine is bound to matplotlib for rendering and pandas for data, which limits its scale ceiling, its interactivity story, and its composition model (layers and facets, but no arbitrary chart concatenation). Ferrum takes that grammar foundation and rebuilds it on a Rust engine with Arrow-based data transport, then extends it with typed encodings and selection ideas from Altair, statistical vocabulary and figure-level helpers from Seaborn, interactive output ideas from Plotly, and diagnostic vocabulary from Yellowbrick and scikit-plot.
 
 What Ferrum rejects is not the value of those libraries, but the fractures between their strengths. You should not have to choose between a grammar library, an interactive library, and a diagnostics library depending on the day's task.
 

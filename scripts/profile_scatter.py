@@ -1,8 +1,13 @@
-"""Profile ferrum vs Altair vs seaborn: scatter with tooltips.
+"""Profile ferrum vs Altair vs seaborn vs Plotly vs plotnine: scatter with tooltips.
 
 Runs at multiple scales (200k and 1M by default). Measures render time
 (wall clock, median of 3 runs) and output file size for SVG, PNG, and
 interactive HTML formats.
+
+Usage:
+    python scripts/profile_scatter.py                  # run all libraries
+    python scripts/profile_scatter.py --only plotnine  # run one library
+    python scripts/profile_scatter.py --only ferrum,plotnine  # run a subset
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import polars as pl
 
 SCALES = [200_000, 1_000_000]
 RUNS = 3
+ALL_LIBS = ["ferrum", "altair", "seaborn", "plotly", "plotnine"]
 
 tmp = Path(tempfile.mkdtemp(prefix="ferrum_profile_"))
 
@@ -241,6 +247,145 @@ def bench_seaborn(n: int) -> dict:
     raise RuntimeError(f"No JSON in seaborn output:\n{result.stdout}")
 
 
+# ── plotly (isolated subprocess) ────────────────────────────────────
+PLOTLY_SCRIPT = r'''
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["plotly>=5", "kaleido>=0.2", "numpy"]
+# ///
+import json, os, sys, time
+import numpy as np, plotly.graph_objects as go
+
+N = int(sys.argv[2])
+RUNS = 3
+rng = np.random.default_rng(42)
+x, y = rng.normal(0,1,N), rng.normal(0,1,N)
+tmp = sys.argv[1]
+
+def _fig():
+    fig = go.Figure(go.Scattergl(x=x, y=y, mode="markers",
+                                  marker=dict(size=3, opacity=0.3)))
+    fig.update_layout(width=500, height=400, title=f"Scatter — {N:,} points")
+    return fig
+
+# SVG
+svg_path = f"{tmp}/plotly_{N}.svg"
+times_svg = []
+for _ in range(RUNS):
+    t0 = time.perf_counter()
+    _fig().write_image(svg_path, format="svg")
+    times_svg.append(time.perf_counter() - t0)
+
+# PNG
+png_path = f"{tmp}/plotly_{N}.png"
+times_png = []
+for _ in range(RUNS):
+    t0 = time.perf_counter()
+    _fig().write_image(png_path, format="png")
+    times_png.append(time.perf_counter() - t0)
+
+# HTML
+html_path = f"{tmp}/plotly_{N}.html"
+times_html = []
+for _ in range(RUNS):
+    t0 = time.perf_counter()
+    _fig().write_html(html_path)
+    times_html.append(time.perf_counter() - t0)
+
+print(json.dumps({
+    "svg_time": sorted(times_svg)[RUNS//2],
+    "svg_size": os.path.getsize(svg_path),
+    "png_time": sorted(times_png)[RUNS//2],
+    "png_size": os.path.getsize(png_path),
+    "html_time": sorted(times_html)[RUNS//2],
+    "html_size": os.path.getsize(html_path),
+}))
+'''
+
+
+def bench_plotly(n: int) -> dict:
+    script_path = tmp / "_plotly_bench.py"
+    script_path.write_text(PLOTLY_SCRIPT)
+    result = subprocess.run(
+        ["uv", "run", "--no-project", "--script", str(script_path), str(tmp), str(n)],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        print(f"  Plotly exited {result.returncode}", file=sys.stderr)
+        return {"crashed": True, "exit_code": result.returncode}
+    for line in result.stdout.strip().splitlines():
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError(f"No JSON in Plotly output:\n{result.stdout}")
+
+
+# ── plotnine (isolated subprocess) ─────────────────────────────────
+PLOTNINE_SCRIPT = r'''
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["plotnine>=0.13", "matplotlib>=3.8", "numpy", "pandas"]
+# ///
+import json, os, sys, time
+import matplotlib; matplotlib.use("Agg")
+import numpy as np, pandas as pd
+from plotnine import ggplot, aes, geom_point, labs, theme, element_text
+
+N = int(sys.argv[2])
+RUNS = 3
+rng = np.random.default_rng(42)
+df = pd.DataFrame({"x": rng.normal(0,1,N), "y": rng.normal(0,1,N)})
+tmp = sys.argv[1]
+
+def _plot():
+    return (ggplot(df, aes("x", "y"))
+            + geom_point(size=0.5, alpha=0.3)
+            + labs(title=f"Scatter — {N:,} points"))
+
+# SVG
+svg_path = f"{tmp}/plotnine_{N}.svg"
+times_svg = []
+for _ in range(RUNS):
+    t0 = time.perf_counter()
+    _plot().save(svg_path, format="svg", width=6.25, height=5, dpi=100, verbose=False)
+    times_svg.append(time.perf_counter() - t0)
+
+# PNG
+png_path = f"{tmp}/plotnine_{N}.png"
+times_png = []
+for _ in range(RUNS):
+    t0 = time.perf_counter()
+    _plot().save(png_path, format="png", width=6.25, height=5, dpi=100, verbose=False)
+    times_png.append(time.perf_counter() - t0)
+
+print(json.dumps({
+    "svg_time": sorted(times_svg)[RUNS//2],
+    "svg_size": os.path.getsize(svg_path),
+    "png_time": sorted(times_png)[RUNS//2],
+    "png_size": os.path.getsize(png_path),
+}))
+'''
+
+
+def bench_plotnine(n: int) -> dict:
+    script_path = tmp / "_plotnine_bench.py"
+    script_path.write_text(PLOTNINE_SCRIPT)
+    result = subprocess.run(
+        ["uv", "run", "--no-project", "--script", str(script_path), str(tmp), str(n)],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        print(f"  plotnine exited {result.returncode}", file=sys.stderr)
+        return {"crashed": True, "exit_code": result.returncode}
+    for line in result.stdout.strip().splitlines():
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError(f"No JSON in plotnine output:\n{result.stdout}")
+
+
 # ── display ─────────────────────────────────────────────────────────
 def fmt_size(b: int | None) -> str:
     if b is None:
@@ -260,48 +405,91 @@ def fmt_time(s: float | None) -> str:
     return f"{s:.2f} s"
 
 
-def print_table(n: int, fm: dict, alt: dict, sns: dict):
-    crashed_alt = alt.get("crashed", False)
-    W = 80
+BENCH_FUNCS = {
+    "ferrum": lambda n: bench_ferrum(n, force_raster=True),
+    "altair": bench_altair,
+    "seaborn": bench_seaborn,
+    "plotly": bench_plotly,
+    "plotnine": bench_plotnine,
+}
+
+DISPLAY_NAMES = {
+    "ferrum": "Ferrum",
+    "altair": "Altair",
+    "seaborn": "Seaborn",
+    "plotly": "Plotly",
+    "plotnine": "plotnine",
+}
+
+METRICS = [
+    ("SVG render time", "svg_time", fmt_time),
+    ("SVG file size", "svg_size", fmt_size),
+    ("PNG render time", "png_time", fmt_time),
+    ("PNG file size", "png_size", fmt_size),
+    ("HTML render+save", "html_time", fmt_time),
+    ("HTML file size", "html_size", fmt_size),
+]
+
+
+def print_table(n: int, results: dict[str, dict], libs: list[str]):
+    col_w = 15
+    label_w = 32
+    header_libs = [DISPLAY_NAMES[lib] for lib in libs]
+    W = label_w + col_w * len(libs)
     print()
     print(f"  {n:,} points (median of {RUNS} runs)")
     print("=" * W)
-    print(f"{'Metric':<32} {'Ferrum':>15} {'Altair':>15} {'Seaborn':>15}")
+    print(f"{'Metric':<{label_w}}" + "".join(f"{name:>{col_w}}" for name in header_libs))
     print("-" * W)
 
-    def t(d, k):
-        return "OOM" if d.get("crashed") else fmt_time(d.get(k))
+    for label, key, formatter in METRICS:
+        vals = []
+        for lib in libs:
+            d = results.get(lib, {})
+            if d.get("crashed"):
+                vals.append("OOM")
+            else:
+                vals.append(formatter(d.get(key)))
+        print(f"{label:<{label_w}}" + "".join(f"{v:>{col_w}}" for v in vals))
 
-    def s(d, k):
-        return "OOM" if d.get("crashed") else fmt_size(d.get(k))
+    for lib in libs:
+        d = results.get(lib, {})
+        if d.get("crashed"):
+            print(f"{DISPLAY_NAMES[lib] + ' status':<{label_w}}" +
+                  "".join(f"{'OOM (exit ' + str(d['exit_code']) + ')' if l == lib else '—':>{col_w}}" for l in libs))
 
-    print(f"{'SVG render time':<32} {fmt_time(fm['svg_time']):>15} {t(alt, 'svg_time'):>15} {fmt_time(sns.get('svg_time')):>15}")
-    print(f"{'SVG file size':<32} {fmt_size(fm['svg_size']):>15} {s(alt, 'svg_size'):>15} {fmt_size(sns.get('svg_size')):>15}")
-    print(f"{'PNG render time':<32} {fmt_time(fm['png_time']):>15} {'—':>15} {fmt_time(sns.get('png_time')):>15}")
-    print(f"{'PNG file size':<32} {fmt_size(fm['png_size']):>15} {'—':>15} {fmt_size(sns.get('png_size')):>15}")
-    print(f"{'HTML render+save':<32} {fmt_time(fm['html_time']):>15} {t(alt, 'html_time'):>15} {'—':>15}")
-    print(f"{'HTML file size':<32} {fmt_size(fm['html_size']):>15} {s(alt, 'html_size'):>15} {'—':>15}")
-    if not crashed_alt:
-        print(f"{'Altair spec gen':<32} {'—':>15} {fmt_time(alt.get('spec_gen_time')):>15} {'—':>15}")
-    else:
-        print(f"{'Altair status':<32} {'—':>15} {'OOM (exit ' + str(alt['exit_code']) + ')':>15} {'—':>15}")
     print("=" * W)
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Benchmark scatter plot rendering")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Comma-separated list of libraries to benchmark (e.g. --only plotnine,ferrum)")
+    args = parser.parse_args()
+
+    if args.only:
+        libs = [lib.strip() for lib in args.only.split(",")]
+        for lib in libs:
+            if lib not in BENCH_FUNCS:
+                parser.error(f"Unknown library: {lib!r}. Choose from: {', '.join(ALL_LIBS)}")
+    else:
+        libs = ALL_LIBS
+
     print(f"Temp dir: {tmp}")
+    print(f"Libraries: {', '.join(libs)}")
 
     for n in SCALES:
         print(f"\n--- {n:,} points ---")
-        print("  ferrum (raster)...", end=" ", flush=True)
-        fm = bench_ferrum(n, force_raster=True)
-        print("done")
-        print("  altair...", end=" ", flush=True)
-        alt = bench_altair(n)
-        print("done" if not alt.get("crashed") else f"OOM (exit {alt['exit_code']})")
-        print("  seaborn...", end=" ", flush=True)
-        sns = bench_seaborn(n)
-        print("done" if not sns.get("crashed") else f"crashed (exit {sns['exit_code']})")
-        print_table(n, fm, alt, sns)
+        results: dict[str, dict] = {}
+        for lib in libs:
+            label = DISPLAY_NAMES[lib]
+            print(f"  {label}...", end=" ", flush=True)
+            result = BENCH_FUNCS[lib](n)
+            crashed = result.get("crashed", False)
+            print("done" if not crashed else f"OOM (exit {result['exit_code']})")
+            results[lib] = result
+        print_table(n, results, libs)
 
     print(f"\nAll files in {tmp}")

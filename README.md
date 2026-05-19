@@ -56,29 +56,29 @@ Twelve built-in themes — from warm cream (Paper Ink, the default) to dark, pub
 
 **200,000-point scatter benchmark** (median of 3 runs, Apple M-series):
 
-| Metric | Ferrum | Altair | seaborn | Plotly |
-|---|---|---|---|---|
-| SVG render | **27 ms** | 2.86 s | 1.95 s | 2.51 s |
-| SVG file size | 590 KB | 57.8 MB | 32.6 MB | 267 KB |
-| PNG render | **78 ms** | — | 119 ms | 2.50 s |
-| Interactive HTML | **4.9 MB** | 14.3 MB | — | 9.8 MB |
+| Metric | Ferrum | plotnine | seaborn | Altair | Plotly |
+|---|---|---|---|---|---|
+| SVG render | **27 ms** | 7.56 s | 1.95 s | 2.86 s | 2.51 s |
+| SVG file size | 590 KB | 137 MB | 32.6 MB | 57.8 MB | 267 KB |
+| PNG render | **78 ms** | 2.35 s | 119 ms | — | 2.50 s |
+| Interactive HTML | **4.9 MB** | — | — | 14.3 MB | 9.8 MB |
 
-At 1M points, Altair OOMs. Ferrum renders in 57 ms. [Full benchmarks →](https://ferrumviz.com/guide/concepts/performance-scale/)
+At 1M points, Altair OOMs and plotnine takes 39 s. Ferrum renders in 57 ms. [Full benchmarks →](https://ferrumviz.com/guide/concepts/performance-scale/)
 
 ## How Ferrum compares
 
-|  | Ferrum | seaborn | Altair | Plotly |
-|---|---|---|---|---|
-| Grammar of graphics | Layered, typed encodings, faceting, scales | Convenience helpers over matplotlib | Vega-Lite declarative spec | Imperative trace-based |
-| Model diagnostics | 44 helpers, 28 visualizer classes — same `Chart` objects | — | — | — |
-| Composition | `+` layer, `\|` hconcat, `&` vconcat | Manual subplot management | `\|`, `&` (Vega-Lite) | `make_subplots` |
-| Interactivity | WASM/GPU renderer, selections, linked views | matplotlib backends | Vega-Lite selections | Plotly.js (full-featured) |
-| Scale ceiling | 10M+ rows (auto-raster) | ~100k marks | ~5k rows | ~500k marks |
-| DataFrame support | polars, pandas, modin, cuDF, dask, ibis, pyarrow | pandas only | pandas, polars | pandas, polars |
-| System deps | None — pure wheel | matplotlib (Cairo/Tk/Qt) | None | None |
-| Rendering backend | Rust (SVG, CPU raster, GPU/WASM) | matplotlib | Vega-Lite (browser/V8) | Plotly.js (browser/kaleido) |
+|  | Ferrum | plotnine | seaborn | Altair | Plotly |
+|---|---|---|---|---|---|
+| Grammar | Layered, typed encodings, faceting | ggplot2 port, full GoG | Convenience helpers | Vega-Lite declarative | Imperative traces |
+| Diagnostics | 44 helpers, 28 visualizers | — | — | — | — |
+| Composition | `+` `\|` `&` operators | `+` layers, facets only | Manual subplots | `\|` `&` (Vega-Lite) | `make_subplots` |
+| Interactivity | WASM/GPU, selections, linked views | matplotlib backends | matplotlib backends | Vega-Lite selections | Plotly.js |
+| Scale ceiling | 10M+ rows | ~100k marks | ~100k marks | ~5k rows | ~500k marks |
+| DataFrames | polars, pandas, modin, cuDF, dask, ibis | pandas only | pandas only | pandas, polars | pandas, polars |
+| System deps | None | matplotlib | matplotlib | None | None |
+| Backend | Rust (SVG, raster, WASM) | matplotlib | matplotlib | Vega-Lite (V8) | Plotly.js (kaleido) |
 
-[Detailed migration guides →](https://ferrumviz.com/comparison/) for seaborn, yellowbrick, and scikit-plot.
+[Detailed migration guides →](https://ferrumviz.com/comparison/) for plotnine, seaborn, yellowbrick, and scikit-plot.
 
 ## Examples
 

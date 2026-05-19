@@ -49,54 +49,54 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 !!! tip "Auto-raster in practice"
     A 1M-point scatter that would produce a **57 MB** SVG with one `<circle>` per mark becomes a **606 KB** SVG when auto-raster kicks in — same chart, same spec, two orders of magnitude smaller output.
 
-### Scatter benchmark: Ferrum vs. Altair vs. seaborn vs. Plotly
+### Scatter benchmark: Ferrum vs. Altair vs. seaborn vs. Plotly vs. plotnine
 
-Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Plotly uses ScatterGL (WebGL-backed) with kaleido for static exports.
+Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Plotly uses ScatterGL (WebGL-backed) with kaleido for static exports. plotnine uses the same matplotlib backends as seaborn but adds a ggplot2-style grammar layer.
 
 #### 200,000 points
 
-| Metric | Ferrum | Altair | seaborn | Plotly |
-|---|---|---|---|---|
-| SVG render time | **27 ms** | 2.86 s | 1.95 s | 2.51 s |
-| SVG file size | 590 KB | 57.8 MB | 32.6 MB | **267 KB** |
-| PNG render time | **78 ms** | — | 119 ms | 2.50 s |
-| PNG file size | 383 KB | — | **141 KB** | 59 KB |
-| Interactive HTML render + save | 67 ms | 482 ms | — | **43 ms** |
-| Interactive HTML file size | **4.9 MB** | 14.3 MB | — | 9.8 MB |
+| Metric | Ferrum | Altair | seaborn | Plotly | plotnine |
+|---|---|---|---|---|---|
+| SVG render time | **27 ms** | 2.86 s | 1.95 s | 2.51 s | 7.56 s |
+| SVG file size | 590 KB | 57.8 MB | 32.6 MB | **267 KB** | 137.0 MB |
+| PNG render time | **78 ms** | — | 119 ms | 2.50 s | 2.35 s |
+| PNG file size | 383 KB | — | **141 KB** | 59 KB | 99 KB |
+| Interactive HTML render + save | 67 ms | 482 ms | — | **43 ms** | — |
+| Interactive HTML file size | **4.9 MB** | 14.3 MB | — | 9.8 MB | — |
 
-Ferrum SVG is **93x faster** than Plotly, **106x faster** than Altair, and **72x faster** than seaborn. Plotly's SVG is smallest (267 KB) because ScatterGL emits a single canvas-like element; ferrum's auto-raster produces a comparable 590 KB. Altair and seaborn emit individual SVG elements (32–58 MB).
+Ferrum SVG is **280x faster** than plotnine, **106x faster** than Altair, **93x faster** than Plotly, and **72x faster** than seaborn. plotnine is the slowest library tested — its ggplot2 grammar layer adds ~4x overhead on top of matplotlib's own SVG backend (7.56 s vs. seaborn's 1.95 s) and produces the largest SVG (137 MB). Plotly's SVG is smallest (267 KB) because ScatterGL emits a single canvas-like element; ferrum's auto-raster produces a comparable 590 KB.
 
-Ferrum PNG is fastest (78 ms), seaborn close behind (119 ms). Plotly is very slow (2.5 s) because kaleido spins up headless Chromium for each export.
+Ferrum PNG is fastest (78 ms), seaborn close behind (119 ms). plotnine (2.35 s) and Plotly (2.50 s) are both ~20–30x slower — plotnine due to grammar overhead on top of matplotlib Agg, Plotly due to kaleido's Chromium startup.
 
-Plotly's interactive HTML is slightly faster to save (43 ms vs. 67 ms) — it serializes the plotly.js JSON spec without pre-rendering. Ferrum pre-renders the scene graph and embeds WASM, producing **2x smaller** output (4.9 MB vs. 9.8 MB).
+Plotly's interactive HTML is slightly faster to save (43 ms vs. 67 ms) — it serializes the plotly.js JSON spec without pre-rendering. Ferrum pre-renders the scene graph and embeds WASM, producing **2x smaller** output (4.9 MB vs. 9.8 MB). Neither plotnine nor seaborn produce interactive output.
 
 #### 1,000,000 points
 
-| Metric | Ferrum | Altair | seaborn | Plotly |
-|---|---|---|---|---|
-| SVG render time | **57 ms** | OOM crash | 8.55 s | 3.56 s |
-| SVG file size | 607 KB | OOM crash | 162.9 MB | **253 KB** |
-| PNG render time | **112 ms** | — | 451 ms | 3.69 s |
-| PNG file size | 386 KB | — | **163 KB** | 56 KB |
-| Interactive HTML render + save | **125 ms** | OOM crash | — | 149 ms |
-| Interactive HTML file size | **5.0 MB** | OOM crash | — | 30.6 MB |
+| Metric | Ferrum | Altair | seaborn | Plotly | plotnine |
+|---|---|---|---|---|---|
+| SVG render time | **57 ms** | OOM crash | 8.55 s | 3.56 s | 38.82 s |
+| SVG file size | 607 KB | OOM crash | 162.9 MB | **253 KB** | 685.0 MB |
+| PNG render time | **112 ms** | — | 451 ms | 3.69 s | 11.42 s |
+| PNG file size | 386 KB | — | **163 KB** | 56 KB | 93 KB |
+| Interactive HTML render + save | **125 ms** | OOM crash | — | 149 ms | — |
+| Interactive HTML file size | **5.0 MB** | OOM crash | — | 30.6 MB | — |
 
 **Altair cannot participate at 1M points.** vl-convert's embedded V8 hits the heap limit (exit 133 / SIGKILL) trying to serialize 1M rows through the Vega-Lite runtime.
 
-Ferrum SVG is **62x faster** than Plotly (57 ms vs. 3.56 s) and **150x faster** than seaborn (57 ms vs. 8.55 s). Plotly's SVG is smallest (253 KB) but takes 3.5 s to produce via kaleido. Ferrum's auto-raster gives 607 KB in 57 ms.
+Ferrum SVG is **681x faster** than plotnine (57 ms vs. 38.82 s), **150x faster** than seaborn, and **62x faster** than Plotly. plotnine's 685 MB SVG is the largest output in the benchmark — over 4x larger than seaborn's 163 MB. Plotly's SVG is smallest (253 KB) but takes 3.5 s to produce via kaleido. Ferrum's auto-raster gives 607 KB in 57 ms.
 
-Ferrum PNG is fastest (112 ms), seaborn 4x slower (451 ms), Plotly 33x slower (3.69 s). Kaleido's Chromium overhead dominates at every scale.
+Ferrum PNG is fastest (112 ms), seaborn 4x slower (451 ms), plotnine 102x slower (11.42 s), Plotly 33x slower (3.69 s). plotnine's grammar overhead compounds at scale — where seaborn takes 451 ms, plotnine takes 11.42 s for the same matplotlib Agg output.
 
-Both Ferrum and Plotly produce interactive HTML at 1M. Ferrum is slightly faster (125 ms vs. 149 ms) and **6x smaller** (5.0 MB vs. 30.6 MB). Plotly's HTML balloons because it embeds all 1M data points as JSON; ferrum uses a binary buffer.
+Both Ferrum and Plotly produce interactive HTML at 1M. Ferrum is slightly faster (125 ms vs. 149 ms) and **6x smaller** (5.0 MB vs. 30.6 MB). Plotly's HTML balloons because it embeds all 1M data points as JSON; ferrum uses a binary buffer. plotnine has no interactive output.
 
 #### Key takeaways
 
-1. **Ferrum dominates SVG render speed** — fastest at both scales by 60–150x margins. Auto-raster collapses N individual elements into one embedded raster image.
-2. **Plotly produces the smallest static files** — ScatterGL's WebGL canvas approach yields tiny SVGs (253–267 KB) and PNGs (56–59 KB), but at the cost of 2.5–3.7 s kaleido overhead per export.
-3. **Seaborn dominates PNG speed** — matplotlib's Agg rasterizer (119 ms at 200k, 451 ms at 1M) is purpose-built for direct pixel output. With auto-raster, ferrum is competitive (78 ms at 200k, 112 ms at 1M).
-4. **Altair hits a hard ceiling** — the V8/Vega-Lite architecture OOMs at 1M points. At 200k it works but produces the largest files.
-5. **Interactive HTML: ferrum wins at scale** — both ferrum and Plotly produce interactive HTML at 1M, but ferrum's binary-buffer approach keeps output at 5.0 MB vs. Plotly's 30.6 MB (6x smaller).
-6. **Kaleido is Plotly's bottleneck** — spinning up headless Chromium makes every static export take 2.5–3.7 s regardless of data size. For interactive HTML (no kaleido), Plotly is competitive with ferrum on speed.
+1. **Ferrum dominates SVG render speed** — fastest at both scales by 60–681x margins. Auto-raster collapses N individual elements into one embedded raster image.
+2. **plotnine is the slowest library tested** — the ggplot2 grammar layer adds 3–5x overhead on top of matplotlib at every scale and format. Despite being the closest grammar-of-graphics peer to ferrum, it inherits matplotlib's worst scaling characteristics and amplifies them. This is the core case for why a grammar library needs its own rendering engine rather than layering grammar on top of matplotlib.
+3. **Plotly produces the smallest static files** — ScatterGL's WebGL canvas approach yields tiny SVGs (253–267 KB) and PNGs (56–59 KB), but at the cost of 2.5–3.7 s kaleido overhead per export.
+4. **Seaborn is the fastest matplotlib-based option** — raw matplotlib Agg (119 ms at 200k, 451 ms at 1M) beats plotnine by 20–25x on PNG, showing the cost of the grammar abstraction layer.
+5. **Altair hits a hard ceiling** — the V8/Vega-Lite architecture OOMs at 1M points. At 200k it works but produces the largest files after plotnine.
+6. **Interactive HTML: ferrum wins at scale** — both ferrum and Plotly produce interactive HTML at 1M, but ferrum's binary-buffer approach keeps output at 5.0 MB vs. Plotly's 30.6 MB (6x smaller). Neither Altair, seaborn, nor plotnine produce interactive output at this scale.
 7. **Auto-raster changes the game for SVG** — without it, ferrum's 200k SVG was 20.9 MB / 1.20 s. With it: 590 KB / 27 ms. The default threshold (500k marks) means users get this automatically at high counts.
 
 ## SHAP and ICE at full sample size
