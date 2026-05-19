@@ -119,6 +119,7 @@ uv run pytest                                            # run tests
 
 ## How this was built
 
+> [!NOTE]
 > **Built in 10 days** by one human and an agentic Claude framework.
 > 975 commits · 103k lines · 3,829 tests · 12 phases · 13 agents · 16 skills
 >
