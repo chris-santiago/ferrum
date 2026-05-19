@@ -45,6 +45,7 @@ nav = [
   ] },
   { Gallery = "gallery/index.md" },
   { Comparison = [
+    { "vs plotnine" = "comparison/plotnine.md" },
     { "vs seaborn" = "comparison/seaborn.md" },
     { "vs yellowbrick" = "comparison/yellowbrick.md" },
     { "vs scikit-plot" = "comparison/scikit-plot.md" },

@@ -78,7 +78,7 @@ At 1M points, Altair OOMs and plotnine takes 39 s. Ferrum renders in 57 ms. [Ful
 | System deps | None | matplotlib | matplotlib | None | None |
 | Backend | Rust (SVG, raster, WASM) | matplotlib | matplotlib | Vega-Lite (V8) | Plotly.js (kaleido) |
 
-[Detailed migration guides →](https://ferrumviz.com/comparison/) for plotnine, seaborn, yellowbrick, and scikit-plot.
+[Detailed migration guides →](https://ferrumviz.com/comparison/plotnine/) for plotnine, seaborn, yellowbrick, and scikit-plot.
 
 ## Examples
 
