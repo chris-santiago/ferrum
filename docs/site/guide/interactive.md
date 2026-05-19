@@ -31,6 +31,8 @@ chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 chart.interactive()
 ```
 
+<iframe src="../assets/demos/01_basic_interactive.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
+
 The chart object is unchanged — `.interactive()` switches the render target from SVG to a WASM canvas widget. The same chart still works with `.show_svg()`, `.save("out.svg")`, and every other static render path. Selections and zoom/pan are silently ignored in static output.
 
 ## Selections
@@ -60,6 +62,8 @@ chart = (
     .interactive()
 )
 ```
+
+<iframe src="../assets/demos/02_point_selection.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
 
 Clicking a mark selects all marks that share the same `group` value. Shift-click toggles additional selections (controlled by `toggle="event.shiftKey"`, the default). Use [`selection_single`][ferrum.selection_single] to disable toggling, or [`selection_multi`][ferrum.selection_multi] for explicit multi-select.
 
@@ -96,6 +100,8 @@ chart = (
     .interactive()
 )
 ```
+
+<iframe src="../assets/demos/03_interval_selection.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
 
 Dragging on the canvas creates a rectangular brush. Marks inside the brush are selected; marks outside are not. The brush can be panned (`translate=True`) and zoomed with the mousewheel (`zoom=True`).
 
@@ -136,6 +142,8 @@ chart = (
 )
 ```
 
+<iframe src="../assets/demos/04_conditional_color.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
+
 Clicking a point colors all marks of the same species; unselected marks turn grey. The [`value`][ferrum.value] wrapper marks a literal (a hex color, an opacity float) for use in the conditional.
 
 You can also apply conditionals to `opacity` and `size`:
@@ -155,6 +163,8 @@ chart = (
     .interactive()
 )
 ```
+
+<iframe src="../assets/demos/05_conditional_opacity.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
 
 ## Zoom and pan
 
@@ -201,6 +211,8 @@ bars = (
 
 linked = scatter | bars
 ```
+
+<iframe src="../assets/demos/06_linked_views.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
 
 Clicking a point in the scatter selects all marks that share the same `category` value — in both panels. The `|` operator composes both charts into a side-by-side view — the same operator used for static concatenation, no separate "link API." The `fields=["category"]` parameter tells the selection to match marks by field value rather than by data index, which is what enables cross-panel linking even when the two charts have different data shapes (the bar chart uses an aggregate transform).
 
