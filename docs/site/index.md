@@ -12,6 +12,10 @@ One chart model for statistical graphics, interactive views, and ML diagnostics.
 [Get started :material-arrow-right:](getting-started/install.md){ .md-button .md-button--primary }
 [Why Ferrum](getting-started/why-ferrum.md){ .md-button }
 
+<figure markdown="span">
+  ![Ferrum chart examples: linear model, decision boundary, pairplot, SHAP beeswarm](assets/images/hero-strip.png){ width="100%" }
+</figure>
+
 ---
 
 ## One mental model, from scatter plot to SHAP summary
