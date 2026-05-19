@@ -8,36 +8,36 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 
 | plotnine | Ferrum | Notes |
 |---|---|---|
-| `ggplot(df, aes(x, y))` | `fm.Chart(df).encode(x=, y=)` | Aesthetics become encoding channels. |
-| `geom_point()` | `.mark_point()` | — |
-| `geom_line()` | `.mark_line()` | — |
-| `geom_bar(stat="identity")` | `.mark_bar()` | — |
-| `geom_col()` | `.mark_bar()` | — |
-| `geom_histogram()` | `.mark_histogram()` | Binning computed in Rust. |
-| `geom_density()` | `.mark_density()` | KDE computed in Rust. |
-| `geom_smooth()` | `.mark_smooth()` | `method=` accepts `"lm"`, `"loess"`, `"lowess"`, `"poly"`. |
-| `geom_boxplot()` | `.mark_boxplot()` | — |
-| `geom_violin()` | `.mark_violin()` | — |
-| `geom_tile()` | `.mark_rect()` | — |
-| `geom_text()` | `.mark_text()` | — |
-| `geom_hline()` / `geom_vline()` | `.mark_rule()` | — |
-| `geom_area()` | `.mark_area()` | — |
-| `geom_errorbar()` | `.mark_errorbar()` | — |
-| `geom_ribbon()` | `.mark_ribbon()` | — |
-| `geom_qq()` | `.mark_qq()` | — |
-| `geom_contour()` | `.mark_contour()` | — |
-| `geom_hex()` | `.mark_hex()` | — |
-| `stat_smooth(method="lm")` | `.mark_smooth(method="lm")` | Stats are part of the mark declaration. |
-| `stat_bin()` | `.mark_histogram()` | — |
-| `stat_density()` | `.mark_density()` | — |
+| `ggplot(df, aes(x, y))` | [`fm.Chart(df)`][ferrum.Chart]`.encode(x=, y=)` | Aesthetics become encoding channels. |
+| `geom_point()` | [`.mark_point()`][ferrum.Chart.mark_point] | — |
+| `geom_line()` | [`.mark_line()`][ferrum.Chart.mark_line] | — |
+| `geom_bar(stat="identity")` | [`.mark_bar()`][ferrum.Chart.mark_bar] | — |
+| `geom_col()` | [`.mark_bar()`][ferrum.Chart.mark_bar] | — |
+| `geom_histogram()` | [`.mark_histogram()`][ferrum.Chart.mark_histogram] | Binning computed in Rust. |
+| `geom_density()` | [`.mark_density()`][ferrum.Chart.mark_density] | KDE computed in Rust. |
+| `geom_smooth()` | [`.mark_smooth()`][ferrum.Chart.mark_smooth] | `method=` accepts `"lm"`, `"loess"`, `"lowess"`, `"poly"`. |
+| `geom_boxplot()` | [`.mark_boxplot()`][ferrum.Chart.mark_boxplot] | — |
+| `geom_violin()` | [`.mark_violin()`][ferrum.Chart.mark_violin] | — |
+| `geom_tile()` | [`.mark_rect()`][ferrum.Chart.mark_rect] | — |
+| `geom_text()` | [`.mark_text()`][ferrum.Chart.mark_text] | — |
+| `geom_hline()` / `geom_vline()` | [`.mark_rule()`][ferrum.Chart.mark_rule] | — |
+| `geom_area()` | [`.mark_area()`][ferrum.Chart.mark_area] | — |
+| `geom_errorbar()` | [`.mark_errorbar()`][ferrum.Chart.mark_errorbar] | — |
+| `geom_ribbon()` | [`.mark_ribbon()`][ferrum.Chart.mark_ribbon] | — |
+| `geom_qq()` | [`.mark_qq()`][ferrum.Chart.mark_qq] | — |
+| `geom_contour()` | [`.mark_contour()`][ferrum.Chart.mark_contour] | — |
+| `geom_hex()` | [`.mark_hex()`][ferrum.Chart.mark_hex] | — |
+| `stat_smooth(method="lm")` | [`.mark_smooth(method="lm")`][ferrum.Chart.mark_smooth] | Stats are part of the mark declaration. |
+| `stat_bin()` | [`.mark_histogram()`][ferrum.Chart.mark_histogram] | — |
+| `stat_density()` | [`.mark_density()`][ferrum.Chart.mark_density] | — |
 | `facet_wrap(~var)` | `.encode(facet="var")` | Faceting is an encoding channel. |
 | `facet_grid(row~col)` | `.encode(facet_row="row", facet_col="col")` | — |
 | `scale_x_log10()` | `.encode(x=fm.X("x", scale=fm.Scale(type="log")))` | Scales are values, not global functions. |
 | `coord_flip()` | `.coord("flip")` | — |
 | `labs(title=, x=, y=)` | `.properties(title=)` | Axis labels inferred from field names or set via `fm.X("field", title="Label")`. |
 | `theme_bw()` | `fm.themes.minimal` | See [Themes](../guide/themes.md) for all 12. |
-| `theme_set()` | `fm.set_default_theme()` | Scope-bounded via context manager; per-chart `.theme()` always wins. |
-| `ggsave()` | `.save()` | Supports SVG, PNG, HTML. |
+| `theme_set()` | [`fm.set_default_theme()`][ferrum.set_default_theme] | Scope-bounded via context manager; per-chart [`.theme()`][ferrum.Chart.theme] always wins. |
+| `ggsave()` | [`.save()`][ferrum.Chart.save] | Supports SVG, PNG, HTML. |
 
 ## Key differences
 
@@ -83,15 +83,15 @@ plotnine inherits matplotlib's rendering pipeline, which means individual SVG el
 
 ### DataFrame pluralism
 
-plotnine requires pandas. Ferrum accepts polars, pandas, modin, cuDF, dask, ibis, and pyarrow through the same `Chart(data)` constructor.
+plotnine requires pandas. Ferrum accepts polars, pandas, modin, cuDF, dask, ibis, and pyarrow through the same [`Chart(data)`][ferrum.Chart] constructor.
 
 ### Interactive rendering
 
-plotnine has no built-in interactivity beyond matplotlib's GUI backends. Ferrum's `.interactive()` produces a GPU-backed WASM renderer with selections, zoom/pan, linked views, and tooltips — in Jupyter via anywidget or as standalone HTML.
+plotnine has no built-in interactivity beyond matplotlib's GUI backends. Ferrum's [`.interactive()`][ferrum.Chart.interactive] produces a GPU-backed WASM renderer with selections, zoom/pan, linked views, and tooltips — in Jupyter via anywidget or as standalone HTML.
 
 ### Model diagnostics
 
-plotnine has no model evaluation surface. Ferrum includes 44 figure-level helpers and 28 visualizer classes for classification, regression, clustering, and explainability diagnostics — all returning the same `Chart` objects that compose with grammar operators.
+plotnine has no model evaluation surface. Ferrum includes 44 figure-level helpers and 28 visualizer classes for classification, regression, clustering, and explainability diagnostics — all returning the same [`Chart`][ferrum.Chart] objects that compose with grammar operators. See [Model diagnostics](../guide/model-diagnostics.md) for the full surface.
 
 ### Themes are values, not global state
 
@@ -121,13 +121,13 @@ plotnine delegates statistical computation to scipy and statsmodels via matplotl
 | Primitive marks | point, line, bar, area, tile, text, rule, segment, step | All of plotnine's + tick, rect, image |
 | Statistical marks | histogram, density, smooth, boxplot, violin, qq, hex, contour, ribbon, errorbar | All of plotnine's + boxen, swarm, raster, function |
 | Faceting | `facet_wrap`, `facet_grid` | `facet`, `facet_row`, `facet_col` encoding channels |
-| Composition | `+` (layers only) | `+` layer, `\|` hconcat, `&` vconcat, `RepeatChart`, `JointChart` |
+| Composition | `+` (layers only) | `+` layer, `\|` [`hconcat`][ferrum.hconcat], `&` [`vconcat`][ferrum.vconcat], [`RepeatChart`][ferrum.RepeatChart], [`JointChart`][ferrum.JointChart] |
 | Coordinates | `coord_flip`, `coord_fixed`, `coord_cartesian`, `coord_polar` | `"flip"`, `"polar"`, `"theta"`, `"radial"` |
-| Scales | Full ggplot2 scale system | Typed scale values with `fm.Scale(type=, domain=, range=)` |
-| Themes | ggplot2 theme system (bw, classic, minimal, etc.) | 12 built-in themes (Paper Ink, Slate Citrus, Dark, Publication, Economist, etc.) |
-| Interactivity | matplotlib backends only | WASM/GPU renderer with selections, zoom/pan, linked views |
-| Model diagnostics | — | 44 helpers, 28 visualizer classes (ROC, PR, confusion matrix, SHAP, PDP, etc.) |
-| DataFrames | pandas only | polars, pandas, modin, cuDF, dask, ibis, pyarrow |
+| Scales | Full ggplot2 scale system | Typed scale values with [`fm.Scale(type=, domain=, range=)`][ferrum.Scale] |
+| Themes | ggplot2 theme system (bw, classic, minimal, etc.) | 12 built-in themes (Paper Ink, Slate Citrus, Dark, Publication, Economist, etc.). See [Themes](../guide/themes.md). |
+| Interactivity | matplotlib backends only | WASM/GPU renderer with selections, zoom/pan, linked views via [`.interactive()`][ferrum.Chart.interactive] |
+| Model diagnostics | — | 44 helpers, 28 visualizer classes ([ROC][ferrum.roc_chart], [PR][ferrum.pr_chart], [confusion matrix][ferrum.confusion_matrix_chart], [SHAP][ferrum.shap_beeswarm_chart], [PDP][ferrum.pdp_chart], etc.) via [`ModelSource`][ferrum.ModelSource] |
+| DataFrames | pandas only | polars, pandas, modin, cuDF, dask, ibis, pyarrow via [`Chart(data)`][ferrum.Chart] |
 | System deps | matplotlib (Cairo/Tk/Qt) | None — pure wheel |
 
 ## Where to go next
