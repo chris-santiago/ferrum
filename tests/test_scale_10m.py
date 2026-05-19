@@ -7,6 +7,14 @@ All tests are marked ``slow`` and are skipped by default:
     uv run pytest              # skips slow tests
     uv run pytest -m slow      # runs all slow tests including these
     uv run pytest tests/test_scale_10m.py -m slow -v
+
+Baseline results (M4 MacBook Pro, 2026-05-19, 14.39s total):
+    Scatter 10M (auto-raster)  0.69s
+    Histogram 10M              0.58s
+    Hexbin 10M                 1.07s
+    Line 10M                   3.82s
+    Area 10M                   4.14s
+    Memory check               0.68s
 """
 
 from __future__ import annotations
