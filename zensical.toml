@@ -51,7 +51,7 @@ nav = [
     { "vs scikit-plot" = "comparison/scikit-plot.md" },
   ] },
   { "API Reference" = [
-    { "Ferrum" = "api/ferrum.md" },
+    { "Ferrum" = "api/ferrum-toc.md" },
     { "Chart" = "api/chart.md" },
     { "Marks" = "api/marks.md" },
     { "Encoding" = "api/encoding.md" },
