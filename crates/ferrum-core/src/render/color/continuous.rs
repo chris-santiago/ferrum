@@ -222,10 +222,9 @@ impl PyContinuousScheme {
 /// ----------
 /// stops : list[tuple[float, str]]
 ///     Pairs of ``t`` in ``[0, 1]`` and CSS color strings.  Each color may
-///     be an ``#rrggbb`` or ``#rrggbbaa`` hex literal, or one of the common
-///     named colors: ``"red"``, ``"green"``, ``"blue"``, ``"white"``,
-///     ``"black"``, ``"yellow"``, ``"magenta"``, ``"cyan"``,
-///     ``"gray"`` / ``"grey"``.
+///     be an ``#rrggbb`` or ``#rrggbbaa`` hex literal, or any of the 148
+///     standard CSS named colors (e.g. ``"steelblue"``, ``"tomato"``,
+///     ``"cornflowerblue"``).
 ///     Endpoints ``(0.0, ...)`` and ``(1.0, ...)`` should be present.
 ///
 /// Returns
@@ -245,38 +244,13 @@ impl PyContinuousScheme {
 pub fn Gradient(stops: Vec<(f64, String)>) -> PyResult<PyContinuousScheme> {
     let mut color_stops = Vec::with_capacity(stops.len());
     for (t, name) in stops {
-        let color = parse_color_string(&name)
+        let color = crate::render::color::parse_color(&name)
             .map_err(|e| PyValueError::new_err(format!("Gradient: {e}")))?;
         color_stops.push((t, color));
     }
     Ok(PyContinuousScheme(ContinuousScheme::Gradient(color_stops)))
 }
 
-/// Parse a color string. Accepts `#rrggbb` / `#rrggbbaa` (delegated to
-/// `categorical::from_hex_str`) and a small set of common named colors.
-fn parse_color_string(s: &str) -> Result<Color, String> {
-    let trimmed = s.trim();
-    if trimmed.starts_with('#') {
-        return crate::render::color::categorical::from_hex_str(trimmed)
-            .map_err(|e| format!("{e}"));
-    }
-    let named: Option<(u8, u8, u8)> = match trimmed.to_ascii_lowercase().as_str() {
-        "red"     => Some((255,   0,   0)),
-        "green"   => Some((  0, 128,   0)),
-        "blue"    => Some((  0,   0, 255)),
-        "white"   => Some((255, 255, 255)),
-        "black"   => Some((  0,   0,   0)),
-        "yellow"  => Some((255, 255,   0)),
-        "magenta" => Some((255,   0, 255)),
-        "cyan"    => Some((  0, 255, 255)),
-        "gray" | "grey" => Some((128, 128, 128)),
-        _ => None,
-    };
-    if let Some((r, g, b)) = named {
-        return Ok(from_rgba(r, g, b, 255));
-    }
-    Err(format!("unrecognized color: '{s}' (use a named color or #rrggbb / #rrggbbaa)"))
-}
 
 #[cfg(test)]
 mod tests {

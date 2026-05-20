@@ -44,3 +44,56 @@ def test_unbalanced_parens_raises():
 
     with pytest.raises(ValueError, match="unbalanced"):
         parse_shorthand("mean(price")
+
+
+# --- Permissive field-name tests (fix/shorthand-hyphen-parsing) ---
+
+
+def test_bare_field_with_hyphens():
+    assert parse_shorthand("raw-aucpr") == ("raw-aucpr", None, None)
+
+
+def test_field_with_hyphens_and_type():
+    assert parse_shorthand("raw-aucpr:Q") == ("raw-aucpr", "Q", None)
+
+
+def test_field_with_dots():
+    assert parse_shorthand("model.score") == ("model.score", None, None)
+    assert parse_shorthand("model.score:Q") == ("model.score", "Q", None)
+
+
+def test_field_with_spaces():
+    assert parse_shorthand("Sepal Length") == ("Sepal Length", None, None)
+    assert parse_shorthand("Sepal Length:Q") == ("Sepal Length", "Q", None)
+
+
+def test_field_with_mixed_special_chars():
+    assert parse_shorthand("col-1.2 foo") == ("col-1.2 foo", None, None)
+    assert parse_shorthand("col-1.2 foo:N") == ("col-1.2 foo", "N", None)
+
+
+def test_aggregate_with_hyphenated_field():
+    assert parse_shorthand("mean(raw-aucpr)") == ("raw-aucpr", None, "mean")
+    assert parse_shorthand("mean(raw-aucpr):Q") == ("raw-aucpr", "Q", "mean")
+
+
+def test_aggregate_with_dotted_field():
+    assert parse_shorthand("sum(model.score)") == ("model.score", None, "sum")
+
+
+def test_aggregate_with_spaced_field():
+    assert parse_shorthand("mean(Sepal Length)") == ("Sepal Length", None, "mean")
+
+
+def test_colon_in_column_name_informative_error():
+    """Column names containing ':' should produce a helpful error message."""
+    import pytest
+
+    with pytest.raises(ValueError, match=r"looks like.*type suffix"):
+        parse_shorthand("col:name:Q")
+
+    with pytest.raises(ValueError, match=r"looks like.*type suffix"):
+        parse_shorthand("ns:field")
+
+    with pytest.raises(ValueError, match=r"looks like.*type suffix"):
+        parse_shorthand("a:b:c")

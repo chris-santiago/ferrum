@@ -14,6 +14,8 @@ fn shape_from_str(s: &str) -> ShapeKind {
         "diamond" => ShapeKind::Diamond,
         "triangle-up" | "triangle_up" => ShapeKind::TriangleUp,
         "triangle-down" | "triangle_down" => ShapeKind::TriangleDown,
+        "|" | "vline" => ShapeKind::VLine,
+        "-" | "hline" => ShapeKind::HLine,
         _ => ShapeKind::Circle, // "circle" and unknown values
     }
 }
@@ -148,6 +150,32 @@ fn emit_shape_nodes(
                 ],
                 style,
                 closed: true,
+            }]
+        }
+        ShapeKind::VLine => {
+            let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
+            let arm = r * 0.7;
+            let sw = r * 0.35;
+            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            vec![SceneNode::Line {
+                x1: cx,
+                y1: cy - arm,
+                x2: cx,
+                y2: cy + arm,
+                style: s,
+            }]
+        }
+        ShapeKind::HLine => {
+            let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
+            let arm = r * 0.7;
+            let sw = r * 0.35;
+            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            vec![SceneNode::Line {
+                x1: cx - arm,
+                y1: cy,
+                x2: cx + arm,
+                y2: cy,
+                style: s,
             }]
         }
     }
@@ -812,6 +840,59 @@ mod tests {
             "row 1 angle: expected 45.0, got {}", circles[1].angle);
         assert!((circles[2].angle - 90.0).abs() < 1e-5,
             "row 2 angle: expected 90.0, got {}", circles[2].angle);
+    }
+
+    // ── VLine / HLine shape tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_shape_from_str_vline() {
+        assert_eq!(shape_from_str("|"), ShapeKind::VLine);
+        assert_eq!(shape_from_str("vline"), ShapeKind::VLine);
+    }
+
+    #[test]
+    fn test_shape_from_str_hline() {
+        assert_eq!(shape_from_str("-"), ShapeKind::HLine);
+        assert_eq!(shape_from_str("hline"), ShapeKind::HLine);
+    }
+
+    fn default_shape_style() -> ShapeStyle {
+        ShapeStyle {
+            fill: Some(crate::render::color::from_rgb(0, 0, 0)),
+            stroke: None,
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash_idx: None,
+            angle: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_emit_vline_single_vertical_line() {
+        use ferrum_scene::SceneNode;
+        let nodes = emit_shape_nodes(ShapeKind::VLine, 100.0, 100.0, 5.0, default_shape_style());
+        assert_eq!(nodes.len(), 1, "VLine should emit exactly 1 node");
+        match &nodes[0] {
+            SceneNode::Line { x1, y1: _, x2, y2: _, .. } => {
+                assert!((x1 - x2).abs() < 1e-10, "VLine x1 and x2 must be equal (vertical line): x1={x1}, x2={x2}");
+            }
+            other => panic!("Expected SceneNode::Line, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_emit_hline_single_horizontal_line() {
+        use ferrum_scene::SceneNode;
+        let nodes = emit_shape_nodes(ShapeKind::HLine, 100.0, 100.0, 5.0, default_shape_style());
+        assert_eq!(nodes.len(), 1, "HLine should emit exactly 1 node");
+        match &nodes[0] {
+            SceneNode::Line { x1: _, y1, x2: _, y2, .. } => {
+                assert!((y1 - y2).abs() < 1e-10, "HLine y1 and y2 must be equal (horizontal line): y1={y1}, y2={y2}");
+            }
+            other => panic!("Expected SceneNode::Line, got: {other:?}"),
+        }
     }
 
     #[test]

@@ -68,11 +68,15 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         import polars as pl
 
         if isinstance(data, pl.DataFrame):
-            # polars.Date (date32) is not handled by the Rust CDI transport;
-            # cast to Datetime[ms] so Arrow produces timestamp[ms] instead.
-            date_cols = [c for c in data.columns if data[c].dtype == pl.Date]
-            if date_cols:
-                data = data.with_columns([pl.col(c).cast(pl.Datetime("ms")) for c in date_cols])
+            casts = []
+            for c in data.columns:
+                dt = data[c].dtype
+                if dt == pl.Date:
+                    casts.append(pl.col(c).cast(pl.Datetime("ms")))
+                elif dt == pl.Categorical or isinstance(dt, pl.Enum):
+                    casts.append(pl.col(c).cast(pl.Utf8))
+            if casts:
+                data = data.with_columns(casts)
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
             return data.collect().to_arrow()
