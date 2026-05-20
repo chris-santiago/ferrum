@@ -540,7 +540,8 @@ class Chart(_RenderMixin):
             Whether points are filled.  Default is ``True``.
         shape : str, optional
             Point shape: ``"circle"``, ``"square"``, ``"cross"``, ``"diamond"``,
-            ``"triangle-up"``, ``"triangle-down"``.
+            ``"triangle-up"``, ``"triangle-down"``, ``"|"`` / ``"vline"``,
+            ``"-"`` / ``"hline"``.
         stroke_width : float, optional
             Stroke width in pixels.
         position : Position, optional

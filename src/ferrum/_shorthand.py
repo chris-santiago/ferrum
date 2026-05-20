@@ -14,16 +14,21 @@ import re
 from typing import Optional, Tuple
 
 _VALID_TYPES = frozenset(["Q", "N", "O", "T"])
+_FIELD = r"[^:()]+"
 _PATTERN = re.compile(
     r"""
     ^                                       # start
     (?:                                     # optional aggregate prefix:
         (?P<agg>[a-z][a-z0-9_]*)            #   agg name (lowercase identifier)
         \(                                  #   open paren
-        (?P<aggfield>[a-zA-Z_][a-zA-Z0-9_]*)?  # optional field inside parens
+        (?P<aggfield>"""
+    + _FIELD
+    + r""")?                                #   optional field inside parens
         \)                                  #   close paren
     )?
-    (?(agg)|(?P<field>[a-zA-Z_][a-zA-Z0-9_]*))  # if no agg, require bare field
+    (?(agg)|(?P<field>"""
+    + _FIELD
+    + r"""))                                # if no agg, require bare field
     (?::(?P<type>[A-Z]))?                   # optional type suffix
     $                                       # end
     """,
@@ -76,6 +81,12 @@ def parse_shorthand(s: str) -> Tuple[Optional[str], Optional[str], Optional[str]
 
     m = _PATTERN.match(s)
     if not m:
+        if ":" in s:
+            raise ValueError(
+                f"could not parse shorthand: {s!r} — it looks like the column "
+                f"name contains ':' which conflicts with the type suffix "
+                f"delimiter. Use fm.X(field='...', type='Q') instead."
+            )
         raise ValueError(f"could not parse shorthand: {s!r}")
 
     type_ = m.group("type")

@@ -1,8 +1,10 @@
-//! mark_tick: four modes —
+//! mark_tick: six modes —
 //!   quantitative x only → x-rug: vertical ticks at panel baseline;
 //!   quantitative y only → y-rug: horizontal ticks at left axis edge;
 //!   ordinal x + quantitative y → horizontal tick at data y position (boxplot median);
-//!   ordinal y + quantitative x → vertical tick at data x position (strip plot).
+//!   ordinal y + quantitative x → vertical tick at data x position (strip plot);
+//!   ordinal y only → horizontal crossbars centered on each category band;
+//!   ordinal x only → vertical crossbars centered on each category band.
 
 use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
@@ -45,9 +47,46 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let xf_opt = x_field(ctx, spec);
 
-    // Quantitative y only → y-rug: horizontal ticks at left axis edge.
+    // No x field: either ordinal-y-only or quantitative-y-rug.
     if xf_opt.is_none() {
         if let Some(yf) = y_field(ctx, spec) {
+            // Ordinal y only → horizontal crossbars centered on each category band.
+            if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
+                let ys = match col_as_str(ctx.batch, yf) {
+                    Ok(v) => v,
+                    Err(_) => return MarkBuildResult {
+                        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                        tooltips: None, hrefs: None, descriptions: None,
+                    },
+                };
+                let n_cats = {
+                    let mut set = std::collections::HashSet::<&str>::new();
+                    for v in ys.iter().flatten() { set.insert(v.as_str()); }
+                    set.len().max(1)
+                };
+                let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+                let baseline_x = panel.x;
+                for i in 0..ys.len() {
+                    let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
+                    let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
+                    let cy = cy + y_offsets[i];
+                    let bx = baseline_x + x_offsets[i];
+                    nodes.push(SceneNode::Line {
+                        x1: bx,
+                        y1: cy,
+                        x2: bx + 2.0 * tick_half,
+                        y2: cy,
+                        style: row_stroke(i),
+                    });
+                    indices.push(i);
+                }
+                return MarkBuildResult {
+                    kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
+                    tooltips, hrefs, descriptions,
+                };
+            }
+
+            // Quantitative y only → y-rug: horizontal ticks at left axis edge.
             let tick_len = ctx.theme.tick_size * 2.0;
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
@@ -162,6 +201,42 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 hrefs,
                 descriptions,            };
         }
+    }
+
+    // Ordinal x only (no y field) → vertical crossbars at each category, anchored at panel bottom.
+    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_none() {
+        let xs = match col_as_str(ctx.batch, xf) {
+            Ok(v) => v,
+            Err(_) => return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+                tooltips: None, hrefs: None, descriptions: None,
+            },
+        };
+        let n_cats = {
+            let mut set = std::collections::HashSet::<&str>::new();
+            for v in xs.iter().flatten() { set.insert(v.as_str()); }
+            set.len().max(1)
+        };
+        let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+        let baseline_y = panel.y + panel.h;
+        for i in 0..xs.len() {
+            let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
+            let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
+            let cx = cx + x_offsets[i];
+            let by = baseline_y + y_offsets[i];
+            nodes.push(SceneNode::Line {
+                x1: cx,
+                y1: by,
+                x2: cx,
+                y2: by - 2.0 * tick_half,
+                style: row_stroke(i),
+            });
+            indices.push(i);
+        }
+        return MarkBuildResult {
+            kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
+            tooltips, hrefs, descriptions,
+        };
     }
 
     // Quantitative x → rug-style vertical tick at panel baseline.
@@ -332,5 +407,134 @@ mod tests {
         assert_eq!(line.color.r, 0xAA, "tick stroke must use mark_style.stroke, not mark_style.fill");
         assert_eq!(line.color.g, 0xBB, "tick stroke must use mark_style.stroke, not mark_style.fill");
         assert_eq!(line.color.b, 0xCC, "tick stroke must use mark_style.stroke, not mark_style.fill");
+    }
+
+    #[test]
+    fn tick_ordinal_y_only_emits_horizontal_lines() {
+        // Regression: ordinal-y-only (no x) previously returned empty nodes because
+        // col_as_f64 failed on the string column. Now it should emit one horizontal
+        // crossbar per row centered on the ordinal band.
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: None,
+                y: Some(EncodingSpec {
+                    field: "cat".into(),
+                    type_: Some(crate::spec::encoding::DataType::Ordinal),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("cat", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let line_count = result.nodes.iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. }))
+            .count();
+        assert_eq!(line_count, 3, "expected 3 horizontal tick lines for 3 ordinal-y categories, got {line_count}");
+
+        // All lines must be horizontal: y1 == y2.
+        for node in &result.nodes {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = node {
+                assert!(
+                    (y1 - y2).abs() < f64::EPSILON,
+                    "ordinal-y-only ticks must be horizontal (y1={y1}, y2={y2})"
+                );
+            }
+        }
+
+        // Lines must have non-zero width (x1 != x2).
+        let has_width = result.nodes.iter().any(|n| {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n {
+                (x2 - x1).abs() > f64::EPSILON
+            } else {
+                false
+            }
+        });
+        assert!(has_width, "ordinal-y-only tick lines must have non-zero horizontal extent");
+    }
+
+    #[test]
+    fn tick_ordinal_x_only_emits_vertical_lines() {
+        // Ordinal-x-only (no y field) should emit one vertical crossbar per row
+        // anchored at the panel bottom, centered on the ordinal band.
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "cat".into(),
+                    type_: Some(crate::spec::encoding::DataType::Ordinal),
+                    ..Default::default()
+                }),
+                y: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("cat", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["x", "y", "z"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let line_count = result.nodes.iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. }))
+            .count();
+        assert_eq!(line_count, 3, "expected 3 vertical tick lines for 3 ordinal-x categories, got {line_count}");
+
+        // All lines must be vertical: x1 == x2.
+        for node in &result.nodes {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = node {
+                assert!(
+                    (x1 - x2).abs() < f64::EPSILON,
+                    "ordinal-x-only ticks must be vertical (x1={x1}, x2={x2})"
+                );
+            }
+        }
+
+        // Lines must have non-zero height (y1 != y2).
+        let has_height = result.nodes.iter().any(|n| {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n {
+                (y2 - y1).abs() > f64::EPSILON
+            } else {
+                false
+            }
+        });
+        assert!(has_height, "ordinal-x-only tick lines must have non-zero vertical extent");
     }
 }

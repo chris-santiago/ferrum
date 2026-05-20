@@ -11,6 +11,10 @@ from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.encoding import X, Y
+from ferrum.marks._mark_kwargs import (
+    apply_user_mark_kwargs as _apply,
+    validate_user_mark_kwargs as _validate,
+)
 
 
 def desugar_boxplot(
@@ -22,6 +26,7 @@ def desugar_boxplot(
     size: Optional[float] = None,
     color_field: Optional[str] = None,
     horizontal: bool = False,
+    **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Box-plot composite mark desugar.
 
@@ -90,6 +95,7 @@ def desugar_boxplot(
     >>> len(result[4])  # 6 layers: whisker, lower cap, upper cap, box, median, outlier
     6
     """
+    user_kw = _validate("boxplot", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
@@ -165,7 +171,7 @@ def desugar_boxplot(
             )
         )
 
-    return MarkDesugarResult(transforms=transforms, layers=layers)
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names(
@@ -189,6 +195,7 @@ def desugar_errorbar(
     *,
     extent: str = "ci",
     ticks: bool = True,
+    **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Error-bar composite mark desugar.
 
@@ -242,6 +249,7 @@ def desugar_errorbar(
     >>> [l.mark for l in result[4]]
     ['rule', 'tick', 'tick']
     """
+    user_kw = _validate("errorbar", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
@@ -273,7 +281,7 @@ def desugar_errorbar(
                 ),
             ]
         )
-    return MarkDesugarResult(transforms=transforms, layers=layers)
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names(
@@ -294,6 +302,7 @@ def desugar_errorband(
     *,
     extent: str = "ci",
     borders: bool = False,
+    **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Error-band (shaded CI ribbon) composite mark desugar.
 
@@ -345,6 +354,7 @@ def desugar_errorband(
     >>> result[4][0].mark
     'ribbon'
     """
+    user_kw = _validate("errorband", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
@@ -374,7 +384,7 @@ def desugar_errorband(
                 ),
             ]
         )
-    return MarkDesugarResult(transforms=transforms, layers=layers)
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names(
@@ -396,6 +406,7 @@ def desugar_ribbon(
     y2_field: str | None = None,
     opacity: float = 0.2,
     interpolate: str = "linear",
+    **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Primitive ribbon (shaded band) mark desugar — no transform.
 
@@ -448,6 +459,7 @@ def desugar_ribbon(
     >>> result[4][0].mark
     'ribbon'
     """
+    user_kw = _validate("ribbon", mark_kwargs)
     if interpolate != "linear":
         raise ValueError(
             f"mark_ribbon(interpolate={interpolate!r}) is not supported; "
@@ -467,7 +479,7 @@ def desugar_ribbon(
             mark_kwargs={"opacity": opacity, "stroke": "none"},
         ),
     ]
-    return MarkDesugarResult(layers=layers)
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names(
@@ -490,6 +502,7 @@ def desugar_boxen(
     palette=None,
     horizontal: bool = False,
     color_field: str | None = None,
+    **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Letter-value (boxen) composite mark.
 
@@ -508,6 +521,7 @@ def desugar_boxen(
     scales resolve naturally (LetterValue copies the groupby values verbatim
     into ``group``, and quantile outputs lie within the original value range).
     """
+    user_kw = _validate("boxen", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_boxen() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
@@ -570,7 +584,7 @@ def desugar_boxen(
         )
     )
 
-    return MarkDesugarResult(transforms=transforms, layers=layers)
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names(

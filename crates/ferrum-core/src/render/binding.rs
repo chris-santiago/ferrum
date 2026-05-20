@@ -278,27 +278,27 @@ struct ThemeOverridesSpec {
     row_padding: Option<f64>,
 }
 
-fn parse_hex(s: &str) -> PyResult<super::color::Color> {
-    super::color::from_hex_str(s).map_err(|e| PyValueError::new_err(e.to_string()))
+fn parse_color_val(s: &str) -> PyResult<super::color::Color> {
+    super::color::parse_color(s).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyResult<()> {
-    if let Some(s) = spec.mark_color { t.mark_color = parse_hex(&s)?; }
+    if let Some(s) = spec.mark_color { t.mark_color = parse_color_val(&s)?; }
     // `background` is an alias for `background_color`; both populate the
     // same field. Last-write-wins if a user passes both.
-    if let Some(s) = spec.background_color { t.background_color = parse_hex(&s)?; }
-    if let Some(s) = spec.background { t.background_color = parse_hex(&s)?; }
+    if let Some(s) = spec.background_color { t.background_color = parse_color_val(&s)?; }
+    if let Some(s) = spec.background { t.background_color = parse_color_val(&s)?; }
     if let Some(v) = spec.padding { t.padding = v; }
 
     // Typography
     if let Some(v) = spec.font_family { t.font_family = v; }
     if let Some(v) = spec.font_weight { t.font_weight = v; }
-    if let Some(s) = spec.font_color { t.font_color = parse_hex(&s)?; }
+    if let Some(s) = spec.font_color { t.font_color = parse_color_val(&s)?; }
     if let Some(v) = spec.font_size { t.label_font_size = v; }
     if let Some(v) = spec.title_font_family { t.title_font_family = v; }
     if let Some(v) = spec.title_font_size { t.title_font_size = v; }
     if let Some(v) = spec.title_font_weight { t.title_font_weight = v; }
-    if let Some(s) = spec.title_color { t.title_color = parse_hex(&s)?; }
+    if let Some(s) = spec.title_color { t.title_color = parse_color_val(&s)?; }
     if let Some(s) = spec.title_anchor {
         t.title_anchor = match s.as_str() {
             "start" => TextAnchor::Start,
@@ -311,19 +311,19 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     }
     if let Some(v) = spec.title_offset { t.title_offset = v; }
     if let Some(v) = spec.label_font_family { t.label_font_family = v; }
-    if let Some(s) = spec.label_color { t.label_color = parse_hex(&s)?; }
+    if let Some(s) = spec.label_color { t.label_color = parse_color_val(&s)?; }
 
     // Axes
     if let Some(v) = spec.axis_line { t.axis_line = v; }
-    if let Some(s) = spec.axis_line_color { t.axis_line_color = parse_hex(&s)?; }
+    if let Some(s) = spec.axis_line_color { t.axis_line_color = parse_color_val(&s)?; }
     if let Some(v) = spec.axis_line_width { t.axis_line_width = v; }
-    if let Some(s) = spec.tick_color { t.tick_color = parse_hex(&s)?; }
+    if let Some(s) = spec.tick_color { t.tick_color = parse_color_val(&s)?; }
     if let Some(v) = spec.tick_size { t.tick_size = v; }
     if let Some(v) = spec.tick_width { t.tick_width = v; }
 
     // Grid
     if let Some(v) = spec.grid { t.grid = v; }
-    if let Some(s) = spec.grid_color { t.grid_color = parse_hex(&s)?; }
+    if let Some(s) = spec.grid_color { t.grid_color = parse_color_val(&s)?; }
     if let Some(v) = spec.grid_width { t.grid_width = v; }
     if let Some(v) = spec.grid_dash { t.grid_dash = Some(v); }
     if let Some(v) = spec.grid_opacity { t.grid_opacity = v; }
@@ -370,7 +370,7 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     }
 
     // Strip
-    if let Some(s) = spec.strip_background_color { t.strip_background_color = parse_hex(&s)?; }
+    if let Some(s) = spec.strip_background_color { t.strip_background_color = parse_color_val(&s)?; }
     if let Some(v) = spec.strip_text_size { t.strip_text_size = v; }
     if let Some(v) = spec.strip_padding { t.strip_padding = v; }
 
@@ -398,7 +398,7 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     if let Some(v) = spec.legend_title_font_size { t.legend_title_font_size = v; }
 
     // Reference lines
-    if let Some(s) = spec.reference_line_color { t.reference_line_color = parse_hex(&s)?; }
+    if let Some(s) = spec.reference_line_color { t.reference_line_color = parse_color_val(&s)?; }
     if let Some(v) = spec.reference_line_dash { t.reference_line_dash = Some(v); }
 
     // Spacing

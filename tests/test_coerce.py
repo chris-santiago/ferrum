@@ -14,6 +14,36 @@ def test_polars_dataframe_zero_copy():
     assert tbl.column_names == ["a", "b"]
 
 
+def test_polars_categorical_cast_to_string():
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical)})
+    tbl = to_arrow_table(df)
+    assert tbl.num_rows == 3
+    assert pa.types.is_large_string(tbl.schema.field("cat").type) or pa.types.is_string(
+        tbl.schema.field("cat").type
+    )
+    assert tbl.column("cat").to_pylist() == ["a", "b", "a"]
+
+
+def test_polars_enum_cast_to_string():
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "grade": pl.Series(["A", "B", "A"], dtype=pl.Enum(["A", "B", "C"]))}
+    )
+    tbl = to_arrow_table(df)
+    assert tbl.num_rows == 3
+    assert pa.types.is_large_string(tbl.schema.field("grade").type) or pa.types.is_string(
+        tbl.schema.field("grade").type
+    )
+    assert tbl.column("grade").to_pylist() == ["A", "B", "A"]
+
+
+def test_polars_categorical_renders_svg():
+    import ferrum as fm
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical)})
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").show_svg()
+    assert "<svg" in svg
+
+
 def test_pyarrow_table_passthrough():
     tbl_in = pa.table({"x": [1, 2], "y": ["a", "b"]})
     tbl_out = to_arrow_table(tbl_in)

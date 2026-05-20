@@ -310,7 +310,7 @@ impl SizeScale {
     pub fn max_px(&self) -> f64 { self.inner.pixel_range().1 }
 }
 
-/// An ordinal shape scale: maps a categorical field to one of 6 shapes.
+/// An ordinal shape scale: maps a categorical field to one of 8 shapes.
 #[derive(Debug, Clone)]
 pub struct ShapeScale {
     pub domain: Vec<String>,   // distinct values in encounter order
@@ -326,7 +326,7 @@ impl ShapeScale {
     }
 }
 
-/// The 6 point shapes available to the shape scale.
+/// The 8 point shapes available to the shape scale and `mark_point(shape=…)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeKind {
     Circle,
@@ -335,16 +335,22 @@ pub enum ShapeKind {
     Diamond,
     TriangleUp,
     TriangleDown,
+    /// Short vertical line marker (`"|"` or `"vline"`).
+    VLine,
+    /// Short horizontal line marker (`"-"` or `"hline"`).
+    HLine,
 }
 
-/// Fixed 6-shape palette used by `build_shape_scale`.
-pub const SHAPE_PALETTE: [ShapeKind; 6] = [
+/// Fixed 8-shape palette used by `build_shape_scale`. Wraps on overflow.
+pub const SHAPE_PALETTE: [ShapeKind; 8] = [
     ShapeKind::Circle,
     ShapeKind::Square,
     ShapeKind::Cross,
     ShapeKind::Diamond,
     ShapeKind::TriangleUp,
     ShapeKind::TriangleDown,
+    ShapeKind::VLine,
+    ShapeKind::HLine,
 ];
 
 /// A linear opacity scale: maps a quantitative field to `[min_opacity, max_opacity]`.
@@ -1566,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn shape_scale_picks_from_6_shape_palette_in_order() {
+    fn shape_scale_picks_from_8_shape_palette_in_order() {
         let batch = make_batch_q_q_n_n_q();
         let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch).unwrap();
         let scale = scale.unwrap();
