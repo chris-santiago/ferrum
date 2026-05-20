@@ -64,9 +64,12 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         )
 
     # Fast path: polars (zero-copy via Arrow C Data Interface)
+    # K5: also accept polars.Series — convert to single-column DataFrame first.
     try:
         import polars as pl
 
+        if isinstance(data, pl.Series):
+            data = data.to_frame()
         if isinstance(data, pl.DataFrame):
             casts = []
             for c in data.columns:
@@ -75,6 +78,9 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                     casts.append(pl.col(c).cast(pl.Datetime("ms")))
                 elif dt == pl.Categorical or isinstance(dt, pl.Enum):
                     casts.append(pl.col(c).cast(pl.Utf8))
+                # K6: Duration columns → Int64 (nanoseconds) for Rust compat.
+                elif isinstance(dt, pl.Duration):
+                    casts.append(pl.col(c).cast(pl.Int64))
             if casts:
                 data = data.with_columns(casts)
             return data.to_arrow()
@@ -84,7 +90,31 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         pass
 
     # Fast path: pyarrow native
+    # K5: accept pandas.Series — convert to single-column DataFrame and fall
+    #     through to the narwhals path below.
+    try:
+        import pandas as pd
+
+        if isinstance(data, pd.Series):
+            name = data.name if data.name is not None else "value"
+            data = data.to_frame(name=str(name))
+            # Fall through to the narwhals path at the bottom of this function.
+    except ImportError:
+        pass
+
     if isinstance(data, pa.Table):
+        # K7: cast date32/date64 columns to timestamp[ms] for Rust compat.
+        new_cols = []
+        needs_cast = False
+        for i in range(len(data.schema)):
+            col = data.column(i)
+            field_type = data.schema.field(i).type
+            if pa.types.is_date32(field_type) or pa.types.is_date64(field_type):
+                col = col.cast(pa.timestamp("ms"))
+                needs_cast = True
+            new_cols.append(col)
+        if needs_cast:
+            return pa.table({data.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
         return data
     if isinstance(data, pa.RecordBatch):
         return pa.Table.from_batches([data])

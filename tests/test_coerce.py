@@ -15,7 +15,9 @@ def test_polars_dataframe_zero_copy():
 
 
 def test_polars_categorical_cast_to_string():
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical)})
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical)}
+    )
     tbl = to_arrow_table(df)
     assert tbl.num_rows == 3
     assert pa.types.is_large_string(tbl.schema.field("cat").type) or pa.types.is_string(
@@ -39,7 +41,13 @@ def test_polars_enum_cast_to_string():
 def test_polars_categorical_renders_svg():
     import ferrum as fm
 
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical)})
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [4.0, 5.0, 6.0],
+            "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical),
+        }
+    )
     svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").show_svg()
     assert "<svg" in svg
 
@@ -275,3 +283,88 @@ class TestNarwhalsPandasIngestion:
 
         svg = fm.Chart(df).mark_line().encode(x="x", y="y").show_svg()
         assert "<svg" in svg
+
+
+# ── K5: Series acceptance ─────────────────────────────────────────────────────
+
+
+def test_polars_series_accepted():
+    s = pl.Series("x", [1.0, 2.0, 3.0])
+    tbl = to_arrow_table(s)
+    assert tbl.num_rows == 3
+    assert tbl.column_names == ["x"]
+
+
+def test_pandas_series_accepted():
+    pd = pytest.importorskip("pandas")
+    s = pd.Series([1.0, 2.0, 3.0], name="x")
+    tbl = to_arrow_table(s)
+    assert tbl.num_rows == 3
+    assert "x" in tbl.column_names
+
+
+def test_pandas_unnamed_series():
+    pd = pytest.importorskip("pandas")
+    s = pd.Series([1.0, 2.0, 3.0])
+    tbl = to_arrow_table(s)
+    assert tbl.num_rows == 3
+
+
+# ── K6: Polars Duration cast ──────────────────────────────────────────────────
+
+
+def test_polars_duration_cast():
+    df = pl.DataFrame(
+        {
+            "dur": pl.Series([1_000_000, 2_000_000, 3_000_000], dtype=pl.Duration("ns")),
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
+    tbl = to_arrow_table(df)
+    assert pa.types.is_int64(tbl.schema.field("dur").type)
+
+
+def test_polars_duration_renders():
+    df = pl.DataFrame(
+        {
+            "dur": pl.Series([1_000_000, 2_000_000, 3_000_000], dtype=pl.Duration("ns")),
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
+    import ferrum as fm
+
+    svg = fm.Chart(df).mark_point().encode(x="dur", y="y").show_svg()
+    assert "<svg" in svg
+
+
+# ── K7: PyArrow Date32/Date64 cast ───────────────────────────────────────────
+
+
+def test_pyarrow_date32_cast():
+    arr = pa.array([0, 1, 100], type=pa.date32())
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
+    result = to_arrow_table(tbl)
+    assert pa.types.is_timestamp(result.schema.field("d").type)
+
+
+def test_pyarrow_date64_cast():
+    arr = pa.array([0, 86_400_000, 172_800_000], type=pa.date64())
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
+    result = to_arrow_table(tbl)
+    assert pa.types.is_timestamp(result.schema.field("d").type)
+
+
+def test_pyarrow_date32_renders():
+    import ferrum as fm
+
+    arr = pa.array([0, 1, 100], type=pa.date32())
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
+    svg = fm.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_pyarrow_non_date_table_passthrough():
+    """Non-date pyarrow tables must still pass through as the same object."""
+    tbl = pa.table({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
+    result = to_arrow_table(tbl)
+    assert result is tbl

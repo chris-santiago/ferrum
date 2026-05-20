@@ -135,9 +135,11 @@ def desugar_density(
                 cmap=cmap,
             )
 
-    if kernel is not None and kernel != "gaussian":
+    _VALID_KERNELS = {"gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"}
+    if kernel is not None and kernel not in _VALID_KERNELS:
         raise ValueError(
-            f"mark_density(kernel={kernel!r}) is not supported; only 'gaussian' is available"
+            f"mark_density(kernel={kernel!r}) is not supported; "
+            f"valid: {sorted(_VALID_KERNELS)}"
         )
     if multiple not in ("layer", "stack", "fill", "dodge"):
         raise ValueError(
@@ -156,6 +158,7 @@ def desugar_density(
         cumulative=cumulative,
         # shared_extent=True forces a global x-grid across groups (required for stack/fill).
         shared_extent=(multiple in ("stack", "fill")),
+        kernel=kernel or "gaussian",
     )
     if groupby is not None:
         kde_kwargs["groupby"] = groupby

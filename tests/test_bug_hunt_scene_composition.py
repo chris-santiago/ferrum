@@ -659,7 +659,23 @@ def test_composition_save_svg_roundtrip(tmp_path):
 
 
 def test_composition_save_unsupported_format_raises():
-    """Saving composition with unsupported format raises NotImplementedError."""
+    """Saving composition with a genuinely unsupported format raises ValueError."""
+    import tempfile
+    import os
+
+    composed = HConcatChart([_simple_chart(), _simple_chart()])
+    with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
+        tmp = f.name
+    try:
+        with pytest.raises(ValueError, match="xyz|not supported"):
+            composed.save(tmp, format="xyz")
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def test_composition_save_pdf_works():
+    """Saving composition as PDF now succeeds (F14)."""
     import tempfile
     import os
 
@@ -667,8 +683,9 @@ def test_composition_save_unsupported_format_raises():
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         tmp = f.name
     try:
-        with pytest.raises(NotImplementedError, match="svg.*png|png.*svg|not supported"):
-            composed.save(tmp, format="pdf")
+        composed.save(tmp)
+        with open(tmp, "rb") as fh:
+            assert fh.read(5) == b"%PDF-"
     finally:
         os.unlink(tmp)
 

@@ -9,6 +9,23 @@ from __future__ import annotations
 from typing import Any
 
 
+# Aliases map user-friendly names to their canonical renderer-level keys.
+# Canonical keys (fill, opacity, stroke_dash) continue to work unchanged.
+_MARK_KWARG_ALIASES: dict[str, str] = {
+    "color": "fill",
+    "alpha": "opacity",
+    "linetype": "stroke_dash",
+    "line_type": "stroke_dash",
+}
+
+_LINETYPE_MAP: dict[str, list[float]] = {
+    "solid": [],
+    "dashed": [4.0, 2.0],
+    "dotted": [1.0, 3.0],
+    "dashdot": [4.0, 2.0, 1.0, 2.0],
+    "longdash": [8.0, 4.0],
+}
+
 _VALID_MARK_KWARGS = frozenset(
     [
         "size",
@@ -88,13 +105,31 @@ class MarkBase:
 
     def __init__(self, mark_name: str, **kwargs: Any) -> None:
         self.mark_name = mark_name
-        for k in kwargs:
+        # Resolve aliases before validation so canonical keys always pass
+        # and friendly aliases (color, alpha, linetype) are transparently
+        # remapped.  Canonical keys (fill, opacity, stroke_dash) still work
+        # unchanged — the alias dict only covers the friendly names.
+        resolved: dict[str, Any] = {}
+        for k, v in kwargs.items():
+            canonical = _MARK_KWARG_ALIASES.get(k, k)
+            if canonical == "stroke_dash" and k in ("linetype", "line_type") and isinstance(v, str):
+                if v in _LINETYPE_MAP:
+                    v = _LINETYPE_MAP[v]
+                else:
+                    v = [float(x) for x in v.split(",") if x.strip()]
+            resolved[canonical] = v
+        for k in resolved:
             if k not in _VALID_MARK_KWARGS:
                 raise TypeError(
                     f"mark_{mark_name}: unknown keyword argument {k!r}. "
                     f"Valid: {sorted(_VALID_MARK_KWARGS)}"
                 )
-        self._kwargs = dict(kwargs)
+        self._kwargs = resolved
+
+    @property
+    def kwargs(self) -> dict[str, Any]:
+        """Read-only view of the resolved (alias-expanded) kwargs dict."""
+        return dict(self._kwargs)
 
     def to_mark_kwargs_dict(self) -> dict:
         """Return the subset of stored kwargs that map to ``MarkKwargsSpec`` fields.

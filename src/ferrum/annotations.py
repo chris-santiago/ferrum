@@ -214,6 +214,65 @@ def annotate_text(
     return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
 
 
+def annotate_abline(
+    slope: float,
+    intercept: float,
+    *,
+    stroke: str = "black",
+    stroke_width: float = 1.0,
+    stroke_dash: "list[float] | None" = None,
+    opacity: float = 1.0,
+) -> Chart:
+    """Draw the line y = slope * x + intercept across the full x extent.
+
+    Returns a two-point ``mark_line`` chart whose x range spans ``[-1e6,
+    1e6]``; the Rust renderer clips the line to the plot area automatically.
+    The chart is suitable for layering with ``+``::
+
+        scatter + fm.annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
+
+    Parameters
+    ----------
+    slope : float
+        Line slope (rise over run).
+    intercept : float
+        Y-intercept (value of y when x = 0).
+    stroke : str, default "black"
+        Line color as a CSS color string.
+    stroke_width : float, default 1.0
+        Line width in pixels.
+    stroke_dash : list of float, optional
+        SVG dash array, e.g. ``[4, 4]`` for evenly dashed.
+    opacity : float, default 1.0
+        Line opacity in ``[0, 1]``.
+
+    Returns
+    -------
+    Chart
+        Two-point line chart suitable for ``+`` layering.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.1, 0.9]})
+    >>> scatter = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    >>> identity = fm.annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
+    >>> chart = scatter + identity
+    """
+    x_lo, x_hi = -1e6, 1e6
+    df = pl.DataFrame(
+        {
+            "__abline_x": [x_lo, x_hi],
+            "__abline_y": [slope * x_lo + intercept, slope * x_hi + intercept],
+        }
+    )
+    mark_kwargs: dict = {"stroke": stroke, "stroke_width": stroke_width, "opacity": opacity}
+    if stroke_dash is not None:
+        mark_kwargs["stroke_dash"] = stroke_dash
+    return Chart(df).mark_line(**mark_kwargs).encode(x="__abline_x:Q", y="__abline_y:Q")
+
+
 def annotate_arrow(
     x1: float,
     y1: float,

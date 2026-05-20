@@ -519,7 +519,12 @@ def _resolve_encoding_value(enc: Any, *, channel: str | None = None) -> dict:
                 return {"kind": "stroke_width", "value": fv}
             if channel == "stroke_dash":
                 return {"kind": "stroke_dash", "value": [fv]}
-            # Default (opacity, or any unrecognized channel): tag as opacity.
+            if channel == "stroke_opacity":
+                return {"kind": "stroke_opacity", "value": fv}
+            if channel == "fill_opacity":
+                return {"kind": "fill_opacity", "value": fv}
+            if channel == "angle":
+                return {"kind": "angle", "value": fv}
             return {"kind": "opacity", "value": fv}
         return {"kind": "opacity", "value": 1.0}
     from ferrum.encoding.base import ChannelBase

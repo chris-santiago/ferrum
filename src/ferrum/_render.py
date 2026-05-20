@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ferrum._coerce import to_arrow_table
 from ferrum.encoding.base import ChannelBase
@@ -19,6 +19,96 @@ if TYPE_CHECKING:
     pass
 
 _logger = logging.getLogger(__name__)
+
+
+def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
+    """Collect Axis(label_map=...) entries from a chart's encoding.
+
+    Returns a mapping of ``{column_name: {old_value: new_value, ...}}``
+    by scanning the chart's ``_encoding`` dict (single-mark path) and
+    the ``_layers`` list (layered-mark path).
+
+    Only x and y channels are checked because axis label remapping only
+    applies to positional axes.
+    """
+    from ferrum.axis import Axis as _Axis
+
+    result: dict[str, dict[str, str]] = {}
+
+    def _check_enc(enc_dict: dict) -> None:
+        for ch_name in ("x", "y"):
+            ch = enc_dict.get(ch_name)
+            if not isinstance(ch, ChannelBase):
+                continue
+            axis_kwarg = ch._kwargs.get("axis")
+            if not isinstance(axis_kwarg, _Axis):
+                continue
+            if axis_kwarg.label_map is None:
+                continue
+            col = ch.field
+            if col is None:
+                continue
+            if col in result:
+                # Merge: later layers override earlier for same column.
+                result[col].update(axis_kwarg.label_map)
+            else:
+                result[col] = dict(axis_kwarg.label_map)
+
+    # Single-mark or top-level encoding
+    _check_enc(chart._encoding)
+
+    # Layered chart: each _Layer has its own encoding dict
+    if chart._layers:
+        for layer in chart._layers:
+            _check_enc(layer.encoding)
+
+    return result
+
+
+def _apply_label_maps(
+    data: Any,
+    label_maps: dict[str, dict[str, str]],
+) -> Any:
+    """Apply label remapping to a polars DataFrame.
+
+    For each ``(column_name, mapping)`` pair in *label_maps*, replaces
+    string values in that column according to the mapping.  Values not
+    present in the mapping are left unchanged.
+
+    If the column does not exist in *data* or the data is not a polars
+    DataFrame, the data is returned unchanged.
+    """
+    if not label_maps:
+        return data
+
+    import polars as pl
+
+    if not isinstance(data, pl.DataFrame):
+        # Non-polars data: coerce first, but we can't modify Arrow tables
+        # in-place easily — convert to polars, remap, return polars.
+        try:
+            from ferrum._coerce import to_arrow_table as _to_arrow
+            import pyarrow as pa
+
+            arrow = _to_arrow(data)
+            df = pl.from_arrow(arrow)
+        except (ImportError, TypeError, ValueError):
+            import warnings
+            warnings.warn("Axis label_map could not be applied (data coercion failed); labels unchanged.", stacklevel=2)
+            return data
+    else:
+        df = data
+
+    for col, mapping in label_maps.items():
+        if col not in df.columns:
+            continue
+        series = df[col]
+        if series.dtype not in (pl.Utf8, pl.String, pl.Categorical):
+            continue
+        # replace(mapping) without a default leaves unmatched values unchanged.
+        df = df.with_columns(series.replace(mapping).alias(col))
+
+    return df
 
 
 def _warn_large_chart(mark_count: int) -> None:
@@ -186,8 +276,17 @@ class _RenderMixin:
         resolved = self._resolve_pending()
         chart = resolved._apply_auto_raster()
         spec = chart.to_spec()
-        data = to_arrow_table(chart._data)
-        viewport = (chart._width or 600.0, chart._height or 400.0)
+        # F17: apply Axis(label_map=...) column-value remapping before data
+        # reaches Rust so the scale domain uses the display labels.
+        label_maps = _collect_label_maps(chart)
+        raw_data = _apply_label_maps(chart._data, label_maps) if label_maps else chart._data
+        data = to_arrow_table(raw_data)
+        from ferrum import config as _config
+
+        viewport = (
+            chart._width or float(_config.get("width")),
+            chart._height or float(_config.get("height")),
+        )
         from ferrum.themes._defaults import get_default_theme
 
         effective_theme = chart._theme or get_default_theme()
@@ -231,7 +330,7 @@ class _RenderMixin:
             )
         return render_svg(spec, data, viewport=viewport, theme=theme_dict)
 
-    def show_png(self, *, raster: bool | None = None) -> bytes:
+    def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
         """Render the chart to PNG bytes.
 
         Parameters
@@ -240,6 +339,10 @@ class _RenderMixin:
             Override the auto-raster policy for this render only.
             ``False`` forces per-element rendering.  ``True`` forces raster.
             ``None`` uses the chart's ``RenderConfig`` policy.
+        scale : float, default 2.0
+            Pixel-density multiplier applied to the chart's intrinsic dimensions.
+            ``2.0`` (the default) produces a retina-quality image at twice the
+            logical pixel count.  ``1.0`` renders at 1:1 resolution.
 
         Returns
         -------
@@ -255,21 +358,29 @@ class _RenderMixin:
         >>> png[:4] == b'\\x89PNG'
         True
         """
-        from ferrum._core import render_png
+        from ferrum._core import rasterize_svg
 
-        chart = self._with_raster_override(raster)
-        spec, data, viewport, theme_dict = chart._render_inputs()
-        return render_png(spec, data, viewport=viewport, theme=theme_dict)
+        svg = self.show_svg(raster=raster)
+        return bytes(rasterize_svg(svg, scale=scale))
 
-    def save(self, path, *, format=None, embed_wasm=True, raster: bool | None = None) -> None:
+    def save(
+        self,
+        path,
+        *,
+        format=None,
+        embed_wasm=True,
+        raster: bool | None = None,
+        scale: float = 2.0,
+    ) -> None:
         """Save the chart to a file on disk.
 
         Parameters
         ----------
         path : str or pathlib.Path
             Destination file path.  Extension determines the default format:
-            ``.svg`` -> SVG, ``.png`` -> PNG, ``.html`` -> HTML, ``.json`` -> JSON.
-        format : {"svg", "png", "html", "json"} or None, optional
+            ``.svg`` -> SVG, ``.png`` -> PNG, ``.html`` -> HTML,
+            ``.json`` -> JSON, ``.pdf`` -> PDF.
+        format : {"svg", "png", "html", "json", "pdf"} or None, optional
             Explicit format override.  ``None`` (default) infers from ``path``.
         embed_wasm : bool
             For ``"html"`` format only.  When True (default), the WASM binary
@@ -278,6 +389,9 @@ class _RenderMixin:
             Override the auto-raster policy for this save only.
             ``False`` forces per-element output.  ``True`` forces raster.
             ``None`` uses the chart's ``RenderConfig`` policy.
+        scale : float, default 2.0
+            Pixel-density multiplier for PNG and PDF output.  Has no effect
+            on SVG, HTML, or JSON exports.
 
         Examples
         --------
@@ -288,7 +402,13 @@ class _RenderMixin:
         """
         from ferrum.display import save_chart
 
-        save_chart(self._with_raster_override(raster), path, format=format, embed_wasm=embed_wasm)
+        save_chart(
+            self._with_raster_override(raster),
+            path,
+            format=format,
+            embed_wasm=embed_wasm,
+            scale=scale,
+        )
 
     def show(self, *, raster: bool | None = None) -> None:
         """Display the chart inline or in a browser.

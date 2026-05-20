@@ -16,7 +16,7 @@ from ferrum._layer import _Layer, _PendingMark
 from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding.base import ChannelBase, _PendingAggregate
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import (
     desugar_density,
@@ -582,11 +582,15 @@ class Chart(_RenderMixin):
             Line join: ``"miter"``, ``"round"``, ``"bevel"``.
         position : Position, optional
             Position adjustment.
+        point : bool, optional
+            When ``True``, overlay a ``mark_point`` layer on top of the line.
+            Mirrors the Altair ``mark_line(point=True)`` shorthand.
 
         Returns
         -------
         Chart
-            New ``Chart`` with mark set to ``"line"``.
+            New ``Chart`` with mark set to ``"line"``.  When ``point=True``
+            the result is a multi-layer chart (line + points).
 
         Examples
         --------
@@ -596,7 +600,68 @@ class Chart(_RenderMixin):
         >>> fm.Chart(df).mark_line(stroke_width=3, interpolate="monotone").encode(x="x", y="y")
         Chart(mark='line', encoding=['x', 'y'])
         """
-        return self._set_mark("line", **kwargs)
+        point_overlay = kwargs.pop("point", False)
+        line_chart = self._set_mark("line", **kwargs)
+        if point_overlay:
+            point_chart = self._set_mark("point")
+            return line_chart + point_chart
+        return line_chart
+
+    def mark_circle(self, **kwargs) -> "Chart":
+        """Render data as filled circles — shorthand for ``mark_point(shape="circle")``.
+
+        Mirrors the Altair ``mark_circle()`` convenience method.  All keyword
+        arguments are forwarded to :meth:`mark_point`, including aliases such
+        as ``color`` and ``alpha``.
+
+        Parameters
+        ----------
+        **kwargs
+            Any keyword accepted by :meth:`mark_point` (``size``, ``fill``,
+            ``opacity``, ``color``, ``alpha``, etc.).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"point"`` and ``shape="circle"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> fm.Chart(df).mark_circle(size=80).encode(x="x", y="y")
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        return self.mark_point(shape="circle", **kwargs)
+
+    def mark_square(self, **kwargs) -> "Chart":
+        """Render data as filled squares — shorthand for ``mark_point(shape="square")``.
+
+        Mirrors the Altair ``mark_square()`` convenience method.  All keyword
+        arguments are forwarded to :meth:`mark_point`, including aliases such
+        as ``color`` and ``alpha``.
+
+        Parameters
+        ----------
+        **kwargs
+            Any keyword accepted by :meth:`mark_point` (``size``, ``fill``,
+            ``opacity``, ``color``, ``alpha``, etc.).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with mark set to ``"point"`` and ``shape="square"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> fm.Chart(df).mark_square(size=80).encode(x="x", y="y")
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        return self.mark_point(shape="square", **kwargs)
 
     def mark_bar(self, **kwargs) -> "Chart":
         """Render data as bars.
@@ -760,7 +825,7 @@ class Chart(_RenderMixin):
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         band_size : float, optional
-            Tick length in pixels.
+            Tick length as a fraction of band width (0–1, default 0.3).
         orient : str, optional
             ``"vertical"`` (default ticks perpendicular to x) or
             ``"horizontal"``.
@@ -963,8 +1028,14 @@ class Chart(_RenderMixin):
         Parameters
         ----------
         method : str, optional
-            Smoothing method: ``"loess"`` (default), ``"linear"``, ``"quadratic"``,
-            ``"cubic"``, ``"log"``, ``"sqrt"``.
+            Smoothing method.  Default is ``"loess"``.
+
+            - ``"lm"`` or ``"linear"`` — linear regression (OLS, degree-1 polynomial)
+            - ``"loess"`` — local regression (LOWESS)
+            - ``"quadratic"`` — polynomial regression, degree 2
+            - ``"cubic"`` — polynomial regression, degree 3
+            - ``"log"`` — linear fit on log-transformed x
+            - ``"sqrt"`` — linear fit on sqrt-transformed x
         degree : int, optional
             Polynomial degree for ``"linear"``/``"quadratic"``/``"cubic"``.
         bandwidth : float, optional
@@ -4300,6 +4371,80 @@ class Chart(_RenderMixin):
             )
         return new
 
+    def xlim(self, lo: float, hi: float) -> "Chart":
+        """Set the x-axis domain to ``[lo, hi]`` (plotnine-style).
+
+        Equivalent to ``.coord(fm.CoordCartesian(xlim=(lo, hi)))``.  When a
+        ``CoordCartesian`` is already set on this chart its ``ylim`` (and other
+        parameters) are preserved; only ``xlim`` is updated.
+
+        Parameters
+        ----------
+        lo : float
+            Lower bound of the x-axis domain.
+        hi : float
+            Upper bound of the x-axis domain.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the x-axis domain constrained.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").xlim(0, 10)
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        from ferrum.coord import CoordCartesian
+        import dataclasses
+
+        existing = self._coord
+        if isinstance(existing, CoordCartesian):
+            new_coord = dataclasses.replace(existing, xlim=(lo, hi))
+        else:
+            new_coord = CoordCartesian(xlim=(lo, hi))
+        return self.coord(new_coord)
+
+    def ylim(self, lo: float, hi: float) -> "Chart":
+        """Set the y-axis domain to ``[lo, hi]`` (plotnine-style).
+
+        Equivalent to ``.coord(fm.CoordCartesian(ylim=(lo, hi)))``.  When a
+        ``CoordCartesian`` is already set on this chart its ``xlim`` (and other
+        parameters) are preserved; only ``ylim`` is updated.
+
+        Parameters
+        ----------
+        lo : float
+            Lower bound of the y-axis domain.
+        hi : float
+            Upper bound of the y-axis domain.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the y-axis domain constrained.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").ylim(0, 20)
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        from ferrum.coord import CoordCartesian
+        import dataclasses
+
+        existing = self._coord
+        if isinstance(existing, CoordCartesian):
+            new_coord = dataclasses.replace(existing, ylim=(lo, hi))
+        else:
+            new_coord = CoordCartesian(ylim=(lo, hi))
+        return self.coord(new_coord)
+
     @staticmethod
     def _transforms_to_json_list(transforms: list) -> list:
         """Serialize a list of Python transform objects to JSON-safe dicts.
@@ -4527,6 +4672,99 @@ class Chart(_RenderMixin):
             new._render_config = render_config
         return new
 
+    def labs(self, **kwargs) -> "Chart":
+        """Set human-readable labels for axes and title (plotnine-style).
+
+        A convenience wrapper around ``properties()`` and per-channel ``title``
+        kwargs.  Only the keys you provide are updated; everything else is
+        inherited from the existing chart.
+
+        Parameters
+        ----------
+        title : str, optional
+            Chart title — delegates to ``.properties(title=...)``.
+        subtitle : str, optional
+            Chart subtitle — delegates to ``.properties(subtitle=...)``.
+        x : str, optional
+            Horizontal-axis title.  Wraps the existing ``x`` encoding channel
+            in a new ``X(field, title=x, **original_kwargs)`` value, or creates
+            ``X(None, title=x)`` if no ``x`` encoding is present.
+        y : str, optional
+            Vertical-axis title.  Analogous to ``x`` above for the ``y``
+            channel.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the specified labels applied.
+
+        Raises
+        ------
+        ValueError
+            If any key in ``kwargs`` is not one of ``title``, ``subtitle``,
+            ``x``, or ``y``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> fm.Chart(df).mark_point().encode(x="x", y="y").labs(
+        ...     title="My Chart", x="Horizontal", y="Vertical"
+        ... )
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        from ferrum.encoding.positional import X, Y
+        from ferrum.title import Title as _TitleCls
+
+        remaining = dict(kwargs)
+        c = self._clone()
+
+        if "title" in remaining:
+            c = c.properties(title=remaining.pop("title"))
+        if "subtitle" in remaining:
+            subtitle_text = remaining.pop("subtitle")
+            # Merge subtitle into the existing Title object (preserving other
+            # Title fields such as anchor, font, etc.) or create a new one.
+            existing_title = c._title
+            if isinstance(existing_title, _TitleCls):
+                import dataclasses
+
+                c._title = dataclasses.replace(existing_title, subtitle=subtitle_text)
+            else:
+                # No title set yet — create a Title with an empty main text.
+                c._title = _TitleCls(text="", subtitle=subtitle_text)
+
+        for axis_name, cls in (("x", X), ("y", Y)):
+            if axis_name not in remaining:
+                continue
+            label = remaining.pop(axis_name)
+            existing = c._encoding.get(axis_name)
+            if existing is not None and hasattr(existing, "field"):
+                # Reconstruct the channel preserving all kwargs except title.
+                base_kwargs = {k: v for k, v in existing._kwargs.items() if k != "title"}
+                c._encoding[axis_name] = cls(existing.field, title=label, **base_kwargs)
+            else:
+                # No existing typed channel — create a title-only placeholder.
+                # The field is set to None so shorthand in _encoding is kept;
+                # if the existing entry is a plain str we preserve it and wrap.
+                if isinstance(existing, str):
+                    from ferrum._shorthand import parse_shorthand
+
+                    parsed_field, parsed_type, _ = parse_shorthand(existing)
+                    base_kwargs: dict = {}
+                    if parsed_type is not None:
+                        base_kwargs["type"] = parsed_type
+                    c._encoding[axis_name] = cls(
+                        parsed_field or existing, title=label, **base_kwargs
+                    )
+                else:
+                    c._encoding[axis_name] = cls(None, title=label)
+
+        if remaining:
+            raise ValueError(f"labs(): unknown label keys: {sorted(remaining.keys())}")
+        return c
+
     # ---- Spec output ----
 
     def to_spec(self):
@@ -4559,6 +4797,18 @@ class Chart(_RenderMixin):
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
         mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         enc, mk = _apply_channel_aliases(enc, mk)
+
+        # --- Aggregate field remap: map original field → output_col for encoding ---
+        # _PendingAggregate sentinels carry the original field name but Aggregate
+        # transforms emit the output under a new column name (e.g. "mean_val").
+        # Build a remap dict now so the EncodingSpec loop below uses the correct
+        # post-aggregation field name. Key: original_field, Value: output_col.
+        _agg_field_remap: dict[str, str] = {}
+        if resolved._transforms:
+            for _t in resolved._transforms:
+                # Use "is not None" so count() (field="") is included.
+                if isinstance(_t, _PendingAggregate) and _t.field is not None:
+                    _agg_field_remap[_t.field] = _t.output_col
 
         # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
         # When CoordPolar is set, the spec-side declares theta (angular variable)
@@ -4633,7 +4883,14 @@ class Chart(_RenderMixin):
                                 tf_list.append(entry)
                         if tf_list:
                             kw["tooltip_fields"] = json.dumps(tf_list)
-                    continue
+                        continue
+                    # Aggregate shorthands like count() have field=None but the
+                    # transform emits an output column (e.g. "count_all").  If there
+                    # is a remap entry for "" (the sentinel for no-source-field), fall
+                    # through to the EncodingSpec-building code below so the encoding
+                    # points at the correct output column.
+                    if "" not in _agg_field_remap:
+                        continue
                 # Phase 9: skip channels whose field is an unresolved Repeat
                 # placeholder. RepeatChart.expand() materializes concrete charts
                 # before render; the bare template's spec just omits placeholder
@@ -4653,18 +4910,64 @@ class Chart(_RenderMixin):
                 # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
                 # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
                 field = d.pop("field")
+                # Remap aggregate fields: if this channel's field was aggregated by a
+                # _PendingAggregate transform, point the encoding at the output column.
+                # Use "" as the lookup key for count() (field=None) since _PendingAggregate
+                # stores field="" for count-style aggregates with no source column.
+                _remap_key = field if field is not None else ""
+                field = _agg_field_remap.get(_remap_key, field)
                 kw[axis] = EncodingSpec(field, **d)
-        if resolved._transforms:
+        # Resolve _PendingAggregate sentinels emitted by to_implicit_transforms().
+        # Any Aggregate shorthand like encode(y="mean(val):Q") defers groupby
+        # assignment until now, when all sibling encoding fields are visible.
+        # Infer groupby from non-aggregate encoding fields (mirrors Altair behaviour).
+        effective_transforms = list(resolved._transforms) if resolved._transforms else []
+        if any(isinstance(t, _PendingAggregate) for t in effective_transforms):
+            from ferrum import Aggregate, AggregateOp
+            from ferrum.repeat import _RepeatPlaceholder as _RPH
+
+            # Collect fields from channels that carry no aggregate.
+            non_agg_fields: list[str] = []
+            for _ch in resolved._encoding.values():
+                if not isinstance(_ch, ChannelBase):
+                    continue
+                if _ch._kwargs.get("aggregate"):
+                    continue
+                f = _ch.field
+                if f is None or isinstance(f, _RPH):
+                    continue
+                if f not in non_agg_fields:
+                    non_agg_fields.append(f)
+            # Include facet fields (row/col grouping dimensions).
+            if resolved._facet is not None:
+                for _ff in (resolved._facet.col, resolved._facet.row, resolved._facet.field):
+                    if _ff and _ff not in non_agg_fields:
+                        non_agg_fields.append(_ff)
+            # Replace sentinels with concrete Aggregate objects.
+            resolved_transforms: list = []
+            for t in effective_transforms:
+                if isinstance(t, _PendingAggregate):
+                    resolved_transforms.append(
+                        Aggregate(
+                            [AggregateOp(t.field, t.agg, t.output_col)],
+                            groupby=non_agg_fields,
+                        )
+                    )
+                else:
+                    resolved_transforms.append(t)
+            effective_transforms = resolved_transforms
+
+        if effective_transforms:
             # If any transform is a _NamedTransform or a plain dict (Phase 12
             # data transforms), serialize everything via JSON so Rust receives
             # the full pipeline through the serde path.
-            has_named = any(isinstance(t, _NamedTransform) for t in resolved._transforms)
-            has_dict = any(isinstance(t, dict) for t in resolved._transforms)
+            has_named = any(isinstance(t, _NamedTransform) for t in effective_transforms)
+            has_dict = any(isinstance(t, dict) for t in effective_transforms)
             if has_named or has_dict:
-                xform_json = Chart._transforms_to_json_list_named(resolved._transforms)
+                xform_json = Chart._transforms_to_json_list_named(effective_transforms)
                 kw["transforms_json"] = json.dumps(xform_json)
             else:
-                kw["transforms"] = list(resolved._transforms)
+                kw["transforms"] = effective_transforms
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:
@@ -4770,6 +5073,28 @@ class Chart(_RenderMixin):
         if indent is None:
             return compact
         return json.dumps(json.loads(compact), indent=indent)
+
+    def to_dict(self) -> dict:
+        """Serialise the chart specification to a plain Python dict (Altair-style).
+
+        Equivalent to ``json.loads(self.to_json())``.  Useful for introspection,
+        testing, and interoperability with tools that consume chart-spec dicts.
+
+        Returns
+        -------
+        dict
+            The chart specification as a nested Python dictionary.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1], "y": [2]})
+        >>> d = fm.Chart(df).mark_point().encode(x="x", y="y").to_dict()
+        >>> d["mark"]
+        'point'
+        """
+        return json.loads(self.to_json())
 
     # ---- Selections / interactivity (spec §3.10) ----
 

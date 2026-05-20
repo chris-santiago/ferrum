@@ -46,8 +46,11 @@ def test_chart_encode_with_string_field():
 def test_chart_encode_with_shorthand_aggregate():
     df = pl.DataFrame({"price": [1.0]})
     c = Chart(df).mark_bar().encode(y="mean(price)")
-    # The shorthand should desugar into an Aggregate transform
-    assert any(t.__class__.__name__ == "Aggregate" for t in c._transforms)
+    # The shorthand desugars into a _PendingAggregate sentinel; the sentinel is
+    # resolved into a Rust Aggregate object with inferred groupby at to_spec() time.
+    from ferrum.encoding.base import _PendingAggregate
+
+    assert any(isinstance(t, _PendingAggregate) for t in c._transforms)
 
 
 def test_chart_encode_with_explicit_channel_class():

@@ -164,31 +164,8 @@ fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> f64 {
             })
             .collect();
 
-        if vals.is_empty() {
-            return if matches!(fn_, AggFn::Count) {
-                0.0
-            } else {
-                f64::NAN
-            };
-        }
-
-        match fn_ {
-            AggFn::Mean => vals.iter().sum::<f64>() / vals.len() as f64,
-            AggFn::Sum => vals.iter().sum(),
-            AggFn::Count => vals.len() as f64,
-            AggFn::Min => vals.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            AggFn::Max => vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-            AggFn::Median => {
-                let mut sorted = vals;
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = sorted.len();
-                if n % 2 == 1 {
-                    sorted[n / 2]
-                } else {
-                    0.5 * (sorted[n / 2 - 1] + sorted[n / 2])
-                }
-            }
-        }
+        use crate::transform::aggregate::aggregate as agg_fn;
+        agg_fn(&vals, fn_, rows.len())
     } else {
         // Count on non-numeric.
         if matches!(fn_, AggFn::Count) {

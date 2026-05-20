@@ -26,22 +26,36 @@ def _xs_ys(svg: str) -> tuple[list[float], list[float]]:
     return xs, ys
 
 
+def _svg_width(svg: str) -> float:
+    """Extract the ``width`` attribute value from the root SVG element."""
+    import re
+
+    m = re.search(r'<svg[^>]+width="([\d.]+)"', svg)
+    return float(m.group(1)) if m else 640.0
+
+
 def test_quantitative_default_inset_keeps_marks_inside_plot_edge() -> None:
     """Default 5% padding pulls the extreme marks away from the plot edges.
 
-    With data ``[1, 5]`` on a 600x400 SVG, the leftmost x mark used to land
-    at the very left of the plot rect; under T4 it's inset by ~5%.
+    With data ``[1, 5]``, the leftmost x mark used to land at the very left
+    of the plot rect; under T4 it is inset by ~5%.  The assertion is relative
+    to the SVG width so it remains valid regardless of which default dimensions
+    are configured (640×480 as of 2026-05-20).
     """
     df = pl.DataFrame({"x": [1.0, 5.0], "y": [1.0, 5.0]})
     svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    width = _svg_width(svg)
     xs, _ = _xs_ys(svg)
     assert len(xs) == 2
     leftmost = min(xs)
     rightmost = max(xs)
     # The leftmost mark sits noticeably inside the plot area; the gap should
-    # be at least ~5px on a default 600px-wide chart (panel inset by ~5%).
+    # be at least ~5px (T4 inset applies regardless of chart width).
     assert leftmost > 5.0, f"leftmost x={leftmost} should be > 5 px (T4 inset)"
-    assert rightmost < 595.0, f"rightmost x={rightmost} should be < 595 px"
+    # The rightmost mark must sit at least 5 px away from the SVG right edge.
+    assert rightmost < width - 5.0, (
+        f"rightmost x={rightmost} should be < {width - 5.0} px (SVG width={width})"
+    )
 
 
 def test_explicit_domain_suppresses_padding() -> None:

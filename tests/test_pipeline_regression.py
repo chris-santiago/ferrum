@@ -511,11 +511,11 @@ class TestEncodingTitleInheritance:
 
 
 class TestDesugarsRaiseValueError:
-    def test_density_epanechnikov_kernel_raises_value_error(self):
-        """mark_density(kernel='epanechnikov') should raise ValueError."""
+    def test_density_invalid_kernel_raises_value_error(self):
+        """mark_density(kernel='banana') should raise ValueError."""
         df = _numeric_df()
-        with pytest.raises(ValueError, match="epanechnikov"):
-            fm.Chart(df).mark_density(kernel="epanechnikov").encode(x="x").show_svg()
+        with pytest.raises(ValueError, match="not supported"):
+            fm.Chart(df).mark_density(kernel="banana").encode(x="x").show_svg()
 
     def test_histogram_right_true_raises_value_error(self):
         """mark_histogram(right=True) should raise ValueError."""
