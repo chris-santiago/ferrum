@@ -6,6 +6,61 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.10.0
+
+*2026-05-20*
+
+### Added
+
+- `.labs()` fluent method for post-hoc axis labels and titles
+- `.xlim()` / `.ylim()` convenience methods for axis limits
+- `.to_dict()` on Chart (returns parsed JSON spec as a Python dict)
+- `mark_circle()` / `mark_square()` convenience methods (aliases for `mark_point(shape=...)`)
+- `mark_line(point=True)` overlays points on lines (altair parity)
+- `color=` and `alpha=` mark kwarg aliases (maps to `fill` and `opacity`)
+- `linetype=` mark kwarg alias with named values (`"dashed"`, `"dotted"`, `"dashdot"`, `"longdash"`, `"solid"`)
+- `Axis(label_map={"a": "Group A"})` categorical label remapping
+- `annotate_abline(slope, intercept)` for slope+intercept reference lines
+- PNG `scale=` parameter on `show_png()` and `save()` for DPI control
+- PDF export via `save("chart.pdf")` (zero-dependency minimal PDF writer)
+- `reverse=` on continuous positional scales
+- 5 new aggregate functions: `variance`, `stdev`, `q1`, `q3`, `distinct`
+- 4 KDE kernels: `epanechnikov`, `tophat`, `cosine` (plus existing `gaussian`)
+- Smooth method aliases: `"linear"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`
+- `"|"` / `"-"` (vline/hline) point shapes
+- 148 CSS named colors in theme overrides (e.g. `Theme(mark_color="steelblue")`)
+- Altair migration guide (`docs/site/comparison/altair.md`)
+- Pandas/polars `Series` accepted as data input
+- Polars `Categorical` / `Enum` columns auto-cast to string
+- Polars `Duration` columns auto-cast to int64 nanoseconds
+- PyArrow `Date32` / `Date64` columns auto-cast to timestamp
+- Composite mark kwargs forwarding (errorbar, boxplot, errorband, ribbon, boxen)
+- Mark tick rendering for ordinal-y-only and ordinal-x-only encodings
+
+### Fixed
+
+- `type_="Q"` kwarg on channel constructors was silently dropped
+- `count():Q` aggregate shorthand crashed (empty field rejected by Rust)
+- Aggregate shorthand `mean(val):Q` missing auto-groupby from sibling channels
+- `nice=True` on Scale constructors silently dropped during serialization
+- `mark_smooth(method="linear")` documented but crashed (Rust only accepted `"lm"`)
+- Non-Int64 integer columns failed when encoded as nominal (pyarrow/pandas users)
+- Config defaults (640x480) didn't match render defaults (was hardcoded 600x400)
+- Shorthand parser rejected hyphens, dots, and spaces in column names
+- `ChannelName` enum missing `StrokeOpacity` / `FillOpacity` / `Angle` variants (conditional encodings on extended channels were broken)
+- WASM conditional resolver missing match arms for 3 extended channels
+- `mark_density(kernel=...)` never forwarded kernel to Kde transform
+- `_apply_label_maps` broad `except Exception` narrowed to specific types with warning
+
+### Other
+
+- Plotnine/Altair migration gap audit (`design-docs/superpowers/audits/`)
+- 226 new regression tests across 6 test files
+- Overhaul README with hero strip, benchmarks, comparison table, and theme grid
+- Embed interactive demos in docs
+- Add plotnine to benchmarks, comparison table, and migration guides
+- 10M-row stress tests for scale ceiling validation
+
 ## 0.9.1
 
 *2026-05-18*
