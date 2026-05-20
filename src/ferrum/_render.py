@@ -94,7 +94,11 @@ def _apply_label_maps(
             df = pl.from_arrow(arrow)
         except (ImportError, TypeError, ValueError):
             import warnings
-            warnings.warn("Axis label_map could not be applied (data coercion failed); labels unchanged.", stacklevel=2)
+
+            warnings.warn(
+                "Axis label_map could not be applied (data coercion failed); labels unchanged.",
+                stacklevel=2,
+            )
             return data
     else:
         df = data

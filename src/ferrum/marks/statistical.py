@@ -138,8 +138,7 @@ def desugar_density(
     _VALID_KERNELS = {"gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"}
     if kernel is not None and kernel not in _VALID_KERNELS:
         raise ValueError(
-            f"mark_density(kernel={kernel!r}) is not supported; "
-            f"valid: {sorted(_VALID_KERNELS)}"
+            f"mark_density(kernel={kernel!r}) is not supported; valid: {sorted(_VALID_KERNELS)}"
         )
     if multiple not in ("layer", "stack", "fill", "dodge"):
         raise ValueError(

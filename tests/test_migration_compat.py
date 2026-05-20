@@ -658,9 +658,7 @@ def test_mark_smooth_method_linear():
     """Regression: mark_smooth(method='linear') crashed because smooth.rs only
     accepted 'lm' and 'loess'. Now 'linear' is an alias for 'lm'."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 4.0, 6.0, 8.0]})
-    svg = (
-        fm.Chart(df).mark_smooth(method="linear").encode(x="x", y="y").show_svg()
-    )
+    svg = fm.Chart(df).mark_smooth(method="linear").encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "<path" in svg or "d=" in svg
 
@@ -668,9 +666,7 @@ def test_mark_smooth_method_linear():
 def test_mark_smooth_method_quadratic():
     """Regression: 'quadratic' is a new polynomial degree-2 method."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 4.0, 9.0, 16.0]})
-    svg = (
-        fm.Chart(df).mark_smooth(method="quadratic").encode(x="x", y="y").show_svg()
-    )
+    svg = fm.Chart(df).mark_smooth(method="quadratic").encode(x="x", y="y").show_svg()
     assert "<svg" in svg
 
 
@@ -705,9 +701,7 @@ def test_aggregate_variance():
     """Regression: encode(y='variance(val):Q') crashed because AggFn only had
     6 variants. Now variance/stdev/q1/q3/distinct are supported."""
     df = pl.DataFrame({"cat": ["a", "a", "b", "b"], "val": [1.0, 3.0, 10.0, 20.0]})
-    svg = (
-        fm.Chart(df).mark_bar().encode(x="cat:N", y="variance(val):Q").show_svg()
-    )
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="variance(val):Q").show_svg()
     assert "<rect" in svg
 
 
@@ -720,10 +714,12 @@ def test_aggregate_stdev():
 
 def test_aggregate_q1_q3():
     """Regression: q1/q3 aggregate functions."""
-    df = pl.DataFrame({
-        "cat": ["a"] * 5 + ["b"] * 5,
-        "val": [1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
-    })
+    df = pl.DataFrame(
+        {
+            "cat": ["a"] * 5 + ["b"] * 5,
+            "val": [1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+        }
+    )
     svg_q1 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q1(val):Q").show_svg()
     svg_q3 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q3(val):Q").show_svg()
     assert "<rect" in svg_q1
@@ -742,9 +738,7 @@ def test_kde_kernel_epanechnikov():
     because desugar_density rejected non-gaussian AND never forwarded kernel
     to Kde(). Both are now fixed."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0, 3.0, 2.5]})
-    svg = (
-        fm.Chart(df).mark_density(kernel="epanechnikov").encode(x="val:Q").show_svg()
-    )
+    svg = fm.Chart(df).mark_density(kernel="epanechnikov").encode(x="val:Q").show_svg()
     assert "<svg" in svg
     assert "<path" in svg or "d=" in svg
 
