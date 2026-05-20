@@ -18,6 +18,10 @@ _AXIS_DEFAULTS: dict[str, Any] = {
     "domain": True,
 }
 
+# Fields that exist only in the Python layer and must not be forwarded to
+# the Rust renderer (they have no corresponding key in EncodingSpec.axis.extra).
+_PYTHON_ONLY_FIELDS: frozenset[str] = frozenset({"label_map"})
+
 
 @dataclass(frozen=True, slots=True)
 class Axis:
@@ -89,6 +93,15 @@ class Axis:
         Explicit tick values.
     zindex : int, optional
         Z-index for layering.
+    label_map : dict[str, str], optional
+        Mapping from original tick-label text to display text.  Applied in the
+        Python layer at render time by renaming the corresponding column values
+        in the DataFrame before Rust computes the scale domain.  Keys not
+        present in the data are silently ignored.
+
+        Example — rename categorical axis labels::
+
+            fm.Axis(label_map={"a": "Group A", "b": "Group B"})
 
     Examples
     --------
@@ -132,11 +145,15 @@ class Axis:
     title_padding: float | None = None
     values: list | None = None
     zindex: int | None = None
+    label_map: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting None and default values."""
+        """Serialize to dict for the renderer, omitting None, defaults, and Python-only fields."""
         result: dict[str, Any] = {}
         for f in fields(self):
+            # Python-only fields have no Rust counterpart — never forward them.
+            if f.name in _PYTHON_ONLY_FIELDS:
+                continue
             val = getattr(self, f.name)
             # Skip None values
             if val is None:

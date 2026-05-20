@@ -13,6 +13,8 @@ pub(crate) enum BandwidthSpec {
     Fixed { value: f64 },
 }
 
+pub(crate) fn default_kernel() -> String { "gaussian".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct KdeSpec {
     pub field: String,
@@ -29,6 +31,11 @@ pub(crate) struct KdeSpec {
     /// When true, all groups share the same x-grid (required for stack/fill).
     #[serde(default)]
     pub shared_extent: bool,
+    /// Kernel function for density estimation.
+    /// Supported: "gaussian" (default), "epanechnikov" / "epan",
+    /// "tophat" / "uniform", "cosine".
+    #[serde(default = "default_kernel")]
+    pub kernel: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub groupby: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -106,7 +113,7 @@ fn apply_one_group(
         if h <= 0.0 || !h.is_finite() {
             vec![f64::NAN; spec.n]
         } else {
-            gaussian_density_at_grid(&clean, h, &grid)
+            kernel_density_at_grid(&clean, h, &grid, &spec.kernel)
         }
     };
 
@@ -252,6 +259,18 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
+/// Dispatch to the requested kernel's density estimator.
+/// Falls back to Gaussian for any unrecognised kernel name (should not
+/// happen in practice since `PyKde::new` validates the string).
+fn kernel_density_at_grid(x: &[f64], h: f64, grid: &[f64], kernel: &str) -> Vec<f64> {
+    match kernel {
+        "epanechnikov" | "epan" => epanechnikov_density_at_grid(x, h, grid),
+        "tophat" | "uniform" => tophat_density_at_grid(x, h, grid),
+        "cosine" => cosine_density_at_grid(x, h, grid),
+        _ => gaussian_density_at_grid(x, h, grid),
+    }
+}
+
 fn gaussian_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
     let n = x.len() as f64;
     let norm = 1.0 / (n * h * (2.0 * std::f64::consts::PI).sqrt());
@@ -262,6 +281,71 @@ fn gaussian_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
                 .map(|&xi| {
                     let z = (g - xi) / h;
                     (-0.5 * z * z).exp()
+                })
+                .sum();
+            norm * s
+        })
+        .collect()
+}
+
+/// Epanechnikov kernel: K(u) = (3/4)(1 - u²) for |u| ≤ 1, else 0.
+/// Integrates to 1 over [-1, 1] and is optimal in MSE sense.
+fn epanechnikov_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+    let n = x.len() as f64;
+    // The kernel integrates to 1 over [-h, h], so no extra h factor in norm.
+    let norm = 1.0 / (n * h);
+    grid.iter()
+        .map(|&g| {
+            let s: f64 = x
+                .iter()
+                .map(|&xi| {
+                    let u = (g - xi) / h;
+                    if u.abs() <= 1.0 {
+                        0.75 * (1.0 - u * u)
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            norm * s
+        })
+        .collect()
+}
+
+/// Tophat (uniform) kernel: K(u) = 0.5 for |u| ≤ 1, else 0.
+fn tophat_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+    let n = x.len() as f64;
+    let norm = 1.0 / (n * h);
+    grid.iter()
+        .map(|&g| {
+            let s: f64 = x
+                .iter()
+                .map(|&xi| {
+                    let u = (g - xi) / h;
+                    if u.abs() <= 1.0 { 0.5 } else { 0.0 }
+                })
+                .sum();
+            norm * s
+        })
+        .collect()
+}
+
+/// Cosine kernel: K(u) = (π/4)·cos(π·u/2) for |u| ≤ 1, else 0.
+fn cosine_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+    use std::f64::consts::PI;
+    let n = x.len() as f64;
+    let norm = 1.0 / (n * h);
+    grid.iter()
+        .map(|&g| {
+            let s: f64 = x
+                .iter()
+                .map(|&xi| {
+                    let u = (g - xi) / h;
+                    if u.abs() <= 1.0 {
+                        (PI / 4.0) * ((PI / 2.0) * u).cos()
+                    } else {
+                        0.0
+                    }
                 })
                 .sum();
             norm * s
@@ -334,7 +418,8 @@ pub(crate) struct PyKde(pub(crate) TransformSpec);
 #[pymethods]
 impl PyKde {
     #[new]
-    #[pyo3(signature = (field, *, bandwidth = None, bw_adjust = 1.0, n = 512, extent = None, cumulative = false, shared_extent = false, groupby = None, name = None))]
+    #[pyo3(signature = (field, *, bandwidth = None, bw_adjust = 1.0, n = 512, extent = None, cumulative = false, shared_extent = false, kernel = "gaussian", groupby = None, name = None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
         bandwidth: Option<&Bound<'_, PyAny>>,
@@ -343,6 +428,7 @@ impl PyKde {
         extent: Option<(f64, f64)>,
         cumulative: bool,
         shared_extent: bool,
+        kernel: &str,
         groupby: Option<String>,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -387,6 +473,14 @@ impl PyKde {
                 ));
             }
         }
+        let kernel_str = match kernel {
+            "gaussian" | "epanechnikov" | "epan" | "tophat" | "uniform" | "cosine" => {
+                kernel.to_string()
+            }
+            other => return Err(PyValueError::new_err(format!(
+                "Kde: unknown kernel '{other}'; expected 'gaussian' | 'epanechnikov' | 'epan' | 'tophat' | 'uniform' | 'cosine'"
+            ))),
+        };
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),
             bandwidth: bw,
@@ -395,6 +489,7 @@ impl PyKde {
             extent,
             cumulative,
             shared_extent,
+            kernel: kernel_str,
             groupby,
             name,
         })))
@@ -403,9 +498,10 @@ impl PyKde {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Kde(s) => format!(
-                "Kde(field='{}', bandwidth={:?}, n={}, extent={:?}, cumulative={})",
+                "Kde(field='{}', bandwidth={:?}, n={}, extent={:?}, cumulative={}, kernel='{}')",
                 s.field, s.bandwidth, s.n, s.extent,
                 if s.cumulative { "True" } else { "False" },
+                s.kernel,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -481,6 +577,7 @@ mod tests {
                 n: case.n,
                 extent: Some((case.extent[0], case.extent[1])),
                 cumulative: case.cumulative,
+                kernel: default_kernel(),
                 groupby: None,
                 name: None,
             };
@@ -521,6 +618,7 @@ mod tests {
             n: 16,
             extent: Some((0.0, 6.0)),
             cumulative: false,
+            kernel: default_kernel(),
             groupby: None,
             name: None,
         };
@@ -540,6 +638,7 @@ mod tests {
             n: 8,
             extent: Some((0.0, 2.0)),
             cumulative: false,
+            kernel: default_kernel(),
             groupby: None,
             name: None,
         };
@@ -572,6 +671,7 @@ mod tests {
             n: 8,
             extent: None,
             cumulative: false,
+            kernel: default_kernel(),
             groupby: Some("g".into()),
             name: None,
         };
@@ -608,6 +708,7 @@ mod tests {
             n: 4,
             extent: Some((0.0, 6.0)),
             cumulative: false,
+            kernel: default_kernel(),
             groupby: None,
             name: None,
         };
@@ -629,6 +730,7 @@ mod tests {
             n: 4,
             extent: None,
             cumulative: false,
+            kernel: default_kernel(),
             groupby: Some("ghost".into()),
             name: None,
         };
@@ -646,6 +748,7 @@ mod tests {
             extent: Some((-1.0, 5.0)),
             cumulative: true,
             shared_extent: false,
+            kernel: "gaussian".to_string(),
             groupby: None,
             name: None,
         };
@@ -667,6 +770,7 @@ mod tests {
             n: 10,
             extent: Some((5.0, 9.0)),
             cumulative: false,
+            kernel: default_kernel(),
             groupby: None,
             name: None,
         };
@@ -692,6 +796,7 @@ mod tests {
             n: 16,
             extent: Some((2.0, 6.0)),
             cumulative: false,
+            kernel: default_kernel(),
             groupby: None,
             name: None,
         };
@@ -700,6 +805,231 @@ mod tests {
         assert!(
             density.iter().all(|d| d.is_nan()),
             "zero-variance KDE should emit all-NaN densities"
+        );
+    }
+
+    // ---- Kernel-specific tests ----
+
+    fn kde_spec_with_kernel(kernel: &str, n: usize) -> KdeSpec {
+        KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Fixed { value: 1.0 },
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n,
+            extent: Some((-3.0, 3.0)),
+            cumulative: false,
+            kernel: kernel.to_string(),
+            groupby: None,
+            name: None,
+        }
+    }
+
+    fn simple_batch() -> RecordBatch {
+        batch_with("x", vec![0.0, 0.5, -0.5, 1.0, -1.0])
+    }
+
+    /// Gaussian kernel (default) must produce non-zero density everywhere in the grid.
+    #[test]
+    fn test_kde_gaussian_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("gaussian", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        assert!(
+            density.iter().all(|&d| d > 0.0),
+            "Gaussian KDE: all grid densities should be positive"
+        );
+    }
+
+    /// Epanechnikov kernel must produce non-zero density on simple data.
+    #[test]
+    fn test_kde_epanechnikov_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("epanechnikov", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        // At least some grid points must be non-zero (those inside bandwidth support).
+        let nonzero_count = density.iter().filter(|&&d| d > 0.0).count();
+        assert!(
+            nonzero_count > 0,
+            "Epanechnikov KDE: expected some non-zero densities, got all zeros"
+        );
+    }
+
+    /// Epanechnikov kernel must produce exactly 0 for grid points further than
+    /// bandwidth h from all data points.
+    #[test]
+    fn test_kde_epanechnikov_zero_outside_bandwidth() {
+        // Single data point at x=0, bandwidth=0.5.
+        // Grid points beyond |g - 0| > 0.5 must be exactly 0.
+        let batch = batch_with("x", vec![0.0, 0.01]); // need ≥ 2 points
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Fixed { value: 0.5 },
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 21,
+            extent: Some((-2.0, 2.0)),
+            cumulative: false,
+            kernel: "epanechnikov".to_string(),
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let values = col(&out, "value");
+        let density = col(&out, "density");
+        // All grid points where |g| > 0.5 AND |g - 0.01| > 0.5 must have density = 0.
+        for (i, (&v, &d)) in values.iter().zip(density.iter()).enumerate() {
+            let in_support = v.abs() <= 0.5 || (v - 0.01).abs() <= 0.5;
+            if !in_support {
+                assert_eq!(
+                    d, 0.0,
+                    "Epanechnikov: expected density=0 at grid point {i} (x={v}), got {d}"
+                );
+            }
+        }
+    }
+
+    /// "epan" alias must produce the same output as "epanechnikov".
+    #[test]
+    fn test_kde_epan_alias_matches_epanechnikov() {
+        let batch = simple_batch();
+        let spec1 = kde_spec_with_kernel("epanechnikov", 15);
+        let spec2 = kde_spec_with_kernel("epan", 15);
+        let out1 = apply(&spec1, &batch).unwrap();
+        let out2 = apply(&spec2, &batch).unwrap();
+        let d1 = col(&out1, "density");
+        let d2 = col(&out2, "density");
+        for (a, b) in d1.iter().zip(d2.iter()) {
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "'epan' and 'epanechnikov' must produce identical output"
+            );
+        }
+    }
+
+    /// Tophat kernel must produce non-zero density on simple data.
+    #[test]
+    fn test_kde_tophat_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("tophat", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        let nonzero_count = density.iter().filter(|&&d| d > 0.0).count();
+        assert!(
+            nonzero_count > 0,
+            "Tophat KDE: expected some non-zero densities"
+        );
+    }
+
+    /// "uniform" alias must produce the same output as "tophat".
+    #[test]
+    fn test_kde_uniform_alias_matches_tophat() {
+        let batch = simple_batch();
+        let spec1 = kde_spec_with_kernel("tophat", 15);
+        let spec2 = kde_spec_with_kernel("uniform", 15);
+        let out1 = apply(&spec1, &batch).unwrap();
+        let out2 = apply(&spec2, &batch).unwrap();
+        let d1 = col(&out1, "density");
+        let d2 = col(&out2, "density");
+        for (a, b) in d1.iter().zip(d2.iter()) {
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "'uniform' and 'tophat' must produce identical output"
+            );
+        }
+    }
+
+    /// Cosine kernel must produce non-zero density on simple data.
+    #[test]
+    fn test_kde_cosine_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("cosine", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        let nonzero_count = density.iter().filter(|&&d| d > 0.0).count();
+        assert!(
+            nonzero_count > 0,
+            "Cosine KDE: expected some non-zero densities"
+        );
+    }
+
+    /// Gaussian must produce the same output as before (regression against the
+    /// hardcoded path we replaced with the dispatch).
+    #[test]
+    fn test_kde_gaussian_regression_matches_direct_call() {
+        let data = vec![-1.0, 0.0, 1.0, 2.0, 3.0];
+        let h = 0.8_f64;
+        let grid: Vec<f64> = (0..10).map(|i| -2.0 + i as f64 * 0.5).collect();
+        let expected = gaussian_density_at_grid(&data, h, &grid);
+        let via_dispatch = kernel_density_at_grid(&data, h, &grid, "gaussian");
+        for (a, b) in expected.iter().zip(via_dispatch.iter()) {
+            assert_eq!(
+                a.to_bits(), b.to_bits(),
+                "gaussian dispatch must be byte-identical to direct call"
+            );
+        }
+    }
+
+    /// Unknown kernel name in PyKde::new must return an error.
+    #[test]
+    fn test_kde_unknown_kernel_returns_error() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            use pyo3::types::PyString;
+            let bw_obj = PyString::new(py, "scott").into_any();
+            let result = PyKde::new(
+                "x",
+                Some(&bw_obj),
+                1.0,
+                512,
+                None,
+                false,
+                false,
+                "laplacian",
+                None,
+                None,
+            );
+            assert!(result.is_err(), "unknown kernel 'laplacian' must return an error");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("unknown kernel"),
+                "error message should mention 'unknown kernel': {msg}"
+            );
+        });
+    }
+
+    /// Gaussian kernel must round-trip through JSON including the kernel field.
+    #[test]
+    fn test_kde_kernel_field_round_trips_json() {
+        let original = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "epanechnikov".to_string(),
+            groupby: None,
+            name: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: KdeSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kernel, "epanechnikov");
+        assert_eq!(parsed, original);
+    }
+
+    /// Old JSON without a "kernel" field must deserialize to gaussian (backward compat).
+    #[test]
+    fn test_kde_kernel_field_defaults_to_gaussian_on_old_json() {
+        // Simulate a serialized KdeSpec without the "kernel" field.
+        let json = r#"{"field":"x","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":32}"#;
+        let parsed: KdeSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.kernel, "gaussian",
+            "missing 'kernel' field must default to 'gaussian' for backward compat"
         );
     }
 }

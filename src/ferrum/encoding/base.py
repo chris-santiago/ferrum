@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
 from ferrum.legend import _normalize_legend
 from ferrum.encoding._scale import _scale_to_dict
+
+
+@dataclass(frozen=True)
+class _PendingAggregate:
+    """Sentinel emitted by ``to_implicit_transforms()`` for aggregate channels.
+
+    Carries the aggregate operation's field, function name, and output column
+    name but defers groupby assignment until ``chart.to_spec()`` can inspect
+    all sibling encoding channels and infer which fields should be grouped by.
+
+    This is an internal implementation detail — callers outside ``chart.py``
+    must not construct or inspect this type directly.
+    """
+
+    field: str
+    agg: str
+    output_col: str
 
 
 class ChannelBase:
@@ -32,6 +50,15 @@ class ChannelBase:
                 f"{self.__class__.__name__}: field must be str, _RepeatPlaceholder, or None, "
                 f"got {type(field).__name__}"
             )
+        # Normalize type_ → type so fm.X("hp", type_="Q") and fm.X("hp", type="Q")
+        # are identical. The trailing underscore form avoids shadowing the builtin
+        # but both spellings must produce the same internal state.
+        if "type_" in kwargs:
+            kwargs = dict(kwargs)  # copy before mutation so we don't alias caller's state
+            _type_val = kwargs.pop("type_")
+            if "type" not in kwargs:
+                kwargs["type"] = _type_val
+            # else: "type" wins; type_ is discarded.
         # Parse shorthand from the field string so Channel("col:Q") works the same
         # as Channel("col", type_="Q"). This lets users pass shorthand strings
         # directly to channel constructors without manually splitting field and type.
@@ -112,7 +139,14 @@ class ChannelBase:
         return out
 
     def to_implicit_transforms(self) -> list:
-        """Return a list of transform objects derived from kwargs (bin, aggregate)."""
+        """Return a list of transform objects derived from kwargs (bin, aggregate).
+
+        Aggregate transforms are returned as ``_PendingAggregate`` sentinels
+        rather than Rust ``Aggregate`` objects.  The ``chart.to_spec()`` method
+        resolves them into concrete ``Aggregate`` objects once all sibling
+        encoding channels are known, allowing it to infer the correct groupby
+        from non-aggregate fields (Altair-style auto-groupby).
+        """
         out: list = []
         bin_arg = self._kwargs.get("bin")
         if bin_arg:
@@ -127,10 +161,12 @@ class ChannelBase:
                 out.append(bin_arg)
         agg = self._kwargs.get("aggregate")
         if agg:
-            from ferrum import Aggregate, AggregateOp
-
             out.append(
-                Aggregate([AggregateOp(self.field or "", agg, f"{agg}_{self.field or 'all'}")])
+                _PendingAggregate(
+                    field=self.field or "",
+                    agg=agg,
+                    output_col=f"{agg}_{self.field or 'all'}",
+                )
             )
         return out
 

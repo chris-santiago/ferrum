@@ -510,7 +510,25 @@ def test_coord_cartesian_wires_through_chart_spec():
 
 
 def test_save_unknown_format_raises():
-    """Saving to an unsupported format raises NotImplementedError."""
+    """Saving to a genuinely unsupported format raises ValueError."""
+    import tempfile, os
+
+    df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    combined = c1 | c2
+    with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
+        tmp = f.name
+    try:
+        with pytest.raises(ValueError, match="xyz"):
+            combined.save(tmp, format="xyz")
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def test_save_pdf_composition_works():
+    """Saving a composition as PDF now succeeds (F14)."""
     import tempfile, os
 
     df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
@@ -520,8 +538,9 @@ def test_save_unknown_format_raises():
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         tmp = f.name
     try:
-        with pytest.raises(NotImplementedError, match="svg.*png|png.*svg"):
-            combined.save(tmp, format="pdf")
+        combined.save(tmp)
+        with open(tmp, "rb") as fh:
+            assert fh.read(5) == b"%PDF-"
     finally:
         os.unlink(tmp)
 

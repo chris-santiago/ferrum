@@ -93,6 +93,7 @@ _DOC_ALLOWLIST: set[str] = {
     "annotate_vline",
     "annotate_rect",
     "annotate_text",
+    "annotate_abline",
     # Schwabish SB1 (2026-05-11) annotation primitives + title class.
     "annotate_arrow",
     "AUCLabel",

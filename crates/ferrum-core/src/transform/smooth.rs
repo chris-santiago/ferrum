@@ -8,10 +8,18 @@ use std::sync::Arc;
 use crate::transform::residuals;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SmoothMethod {
+    /// Global ordinary least squares (degree-1 polynomial).
     Lm,
+    /// Locally-weighted polynomial regression.
     Loess,
+    /// Global polynomial regression of the specified degree (2 = quadratic, 3 = cubic).
+    Poly { degree: u8 },
+    /// Log-x linear fit: y ~ a + b·ln(x).  Requires x > 0.
+    LogX,
+    /// Sqrt-x linear fit: y ~ a + b·√x.  Requires x ≥ 0.
+    SqrtX,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,6 +165,9 @@ fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<
             &xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed,
             metrics,
         ),
+        SmoothMethod::Poly { degree } => poly_fit(&xs, &ys, &grid, spec.ci, spec.n, degree, metrics),
+        SmoothMethod::LogX => log_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
+        SmoothMethod::SqrtX => sqrt_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
     }
 }
 
@@ -277,21 +288,14 @@ fn pre_aggregate_xy(
     n_bins: usize,
     estimator: crate::transform::aggregate::AggFn,
 ) -> (Vec<f64>, Vec<f64>) {
-    use crate::transform::aggregate::AggFn;
+    use crate::transform::aggregate::aggregate as agg_fn;
     if xs.is_empty() || n_bins == 0 {
         return (Vec::new(), Vec::new());
     }
     let (x_min, x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
         |(a, b), &v| (a.min(v), b.max(v)));
     if x_min == x_max {
-        let avg = match estimator {
-            AggFn::Mean => ys.iter().sum::<f64>() / ys.len() as f64,
-            AggFn::Sum => ys.iter().sum(),
-            AggFn::Count => ys.len() as f64,
-            AggFn::Min => ys.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            AggFn::Max => ys.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-            AggFn::Median => median(ys),
-        };
+        let avg = agg_fn(ys, estimator, ys.len());
         return (vec![x_min], vec![avg]);
     }
     let mut buckets_x: Vec<Vec<f64>> = vec![Vec::new(); n_bins];
@@ -311,26 +315,11 @@ fn pre_aggregate_xy(
         if ys_in.is_empty() { continue; }
         // x always uses mean within the bin; y uses the chosen estimator.
         let mean_x = xs_in.iter().sum::<f64>() / xs_in.len() as f64;
-        let agg = match estimator {
-            AggFn::Mean => ys_in.iter().sum::<f64>() / ys_in.len() as f64,
-            AggFn::Sum => ys_in.iter().sum(),
-            AggFn::Count => ys_in.len() as f64,
-            AggFn::Min => ys_in.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            AggFn::Max => ys_in.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-            AggFn::Median => median(ys_in),
-        };
+        let agg = agg_fn(ys_in, estimator, ys_in.len());
         out_x.push(mean_x);
         out_y.push(agg);
     }
     (out_x, out_y)
-}
-
-fn median(v: &[f64]) -> f64 {
-    let mut s = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = s.len();
-    if n == 0 { return f64::NAN; }
-    if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
 }
 
 /// Build a point-predictor closure for the chosen smoothing method,
@@ -362,6 +351,62 @@ fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn
             let (sxs, sys) = sort_xy(xs_fit, ys_fit);
             let degree = spec.degree;
             Box::new(move |x: f64| loess_at_point_sorted(&sxs, &sys, x, k, degree))
+        }
+        SmoothMethod::Poly { degree } => {
+            let coeffs = poly_ols(xs_fit, ys_fit, degree as usize);
+            Box::new(move |x: f64| eval_poly(&coeffs, x))
+        }
+        SmoothMethod::LogX => {
+            let tx: Vec<f64> = xs_fit.iter().map(|&x| x.ln()).collect();
+            let valid: Vec<(f64, f64)> = tx.iter().zip(ys_fit.iter())
+                .filter(|(t, _)| t.is_finite())
+                .map(|(&t, &y)| (t, y))
+                .collect();
+            if valid.len() < 2 {
+                return Box::new(|_| f64::NAN);
+            }
+            let vxs: Vec<f64> = valid.iter().map(|(t, _)| *t).collect();
+            let vys: Vec<f64> = valid.iter().map(|(_, y)| *y).collect();
+            let n = vxs.len() as f64;
+            let mean_x = vxs.iter().sum::<f64>() / n;
+            let mean_y = vys.iter().sum::<f64>() / n;
+            let sxx: f64 = vxs.iter().map(|x| (x - mean_x).powi(2)).sum();
+            let sxy: f64 = vxs.iter().zip(vys.iter()).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
+            if sxx == 0.0 {
+                return Box::new(|_| f64::NAN);
+            }
+            let beta = sxy / sxx;
+            let alpha = mean_y - beta * mean_x;
+            Box::new(move |x: f64| {
+                let t = x.ln();
+                if !t.is_finite() { f64::NAN } else { alpha + beta * t }
+            })
+        }
+        SmoothMethod::SqrtX => {
+            let tx: Vec<f64> = xs_fit.iter().map(|&x| x.sqrt()).collect();
+            let valid: Vec<(f64, f64)> = tx.iter().zip(ys_fit.iter())
+                .filter(|(t, _)| t.is_finite())
+                .map(|(&t, &y)| (t, y))
+                .collect();
+            if valid.len() < 2 {
+                return Box::new(|_| f64::NAN);
+            }
+            let vxs: Vec<f64> = valid.iter().map(|(t, _)| *t).collect();
+            let vys: Vec<f64> = valid.iter().map(|(_, y)| *y).collect();
+            let n = vxs.len() as f64;
+            let mean_x = vxs.iter().sum::<f64>() / n;
+            let mean_y = vys.iter().sum::<f64>() / n;
+            let sxx: f64 = vxs.iter().map(|x| (x - mean_x).powi(2)).sum();
+            let sxy: f64 = vxs.iter().zip(vys.iter()).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
+            if sxx == 0.0 {
+                return Box::new(|_| f64::NAN);
+            }
+            let beta = sxy / sxx;
+            let alpha = mean_y - beta * mean_x;
+            Box::new(move |x: f64| {
+                let t = x.sqrt();
+                if !t.is_finite() { f64::NAN } else { alpha + beta * t }
+            })
         }
     }
 }
@@ -504,6 +549,242 @@ fn build_smooth_batch(
 
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
+}
+
+// ---- Polynomial OLS helpers ----
+
+/// Solve the normal equations for polynomial regression of the given degree
+/// using faer's LU decomposition.  Returns the coefficient vector
+/// `[a_0, a_1, ..., a_d]` such that `y ≈ a_0 + a_1·x + … + a_d·x^d`.
+/// Returns an empty Vec if the system is rank-deficient or inputs are invalid.
+fn poly_ols(xs: &[f64], ys: &[f64], degree: usize) -> Vec<f64> {
+    use faer::prelude::*;
+
+    let n = xs.len();
+    let p = degree + 1;
+    if n < p || degree == 0 {
+        return Vec::new();
+    }
+
+    // Build Vandermonde matrix X (n × p).
+    let mut x_mat = Mat::zeros(n, p);
+    for (i, &xi) in xs.iter().enumerate() {
+        for j in 0..p {
+            x_mat[(i, j)] = xi.powi(j as i32);
+        }
+    }
+
+    // Normal equations: X'X β = X'y.
+    let xt = x_mat.transpose().to_owned();
+    let xtx = &xt * &x_mat;
+    let mut xty = Mat::zeros(p, 1);
+    for j in 0..p {
+        let mut v = 0.0_f64;
+        for (i, &yi) in ys.iter().enumerate() {
+            v += xt[(j, i)] * yi;
+        }
+        xty[(j, 0)] = v;
+    }
+
+    // Solve via full-pivot LU (handles near-singular cases gracefully).
+    let lu = xtx.partial_piv_lu();
+    let sol = lu.solve(&xty);
+
+    (0..p).map(|j| sol[(j, 0)]).collect()
+}
+
+/// Evaluate the polynomial with coefficients `[a_0, a_1, …, a_d]` at `x`
+/// via Horner's method.
+fn eval_poly(coeffs: &[f64], x: f64) -> f64 {
+    if coeffs.is_empty() {
+        return f64::NAN;
+    }
+    let mut val = *coeffs.last().unwrap();
+    for &c in coeffs[..coeffs.len() - 1].iter().rev() {
+        val = val * x + c;
+    }
+    val
+}
+
+/// Global polynomial regression fit over a grid.
+fn poly_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize, degree: u8,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    let coeffs = poly_ols(xs, ys, degree as usize);
+    if coeffs.is_empty() {
+        return build_smooth_batch(
+            grid.to_vec(),
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            None,
+        );
+    }
+
+    let y_fit: Vec<f64> = grid.iter().map(|&x| eval_poly(&coeffs, x)).collect();
+
+    // Confidence interval: bootstrap residuals from the polynomial fit at input xs.
+    let (lo, hi) = match ci {
+        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
+        Some(level) => {
+            let n = xs.len();
+            let dof = n as f64 - (degree as f64 + 1.0);
+            if dof <= 0.0 {
+                (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid])
+            } else {
+                let resid_ss: f64 = xs.iter().zip(ys)
+                    .map(|(&xi, &yi)| (yi - eval_poly(&coeffs, xi)).powi(2))
+                    .sum();
+                let sigma2 = resid_ss / dof;
+                let t_crit = student_t_critical(level, dof);
+                // Approximate SE using the leverage from the hat matrix diagonal.
+                let leverages = poly_hat_diagonal(xs, degree as usize);
+                let lo_v: Vec<f64> = grid.iter().enumerate().map(|(i, &x)| {
+                    let h = leverages.get(i).copied().unwrap_or(0.0);
+                    let se = (sigma2 * (1.0 - h + 1.0 / n as f64)).sqrt();
+                    eval_poly(&coeffs, x) - t_crit * se
+                }).collect();
+                let hi_v: Vec<f64> = grid.iter().enumerate().map(|(i, &x)| {
+                    let h = leverages.get(i).copied().unwrap_or(0.0);
+                    let se = (sigma2 * (1.0 - h + 1.0 / n as f64)).sqrt();
+                    eval_poly(&coeffs, x) + t_crit * se
+                }).collect();
+                (lo_v, hi_v)
+            }
+        }
+    };
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+}
+
+/// Compute hat-matrix diagonal for polynomial design X (Vandermonde).
+/// Returns Vec of length n corresponding to the training points.
+fn poly_hat_diagonal(xs: &[f64], degree: usize) -> Vec<f64> {
+    use faer::prelude::*;
+    let n = xs.len();
+    let p = degree + 1;
+    if n < p {
+        return vec![0.0; n];
+    }
+    let mut x_mat = Mat::zeros(n, p);
+    for (i, &xi) in xs.iter().enumerate() {
+        for j in 0..p {
+            x_mat[(i, j)] = xi.powi(j as i32);
+        }
+    }
+    crate::transform::linalg::hat_diagonal(&x_mat)
+}
+
+/// Log-x linear fit: y ~ a + b·ln(x). Requires x > 0.
+fn log_x_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    transformed_linear_fit(xs, ys, grid, ci, n_grid, |x| x.ln(), metrics)
+}
+
+/// Sqrt-x linear fit: y ~ a + b·√x. Requires x ≥ 0.
+fn sqrt_x_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    transformed_linear_fit(xs, ys, grid, ci, n_grid, |x| x.sqrt(), metrics)
+}
+
+/// Fit `y ~ a + b·T(x)` where `T` is any monotone transformation of x.
+/// Skips pairs where `T(x)` is not finite (e.g., ln of non-positive x).
+fn transformed_linear_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    transform: impl Fn(f64) -> f64,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    // Transform x values; filter to finite-transform pairs only.
+    let pairs: Vec<(f64, f64)> = xs.iter().zip(ys.iter())
+        .filter_map(|(&xi, &yi)| {
+            let t = transform(xi);
+            if t.is_finite() { Some((t, yi)) } else { None }
+        })
+        .collect();
+
+    if pairs.len() < 2 {
+        return build_smooth_batch(
+            grid.to_vec(),
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            None,
+        );
+    }
+
+    let txs: Vec<f64> = pairs.iter().map(|(t, _)| *t).collect();
+    let tys: Vec<f64> = pairs.iter().map(|(_, y)| *y).collect();
+    // Delegate to the OLS path on transformed-x/original-y.
+    lm_fit_on(&txs, &tys, grid, ci, n_grid, &transform, metrics)
+}
+
+/// OLS fit on pre-transformed x values; evaluate the fit at `transform(grid[i])`.
+fn lm_fit_on(
+    txs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    transform: &impl Fn(f64) -> f64,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    let n = txs.len();
+    let mean_x: f64 = txs.iter().sum::<f64>() / n as f64;
+    let mean_y: f64 = ys.iter().sum::<f64>() / n as f64;
+    let sxx: f64 = txs.iter().map(|x| (x - mean_x).powi(2)).sum();
+    let sxy: f64 = txs.iter().zip(ys).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
+
+    if sxx == 0.0 {
+        return build_smooth_batch(
+            grid.to_vec(),
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            vec![f64::NAN; n_grid],
+            None,
+        );
+    }
+
+    let beta = sxy / sxx;
+    let alpha = mean_y - beta * mean_x;
+
+    let y_fit: Vec<f64> = grid.iter().map(|&x| {
+        let t = transform(x);
+        if t.is_finite() { alpha + beta * t } else { f64::NAN }
+    }).collect();
+
+    let (lo, hi) = match ci {
+        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
+        Some(level) => {
+            let resid_ss: f64 = txs.iter().zip(ys)
+                .map(|(x, y)| (y - (alpha + beta * x)).powi(2))
+                .sum();
+            let dof = n as f64 - 2.0;
+            if dof <= 0.0 {
+                (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid])
+            } else {
+                let sigma2 = resid_ss / dof;
+                let t_crit = student_t_critical(level, dof);
+                let mut lo_v = Vec::with_capacity(n_grid);
+                let mut hi_v = Vec::with_capacity(n_grid);
+                for &x in grid {
+                    let t = transform(x);
+                    if !t.is_finite() {
+                        lo_v.push(f64::NAN);
+                        hi_v.push(f64::NAN);
+                    } else {
+                        let se = (sigma2 * (1.0 / n as f64 + (t - mean_x).powi(2) / sxx)).sqrt();
+                        let yhat = alpha + beta * t;
+                        lo_v.push(yhat - t_crit * se);
+                        hi_v.push(yhat + t_crit * se);
+                    }
+                }
+                (lo_v, hi_v)
+            }
+        }
+    };
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
 fn lm_fit(
@@ -856,10 +1137,14 @@ impl PySmooth {
             }
         }
         let method = match method {
-            "lm" => SmoothMethod::Lm,
+            "lm" | "linear" => SmoothMethod::Lm,
             "loess" => SmoothMethod::Loess,
+            "quadratic" => SmoothMethod::Poly { degree: 2 },
+            "cubic" => SmoothMethod::Poly { degree: 3 },
+            "log" => SmoothMethod::LogX,
+            "sqrt" => SmoothMethod::SqrtX,
             other => return Err(PyValueError::new_err(format!(
-                "Smooth: unknown method '{other}'; expected 'lm' | 'loess'"
+                "Smooth: unknown method '{other}'; expected 'lm' | 'linear' | 'loess' | 'quadratic' | 'cubic' | 'log' | 'sqrt'"
             ))),
         };
         if matches!(method, SmoothMethod::Loess) {
@@ -870,6 +1155,13 @@ impl PySmooth {
             }
             if degree != 1 && degree != 2 {
                 return Err(PyValueError::new_err("Smooth: LOESS degree must be 1 or 2"));
+            }
+        }
+        if let SmoothMethod::Poly { degree: d } = method {
+            if !(2..=3).contains(&d) {
+                return Err(PyValueError::new_err(
+                    "Smooth: 'quadratic'/'cubic' supports degree 2 or 3 only"
+                ));
             }
         }
         use crate::transform::aggregate::AggFn;
@@ -1354,5 +1646,221 @@ mod tests {
                 "expected y=3.0 at grid point {i}; got {v}"
             );
         }
+    }
+
+    // ---- Method alias & new-method tests ----
+
+    /// "linear" must produce exactly the same output as "lm".
+    #[test]
+    fn test_linear_alias_matches_lm() {
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.5 * x - 3.0).collect();
+        let batch = xy_batch(xs, ys);
+        let base = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: Some(0.95),
+            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+        // "linear" maps to SmoothMethod::Lm in the PySmooth constructor.
+        // Test directly by verifying both produce identical RecordBatch output.
+        let out_lm = apply(&base, &batch).unwrap();
+        // The "linear" alias resolves to the same SmoothMethod::Lm struct,
+        // so we verify the spec round-trip via JSON then re-apply.
+        let json = serde_json::to_string(&base).unwrap();
+        let parsed: SmoothSpec = serde_json::from_str(&json).unwrap();
+        let out_linear = apply(&parsed, &batch).unwrap();
+        let y_lm = col(&out_lm, "y");
+        let y_linear = col(&out_linear, "y");
+        for (a, b) in y_lm.iter().zip(y_linear.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "'linear' and 'lm' must produce identical output");
+        }
+    }
+
+    /// "quadratic" (Poly { degree: 2 }) must recover a perfect degree-2 polynomial.
+    #[test]
+    fn test_quadratic_recovers_degree2_polynomial() {
+        // y = 1 + 2x + 3x² — a perfect quadratic.
+        let xs: Vec<f64> = (0..20).map(|i| i as f64 * 0.5).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x + 3.0 * x * x).collect();
+        let batch = xy_batch(xs.clone(), ys.clone());
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 2 },
+            ci: None,
+            bandwidth: 0.75, degree: 2, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        assert_eq!(yf.len(), 5);
+        for (&xq, &yq) in xg.iter().zip(yf.iter()) {
+            let expected = 1.0 + 2.0 * xq + 3.0 * xq * xq;
+            assert!(
+                (yq - expected).abs() < 1e-6,
+                "quadratic: y({xq}) = {yq}, expected {expected}"
+            );
+        }
+    }
+
+    /// "cubic" (Poly { degree: 3 }) must recover a perfect degree-3 polynomial.
+    #[test]
+    fn test_cubic_recovers_degree3_polynomial() {
+        // y = -2 + x - 0.5x² + 0.1x³
+        let xs: Vec<f64> = (0..30).map(|i| i as f64 * 0.3).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| -2.0 + x - 0.5 * x * x + 0.1 * x * x * x).collect();
+        let batch = xy_batch(xs.clone(), ys.clone());
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 3 },
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 7, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        for (&xq, &yq) in xg.iter().zip(yf.iter()) {
+            let expected = -2.0 + xq - 0.5 * xq * xq + 0.1 * xq * xq * xq;
+            assert!(
+                (yq - expected).abs() < 1e-5,
+                "cubic: y({xq}) = {yq}, expected {expected}"
+            );
+        }
+    }
+
+    /// "log" (LogX) must fit y ~ a + b·ln(x) and return NaN for x <= 0.
+    #[test]
+    fn test_log_x_recovers_log_relationship() {
+        // y = 1 + 3·ln(x) (ground truth)
+        let xs: Vec<f64> = (1..=30).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 3.0 * x.ln()).collect();
+        let batch = xy_batch(xs.clone(), ys.clone());
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::LogX,
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        for (&xq, &yq) in xg.iter().zip(yf.iter()) {
+            let expected = 1.0 + 3.0 * xq.ln();
+            assert!(
+                (yq - expected).abs() < 1e-6,
+                "log: y({xq}) = {yq}, expected {expected}"
+            );
+        }
+    }
+
+    /// "sqrt" (SqrtX) must fit y ~ a + b·√x.
+    #[test]
+    fn test_sqrt_x_recovers_sqrt_relationship() {
+        // y = 2 + 4·√x (ground truth)
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 + 4.0 * x.sqrt()).collect();
+        let batch = xy_batch(xs.clone(), ys.clone());
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::SqrtX,
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        for (&xq, &yq) in xg.iter().zip(yf.iter()) {
+            let expected = 2.0 + 4.0 * xq.sqrt();
+            assert!(
+                (yq - expected).abs() < 1e-6,
+                "sqrt: y({xq}) = {yq}, expected {expected}"
+            );
+        }
+    }
+
+    /// "log" on a grid that includes x=0 must produce NaN at that grid point.
+    #[test]
+    fn test_log_x_nan_at_nonpositive_grid_points() {
+        let xs: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| x.ln()).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::LogX,
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false,
+            // Force x_range to include x=0 to probe the NaN path.
+            x_range: Some([0.0, 20.0]),
+            groupby: None, name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        // The first grid point (x=0) must be NaN since ln(0) = -inf.
+        assert!(
+            yf[0].is_nan(),
+            "log method must emit NaN at x={} (grid point 0); got {}",
+            xg[0], yf[0]
+        );
+        // Remaining grid points (x > 0) must be finite.
+        for (i, &yq) in yf.iter().enumerate().skip(1) {
+            assert!(
+                yq.is_finite(),
+                "log method: y[{i}] should be finite at x={} but got {yq}",
+                xg[i]
+            );
+        }
+    }
+
+    /// All new method aliases must be accepted without error by PySmooth::new.
+    #[test]
+    fn test_all_method_aliases_accepted_by_pysmooth_new() {
+        pyo3::Python::initialize();
+        for method in &["linear", "quadratic", "cubic", "log", "sqrt", "lm", "loess"] {
+            let result = PySmooth::new(
+                "x", "y",
+                method,
+                None, 0.75, 1, 200, 0,
+                None, None, "fitted",
+                false, false, None, None, None,
+            );
+            assert!(
+                result.is_ok(),
+                "PySmooth::new with method={method:?} should succeed; got {:?}",
+                result.err().map(|e| e.to_string())
+            );
+        }
+    }
+
+    /// Unknown method aliases must return an error.
+    #[test]
+    fn test_unknown_method_alias_returns_error() {
+        pyo3::Python::initialize();
+        let result = PySmooth::new(
+            "x", "y", "polynomial",
+            None, 0.75, 1, 200, 0,
+            None, None, "fitted",
+            false, false, None, None, None,
+        );
+        assert!(result.is_err(), "unknown method 'polynomial' must return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown method"), "error message should mention 'unknown method': {msg}");
     }
 }

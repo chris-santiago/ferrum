@@ -15,6 +15,11 @@ pub(crate) enum AggFn {
     Min,
     Max,
     Median,
+    Variance,
+    Stdev,
+    Q1,
+    Q3,
+    Distinct,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -48,8 +53,14 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     }
     let schema = batch.schema();
 
-    // Validate fields/dtypes for ops
+    // Validate fields/dtypes for ops.
+    // Count with an empty field (i.e., `count():Q` shorthand) uses the batch row count
+    // directly — no column lookup is needed, so we skip validation in that case.
     for op in &spec.ops {
+        let is_count_star = op.fn_ == AggFn::Count && (op.field.is_empty() || op.field == "*");
+        if is_count_star {
+            continue;
+        }
         let idx = schema.index_of(&op.field).map_err(|_| {
             PyValueError::new_err(format!(
                 "stat_aggregate: column '{}' not found", op.field
@@ -131,6 +142,13 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     for (key, rows) in &groups {
         group_keys_out.push(key.clone());
         for (op_i, op) in spec.ops.iter().enumerate() {
+            // count():Q shorthand — empty field or "*" means count all rows in the group.
+            let is_count_star = op.fn_ == AggFn::Count && (op.field.is_empty() || op.field == "*");
+            if is_count_star {
+                op_values_out[op_i].push(rows.len() as f64);
+                continue;
+            }
+
             let col = batch
                 .column(schema.index_of(&op.field).expect("invariant: op fields validated above"));
 
@@ -196,12 +214,10 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
         .map_err(|e| PyValueError::new_err(format!("stat_aggregate: {e}")))
 }
 
-fn aggregate(vals: &[f64], fn_: AggFn, group_size_including_nulls: usize) -> f64 {
+pub(crate) fn aggregate(vals: &[f64], fn_: AggFn, group_size_including_nulls: usize) -> f64 {
     if vals.is_empty() {
         // Per spec §4.4: all-null group → NaN. Count is the exception.
-        return if matches!(fn_, AggFn::Count) {
-            // Count counts ROWS (non-null check is conventional but spec is ambiguous;
-            // we count non-null/non-NaN values to match numpy's idiomatic behavior).
+        return if matches!(fn_, AggFn::Count | AggFn::Distinct) {
             0.0
         } else {
             f64::NAN
@@ -221,7 +237,45 @@ fn aggregate(vals: &[f64], fn_: AggFn, group_size_including_nulls: usize) -> f64
             if n % 2 == 1 { sorted[n / 2] }
             else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) }
         }
+        AggFn::Variance => {
+            if vals.len() < 2 { return f64::NAN; }
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let sum_sq: f64 = vals.iter().map(|&x| (x - mean).powi(2)).sum();
+            // Sample variance: Bessel's correction (n-1 denominator)
+            sum_sq / (vals.len() - 1) as f64
+        }
+        AggFn::Stdev => {
+            if vals.len() < 2 { return f64::NAN; }
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let sum_sq: f64 = vals.iter().map(|&x| (x - mean).powi(2)).sum();
+            (sum_sq / (vals.len() - 1) as f64).sqrt()
+        }
+        AggFn::Q1 => quantile(vals, 0.25),
+        AggFn::Q3 => quantile(vals, 0.75),
+        AggFn::Distinct => {
+            use std::collections::HashSet;
+            // Represent each f64 by its bits for hashing; NaN was already filtered.
+            let unique: HashSet<u64> = vals.iter().map(|&v| v.to_bits()).collect();
+            unique.len() as f64
+        }
     }
+}
+
+/// Linear-interpolation quantile matching numpy's `np.quantile(method='linear')`.
+///
+/// Sorts `vals`, computes the virtual index `h = p * (n - 1)`, then linearly
+/// interpolates between `sorted[floor(h)]` and `sorted[ceil(h)]`.
+pub(crate) fn quantile(vals: &[f64], p: f64) -> f64 {
+    debug_assert!(!vals.is_empty(), "caller must guard against empty slice");
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n == 1 { return sorted[0]; }
+    let h = p * (n - 1) as f64;
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    let frac = h - lo as f64;
+    sorted[lo] + frac * (sorted[hi] - sorted[lo])
 }
 
 use pyo3::prelude::*;
@@ -257,19 +311,32 @@ impl PyAggregateOp {
     #[new]
     #[pyo3(signature = (field, fn_, as_))]
     fn new(field: &str, fn_: &str, as_: &str) -> PyResult<Self> {
-        if field.is_empty() {
-            return Err(PyValueError::new_err("AggregateOp: field must be non-empty"));
-        }
         if as_.is_empty() {
             return Err(PyValueError::new_err("AggregateOp: as_ must be non-empty"));
         }
         let parsed = match fn_ {
-            "mean" => AggFn::Mean, "sum" => AggFn::Sum, "count" => AggFn::Count,
-            "min" => AggFn::Min, "max" => AggFn::Max, "median" => AggFn::Median,
+            "mean"     => AggFn::Mean,
+            "sum"      => AggFn::Sum,
+            "count"    => AggFn::Count,
+            "min"      => AggFn::Min,
+            "max"      => AggFn::Max,
+            "median"   => AggFn::Median,
+            "variance" | "var"   => AggFn::Variance,
+            "stdev"    => AggFn::Stdev,
+            "q1"       => AggFn::Q1,
+            "q3"       => AggFn::Q3,
+            "distinct" => AggFn::Distinct,
             other => return Err(PyValueError::new_err(format!(
-                "AggregateOp: unknown fn '{other}'; expected mean|sum|count|min|max|median"
+                "AggregateOp: unknown fn '{other}'; expected \
+                 mean|sum|count|min|max|median|variance|stdev|q1|q3|distinct"
             ))),
         };
+        // count() with empty field is the `count():Q` shorthand — allowed.
+        if field.is_empty() && parsed != AggFn::Count {
+            return Err(PyValueError::new_err(
+                "AggregateOp: field must be non-empty (use \"*\" for count of all rows)"
+            ));
+        }
         Ok(PyAggregateOp(AggregateOp {
             field: field.to_string(), fn_: parsed, as_: as_.to_string(),
         }))
@@ -570,5 +637,171 @@ mod tests {
         assert_eq!(out.num_rows(), 1);
         let m = col_f64(&out, "m");
         assert!(m[0].is_nan(), "all-null Mean should be NaN; got {}", m[0]);
+    }
+
+    // ── count() with empty field ──────────────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_count_empty_field_uses_row_count() {
+        pyo3::Python::initialize();
+        // When field is "" (or "*") and fn_ is Count, use num_rows of the batch/group.
+        let batch = batch_value_group(
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            vec!["a", "a", "b", "b"],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "".into(),
+                fn_: AggFn::Count,
+                as_: "n".into(),
+            }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        let groups = col_str(&out, "group");
+        let counts = col_f64(&out, "n");
+        let a = groups.iter().position(|g| g == "a").unwrap();
+        let b = groups.iter().position(|g| g == "b").unwrap();
+        assert_eq!(counts[a] as u64, 2);
+        assert_eq!(counts[b] as u64, 2);
+    }
+
+    // ── new aggregate functions ───────────────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_variance_known_values() {
+        // var([2,4,4,4,5,5,7,9]) = 4.0 (sample variance, Bessel's correction)
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![
+            Some(2.0), Some(4.0), Some(4.0), Some(4.0),
+            Some(5.0), Some(5.0), Some(7.0), Some(9.0),
+        ]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Variance, as_: "var".into() }],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let var = col_f64(&out, "var");
+        assert!((var[0] - 4.571428571428571).abs() < 1e-9, "got {}", var[0]);
+    }
+
+    #[test]
+    fn test_aggregate_stdev_known_values() {
+        // stdev([2,4,4,4,5,5,7,9]) = sqrt(sample_var)
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![
+            Some(2.0), Some(4.0), Some(4.0), Some(4.0),
+            Some(5.0), Some(5.0), Some(7.0), Some(9.0),
+        ]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Stdev, as_: "sd".into() }],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let sd = col_f64(&out, "sd");
+        assert!((sd[0] - 2.138089935325867).abs() < 1e-9, "got {}", sd[0]);
+    }
+
+    #[test]
+    fn test_aggregate_q1_q3_known_values() {
+        // numpy default (linear interpolation): Q1([1,2,3,4]) = 1.75, Q3 = 3.25
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![
+            Some(1.0), Some(2.0), Some(3.0), Some(4.0),
+        ]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![
+                AggregateOp { field: "v".into(), fn_: AggFn::Q1, as_: "q1".into() },
+                AggregateOp { field: "v".into(), fn_: AggFn::Q3, as_: "q3".into() },
+            ],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let q1 = col_f64(&out, "q1");
+        let q3 = col_f64(&out, "q3");
+        assert!((q1[0] - 1.75).abs() < 1e-9, "Q1 got {}", q1[0]);
+        assert!((q3[0] - 3.25).abs() < 1e-9, "Q3 got {}", q3[0]);
+    }
+
+    #[test]
+    fn test_aggregate_q1_q3_odd_count() {
+        // Q1([1,2,3,4,5]) = 2.0, Q3 = 4.0 (numpy linear)
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![
+            Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0),
+        ]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = AggregateSpec {
+            ops: vec![
+                AggregateOp { field: "v".into(), fn_: AggFn::Q1, as_: "q1".into() },
+                AggregateOp { field: "v".into(), fn_: AggFn::Q3, as_: "q3".into() },
+            ],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let q1 = col_f64(&out, "q1");
+        let q3 = col_f64(&out, "q3");
+        assert!((q1[0] - 2.0).abs() < 1e-9, "Q1 got {}", q1[0]);
+        assert!((q3[0] - 4.0).abs() < 1e-9, "Q3 got {}", q3[0]);
+    }
+
+    #[test]
+    fn test_aggregate_distinct_count() {
+        let batch = batch_value_group(
+            vec![Some(1.0), Some(1.0), Some(2.0), Some(3.0), Some(3.0), Some(4.0)],
+            vec!["a", "a", "a", "b", "b", "b"],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "v".into(),
+                fn_: AggFn::Distinct,
+                as_: "d".into(),
+            }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let groups = col_str(&out, "group");
+        let d = col_f64(&out, "d");
+        let a = groups.iter().position(|g| g == "a").unwrap();
+        let b = groups.iter().position(|g| g == "b").unwrap();
+        // group a: {1.0, 2.0} → 2 distinct; group b: {3.0, 4.0} → 2 distinct
+        assert_eq!(d[a] as u64, 2);
+        assert_eq!(d[b] as u64, 2);
+    }
+
+    #[test]
+    fn test_aggregate_fn_serde_roundtrip_new_variants() {
+        // Verify that new AggFn variants serialize and deserialize correctly via
+        // their canonical serde names (lowercase, from rename_all = "lowercase").
+        // Python-layer aliases ("var", "stdevp") are tested via PyAggregateOp::new.
+        let cases = vec![
+            (AggFn::Variance, "variance"),
+            (AggFn::Stdev,    "stdev"),
+            (AggFn::Q1,       "q1"),
+            (AggFn::Q3,       "q3"),
+            (AggFn::Distinct, "distinct"),
+        ];
+        for (fn_, canonical_name) in cases {
+            // Serialize the enum variant.
+            let json = serde_json::to_string(&fn_).unwrap();
+            assert_eq!(json, format!("\"{}\"", canonical_name), "unexpected serde name for {:?}", fn_);
+
+            // Deserialize back from the canonical name.
+            let json_op = format!(r#"{{"field":"x","fn":"{}","as":"out"}}"#, canonical_name);
+            let parsed: AggregateOp = serde_json::from_str(&json_op).unwrap_or_else(|e| {
+                panic!("Failed to deserialize fn '{}': {}", canonical_name, e)
+            });
+            assert_eq!(parsed.fn_, fn_, "fn '{}' should round-trip to {:?}", canonical_name, fn_);
+        }
     }
 }

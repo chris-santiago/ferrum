@@ -14,7 +14,11 @@
 //! instead of five.
 
 use arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array,
+    Array, BooleanArray,
+    Date32Array, Date64Array,
+    DurationMillisecondArray, DurationMicrosecondArray,
+    DurationNanosecondArray, DurationSecondArray,
+    Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, Int8Array,
     LargeStringArray, StringArray,
     TimestampMillisecondArray, TimestampMicrosecondArray,
@@ -75,6 +79,31 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::Timestamp(TimeUnit::Microsecond, _) => collect_as!(TimestampMicrosecondArray),
         DataType::Timestamp(TimeUnit::Millisecond, _) => collect_as!(TimestampMillisecondArray),
         DataType::Timestamp(TimeUnit::Second, _) => collect_as!(TimestampSecondArray),
+        // Duration types: normalize to nanoseconds so the scale layer can treat them
+        // uniformly with Timestamp columns (both become f64 ns-since-zero).
+        DataType::Duration(TimeUnit::Nanosecond) => collect_as!(DurationNanosecondArray),
+        DataType::Duration(TimeUnit::Microsecond) => {
+            let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000.0)).collect())
+        }
+        DataType::Duration(TimeUnit::Millisecond) => {
+            let a = col.as_any().downcast_ref::<DurationMillisecondArray>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000_000.0)).collect())
+        }
+        DataType::Duration(TimeUnit::Second) => {
+            let a = col.as_any().downcast_ref::<DurationSecondArray>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000_000_000.0)).collect())
+        }
+        // Date32: days since epoch → epoch-milliseconds (matches JS Date / Altair convention).
+        DataType::Date32 => {
+            let a = col.as_any().downcast_ref::<Date32Array>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|d| d as f64 * 86_400_000.0)).collect())
+        }
+        // Date64: milliseconds since epoch → f64 directly.
+        DataType::Date64 => {
+            let a = col.as_any().downcast_ref::<Date64Array>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|d| d as f64)).collect())
+        }
         other => Err(RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!("{other:?}"),
@@ -181,6 +210,15 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
             out.push(s);
         }
     };
+    // Macro to avoid repeating the downcast-and-stringify loop for each integer type.
+    macro_rules! push_int {
+        ($t:ty) => {
+            if let Some(a) = col.as_any().downcast_ref::<$t>() {
+                for v in a.iter().flatten() { push(v.to_string()); }
+                return Ok(out);
+            }
+        };
+    }
     if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
         for v in a.iter().flatten() { push(v.to_string()); }
     } else if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
@@ -191,6 +229,15 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
     } else if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
         for v in a.iter().flatten() { push(v.to_string()); }
     } else {
+        // Non-Int64 integer variants — pandas/pyarrow users commonly have Int32, UInt8, etc.
+        // Each arm stringifies the native value so downstream encoding treats them as nominal.
+        push_int!(Int32Array);
+        push_int!(Int16Array);
+        push_int!(Int8Array);
+        push_int!(UInt64Array);
+        push_int!(UInt32Array);
+        push_int!(UInt16Array);
+        push_int!(UInt8Array);
         return Err(RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!("{:?} (cannot enumerate distinct values)", col.data_type()),
@@ -203,8 +250,13 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Int32Array, StringArray};
-    use arrow::datatypes::{Field, Schema};
+    use arrow::array::{
+        Date32Array, Date64Array,
+        DurationMillisecondArray, DurationMicrosecondArray,
+        DurationNanosecondArray, DurationSecondArray,
+        Float64Array, Int32Array, Int8Array, StringArray, UInt8Array, UInt32Array,
+    };
+    use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
@@ -308,5 +360,127 @@ mod tests {
         assert!(is_numeric(&DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)));
         assert!(!is_numeric(&DataType::Utf8));
         assert!(!is_numeric(&DataType::Boolean));
+    }
+
+    // ── distinct_values_in_order: integer-type columns ───────────────────────
+
+    #[test]
+    fn distinct_values_in_order_int32() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![
+                Some(3), Some(1), Some(3), Some(2), Some(1),
+            ]))],
+        ).unwrap();
+        let out = distinct_values_in_order(&b, "x").unwrap();
+        assert_eq!(out, vec!["3", "1", "2"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_uint8() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::UInt8, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt8Array::from(vec![Some(10u8), Some(20u8), Some(10u8)]))],
+        ).unwrap();
+        let out = distinct_values_in_order(&b, "x").unwrap();
+        assert_eq!(out, vec!["10", "20"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_int8() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int8, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int8Array::from(vec![Some(-1i8), Some(2i8), Some(-1i8)]))],
+        ).unwrap();
+        let out = distinct_values_in_order(&b, "x").unwrap();
+        assert_eq!(out, vec!["-1", "2"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_uint32() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::UInt32, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt32Array::from(vec![Some(100u32), Some(200u32), Some(100u32)]))],
+        ).unwrap();
+        let out = distinct_values_in_order(&b, "x").unwrap();
+        assert_eq!(out, vec!["100", "200"]);
+    }
+
+    // ── col_as_f64: Duration and Date types ──────────────────────────────────
+
+    #[test]
+    fn col_as_f64_duration_nanosecond() {
+        // 1 second = 1_000_000_000 nanoseconds → f64 1_000_000_000.0
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Duration(TimeUnit::Nanosecond), true),
+        ]));
+        let arr = DurationNanosecondArray::from(vec![Some(1_000_000_000i64), None, Some(2_000_000_000i64)]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(1_000_000_000.0), None, Some(2_000_000_000.0)]);
+    }
+
+    #[test]
+    fn col_as_f64_duration_microsecond() {
+        // 1 second = 1_000_000 microseconds → f64 1_000_000_000.0 nanoseconds
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Duration(TimeUnit::Microsecond), true),
+        ]));
+        let arr = DurationMicrosecondArray::from(vec![Some(1_000_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(1_000_000_000.0), None]);
+    }
+
+    #[test]
+    fn col_as_f64_duration_millisecond() {
+        // 1000 ms = 1 second → 1_000_000_000 ns
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Duration(TimeUnit::Millisecond), true),
+        ]));
+        let arr = DurationMillisecondArray::from(vec![Some(1000i64)]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(1_000_000_000.0)]);
+    }
+
+    #[test]
+    fn col_as_f64_duration_second() {
+        // 1 s → 1_000_000_000 ns
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Duration(TimeUnit::Second), true),
+        ]));
+        let arr = DurationSecondArray::from(vec![Some(1i64)]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(1_000_000_000.0)]);
+    }
+
+    #[test]
+    fn col_as_f64_date32_days_to_epoch_millis() {
+        // Day 1 (1970-01-02) → 86_400_000 ms
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date32, true),
+        ]));
+        let arr = Date32Array::from(vec![Some(1i32), None, Some(0i32)]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(86_400_000.0), None, Some(0.0)]);
+    }
+
+    #[test]
+    fn col_as_f64_date64_ms_to_f64() {
+        // Date64 stores milliseconds since epoch directly.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date64, true),
+        ]));
+        let arr = Date64Array::from(vec![Some(86_400_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let out = col_as_f64(&b, "d").unwrap();
+        assert_eq!(out, vec![Some(86_400_000.0), None]);
     }
 }

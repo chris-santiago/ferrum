@@ -243,6 +243,7 @@ pub(crate) fn apply_with_context(
             n: spec.n,
             extent: Some((lo, hi)),
             cumulative: false,
+            kernel: crate::transform::kde::default_kernel(),
             groupby: None,
             name: None,
         };

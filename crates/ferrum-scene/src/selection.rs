@@ -45,6 +45,11 @@ pub enum ChannelName {
     Size,
     Shape,
     Opacity,
+    StrokeWidth,
+    StrokeOpacity,
+    StrokeDash,
+    FillOpacity,
+    Angle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +91,9 @@ pub enum EncodingValue {
     Size { value: f64 },
     StrokeWidth { value: f64 },
     StrokeDash { value: Vec<f64> },
+    StrokeOpacity { value: f64 },
+    FillOpacity { value: f64 },
+    Angle { value: f64 },
     Field { name: String },
 }
 

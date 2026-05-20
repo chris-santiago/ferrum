@@ -172,6 +172,15 @@ fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value
         (_, EncodingValue::StrokeDash { value: pattern }) => {
             inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
         }
+        (ChannelName::StrokeOpacity, EncodingValue::StrokeOpacity { value: o }) => {
+            inst.stroke_opacity = *o as f32;
+        }
+        (ChannelName::FillOpacity, EncodingValue::FillOpacity { value: o }) => {
+            inst.fill_color[3] = *o as f32;
+        }
+        (ChannelName::Angle, EncodingValue::Angle { value: a }) => {
+            inst.angle = *a as f32;
+        }
         _ => {}
     }
 }
@@ -219,6 +228,15 @@ fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &E
         }
         (_, EncodingValue::StrokeDash { value: pattern }) => {
             inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+        }
+        (ChannelName::StrokeOpacity, EncodingValue::StrokeOpacity { value: o }) => {
+            inst.stroke_opacity = *o as f32;
+        }
+        (ChannelName::FillOpacity, EncodingValue::FillOpacity { value: o }) => {
+            inst.fill_color[3] = *o as f32;
+        }
+        (ChannelName::Angle, EncodingValue::Angle { value: a }) => {
+            inst.angle = *a as f32;
         }
         _ => {}
     }

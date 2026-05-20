@@ -63,12 +63,18 @@ class _ChartLike:
         """
         return {"image/svg+xml": self.show_svg()}
 
-    def show_png(self) -> bytes:
-        """Render to PNG bytes (2x retina by default).
+    def show_png(self, *, scale: float = 2.0) -> bytes:
+        """Render to PNG bytes.
 
         Rasterises the SVG produced by ``show_svg()`` through the Rust
-        resvg pipeline -- the same rasteriser ``Chart.show_png()`` uses,
-        with the same 2x default scale.
+        resvg pipeline — the same rasteriser ``Chart.show_png()`` uses.
+
+        Parameters
+        ----------
+        scale : float, default 2.0
+            Pixel-density multiplier applied to the SVG's intrinsic dimensions.
+            ``2.0`` (the default) produces a retina-quality image.  ``1.0``
+            renders at 1:1 resolution.
 
         Returns
         -------
@@ -78,9 +84,9 @@ class _ChartLike:
         """
         from ferrum._core import rasterize_svg
 
-        return bytes(rasterize_svg(self.show_svg(), scale=2.0))
+        return bytes(rasterize_svg(self.show_svg(), scale=scale))
 
-    def save(self, path: str, *, format=None, **kwargs) -> None:
+    def save(self, path: str, *, format=None, scale: float = 2.0, **kwargs) -> None:
         """Save the composition to a file.
 
         Parameters
@@ -89,27 +95,34 @@ class _ChartLike:
             Destination file path.  The extension determines the format when
             *format* is omitted.
         format : str, optional
-            ``"svg"``, ``"png"``, or ``"html"``.  Other formats raise
-            ``NotImplementedError``.
+            ``"svg"``, ``"png"``, ``"pdf"``, or ``"html"``.  Other formats
+            raise ``ValueError``.
+        scale : float, default 2.0
+            Pixel-density multiplier for PNG and PDF output.  Has no effect
+            on SVG or HTML exports.
 
         Raises
         ------
-        NotImplementedError
-            If *format* is not ``"svg"``, ``"png"``, or ``"html"``.
+        ValueError
+            If *format* is not a recognised export format.
         """
+        from ferrum.display import save_chart_svg
+
         dest = Path(path)
         fmt = format or dest.suffix.lstrip(".")
         if fmt == "svg":
             dest.write_text(self.show_svg(), encoding="utf-8")
         elif fmt == "png":
-            dest.write_bytes(self.show_png())
+            dest.write_bytes(self.show_png(scale=scale))
+        elif fmt == "pdf":
+            save_chart_svg(self.show_svg(), str(dest), scale=scale)
         elif fmt == "html":
             ic = self.interactive()
             ic.save(str(dest), **kwargs)
         else:
-            raise NotImplementedError(
+            raise ValueError(
                 f"format={fmt!r} is not supported for {type(self).__name__}; "
-                "use 'svg', 'png', or 'html'."
+                "use 'svg', 'png', 'pdf', or 'html'."
             )
 
     def share_scale(self, **channels):

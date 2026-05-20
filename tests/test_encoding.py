@@ -81,9 +81,15 @@ def test_to_implicit_transforms_with_aggregate_kwarg():
     c = _AggTestChannel("latency", aggregate="mean")
     transforms = c.to_implicit_transforms()
     assert len(transforms) == 1
-    from ferrum import Aggregate
+    # to_implicit_transforms() now returns a _PendingAggregate sentinel instead of
+    # a Rust Aggregate object. The sentinel defers groupby assignment until
+    # chart.to_spec() can inspect all sibling encoding channels (B3 fix).
+    from ferrum.encoding.base import _PendingAggregate
 
-    assert isinstance(transforms[0], Aggregate)
+    assert isinstance(transforms[0], _PendingAggregate)
+    assert transforms[0].field == "latency"
+    assert transforms[0].agg == "mean"
+    assert transforms[0].output_col == "mean_latency"
 
 
 # ---------------------------------------------------------------------------
