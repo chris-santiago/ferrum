@@ -191,7 +191,7 @@ chart = (
 )
 ```
 
-Supported aggregation functions: `"sum"`, `"mean"`, `"median"`, `"min"`, `"max"`, `"count"`.
+Supported aggregation functions: `"sum"`, `"mean"`, `"median"`, `"min"`, `"max"`, `"count"`, `"variance"`, `"stdev"`, `"q1"`, `"q3"`, `"distinct"`.
 
 ### `transform_join_aggregate` — aggregate without collapsing
 
@@ -351,6 +351,17 @@ chart = (
 
 The output columns default to `"value"` and `"density"` (configurable via `as_`). Use `groupby` to compute separate densities per category.
 
+The `kernel=` parameter selects the kernel function. Supported values: `"gaussian"` (default), `"epanechnikov"`, `"tophat"`, `"cosine"`.
+
+```python
+chart = (
+    fm.Chart(df)
+    .transform(fm.transform_density("value", kernel="epanechnikov", groupby=["group"]))
+    .mark_area(opacity=0.5)
+    .encode(x="value:Q", y="density:Q", color="group:N")
+)
+```
+
 ### `transform_regression` — regression line
 
 Fit a regression model and output the fitted curve:
@@ -373,6 +384,9 @@ chart = (
 ```
 
 Methods: `"linear"`, `"poly"` (set `order=` for degree), `"exp"`, `"log"`, `"pow"`.
+
+!!! note "mark_smooth method aliases"
+    `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits; `"loess"` (or `"lowess"`) is the primary name for locally weighted regression. All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`.
 
 ### `transform_loess` — LOESS smoothing
 

@@ -285,6 +285,16 @@ Think of `.theme()` as a chart-level override and `set_default_theme()` / `theme
 
 ## Building a custom theme
 
+All color keys in `Theme` — `background`, `mark_color`, `font_color`, `grid_color`, and others — accept either a CSS `#rrggbb` hex string or any of the 148 CSS named colors (`"steelblue"`, `"crimson"`, `"coral"`, `"goldenrod"`, etc.). Named colors are resolved at construction time, so `Theme(mark_color="steelblue")` is exactly equivalent to `Theme(mark_color="#4682B4")`.
+
+```python
+brand = fm.Theme(
+    mark_color="steelblue",
+    background="ivory",
+    grid_color="lightgray",
+)
+```
+
 A custom theme is a `Theme(...)` call with the keys you want:
 
 ```python

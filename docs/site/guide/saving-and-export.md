@@ -21,7 +21,7 @@ All four methods are available on every chart object — base `Chart`, compound 
 | PNG | [`.show_png()`][ferrum.Chart.show_png] | `.png` | Rasterized via `resvg` in Rust. No Cairo/Pillow needed. |
 | HTML | [`.save("out.html")`][ferrum.Chart.save] | `.html` | Self-contained interactive page with inlined WASM renderer. |
 | JSON | [`.save("out.json")`][ferrum.Chart.save] | `.json` | Chart spec as JSON — the same format as `.to_json()`. |
-| PDF | — | `.pdf` | Not natively supported. Convert from SVG using CairoSVG (`cairosvg chart.svg -o chart.pdf`), Inkscape, or browser print-to-PDF. |
+| PDF | [`.save("out.pdf")`][ferrum.Chart.save] | `.pdf` | Rasterized via `resvg-py`. No Ghostscript or Cairo needed. |
 
 ## Saving to disk
 
@@ -78,8 +78,27 @@ svg_str = chart.show_svg()   # str — complete <svg>…</svg> document
 png_bytes = chart.show_png()  # bytes — raw PNG data
 ```
 
+## PDF export
+
+`chart.save("chart.pdf")` exports a vector PDF using `resvg-py` under the hood — no Ghostscript, Cairo, or other system tool required. The same zero-dependency guarantee as PNG rasterization applies.
+
+```python
+chart.save("chart.pdf")
+```
+
+## High-DPI PNG output
+
+Pass `scale=` to `show_png()` or `save()` to produce higher-resolution PNG output. The default scale is `2.0` (2× pixel density, suitable for standard retina displays). Increase it for print-quality output:
+
+```python
+chart.show_png(scale=3.0)        # 3× pixel density
+chart.save("chart.png", scale=3.0)
+```
+
+The scale factor multiplies the chart's pixel dimensions: a 600 × 400 chart at `scale=3.0` produces a 1800 × 1200 PNG.
+
 !!! note "PNG resolution"
-    PNG resolution is not separately configurable (there is no DPI parameter). To produce higher-resolution output, increase `width` and `height` via [`.properties(width=1200, height=800)`][ferrum.Chart.properties] before calling `.show_png()` or `.save("out.png")`.
+    The `scale=` parameter is the recommended way to control PNG resolution. You can also increase `width` and `height` via [`.properties(width=1200, height=800)`][ferrum.Chart.properties], but `scale=` is simpler for DPI-scaling existing charts without changing their logical dimensions.
 
 ## Displaying in Jupyter
 

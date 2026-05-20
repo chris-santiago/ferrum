@@ -257,6 +257,42 @@ For a small-multiples layout where the data is *partitioned* across cells (one p
 
 For most use cases, the figure-level helper [`clustermap`](figure-helpers.md) in `ferrum.plots` is the right entry point. Direct `ClusterMapChart` construction is for when you want fine control over the linkage method, the dendrogram styling, or the heatmap encoding details.
 
+## Quick axis control
+
+Three shortcuts let you adjust axis labels and limits without touching the encoding declaration.
+
+**`.labs()`** sets the x-axis label, y-axis label, and chart title post-hoc — useful for renaming columns to display-friendly strings without modifying the encoding:
+
+```python
+chart = (
+    fm.Chart(df)
+    .mark_point()
+    .encode(x="sepal_length", y="petal_length", color="species:N")
+    .labs(x="Sepal length (cm)", y="Petal length (cm)", title="Iris measurements")
+)
+```
+
+**`.xlim(lo, hi)`** and **`.ylim(lo, hi)`** set explicit axis limits — a shortcut for the `domain=` parameter on a scale object:
+
+```python
+chart = chart.xlim(4.0, 8.0).ylim(0.0, 7.5)
+```
+
+These can be chained with `.labs()` and with each other:
+
+```python
+chart = (
+    fm.Chart(df)
+    .mark_point()
+    .encode(x="sepal_length", y="petal_length")
+    .labs(x="Sepal length", y="Petal length", title="Filtered view")
+    .xlim(4.5, 7.5)
+    .ylim(1.0, 6.5)
+)
+```
+
+All three methods return a new chart object — the original is not modified.
+
 ## Picking a composition operator
 
 A decision guide for the common cases:

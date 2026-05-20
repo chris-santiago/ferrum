@@ -217,6 +217,25 @@ assert chart.show_svg().startswith("<svg")
 
 `kind=` controls the center plot (`"scatter"`, `"kde"`, `"hist"`, `"hex"`, `"reg"`); `marginal_kind=` controls both marginals (`"hist"`, `"kde"`, `"rug"`, `"box"`). The marginals share their data axis with the center.
 
+## Annotation: `annotate_abline`
+
+`fm.annotate_abline(slope, intercept)` returns a [`Chart`][ferrum.Chart] that draws a straight reference line with the given slope and intercept. Because it returns a regular chart, you layer it onto any chart with `+`:
+
+```python
+import ferrum as fm
+import polars as pl
+import numpy as np
+
+rng = np.random.default_rng(42)
+df = pl.DataFrame({"actual": rng.uniform(0, 10, 60).tolist(), "predicted": rng.uniform(0, 10, 60).tolist()})
+scatter = fm.Chart(df).mark_point(opacity=0.7).encode(x="actual:Q", y="predicted:Q")
+perfect_fit = fm.annotate_abline(slope=1, intercept=0, stroke="red", stroke_dash=[4, 2])
+chart = scatter + perfect_fit
+assert chart.show_svg().startswith("<svg")
+```
+
+The reference line is a useful overlay on predicted-vs-actual plots (identity line at slope=1, intercept=0), residual diagnostics (zero reference line at slope=0), or any chart that needs a visual reference. Optional keyword arguments `stroke=`, `stroke_width=`, and `stroke_dash=` control the line appearance.
+
 ## Customizing helper output
 
 Since helper output is a regular chart, you can chain grammar methods to customize it:

@@ -538,6 +538,55 @@ These marks work with [`ModelSource`][ferrum.ModelSource] to produce evaluation 
 | [`mark_rank2d()`][ferrum.Chart.mark_rank2d] | Pairwise feature ranking matrix. |
 | [`mark_parallel_coordinates()`][ferrum.Chart.mark_parallel_coordinates] | Parallel coordinates plot by class. |
 
+## Mark shortcuts
+
+Several common mark configurations have dedicated aliases to keep code concise.
+
+**`mark_circle()` and `mark_square()`** are convenience aliases for `mark_point(shape="circle")` and `mark_point(shape="square")` respectively. They accept the same keyword arguments as `mark_point()`.
+
+```python
+chart = fm.Chart(df).mark_circle(size=60).encode(x="x", y="y", color="group:N")
+chart = fm.Chart(df).mark_square(size=60).encode(x="x", y="y", color="group:N")
+```
+
+**`mark_line(point=True)`** overlays point markers at each data coordinate on top of the line — a common pattern for time-series where individual observations should be visible:
+
+```python
+chart = fm.Chart(df).mark_line(point=True).encode(x="date:T", y="value:Q")
+```
+
+**`"|"` and `"-"` point shapes** render vertical and horizontal line markers respectively. These are useful as per-point glyphs in strip plots or rug-like overlays:
+
+```python
+chart = fm.Chart(df).mark_point(shape="|").encode(x="x", y="group:N")
+```
+
+## Friendly kwarg aliases
+
+Several mark parameters accept short, familiar names in addition to their canonical forms. These aliases are resolved before the spec is compiled — they have no runtime cost and produce identical output.
+
+| Alias | Canonical | Notes |
+|---|---|---|
+| `color="red"` | `fill="red"` | Sets the mark fill color directly. |
+| `alpha=0.5` | `opacity=0.5` | Mark opacity in `[0, 1]`. |
+| `linetype="dashed"` | `stroke_dash=[4, 2]` | Named line patterns; see table below. |
+
+Named `linetype` values and their dash arrays:
+
+| `linetype=` | Dash pattern |
+|---|---|
+| `"solid"` | `[]` (solid line) |
+| `"dashed"` | `[4, 2]` |
+| `"dotted"` | `[1, 3]` |
+| `"dashdot"` | `[4, 2, 1, 2]` |
+| `"longdash"` | `[8, 4]` |
+
+```python
+# These three produce identical output:
+fm.Chart(df).mark_line(alpha=0.7, color="steelblue", linetype="dashed").encode(x="x", y="y")
+fm.Chart(df).mark_line(opacity=0.7, fill="steelblue", stroke_dash=[4, 2]).encode(x="x", y="y")
+```
+
 ## Picking a mark
 
 A quick decision guide for the common cases:

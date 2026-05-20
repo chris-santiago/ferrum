@@ -34,7 +34,7 @@ Ferrum declares intent and computes in Rust before rendering. KDE, LOESS, bootst
 
 **Model diagnostics that compose.** ROC curves, SHAP beeswarm, residuals, calibration — same grammar, same theme, same `.save()`. [`fm.hconcat()`][ferrum.hconcat] just works.
 
-**Handles every dataframe API.** Polars, pandas, modin, cuDF, dask, and ibis all flow through the same [`Chart`][ferrum.Chart] constructor — internally normalized to Arrow once, then routed through the Rust core unchanged. No per-framework adapters in user code; no special-case ingestion paths in ferrum.
+**Handles every dataframe API.** Polars, pandas, modin, cuDF, dask, and ibis all flow through the same [`Chart`][ferrum.Chart] constructor — internally normalized to Arrow once, then routed through the Rust core unchanged. No per-framework adapters in user code; no special-case ingestion paths in ferrum. Pandas and Polars `Series` are accepted directly alongside full DataFrames. Polars `Categorical`, `Enum`, and `Duration` dtypes are auto-coerced; PyArrow `Date32` and `Date64` types are auto-coerced to temporal — no manual casting required before plotting.
 
 **Zero system dependencies.** Ships in a wheel. No Cairo, no X11, no display server. Renders in Kubernetes, CI, SSH sessions, containers.
 

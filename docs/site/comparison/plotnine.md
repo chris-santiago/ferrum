@@ -34,7 +34,10 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 | `facet_grid(row~col)` | `.encode(facet_row="row", facet_col="col")` | — |
 | `scale_x_log10()` | `.encode(x=fm.X("x", scale=fm.Scale(type="log")))` | Scales are values, not global functions. |
 | `coord_flip()` | `.coord("flip")` | — |
-| `labs(title=, x=, y=)` | `.properties(title=)` | Axis labels inferred from field names or set via `fm.X("field", title="Label")`. |
+| `labs(title=, x=, y=)` | `.labs(x=, y=, title=)` | Post-hoc axis label shortcut. Also `.properties(title=)` for chart title only. |
+| `xlim()` / `ylim()` | `.xlim(lo, hi)` / `.ylim(lo, hi)` | Axis limit shortcuts. Also `fm.X("field", scale=fm.LinearScale(domain=[lo, hi]))`. |
+| `geom_abline(slope=, intercept=)` | `fm.annotate_abline(slope, intercept)` | Returns a `Chart`; layer it with `+`. Accepts `stroke=`, `stroke_width=`, `stroke_dash=`. |
+| `color=` / `alpha=` / `linetype=` in `aes()` | `color=` / `alpha=` / `linetype=` on mark kwargs | Friendly aliases for `fill=`, `opacity=`, `stroke_dash=`. Named linetypes: `"dashed"`, `"dotted"`, `"dashdot"`, `"longdash"`, `"solid"`. |
 | `theme_bw()` | `fm.themes.minimal` | See [Themes](../guide/themes.md) for all 12. |
 | `theme_set()` | [`fm.set_default_theme()`][ferrum.set_default_theme] | Scope-bounded via context manager; per-chart [`.theme()`][ferrum.Chart.theme] always wins. |
 | `ggsave()` | [`.save()`][ferrum.Chart.save] | Supports SVG, PNG, HTML. |

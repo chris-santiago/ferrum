@@ -117,6 +117,37 @@ Ferrum ships [twelve built-in themes](../guide/themes.md) in the [`themes`][ferr
 
 See [Configuration](../guide/themes.md) and [ferrum.config](../api/config.md) for more on customization.
 
+## Axis labels and limits
+
+You don't have to reach into encoding declarations to set human-readable axis labels. `.labs()` sets them post-hoc:
+
+```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = (
+    fm.Chart(iris)
+    .mark_point()
+    .encode(x="sepal_length", y="petal_length", color="species:N")
+    .labs(x="Sepal length (cm)", y="Petal length (cm)", title="Iris — sepal vs. petal")
+)
+assert chart.show_svg().startswith("<svg")
+```
+
+To clip the axis range without modifying the encoding, use `.xlim()` and `.ylim()`:
+
+```python
+chart = chart.xlim(4.5, 7.5).ylim(1.0, 6.5)
+assert chart.show_svg().startswith("<svg")
+```
+
+Both are shortcuts: `.labs()` is equivalent to setting `title=` on each channel object; `.xlim()` / `.ylim()` are equivalent to `scale=fm.LinearScale(domain=[lo, hi])` on the positional channel. They are there for when you want the result quickly without remembering the full API path.
+
 ## What just happened
 
 In four snippets you used:
