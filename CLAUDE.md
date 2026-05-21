@@ -8,7 +8,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 
 1. **Read `design-docs/superpowers/ferrum-phases.md`** — it lists all 12 implementation phases, their dependency order, done criteria, and the current status of each. Find the first phase that is not `done` and start there.
 
-2. **Read the phase's spec doc** (linked in the phases table) before writing any code. If no spec exists yet, run `superpowers:brainstorming` before touching anything.
+2. **Read the phase's spec doc** (linked in the phases table) before writing any code. If no spec exists yet, run `chris-code:brainstorming` before touching anything.
 
 3. **Read `ferrum-spec.md`** (repo root) only if you need the user-facing API contract for the phase you are working on. It is the concept spec, not the implementation guide.
 
@@ -199,30 +199,9 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 
 ## Code-quality guardrails
 
-### Before writing code — read the review principles
+Commit gates and review-lite dispatch are handled by the chris-code plugin (`executing-plans`, `subagent-driven-development`). The rules below are ferrum-specific escalation triggers that go beyond the plugin's defaults.
 
-Before any session or subagent writes or modifies Python or Rust in this repo, it must first read the corresponding review skill so new code aligns with the same idioms, severity rubric, and architectural expectations the review surfaces will later enforce:
-
-- **Writing Python?** Read `.claude/skills/python-review/SKILL.md` (and the relevant files under `.claude/skills/python-review/references/`) before editing any `*.py`.
-- **Writing Rust?** Read `.claude/skills/rust-review/SKILL.md` (and the relevant files under `.claude/skills/rust-review/references/`) before editing any `*.rs`.
-
-This is a read-only orientation step — do not invoke the full multi-phase review skill, just internalize the principles. The goal is to write code that would pass a review on the first pass, not to discover violations after the fact. The same rule applies to subagents dispatched to implement code: brief them with the relevant principles in their prompt, or instruct them to read the skill before they write.
-
-### Before committing code — run the lite-review gate
-
-Before any `git commit` that touches `*.py` or `*.rs`, the orchestrator must dispatch the matching lite-review agent on the staged diff and act on its verdict. This is the same protocol the `gallery-fixer` flow already uses; the rule generalizes it to all commits, not just post-fixer ones.
-
-- **Committing Python changes?** Stage the diff, dispatch `python-review-lite`, wait for the verdict.
-- **Committing Rust changes?** Stage the diff, dispatch `rust-review-lite`, wait for the verdict.
-- **Both languages touched?** Dispatch both lite agents in parallel in a single tool-call block.
-
-Act on the returned signal exactly as the gallery-fixer flow already does:
-
-- **clean** → proceed with the commit.
-- **block** → un-stage the offending files, address the verdict's findings, re-stage, re-dispatch. Three consecutive blocks on the same area escalates to the heavyweight skill (see next subsection).
-- **escalate** → surface the verdict to the user and halt; do not commit.
-
-The single sanctioned exception is documentation-only changes (`*.md`, `docs/**`, or comments-only diffs in source files) — those can commit without dispatch. When in doubt, dispatch.
+**Exception:** Documentation-only changes (`*.md`, `docs/**`, or comments-only diffs in source files) can commit without review-lite dispatch.
 
 ### When to escalate to heavyweight review
 
