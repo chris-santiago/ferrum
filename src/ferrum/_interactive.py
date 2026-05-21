@@ -105,15 +105,30 @@ class InteractiveChart:
     ----------
     chart : Chart or _ChartLike
         A chart or composition to render interactively.
+    toolbar : bool, default True
+        Whether to show the interactive toolbar (zoom/pan controls, export
+        button). Set to ``False`` to render without the toolbar.
     """
 
-    def __init__(self, chart: "Chart") -> None:
+    def __init__(self, chart: "Chart", *, toolbar: bool = True) -> None:
         self._chart = chart
+        self._toolbar = toolbar
         self._scene_json, self._packed_data = _render_scene(chart)
         self._selection_callbacks: list[Callable] = []
         self._widget: Any = None
         self._output_widget: Any = None  # ipywidgets.Output, created lazily by on_selection_change
         self._try_init_widget()
+
+    def _build_interaction_config(self, scene_json: str) -> str:
+        """Extract interaction config from scene JSON, overriding toolbar with the stored flag."""
+        import json as _json
+
+        try:
+            cfg = _json.loads(self._extract_interaction_config(scene_json))
+        except Exception:
+            cfg = {}
+        cfg["toolbar"] = self._toolbar
+        return _json.dumps(cfg)
 
     def _try_init_widget(self) -> None:
         cls = _get_widget_class()
@@ -122,7 +137,7 @@ class InteractiveChart:
         w = cls()
         w.scene_json = self._scene_json
         w.packed_data = self._packed_data
-        w.interaction_config = self._extract_interaction_config(self._scene_json)
+        w.interaction_config = self._build_interaction_config(self._scene_json)
         w.observe(self._on_zoom_change, names=["zoom_state"])
         self._widget = w
 
@@ -144,7 +159,7 @@ class InteractiveChart:
             if self._widget is not None:
                 self._widget.scene_json = new_json
                 self._widget.packed_data = new_packed
-                self._widget.interaction_config = self._extract_interaction_config(new_json)
+                self._widget.interaction_config = self._build_interaction_config(new_json)
         except Exception as exc:
             _log.warning("zoom rebuild failed: %s", exc, exc_info=True)
 
@@ -240,6 +255,7 @@ class InteractiveChart:
             title=title,
             embed_wasm=embed_wasm,
             csp_nonce=csp_nonce,
+            toolbar=self._toolbar,
         )
         dest = _Path(path)
         dest.write_text(html)

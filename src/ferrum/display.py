@@ -19,6 +19,7 @@ def save_chart(
     embed_wasm: bool = True,
     csp_nonce: str | None = None,
     scale: float = 2.0,
+    toolbar: bool = True,
 ) -> None:
     """Save a chart to disk.
 
@@ -44,6 +45,9 @@ def save_chart(
     scale : float, default 2.0
         Pixel-density multiplier for PNG and PDF output.  Has no effect on
         SVG, HTML, or JSON exports.
+    toolbar : bool, default True
+        For ``"html"`` format only.  When False, the interactive toolbar is
+        hidden in the rendered HTML.
 
     Examples
     --------
@@ -72,6 +76,7 @@ def save_chart(
             title=title,
             embed_wasm=embed_wasm,
             csp_nonce=csp_nonce,
+            toolbar=toolbar,
         )
         path.write_text(html)
         if not embed_wasm:

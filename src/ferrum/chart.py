@@ -5129,13 +5129,19 @@ class Chart(_RenderMixin):
         new._selections.extend(selections)
         return new
 
-    def interactive(self) -> "Chart":
+    def interactive(self, *, toolbar: bool = True) -> "Chart":
         """Mark this chart as interactive.
 
         Per ``ferrum-spec.md §3.10`` (L736), interactive features (selections,
         pan/zoom, conditional encodings) are silently ignored under SVG/PNG.
         Returns a new ``Chart`` so chained construction patterns work today
         and will gain real interactivity once the Phase 11 WASM renderer ships.
+
+        Parameters
+        ----------
+        toolbar : bool, default True
+            Whether to show the interactive toolbar (zoom/pan controls, export
+            button). Set to ``False`` to render without the toolbar.
 
         Returns
         -------
@@ -5151,7 +5157,7 @@ class Chart(_RenderMixin):
         """
         from ferrum._interactive import InteractiveChart
 
-        return InteractiveChart(self)
+        return InteractiveChart(self, toolbar=toolbar)
 
     def conditional(self, spec: Any) -> "Chart":
         """Apply a conditional encoding to this chart.

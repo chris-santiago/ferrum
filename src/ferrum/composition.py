@@ -27,8 +27,14 @@ class _ChartLike:
     def show_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement show_svg")
 
-    def interactive(self):
+    def interactive(self, *, toolbar: bool = True):
         """Return an interactive rendering of this composition.
+
+        Parameters
+        ----------
+        toolbar : bool, default True
+            Whether to show the interactive toolbar (zoom/pan controls, export
+            button). Set to ``False`` to render without the toolbar.
 
         Returns
         -------
@@ -37,7 +43,7 @@ class _ChartLike:
         """
         from ferrum._interactive import InteractiveChart
 
-        return InteractiveChart(self)
+        return InteractiveChart(self, toolbar=toolbar)
 
     # Subclasses provide ``charts`` as either an instance attribute
     # (symmetric containers — HConcat / VConcat) or as a ``@property``

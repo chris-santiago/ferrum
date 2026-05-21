@@ -110,13 +110,32 @@ pub enum FieldValue {
 
 // ── 3.9 InteractionConfig ───────────────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionConfig {
     pub zoom_enabled: bool,
     pub pan_enabled: bool,
     pub conditionals: Vec<ConditionalEncoding>,
     pub linked_panels: Vec<Vec<usize>>,
     pub tick_levels: Vec<PanelTickLevels>,
+    #[serde(default = "default_true")]
+    pub toolbar: bool,
+}
+
+impl Default for InteractionConfig {
+    fn default() -> Self {
+        Self {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: Vec::new(),
+            linked_panels: Vec::new(),
+            tick_levels: Vec::new(),
+            toolbar: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
