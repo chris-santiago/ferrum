@@ -363,6 +363,7 @@ def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
                 "interaction": {
                     "zoom_enabled": True,
                     "pan_enabled": True,
+                    "toolbar": True,
                     "conditionals": [],
                     "linked_panels": [],
                     "tick_levels": [],

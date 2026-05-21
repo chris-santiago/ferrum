@@ -43,8 +43,6 @@ use crate::spatial_index::SpatialIndex;
 #[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 #[cfg(target_arch = "wasm32")]
-use rstar::AABB;
-#[cfg(target_arch = "wasm32")]
 use crate::zoom_pan::{ScaleMode, ZoomPanState};
 
 #[cfg(target_arch = "wasm32")]
@@ -458,7 +456,7 @@ impl WasmRenderer {
     #[wasm_bindgen(js_name = "selectInRect")]
     pub fn select_in_rect(
         &mut self,
-        panel_id: u32,
+        _panel_id: u32,
         x0: f32,
         y0: f32,
         x1: f32,
@@ -468,37 +466,18 @@ impl WasmRenderer {
             return Ok("{}".to_string());
         }
 
-        // Build an AABB from the selection rectangle (normalise lo/hi).
+        // Normalise the selection rectangle to (lo, hi) on each axis.
         let lo_x = (x0 as f64).min(x1 as f64);
         let hi_x = (x0 as f64).max(x1 as f64);
         let lo_y = (y0 as f64).min(y1 as f64);
         let hi_y = (y0 as f64).max(y1 as f64);
-        let aabb = AABB::from_corners([lo_x, lo_y], [hi_x, hi_y]);
 
-        // Collect the data indices for all marks inside the rectangle.
-        let mut data_indices: Vec<usize> = Vec::new();
-        if let Some(ref idx) = self.spatial_index {
-            let entries = idx.in_envelope(panel_id as usize, aabb);
-            if let Some(ref loaded) = self.loaded {
-                for entry in entries {
-                    // Re-read data_idx from the scene to keep consistent with hit_test.
-                    let data_idx = loaded
-                        .scene
-                        .panels
-                        .get(panel_id as usize)
-                        .and_then(|p| p.marks.get(entry.batch_idx))
-                        .and_then(|b| b.data_indices.as_ref())
-                        .and_then(|ids| ids.get(entry.node_idx).copied())
-                        .unwrap_or(entry.node_idx);
-                    data_indices.push(data_idx);
-                }
-            }
-        }
-
-        // Update the interval selection state with the collected indices as a
-        // Point selection (rect-select semantics: all marks inside the box).
-        // We store x_range/y_range for spatial containment queries and also
-        // record the data indices as a Point selection for the conditional layer.
+        // Update the interval selection state with the bounding rectangle.
+        // The Interval selection uses spatial containment (contains_point) during
+        // conditional encoding resolution — it does not need explicit data indices.
+        // The R-tree query above determines *which* marks are inside the box;
+        // the conditional layer uses contains_point against mark positions at
+        // render time, so storing x_range/y_range is sufficient.
         for spec in &self.selections {
             if let ferrum_scene::SelectionSpec::Interval { name, .. } = spec {
                 let name = name.clone();

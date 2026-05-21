@@ -125,7 +125,7 @@ class InteractiveChart:
 
         try:
             cfg = _json.loads(self._extract_interaction_config(scene_json))
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             cfg = {}
         cfg["toolbar"] = self._toolbar
         return _json.dumps(cfg)
@@ -311,6 +311,7 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
                 "interaction": {
                     "zoom_enabled": True,
                     "pan_enabled": True,
+                    "toolbar": True,
                     "conditionals": [],
                     "linked_panels": [],
                     "tick_levels": [],

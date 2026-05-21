@@ -123,7 +123,8 @@ class _ChartLike:
         elif fmt == "pdf":
             save_chart_svg(self.show_svg(), str(dest), scale=scale)
         elif fmt == "html":
-            ic = self.interactive()
+            toolbar = kwargs.pop("toolbar", True)
+            ic = self.interactive(toolbar=toolbar)
             ic.save(str(dest), **kwargs)
         else:
             raise ValueError(
