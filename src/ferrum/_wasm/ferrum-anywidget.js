@@ -20,7 +20,7 @@ async function _ensureWasm() {
   await _initP;
 }
 
-// D3 interactions (brush, zoom, select, zoomTransform, pointer) are provided
+// D3 interactions (brush, zoom, select, zoomTransform, zoomIdentity, pointer) are provided
 // by d3-interactions.js which is inlined before this file in both standalone
 // HTML and Jupyter ESM builds.  The D3 bundle's `export { ... }` is stripped
 // by the assembler, leaving the symbols in module scope.
@@ -56,58 +56,111 @@ function _placeTextSvg(svgEl, texts) {
   }
 }
 
-// Hit-test pixel (x, y) against the mark batches.
-// marks is an array of {batch, panel} pairs so arc paths can use panel.plot_area.
-function _hitTest(marks, x, y) {
-  for (let bi = marks.length - 1; bi >= 0; bi--) {
-    const { batch: b, panel } = marks[bi];
-    if (!b.nodes) continue;
-    for (let ni = b.nodes.length - 1; ni >= 0; ni--) {
-      const n = b.nodes[ni];
-      let hit = false;
-      if (n.type === 'circle') {
-        const dx = x - n.cx, dy = y - n.cy;
-        hit = dx * dx + dy * dy <= n.r * n.r;
-      } else if (n.type === 'rect') {
-        hit = x >= n.x && x <= n.x + n.w && y >= n.y && y <= n.y + n.h;
-      } else if (n.type === 'path' && b.kind === 'arc') {
-        // Pie / donut wedge hit test from plot_area center + path commands.
-        const pa = panel.plot_area;
-        const cx = pa.x + pa.w / 2, cy = pa.y + pa.h / 2;
-        const dx = x - cx, dy = y - cy;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const arcCmd = n.commands && n.commands.find(c => c.op === 'arc_to');
-        const outerR = arcCmd ? arcCmd.rx : 0;
-        if (dist <= outerR) {
-          const lineTo = n.commands && n.commands.find(c => c.op === 'line_to');
-          const innerR = lineTo
-            ? Math.sqrt((lineTo.x - cx) ** 2 + (lineTo.y - cy) ** 2)
-            : 0;
-          if (dist >= innerR) {
-            const moveTo = n.commands && n.commands.find(c => c.op === 'move_to');
-            if (moveTo) {
-              const norm = a => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-              const pointAngle = Math.atan2(dx, -dy);
-              const startAngle = Math.atan2(moveTo.x - cx, -(moveTo.y - cy));
-              const endAngle = arcCmd
-                ? Math.atan2(arcCmd.x - cx, -(arcCmd.y - cy))
-                : startAngle;
-              const sa = norm(startAngle);
-              let ea = norm(endAngle);
-              if (ea <= sa) ea += 2 * Math.PI;
-              const pa2 = norm(pointAngle);
-              const pa3 = pa2 < sa ? pa2 + 2 * Math.PI : pa2;
-              hit = pa3 >= sa && pa3 <= ea;
-            } else {
-              hit = true; // no move_to — treat as full circle
-            }
-          }
-        }
-      }
-      if (hit) return { batch: b, idx: ni };
+// ── SVG icon builder (safe DOM construction, no innerHTML) ───────────────
+// All icons are 16x16, stroke-based, currentColor. Built via DOM API to
+// avoid innerHTML and potential XSS vectors.
+function _svgIcon(children) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '16');
+  svg.setAttribute('height', '16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.5');
+  for (const child of children) {
+    const el = document.createElementNS(ns, child.tag);
+    for (const [k, v] of Object.entries(child.attrs || {})) {
+      el.setAttribute(k, v);
     }
+    svg.appendChild(el);
   }
-  return null;
+  return svg;
+}
+
+function _iconPan() {
+  return _svgIcon([
+    { tag: 'path', attrs: { d: 'M8 2v12M2 8h12M8 2l-2 2M8 2l2 2M8 14l-2-2M8 14l2-2M2 8l2-2M2 8l2 2M14 8l-2-2M14 8l-2 2' } },
+  ]);
+}
+
+function _iconBoxZoom() {
+  return _svgIcon([
+    { tag: 'circle', attrs: { cx: '7', cy: '7', r: '4' } },
+    { tag: 'path', attrs: { d: 'M10 10l4 4' } },
+    { tag: 'path', attrs: { d: 'M5 7h4M7 5v4' } },
+  ]);
+}
+
+function _iconSelect() {
+  return _svgIcon([
+    { tag: 'rect', attrs: { x: '2', y: '2', width: '12', height: '12', rx: '1', 'stroke-dasharray': '2 2' } },
+    { tag: 'path', attrs: { d: 'M6 8h4M8 6v4', 'stroke-dasharray': 'none' } },
+  ]);
+}
+
+function _iconReset() {
+  return _svgIcon([
+    { tag: 'path', attrs: { d: 'M3 8a5 5 0 1 1 1 3' } },
+    { tag: 'path', attrs: { d: 'M3 11V8h3' } },
+  ]);
+}
+
+function _iconSave() {
+  return _svgIcon([
+    { tag: 'path', attrs: { d: 'M8 2v8M8 10l-3-3M8 10l3-3M3 13h10' } },
+  ]);
+}
+
+// ── Toolbar creation ─────────────────────────────────────────────────────
+function _createToolbar(setMode, onReset, onSave, defaultMode) {
+  const toolbar = document.createElement('div');
+  toolbar.className = 'ferrum-toolbar';
+
+  const tools = [
+    { mode: 'pan', title: 'Pan (P)', iconFn: _iconPan },
+    { mode: 'boxzoom', title: 'Box Zoom (Z)', iconFn: _iconBoxZoom },
+    { mode: 'select', title: 'Box Select (S)', iconFn: _iconSelect },
+    null, // separator
+    { action: 'reset', title: 'Reset (R)', iconFn: _iconReset },
+    { action: 'save', title: 'Save PNG', iconFn: _iconSave },
+  ];
+
+  for (const t of tools) {
+    if (t === null) {
+      const sep = document.createElement('div');
+      sep.className = 'ferrum-tool-separator';
+      toolbar.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'ferrum-tool';
+    btn.title = t.title;
+    btn.appendChild(t.iconFn());
+    if (t.mode) {
+      btn.dataset.mode = t.mode;
+      if (t.mode === defaultMode) btn.classList.add('active');
+      btn.addEventListener('click', () => setMode(t.mode));
+    } else if (t.action === 'reset') {
+      btn.addEventListener('click', onReset);
+    } else if (t.action === 'save') {
+      btn.addEventListener('click', onSave);
+    }
+    toolbar.appendChild(btn);
+  }
+
+  return toolbar;
+}
+
+// ── Download helper ──────────────────────────────────────────────────────
+function _downloadBlob(blob) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ferrum-chart.png';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Adapter interface (duck-typed) ───────────────────────────────────────
@@ -119,16 +172,31 @@ function _hitTest(marks, x, y) {
 // }
 
 async function _render(container, sceneJson, adapter) {
+  // Clean up resources from a previous _render() call on the same container.
+  if (container._ferrumCleanup) {
+    container._ferrumCleanup();
+    container._ferrumCleanup = null;
+  }
   container.replaceChildren();
-  container.style.position = 'relative';
 
   const scene = JSON.parse(sceneJson);
   const w = scene.width || 640, h = scene.height || 480;
 
+  // ── Outer flex container ──────────────────────────────────────────
+  container.className = 'ferrum-container';
+  container.setAttribute('tabindex', '0');
+  container.style.display = 'flex';
+  container.style.outline = 'none';
+
+  // ── Inner chart wrapper (position:relative for canvas + SVG + tooltip) ─
+  const chartWrapper = document.createElement('div');
+  chartWrapper.style.position = 'relative';
+  container.appendChild(chartWrapper);
+
   // ── Canvas ───────────────────────────────────────────────────────
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h; canvas.style.display = 'block';
-  container.appendChild(canvas);
+  chartWrapper.appendChild(canvas);
 
   // ── SVG overlay for text labels ──────────────────────────────────
   const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -136,27 +204,21 @@ async function _render(container, sceneJson, adapter) {
   svgEl.setAttribute('height', h);
   // SVG inherits CSS @font-face from the parent HTML document (Inter).
   svgEl.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
-  container.appendChild(svgEl);
+  chartWrapper.appendChild(svgEl);
 
   // ── Tooltip ──────────────────────────────────────────────────────
   const tip = document.createElement('div');
   tip.className = 'ferrum-tooltip';
   Object.assign(tip.style, { position: 'absolute', pointerEvents: 'none',
     opacity: '0', transition: 'opacity 0.1s ease' });
-  container.appendChild(tip);
+  chartWrapper.appendChild(tip);
 
-  // marks carries {batch, panel} pairs so hit-testers have panel context.
-  const marks = scene.panels
-    ? scene.panels.flatMap(p => (p.marks || []).map(b => ({ batch: b, panel: p })))
-    : [];
-
-  // ── Brush / interval selection detection ──────────────────────────
+  // ── Interaction config ────────────────────────────────────────────
   const cfg = JSON.parse(adapter.getInteractionConfig());
   const _hasPointSelections = (cfg.selections || []).some(s => s.type === 'point');
   const hasInterval = (cfg.selections || []).some(s => s.type === 'interval');
 
   // ── GPU init (may fail when WebGPU/WebGL context limit exceeded) ──
-  // Event listeners below still work without GPU — tooltips + click state.
   let renderer = null;
   try {
     await _ensureWasm();
@@ -168,16 +230,29 @@ async function _render(container, sceneJson, adapter) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
 
-  // ── D3-zoom on canvas ─────────────────────────────────────────────
+  // ── Mode switching ────────────────────────────────────────────────
+  const defaultMode = hasInterval ? 'select' : 'pan';
+  let currentMode = defaultMode;
+  container.dataset.mode = currentMode;
+
+  function setMode(mode) {
+    currentMode = mode;
+    container.dataset.mode = mode;
+    // Update active class on toolbar buttons.
+    container.querySelectorAll('.ferrum-tool[data-mode]').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === mode);
+    });
+  }
+
+  // ── D3-zoom on chart wrapper ──────────────────────────────────────
   let _zoomDebounceId = null;
   const zoomBehavior = zoom()
     .scaleExtent([0.1, 50])
     .filter(event => {
       // Always allow wheel-zoom.
       if (event.type === 'wheel') return true;
-      // When interval selections are active, require Alt/Option or Cmd/Meta
-      // for pan (drag without modifier belongs to the brush).
-      if (hasInterval && !event.altKey && !event.metaKey) return false;
+      // Only pan mode allows drag-zoom.
+      if (currentMode !== 'pan') return false;
       // Only left-button drags.
       return !event.button;
     })
@@ -195,18 +270,72 @@ async function _render(container, sceneJson, adapter) {
       }, 400);
     });
 
-  // Attach zoom to the container (wraps both canvas and SVG) so wheel/pan
-  // events work regardless of which layer captures them.
-  select(container).call(zoomBehavior);
+  // Attach zoom to the inner chart wrapper (not the outer flex container)
+  // so toolbar button clicks don't trigger zoom events.
+  select(chartWrapper).call(zoomBehavior);
+
+  // ── Reset handler ─────────────────────────────────────────────────
+  function onReset() {
+    if (!renderer) return;
+    select(chartWrapper).call(zoomBehavior.transform, zoomIdentity);
+  }
 
   // Double-click: reset zoom to identity.
-  select(container).on('dblclick.zoom', () => {
-    if (!renderer) return;
-    select(container).call(zoomBehavior.transform, zoomIdentity);
-  });
+  select(chartWrapper).on('dblclick.zoom', onReset);
 
-  // ── D3-brush on SVG (per-panel overlays for interval selections) ────
-  if (hasInterval && scene.panels) {
+  // ── Save PNG handler ──────────────────────────────────────────────
+  function onSave() {
+    if (!renderer) return;
+    const dpr = window.devicePixelRatio || 1;
+    if (dpr <= 1) {
+      canvas.toBlob(blob => { _downloadBlob(blob); });
+      return;
+    }
+    const origW = canvas.width, origH = canvas.height;
+    function _restore() {
+      try {
+        canvas.width = origW;
+        canvas.height = origH;
+        renderer.resize(origW, origH);
+        renderer.render_frame_js();
+      } catch (_) { /* GPU context lost — canvas stays at wrong size until next resize */ }
+    }
+    try {
+      canvas.width = origW * dpr;
+      canvas.height = origH * dpr;
+      renderer.resize(canvas.width, canvas.height);
+      renderer.render_frame_js();
+      canvas.toBlob(blob => {
+        _restore();
+        _downloadBlob(blob);
+      });
+    } catch (_) {
+      _restore();
+    }
+  }
+
+  // ── Toolbar (gated on cfg.toolbar !== false) ──────────────────────
+  if (cfg.toolbar !== false) {
+    const toolbar = _createToolbar(setMode, onReset, onSave, defaultMode);
+    container.appendChild(toolbar);
+  }
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────
+  function _onKeydown(e) {
+    switch (e.key) {
+      case 'p': setMode('pan'); break;
+      case 'z': setMode('boxzoom'); break;
+      case 's': setMode('select'); break;
+      case 'r': onReset(); break;
+      case 'Escape': setMode(defaultMode); break;
+      default: return;
+    }
+    e.preventDefault();
+  }
+  container.addEventListener('keydown', _onKeydown);
+
+  // ── D3-brush on SVG (per-panel overlays for interval/boxzoom) ─────
+  if (scene.panels) {
     // Extract brush styling from the interval selection's SelectionMark.
     let brushFill = 'rgba(51, 136, 204, 0.2)';
     let brushStroke = 'rgba(51, 136, 204, 0.6)';
@@ -223,25 +352,42 @@ async function _render(container, sceneJson, adapter) {
       const pa = scene.panels[pi].plot_area;
       if (!pa) continue;
 
+      const panelIdx = pi;
       const brushBehavior = brush()
         .extent([[pa.x, pa.y], [pa.x + pa.w, pa.y + pa.h]])
-        .filter(event => !event.altKey && !event.metaKey && event.button === 0);
+        .filter(event => {
+          // Pan mode blocks brush entirely.
+          if (currentMode === 'pan') return false;
+          return event.button === 0;
+        });
 
-      // Capture panel index for the closure.
-      const panelIdx = pi;
       brushBehavior.on('end', function(event) {
         if (!renderer) return;
         if (!event.selection) return;
         const [[x0, y0], [x1, y1]] = event.selection;
-        try {
-          const resultJson = renderer.handleDrag(panelIdx, x0, y0, x1, y1);
-          adapter.onSelectionChange(JSON.parse(resultJson));
-          // Re-render text with current zoom preserved.
-          const t = zoomTransform(container);
-          const textJson = renderer.setTransform(t.k, t.x, t.y);
-          _placeTextSvg(svgEl, JSON.parse(textJson));
-        } catch (err) {
-          console.warn('[ferrum] handleDrag error:', err);
+
+        if (currentMode === 'boxzoom') {
+          // Compute zoom transform to fit the selected rectangle.
+          const plotW = canvas.width, plotH = canvas.height;
+          const selW = x1 - x0, selH = y1 - y0;
+          const k = Math.min(plotW / selW, plotH / selH);
+          const tx = -x0 * k, ty = -y0 * k;
+          select(chartWrapper).call(zoomBehavior.transform,
+            zoomIdentity.translate(tx, ty).scale(k));
+          // Clear the brush.
+          select(this).call(brushBehavior.move, null);
+        } else if (currentMode === 'select') {
+          // Interval selection via WASM.
+          try {
+            const resultJson = renderer.handleDrag(panelIdx, x0, y0, x1, y1);
+            adapter.onSelectionChange(JSON.parse(resultJson));
+            // Re-render text with current zoom preserved.
+            const t = zoomTransform(chartWrapper);
+            const textJson = renderer.setTransform(t.k, t.x, t.y);
+            _placeTextSvg(svgEl, JSON.parse(textJson));
+          } catch (err) {
+            console.warn('[ferrum] handleDrag error:', err);
+          }
         }
       });
 
@@ -257,25 +403,15 @@ async function _render(container, sceneJson, adapter) {
     }
   }
 
-  // ── Tooltip mousemove ─────────────────────────────────────────────
-  canvas.addEventListener('mousemove', e => {
+  // ── Tooltip hover handler ─────────────────────────────────────────
+  function handleHover(e) {
     const r = canvas.getBoundingClientRect();
     const mx = (e.clientX - r.left) * (canvas.width / r.width);
     const my = (e.clientY - r.top) * (canvas.height / r.height);
 
-    // Inverse-zoom for hit-test in original mark space.
-    const t = zoomTransform(container);
-    const hx = t.k !== 0 ? (mx - t.x) / t.k : mx;
-    const hy = t.k !== 0 ? (my - t.y) / t.k : my;
-
     let tooltipData = null;
-    // Try JS hit-test first (non-packed batches with nodes).
-    const hh = _hitTest(marks, hx, hy);
-    if (hh && hh.batch.tooltips && hh.batch.tooltips[hh.idx]) {
-      tooltipData = hh.batch.tooltips[hh.idx];
-    }
-    // Fallback: WASM hit-test + getTooltip for packed batches (empty nodes).
-    if (!tooltipData && renderer) {
+    // WASM-only hit-test via renderer.hitTestAt + getTooltip.
+    if (renderer) {
       try {
         const hitJson = renderer.hitTestAt(mx, my);
         const hit = JSON.parse(hitJson);
@@ -306,28 +442,41 @@ async function _render(container, sceneJson, adapter) {
     } else {
       tip.style.opacity = '0';
     }
+  }
+
+  // ── RAF-coalesced mousemove ───────────────────────────────────────
+  let _rafId = null, _pendingMove = null;
+  canvas.addEventListener('mousemove', e => {
+    _pendingMove = e;
+    if (!_rafId) _rafId = requestAnimationFrame(() => {
+      _rafId = null;
+      if (_pendingMove) handleHover(_pendingMove);
+    });
   });
 
   canvas.addEventListener('mouseleave', () => {
     tip.style.opacity = '0';
   });
 
-  // ── Click: href navigation + point selection ──────────────────────
+  // ── Click: href navigation + point selection (WASM-only) ──────────
   canvas.addEventListener('click', e => {
     const r = canvas.getBoundingClientRect();
     const cx = (e.clientX - r.left) * (canvas.width / r.width);
     const cy = (e.clientY - r.top) * (canvas.height / r.height);
 
-    // Inverse-zoom for JS hit-test.
-    const t = zoomTransform(container);
-    const hx = t.k !== 0 ? (cx - t.x) / t.k : cx;
-    const hy = t.k !== 0 ? (cy - t.y) / t.k : cy;
-
-    // Href navigation.
-    const h = _hitTest(marks, hx, hy);
-    if (h && h.batch.hrefs && h.batch.hrefs[h.idx]) {
-      window.open(h.batch.hrefs[h.idx], '_blank', 'noopener,noreferrer');
-      return;
+    // Href navigation via WASM hit-test.
+    if (renderer) {
+      try {
+        const hitJson = renderer.hitTestAt(cx, cy);
+        const hit = JSON.parse(hitJson);
+        if (hit.panel != null && hit.batch != null && hit.idx != null) {
+          const href = renderer.getHref(hit.panel, hit.batch, hit.idx);
+          if (href) {
+            window.open(href, '_blank', 'noopener,noreferrer');
+            return;
+          }
+        }
+      } catch (err) { /* WASM not ready */ }
     }
 
     // Delegate clicks to WASM handleClick only when point selections exist.
@@ -340,39 +489,25 @@ async function _render(container, sceneJson, adapter) {
       } catch (err) {
         console.warn('[ferrum] handleClick error:', err);
       }
-      return;
-    }
-
-    // Fallback (no GPU): use JS hit test + tooltip field extraction.
-    if (!h) return;
-    const icfg = adapter.getInteractionConfig();
-    let selConfig = {};
-    try { selConfig = JSON.parse(icfg || '{}'); } catch (_e) { /* ignore */ }
-    const selections = selConfig.selections || [];
-    const tooltip = h.batch.tooltips && h.batch.tooltips[h.idx];
-    const fieldMap = {};
-    if (tooltip) { for (const f of tooltip.fields) fieldMap[f.name] = f.value; }
-    const selState = {};
-    for (const sel of selections) {
-      if (!sel.fields) continue;
-      const vals = {};
-      for (const field of sel.fields) {
-        if (fieldMap[field] !== undefined) vals[field] = fieldMap[field];
-      }
-      if (Object.keys(vals).length > 0) selState[sel.name] = vals;
-    }
-    if (Object.keys(selState).length > 0) {
-      adapter.onSelectionChange(selState);
     }
   });
 
   // ── ResizeObserver ────────────────────────────────────────────────
+  let _ro = null;
   if (renderer) {
-    const ro = new ResizeObserver(() => {
+    _ro = new ResizeObserver(() => {
       try { renderer.resize(canvas.width, canvas.height); } catch (err) { /* ignore */ }
     });
-    ro.observe(canvas);
+    _ro.observe(canvas);
   }
+
+  // ── Cleanup registration ─────────────────────────────────────────
+  container._ferrumCleanup = () => {
+    container.removeEventListener('keydown', _onKeydown);
+    if (_ro) _ro.disconnect();
+    if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+    clearTimeout(_zoomDebounceId);
+  };
 
   return { canvas, renderer, scene, svgEl };
 }
