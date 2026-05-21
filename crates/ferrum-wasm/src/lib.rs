@@ -6,6 +6,7 @@ pub mod error;
 pub mod hit_test;
 pub mod scene_load;
 pub mod selection_state;
+pub mod spatial_index;
 pub mod tessellate;
 pub mod transition;
 pub mod zoom_pan;

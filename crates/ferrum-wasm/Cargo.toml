@@ -21,3 +21,4 @@ base64 = { workspace = true }
 console_error_panic_hook = { workspace = true }
 png = { workspace = true }
 raw-window-handle = "0.6"
+rstar = "0.12"
