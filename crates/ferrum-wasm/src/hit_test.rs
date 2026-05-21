@@ -1,5 +1,7 @@
 use ferrum_scene::{MarkBatch, MarkBatchKind, SceneNode};
 
+use crate::spatial_index::SpatialIndex;
+
 pub struct HitResult {
     pub panel_id: usize,
     pub batch_idx: usize,
@@ -7,11 +9,32 @@ pub struct HitResult {
     pub data_idx: Option<usize>,
 }
 
+/// Returns `true` for batch kinds that are indexed by the spatial index
+/// (circles from `Point` batches and rects from `Bar`/`Rect` batches).
+fn is_indexed_batch_kind(kind: MarkBatchKind) -> bool {
+    matches!(kind, MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect)
+}
+
 pub fn hit_test(
     panels: &[ferrum_scene::Panel],
     x: f64,
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
+) -> Option<HitResult> {
+    hit_test_with_index(panels, x, y, zoom, None)
+}
+
+/// Exact hit-test with an optional spatial index for O(log n) circle/rect lookups.
+///
+/// When `spatial_index` is provided, indexed batch kinds (Point, Bar, Rect) use
+/// the R-tree for candidate lookup.  All other batch kinds always use the linear
+/// scan.  The R-tree result takes priority over the linear scan result.
+pub fn hit_test_with_index(
+    panels: &[ferrum_scene::Panel],
+    x: f64,
+    y: f64,
+    zoom: &crate::zoom_pan::ZoomPanState,
+    spatial_index: Option<&SpatialIndex>,
 ) -> Option<HitResult> {
     for (panel_pos, panel) in panels.iter().enumerate().rev() {
         // Map the click from visual (post-zoom) pixel space back to scene pixel space.
@@ -22,7 +45,31 @@ pub fn hit_test(
         if !rect_contains(&panel.plot_area, px, py) {
             continue;
         }
+
+        // R-tree path for indexed batch kinds (Point, Bar, Rect).
+        if let Some(idx) = spatial_index {
+            if let Some(entry) = idx.hit_test(panel_pos, px, py, 0.0) {
+                let data_idx = panel
+                    .marks
+                    .get(entry.batch_idx)
+                    .and_then(|b| b.data_indices.as_ref())
+                    .and_then(|ids| ids.get(entry.node_idx).copied());
+                return Some(HitResult {
+                    panel_id: panel_pos,
+                    batch_idx: entry.batch_idx,
+                    node_idx: entry.node_idx,
+                    data_idx,
+                });
+            }
+        }
+
+        // Linear scan for non-indexed batch kinds (Line, Area, Arc, Tick, Text, etc.)
+        // and for the full linear path when no spatial index is available.
         for (bi, batch) in panel.marks.iter().enumerate().rev() {
+            // When a spatial index is available, skip indexed kinds — already handled above.
+            if spatial_index.is_some() && is_indexed_batch_kind(batch.kind) {
+                continue;
+            }
             if let Some(ni) = hit_test_batch(batch, panel, px, py) {
                 let data_idx = batch
                     .data_indices
@@ -46,7 +93,27 @@ pub fn hit_test_nearest(
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
 ) -> Option<HitResult> {
+    hit_test_nearest_with_index(panels, x, y, zoom, None)
+}
+
+/// Nearest-mark hit-test with an optional spatial index for O(log n) circle/rect lookups.
+///
+/// Strategy:
+/// 1. If a `SpatialIndex` is provided, query it for the nearest indexed mark (circle/rect)
+///    within `SNAP_DISTANCE`.
+/// 2. Perform a linear scan over *non-indexed* batch kinds (Line, Area, Arc, Tick, Text, etc.).
+/// 3. Return the closer of the two results.
+///
+/// When no index is provided, behaves identically to the original linear-only path.
+pub fn hit_test_nearest_with_index(
+    panels: &[ferrum_scene::Panel],
+    x: f64,
+    y: f64,
+    zoom: &crate::zoom_pan::ZoomPanState,
+    spatial_index: Option<&SpatialIndex>,
+) -> Option<HitResult> {
     let mut best: Option<(f64, HitResult)> = None;
+
     for (panel_pos, panel) in panels.iter().enumerate() {
         // Map the click from visual (post-zoom) pixel space back to scene pixel space.
         let (px, py) = zoom.transforms
@@ -56,7 +123,33 @@ pub fn hit_test_nearest(
         if !rect_contains(&panel.plot_area, px, py) {
             continue;
         }
+
+        // R-tree nearest for indexed batch kinds.
+        if let Some(idx) = spatial_index {
+            if let Some((entry, dist)) = idx.nearest(panel_pos, px, py) {
+                let data_idx = panel
+                    .marks
+                    .get(entry.batch_idx)
+                    .and_then(|b| b.data_indices.as_ref())
+                    .and_then(|ids| ids.get(entry.node_idx).copied());
+                let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
+                if is_closer {
+                    best = Some((dist, HitResult {
+                        panel_id: panel_pos,
+                        batch_idx: entry.batch_idx,
+                        node_idx: entry.node_idx,
+                        data_idx,
+                    }));
+                }
+            }
+        }
+
+        // Linear scan for non-indexed batch kinds (and the full path when no index given).
         for (bi, batch) in panel.marks.iter().enumerate() {
+            // When a spatial index is available, skip indexed kinds — already covered above.
+            if spatial_index.is_some() && is_indexed_batch_kind(batch.kind) {
+                continue;
+            }
             if let Some((ni, dist)) = nearest_in_batch(batch, px, py) {
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {

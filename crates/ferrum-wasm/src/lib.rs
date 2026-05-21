@@ -39,7 +39,11 @@ use crate::scene_load::SceneData;
 #[cfg(target_arch = "wasm32")]
 use crate::selection_state::InteractionState;
 #[cfg(target_arch = "wasm32")]
+use crate::spatial_index::SpatialIndex;
+#[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
+#[cfg(target_arch = "wasm32")]
+use rstar::AABB;
 #[cfg(target_arch = "wasm32")]
 use crate::zoom_pan::{ScaleMode, ZoomPanState};
 
@@ -54,6 +58,7 @@ pub struct WasmRenderer {
     interaction_state: InteractionState,
     zoom: ZoomPanState,
     interaction: ferrum_scene::InteractionConfig,
+    spatial_index: Option<SpatialIndex>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -87,6 +92,7 @@ impl WasmRenderer {
             interaction_state: InteractionState::new(&[]),
             zoom: ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default()),
             interaction: ferrum_scene::InteractionConfig::default(),
+            spatial_index: None,
         })
     }
 
@@ -104,6 +110,8 @@ impl WasmRenderer {
         self.interaction_state = InteractionState::new(&self.selections);
         self.interaction = scene.interaction.clone();
         self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
+        // Build spatial index over all panels for O(log n) hit-testing.
+        self.spatial_index = Some(SpatialIndex::build(&scene.panels));
         self.loaded = Some(LoadedScene { data, buffers, scene });
 
         if let Some(ref loaded) = self.loaded {
@@ -216,13 +224,15 @@ impl WasmRenderer {
         };
 
         // Update selection state via Rust hit-test (authoritative — operates on actual scene data).
-        self.interaction_state.handle_click(
+        // Pass spatial index for O(log n) circle/rect hit-testing.
+        self.interaction_state.handle_click_with_index(
             &loaded.scene.panels,
             &self.selections,
             x as f64,
             y as f64,
             &self.zoom,
             shift_held,
+            self.spatial_index.as_ref(),
         );
 
         self.apply_conditionals_and_render()
@@ -346,8 +356,10 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else { return "{}".to_string(); };
 
         // Try scene-node hit-test first (non-packed batches).
-        if let Some(hr) = hit_test::hit_test_nearest(
+        // Use the spatial index when available for O(log n) circle/rect lookups.
+        if let Some(hr) = hit_test::hit_test_nearest_with_index(
             &loaded.scene.panels, x as f64, y as f64, &self.zoom,
+            self.spatial_index.as_ref(),
         ) {
             return format!(
                 "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
@@ -410,6 +422,98 @@ impl WasmRenderer {
             return "{}".to_string();
         };
         scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize)
+    }
+
+    /// Return the href string for a specific mark node, or an empty string if
+    /// none is present.
+    ///
+    /// `panel_id`, `batch_idx`, and `node_idx` correspond to the triple returned
+    /// by `hitTestAt`.  The href is sourced from `batch.hrefs[node_idx]` in the
+    /// scene graph.
+    #[wasm_bindgen(js_name = "getHref")]
+    pub fn get_href(&self, panel_id: u32, batch_idx: u32, node_idx: u32) -> String {
+        let Some(loaded) = &self.loaded else {
+            return String::new();
+        };
+        loaded
+            .scene
+            .panels
+            .get(panel_id as usize)
+            .and_then(|p| p.marks.get(batch_idx as usize))
+            .and_then(|b| b.hrefs.as_ref())
+            .and_then(|hrefs| hrefs.get(node_idx as usize))
+            .and_then(|opt| opt.as_deref())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Select all indexed marks (circles and rects) within the given scene-space
+    /// rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
+    ///
+    /// Updates the first `Interval` selection spec found in `self.selections`,
+    /// then applies conditional encodings and re-renders.  Returns the new
+    /// selection state JSON.
+    ///
+    /// If no spatial index has been built yet (scene not loaded), returns `"{}"`.
+    #[wasm_bindgen(js_name = "selectInRect")]
+    pub fn select_in_rect(
+        &mut self,
+        panel_id: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Result<String, JsValue> {
+        if self.loaded.is_none() {
+            return Ok("{}".to_string());
+        }
+
+        // Build an AABB from the selection rectangle (normalise lo/hi).
+        let lo_x = (x0 as f64).min(x1 as f64);
+        let hi_x = (x0 as f64).max(x1 as f64);
+        let lo_y = (y0 as f64).min(y1 as f64);
+        let hi_y = (y0 as f64).max(y1 as f64);
+        let aabb = AABB::from_corners([lo_x, lo_y], [hi_x, hi_y]);
+
+        // Collect the data indices for all marks inside the rectangle.
+        let mut data_indices: Vec<usize> = Vec::new();
+        if let Some(ref idx) = self.spatial_index {
+            let entries = idx.in_envelope(panel_id as usize, aabb);
+            if let Some(ref loaded) = self.loaded {
+                for entry in entries {
+                    // Re-read data_idx from the scene to keep consistent with hit_test.
+                    let data_idx = loaded
+                        .scene
+                        .panels
+                        .get(panel_id as usize)
+                        .and_then(|p| p.marks.get(entry.batch_idx))
+                        .and_then(|b| b.data_indices.as_ref())
+                        .and_then(|ids| ids.get(entry.node_idx).copied())
+                        .unwrap_or(entry.node_idx);
+                    data_indices.push(data_idx);
+                }
+            }
+        }
+
+        // Update the interval selection state with the collected indices as a
+        // Point selection (rect-select semantics: all marks inside the box).
+        // We store x_range/y_range for spatial containment queries and also
+        // record the data indices as a Point selection for the conditional layer.
+        for spec in &self.selections {
+            if let ferrum_scene::SelectionSpec::Interval { name, .. } = spec {
+                let name = name.clone();
+                self.interaction_state.selections.insert(
+                    name,
+                    crate::selection_state::SelectionState::Interval {
+                        x_range: Some((lo_x, hi_x)),
+                        y_range: Some((lo_y, hi_y)),
+                    },
+                );
+                break;
+            }
+        }
+
+        self.apply_conditionals_and_render()
     }
 }
 

@@ -74,7 +74,21 @@ impl InteractionState {
         zoom: &crate::zoom_pan::ZoomPanState,
         shift_held: bool,
     ) {
-        let hit = hit_test::hit_test(panels, x, y, zoom);
+        self.handle_click_with_index(panels, specs, x, y, zoom, shift_held, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_click_with_index(
+        &mut self,
+        panels: &[ferrum_scene::Panel],
+        specs: &[SelectionSpec],
+        x: f64,
+        y: f64,
+        zoom: &crate::zoom_pan::ZoomPanState,
+        shift_held: bool,
+        spatial_index: Option<&crate::spatial_index::SpatialIndex>,
+    ) {
+        let hit = hit_test::hit_test_with_index(panels, x, y, zoom, spatial_index);
 
         for spec in specs {
             match spec {
