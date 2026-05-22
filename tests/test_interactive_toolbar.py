@@ -321,6 +321,18 @@ def test_explicit_tooltip_wins_over_auto():
     assert field_names == {"g"}, f"expected only 'g', got {field_names}"
 
 
+@_skip_no_wasm
+def test_chart_save_html_toolbar_false(tmp_path):
+    """Chart.save(format='html', toolbar=False) must embed toolbar:false in the HTML."""
+    chart = _simple_chart()
+    out = tmp_path / "toolbar_false.html"
+    chart.save(str(out), toolbar=False)
+    content = out.read_text()
+    assert '"toolbar": false' in content or '"toolbar":false' in content, (
+        "Chart.save with toolbar=False must embed toolbar:false in the HTML"
+    )
+
+
 def test_static_mesh_separate_from_mark_mesh():
     """Grid lines should tessellate into static_mesh, not mark mesh."""
     import json

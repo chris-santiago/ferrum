@@ -343,31 +343,6 @@ def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
     tuple[str, bytes]
         (scene_json, packed_data) from ``render_interactive``.
     """
-    import json as _json
+    from ferrum._interactive import _render_scene
 
-    from ferrum._core import render_interactive
-
-    spec, data, viewport, theme_dict = chart._render_inputs(_auto_tooltips=True)
-    if data.num_rows == 0:
-        w, h = viewport
-        return _json.dumps(
-            {
-                "panels": [],
-                "width": w,
-                "height": h,
-                "background": None,
-                "title": [],
-                "legend": [],
-                "decorations": [],
-                "selections": [],
-                "interaction": {
-                    "zoom_enabled": True,
-                    "pan_enabled": True,
-                    "toolbar": True,
-                    "conditionals": [],
-                    "linked_panels": [],
-                    "tick_levels": [],
-                },
-            }
-        ), b""
-    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
+    return _render_scene(chart)
