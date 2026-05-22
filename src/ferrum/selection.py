@@ -440,21 +440,34 @@ def _to_event_expr(s: str) -> str | dict[str, str]:
 
 
 def _hex_to_color_dict(hex_str: str) -> dict[str, int]:
+    import warnings
+
     h = hex_str.lstrip("#")
-    if len(h) == 6:
-        return {
-            "r": int(h[0:2], 16),
-            "g": int(h[2:4], 16),
-            "b": int(h[4:6], 16),
-            "a": 255,
-        }
-    if len(h) == 8:
-        return {
-            "r": int(h[0:2], 16),
-            "g": int(h[2:4], 16),
-            "b": int(h[4:6], 16),
-            "a": int(h[6:8], 16),
-        }
+    if len(h) == 3:
+        h = h[0] * 2 + h[1] * 2 + h[2] * 2
+    elif len(h) == 4:
+        h = h[0] * 2 + h[1] * 2 + h[2] * 2 + h[3] * 2
+    try:
+        if len(h) == 6:
+            return {
+                "r": int(h[0:2], 16),
+                "g": int(h[2:4], 16),
+                "b": int(h[4:6], 16),
+                "a": 255,
+            }
+        if len(h) == 8:
+            return {
+                "r": int(h[0:2], 16),
+                "g": int(h[2:4], 16),
+                "b": int(h[4:6], 16),
+                "a": int(h[6:8], 16),
+            }
+    except ValueError:
+        pass
+    warnings.warn(
+        f"Unrecognized hex color {hex_str!r}, defaulting to black",
+        stacklevel=2,
+    )
     return {"r": 0, "g": 0, "b": 0, "a": 255}
 
 

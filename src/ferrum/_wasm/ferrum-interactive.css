@@ -39,3 +39,29 @@
   fill-opacity: 0.2;
   stroke-width: 1;
 }
+
+/* ── Toolbar ─────────────────────────────────────────────── */
+.ferrum-container { display: flex; outline: none; }
+.ferrum-toolbar {
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: #f8f8f8; border-left: 1px solid #e0e0e0;
+}
+.ferrum-tool {
+  width: 28px; height: 28px; border: 1px solid transparent;
+  border-radius: 4px; background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: #666; padding: 0;
+}
+.ferrum-tool:hover { background: #e8e8e8; color: #333; }
+.ferrum-tool.active { background: #dbeafe; border-color: #93c5fd; color: #2563eb; }
+.ferrum-tool-separator { width: 20px; height: 1px; background: #ddd; margin: 4px auto; }
+
+/* ── Cursor feedback ─────────────────────────────────────── */
+/* Pan mode: SVG has pointer-events:none, so cursor on canvas is visible */
+.ferrum-container[data-mode="pan"] canvas { cursor: grab; }
+.ferrum-container[data-mode="pan"]:active canvas { cursor: grabbing; }
+/* Select/boxzoom: SVG overlay has pointer-events:all and sits above canvas,
+   so cursor must be set on svg to be visible */
+.ferrum-container[data-mode="select"] svg { cursor: crosshair; }
+.ferrum-container[data-mode="boxzoom"] svg { cursor: zoom-in; }
+.ferrum-container[data-mode="boxzoom"]:active svg { cursor: crosshair; }

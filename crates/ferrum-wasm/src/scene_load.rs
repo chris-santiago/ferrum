@@ -117,7 +117,19 @@ pub struct RectInstance {
 pub struct SceneData {
     pub circle_instances: Vec<CircleInstance>,
     pub rect_instances: Vec<RectInstance>,
+    /// Mesh vertices/indices for mark batches (lines, areas, paths,
+    /// polygons, polylines). Drawn with the zoom/pan transform.
     pub mesh_buffers: VertexBuffers<MeshVertex, u32>,
+    /// Mesh vertices/indices for non-mark elements (grid lines, axis
+    /// ticks, legend lines, title decorations, etc.).
+    /// Drawn with the identity transform so they stay fixed during
+    /// zoom/pan.
+    pub static_mesh_buffers: VertexBuffers<MeshVertex, u32>,
+    /// Mesh vertices/indices for annotation Line/Path nodes
+    /// (from `annotate_hline` / `annotate_vline` etc.).  Drawn with the
+    /// identity transform AFTER mark mesh so reference lines appear above
+    /// data marks, matching SVG painter order.
+    pub annotation_mesh_buffers: VertexBuffers<MeshVertex, u32>,
     pub text_elements: Vec<TextElementData>,
     pub image_quads: Vec<ImageQuad>,
     pub background: Option<[f32; 4]>,
@@ -192,6 +204,181 @@ pub struct DrawCommand {
     /// When `true`, the additive-blend pipeline is used instead of the
     /// normal alpha-blend pipeline.
     pub additive: bool,
+    /// When `true`, the zoom/pan affine transform is applied to this
+    /// command's instances. When `false` (axes, gridlines, legend, title,
+    /// etc.), the identity transform is used so these elements stay fixed
+    /// during zoom.
+    pub is_mark: bool,
+    /// For mark draw commands (`is_mark == true`), the panel's plot area
+    /// `[x, y, w, h]` in canvas pixels. The render loop uses this to
+    /// restrict the GPU clip region so zoomed marks do not bleed into axis
+    /// margins. `None` for non-mark commands (axes, grid, legend, title).
+    pub plot_area: Option<[f32; 4]>,
+}
+
+/// Accumulator for one full scene-load pass.
+///
+/// Replaces the 8 loose `let mut` variables previously threaded through every
+/// `collect_nodes` / `emit_draw_commands` call. Callers use the three surface
+/// methods (`collect_static` / `collect_mark` / `collect_annotation`) which
+/// handle mesh routing and draw-command emission internally.
+pub struct SceneCollector {
+    pub circles: Vec<CircleInstance>,
+    pub rects: Vec<RectInstance>,
+    /// Mark mesh: lines, areas, paths, polygons, polylines from mark batches.
+    /// Drawn with the zoom/pan transform.
+    pub mesh: VertexBuffers<MeshVertex, u32>,
+    /// Static mesh: grid lines, axis ticks, legend lines, title decorations,
+    /// etc. Drawn with the identity transform so they stay fixed during
+    /// zoom/pan.
+    pub static_mesh: VertexBuffers<MeshVertex, u32>,
+    /// Annotation mesh: Line/Path nodes from `panel.annotations`
+    /// (e.g. `annotate_hline` / `annotate_vline`). Drawn with the identity
+    /// transform AFTER mark mesh so reference lines appear above data marks.
+    pub annotation_mesh: VertexBuffers<MeshVertex, u32>,
+    pub texts: Vec<TextElementData>,
+    pub images: Vec<ImageQuad>,
+    pub draw_commands: Vec<DrawCommand>,
+    /// Snapshot of `circles.len()` at the last `emit` call.
+    prev_c: usize,
+    /// Snapshot of `rects.len()` at the last `emit` call.
+    prev_r: usize,
+}
+
+impl Default for SceneCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SceneCollector {
+    pub fn new() -> Self {
+        Self {
+            circles: Vec::new(),
+            rects: Vec::new(),
+            mesh: VertexBuffers::new(),
+            static_mesh: VertexBuffers::new(),
+            annotation_mesh: VertexBuffers::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            draw_commands: Vec::new(),
+            prev_c: 0,
+            prev_r: 0,
+        }
+    }
+
+    /// Collect `nodes` into the static mesh (non-mark elements: grid, axes,
+    /// annotations, legend, title, decorations) and immediately emit draw
+    /// commands for any new circle/rect instances.
+    pub fn collect_static(
+        &mut self,
+        nodes: &[SceneNode],
+        batch_cap: Option<StrokeCap>,
+        batch_join: Option<StrokeJoin>,
+    ) {
+        collect_nodes(
+            nodes,
+            &mut self.circles,
+            &mut self.rects,
+            &mut self.static_mesh,
+            &mut self.texts,
+            &mut self.images,
+            batch_cap,
+            batch_join,
+        );
+        self.emit(false, false, None);
+    }
+
+    /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
+    /// polygons, polylines) and immediately emit draw commands for any new
+    /// circle/rect instances with the given blend mode and plot area.
+    pub fn collect_mark(
+        &mut self,
+        nodes: &[SceneNode],
+        additive: bool,
+        plot_area: Option<[f32; 4]>,
+        batch_cap: Option<StrokeCap>,
+        batch_join: Option<StrokeJoin>,
+    ) {
+        collect_nodes(
+            nodes,
+            &mut self.circles,
+            &mut self.rects,
+            &mut self.mesh,
+            &mut self.texts,
+            &mut self.images,
+            batch_cap,
+            batch_join,
+        );
+        self.emit(additive, true, plot_area);
+    }
+
+    /// Collect `nodes` into the annotation mesh.
+    ///
+    /// Annotation Line/Path nodes (from `annotate_hline` / `annotate_vline`
+    /// etc.) are stored separately so they can be drawn AFTER mark mesh in
+    /// `render_frame`, giving them the correct z-order above data marks.
+    /// Circle/Rect annotation nodes are still emitted as draw commands via
+    /// `emit` (they already appear at the correct z-order because they are
+    /// emitted after mark batches).
+    pub fn collect_annotation(
+        &mut self,
+        nodes: &[SceneNode],
+        batch_cap: Option<StrokeCap>,
+        batch_join: Option<StrokeJoin>,
+    ) {
+        collect_nodes(
+            nodes,
+            &mut self.circles,
+            &mut self.rects,
+            &mut self.annotation_mesh,
+            &mut self.texts,
+            &mut self.images,
+            batch_cap,
+            batch_join,
+        );
+        // Emit draw commands for any Circle/Rect annotation nodes so they
+        // appear at the correct z-order (after mark batches).
+        self.emit(false, false, None);
+    }
+
+    /// Emit draw commands for any circles/rects added since the last snapshot.
+    fn emit(&mut self, additive: bool, is_mark: bool, plot_area: Option<[f32; 4]>) {
+        let new_c = self.circles.len();
+        if new_c > self.prev_c {
+            self.draw_commands.push(DrawCommand {
+                kind: DrawKind::Circle,
+                instance_start: self.prev_c as u32,
+                instance_count: (new_c - self.prev_c) as u32,
+                additive,
+                is_mark,
+                plot_area,
+            });
+        }
+        self.prev_c = new_c;
+
+        let new_r = self.rects.len();
+        if new_r > self.prev_r {
+            self.draw_commands.push(DrawCommand {
+                kind: DrawKind::Rect,
+                instance_start: self.prev_r as u32,
+                instance_count: (new_r - self.prev_r) as u32,
+                additive,
+                is_mark,
+                plot_area,
+            });
+        }
+        self.prev_r = new_r;
+    }
+
+    /// Snapshot the current circle and rect counts so a subsequent `emit` only
+    /// covers instances appended after this point. Used when instances are
+    /// pre-populated from a binary sidecar (packed batches) rather than from
+    /// `collect_nodes`.
+    pub fn snapshot(&mut self) {
+        self.prev_c = self.circles.len();
+        self.prev_r = self.rects.len();
+    }
 }
 
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
@@ -199,31 +386,52 @@ pub fn load_scene(scene: &SceneGraph) -> SceneData {
 }
 
 pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneData {
-    let mut circles = Vec::new();
-    let mut rects = Vec::new();
-    let mut mesh = VertexBuffers::new();
-    let mut images = Vec::new();
-    let mut texts = Vec::new();
+    let mut collector = SceneCollector::new();
     let mut batch_meta = HashMap::new();
-    let mut draw_commands: Vec<DrawCommand> = Vec::new();
 
     // Unpack binary instance data (passed as raw bytes, not base64).
     // Draw commands for packed batches are emitted in the scene-graph walk
     // below, where the MarkBatch.blend mode is available.
-    unpack_binary_instances(packed_data, &mut circles, &mut rects, &mut batch_meta);
+    unpack_binary_instances(packed_data, &mut collector.circles, &mut collector.rects, &mut batch_meta);
+    // Sync snapshot counters after pre-populating from packed data.
+    collector.snapshot();
 
     let background = scene.background.as_ref().map(|c| color_to_linear(c, 1.0));
 
-    // Snapshot counters: used to emit draw commands for each collect_nodes call.
-    let mut prev_c = circles.len();
-    let mut prev_r = rects.len();
-
-    collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+    // Title: non-mark → static mesh
+    collector.collect_static(&scene.title, None, None);
 
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
-        collect_nodes(&panel.grid, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        // Grid: non-mark → static mesh. Snap Line nodes to pixel centers to
+        // avoid sub-pixel aliasing in the GPU rasterizer (the SVG renderer
+        // handles this natively; WASM needs explicit snapping).
+        let snapped_grid: Vec<SceneNode> = panel.grid.iter().map(|node| {
+            if let SceneNode::Line { x1, y1, x2, y2, style } = node {
+                let (sx1, sy1, sx2, sy2) = if (x1 - x2).abs() < 0.5 {
+                    // Vertical line: snap x to pixel center (round + 0.5)
+                    let snapped_x = x1.round() + 0.5;
+                    (snapped_x, *y1, snapped_x, *y2)
+                } else if (y1 - y2).abs() < 0.5 {
+                    // Horizontal line: snap y to pixel center (round + 0.5)
+                    let snapped_y = y1.round() + 0.5;
+                    (*x1, snapped_y, *x2, snapped_y)
+                } else {
+                    // Diagonal line: pass through unchanged
+                    (*x1, *y1, *x2, *y2)
+                };
+                SceneNode::Line { x1: sx1, y1: sy1, x2: sx2, y2: sy2, style: style.clone() }
+            } else {
+                node.clone()
+            }
+        }).collect();
+        collector.collect_static(&snapped_grid, None, None);
+
+        let panel_plot_area = Some([
+            panel.plot_area.x as f32,
+            panel.plot_area.y as f32,
+            panel.plot_area.w as f32,
+            panel.plot_area.h as f32,
+        ]);
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
@@ -237,78 +445,52 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     0 => DrawKind::Circle,
                     _ => DrawKind::Rect,
                 };
-                draw_commands.push(DrawCommand {
+                collector.draw_commands.push(DrawCommand {
                     kind,
                     instance_start: meta.instance_start as u32,
                     instance_count: meta.instance_count as u32,
                     additive,
+                    is_mark: true,
+                    plot_area: panel_plot_area,
                 });
             } else {
-                collect_nodes(
+                // Mark batches → mark mesh (zoom transform)
+                collector.collect_mark(
                     &batch.nodes,
-                    &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
-                    batch.stroke_cap, batch.stroke_join,
+                    additive,
+                    panel_plot_area,
+                    batch.stroke_cap,
+                    batch.stroke_join,
                 );
-                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, &mut draw_commands);
             }
         }
 
-        collect_nodes(&panel.axes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
-        collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
-        collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        // Axes, strip titles: non-mark → static mesh
+        collector.collect_static(&panel.axes, None, None);
+        collector.collect_static(&panel.strip_title, None, None);
+        // Annotations: route to annotation_mesh so they appear above data
+        // marks in WASM (matching SVG painter order).
+        collector.collect_annotation(&panel.annotations, None, None);
     }
 
-    collect_nodes(&scene.legend, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
-    collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+    // Legend, decorations: non-mark → static mesh
+    collector.collect_static(&scene.legend, None, None);
+    collector.collect_static(&scene.decorations, None, None);
 
     SceneData {
-        circle_instances: circles,
-        rect_instances: rects,
-        mesh_buffers: mesh,
-        text_elements: texts,
-        image_quads: images,
+        circle_instances: collector.circles,
+        rect_instances: collector.rects,
+        mesh_buffers: collector.mesh,
+        static_mesh_buffers: collector.static_mesh,
+        annotation_mesh_buffers: collector.annotation_mesh,
+        text_elements: collector.texts,
+        image_quads: collector.images,
         background,
         width: scene.width as f32,
         height: scene.height as f32,
         packed_batch_meta: batch_meta,
-        draw_commands,
+        draw_commands: collector.draw_commands,
     }
-}
-
-/// Emit draw commands for any circles/rects added since the previous snapshot.
-fn emit_draw_commands(
-    circles: &[CircleInstance],
-    rects: &[RectInstance],
-    prev_c: &mut usize,
-    prev_r: &mut usize,
-    additive: bool,
-    commands: &mut Vec<DrawCommand>,
-) {
-    let new_c = circles.len();
-    if new_c > *prev_c {
-        commands.push(DrawCommand {
-            kind: DrawKind::Circle,
-            instance_start: *prev_c as u32,
-            instance_count: (new_c - *prev_c) as u32,
-            additive,
-        });
-    }
-    *prev_c = new_c;
-    let new_r = rects.len();
-    if new_r > *prev_r {
-        commands.push(DrawCommand {
-            kind: DrawKind::Rect,
-            instance_start: *prev_r as u32,
-            instance_count: (new_r - *prev_r) as u32,
-            additive,
-        });
-    }
-    *prev_r = new_r;
 }
 
 /// Flag: tooltips string table follows instance data (+ optional data_indices).
@@ -456,7 +638,7 @@ fn collect_nodes(
                     center: [*cx as f32, *cy as f32],
                     radius: *r as f32,
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
-                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
+                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
@@ -470,7 +652,7 @@ fn collect_nodes(
                     size: [*w as f32, *h as f32],
                     corner_radius: *corner_radius as f32,
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
-                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
+                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
@@ -2461,25 +2643,21 @@ mod tests {
             style,
         }];
 
-        let mut circles = Vec::new();
-        let mut rects = Vec::new();
-        let mut mesh = lyon::tessellation::VertexBuffers::new();
-        let mut texts = Vec::new();
-        let mut images = Vec::new();
-        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        let mut collector = SceneCollector::new();
+        collector.collect_mark(&nodes, false, None, None, None);
 
-        assert_eq!(circles.len(), 1);
+        assert_eq!(collector.circles.len(), 1);
         // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
         assert!(
-            (circles[0].fill_color[3] - 0.5).abs() < 0.02,
+            (collector.circles[0].fill_color[3] - 0.5).abs() < 0.02,
             "fill_color alpha must use fill_opacity (0.5), got {}",
-            circles[0].fill_color[3]
+            collector.circles[0].fill_color[3]
         );
         // overall opacity field must reflect the opacity field (1.0).
         assert!(
-            (circles[0].opacity - 1.0).abs() < 0.01,
+            (collector.circles[0].opacity - 1.0).abs() < 0.01,
             "instance opacity must reflect style.opacity (1.0), got {}",
-            circles[0].opacity
+            collector.circles[0].opacity
         );
     }
 
@@ -2508,23 +2686,19 @@ mod tests {
             style,
         }];
 
-        let mut circles = Vec::new();
-        let mut rects = Vec::new();
-        let mut mesh = lyon::tessellation::VertexBuffers::new();
-        let mut texts = Vec::new();
-        let mut images = Vec::new();
-        collect_nodes(&nodes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        let mut collector = SceneCollector::new();
+        collector.collect_mark(&nodes, false, None, None, None);
 
-        assert_eq!(rects.len(), 1);
+        assert_eq!(collector.rects.len(), 1);
         assert!(
-            (rects[0].fill_color[3] - 0.25).abs() < 0.02,
+            (collector.rects[0].fill_color[3] - 0.25).abs() < 0.02,
             "rect fill_color alpha must use fill_opacity (0.25), got {}",
-            rects[0].fill_color[3]
+            collector.rects[0].fill_color[3]
         );
         assert!(
-            (rects[0].opacity - 1.0).abs() < 0.01,
+            (collector.rects[0].opacity - 1.0).abs() < 0.01,
             "rect instance opacity must reflect style.opacity (1.0), got {}",
-            rects[0].opacity
+            collector.rects[0].opacity
         );
     }
 
@@ -2775,5 +2949,318 @@ mod tests {
         assert_eq!(rect_cmds.len(), 1);
         assert!(rect_cmds[0].additive, "rect batch should be additive");
         assert_eq!(rect_cmds[0].instance_count, 1);
+    }
+
+    // ── B3: stroke color uses raw alpha, no opacity baked ─────────────
+
+    #[test]
+    fn circle_stroke_color_uses_raw_alpha_not_opacity() {
+        // opacity=0.5, stroke_opacity=0.8
+        // Stroke color alpha must be raw (color.a/255 * 1.0), NOT baked with opacity.
+        // The shader applies stroke_opacity and opacity independently.
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 2.0,
+            opacity: 0.5,
+            stroke_opacity: 0.8,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let node = SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style };
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![node]);
+        let data = load_scene(&scene);
+        let ci = &data.circle_instances[0];
+        // stroke_color.a should be linearized raw alpha ≈ color_to_linear(black, 1.0)[3] = 1.0
+        // NOT color_to_linear(black, 0.5)[3] = 0.5 (the old buggy behavior)
+        assert!(
+            (ci.stroke_color[3] - 1.0).abs() < 1e-5,
+            "circle stroke alpha must be raw (1.0), not opacity-baked; got {}",
+            ci.stroke_color[3]
+        );
+    }
+
+    #[test]
+    fn rect_stroke_color_uses_raw_alpha_not_opacity() {
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 128, b: 255, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 200 }),
+            stroke_width: 1.0,
+            opacity: 0.5,
+            stroke_opacity: 0.8,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let node = SceneNode::Rect {
+            x: 10.0, y: 20.0, w: 40.0, h: 30.0, style, corner_radius: 0.0,
+        };
+        let scene = make_scene_with_nodes(MarkBatchKind::Bar, vec![node]);
+        let data = load_scene(&scene);
+        let ri = &data.rect_instances[0];
+        // stroke_color.a = (200/255)*1.0 (raw), linearized alpha is unchanged
+        let expected_raw = 200.0_f32 / 255.0;
+        assert!(
+            (ri.stroke_color[3] - expected_raw).abs() < 1e-5,
+            "rect stroke alpha must be raw ({expected_raw}), not opacity-baked; got {}",
+            ri.stroke_color[3]
+        );
+    }
+
+    // ── M3: SceneCollector produces the same output as load_scene ────────
+
+    /// Verify that SceneCollector via collect_mark produces the same instance
+    /// counts and per-field values as the full load_scene path for a mixed-mark
+    /// scene (circles + rects + mesh nodes + text).
+    #[test]
+    fn test_scene_collector_produces_same_output() {
+        use ferrum_scene::{PathCmd, TextStyle, FontWeight, TextAnchor, TextBaseline};
+
+        // Build a scene with one circle batch (Normal), one rect batch (Additive),
+        // and one path batch (Normal), plus a title text node.
+        let circle_style = FillStroke {
+            fill: Some(Color { r: 200, g: 100, b: 50, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 1.5,
+            opacity: 0.9,
+            stroke_opacity: 0.7,
+            fill_opacity: 0.8,
+            stroke_dash: Some(vec![6.0, 3.0]),
+            angle: 15.0,
+        };
+        let rect_style = FillStroke {
+            fill: Some(Color { r: 50, g: 150, b: 200, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let circle_node = SceneNode::Circle { cx: 80.0, cy: 80.0, r: 12.0, style: circle_style };
+        let rect_node = SceneNode::Rect {
+            x: 50.0, y: 50.0, w: 80.0, h: 40.0,
+            style: rect_style, corner_radius: 3.0,
+        };
+        let path_node = SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 10.0, y: 200.0 },
+                PathCmd::LineTo { x: 100.0, y: 100.0 },
+                PathCmd::LineTo { x: 200.0, y: 200.0 },
+                PathCmd::Close,
+            ],
+            style: default_fill_stroke(),
+            closed: true,
+        };
+        let text_style = TextStyle {
+            font_size: 14.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let title_node = SceneNode::Text { x: 150.0, y: 20.0, content: "Title".to_string(), style: text_style };
+
+        // Build the scene graph.
+        use ferrum_scene::{BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect};
+        let scene = SceneGraph {
+            width: 300.0,
+            height: 250.0,
+            background: None,
+            title: vec![title_node],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 30.0, y: 20.0, w: 240.0, h: 200.0 },
+                clip: Rect { x: 30.0, y: 20.0, w: 240.0, h: 200.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![
+                    MarkBatch {
+                        kind: MarkBatchKind::Point,
+                        nodes: vec![circle_node],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Bar,
+                        nodes: vec![rect_node],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Additive,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                    },
+                    MarkBatch {
+                        kind: MarkBatchKind::Area,
+                        nodes: vec![path_node],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                    },
+                ],
+                axes: vec![], annotations: vec![], strip_title: vec![],
+            }],
+            legend: vec![], decorations: vec![], selections: vec![],
+            interaction: InteractionConfig::default(), chart_description: None,
+        };
+
+        // Load via the full load_scene path (which now uses SceneCollector internally).
+        let data = load_scene(&scene);
+
+        // Verify instance counts.
+        assert_eq!(data.circle_instances.len(), 1, "exactly 1 circle");
+        assert_eq!(data.rect_instances.len(), 1, "exactly 1 rect");
+        assert_eq!(data.text_elements.len(), 1, "exactly 1 text (title)");
+        assert!(!data.mesh_buffers.vertices.is_empty(), "path batch produces mesh vertices");
+        assert!(!data.mesh_buffers.indices.is_empty(), "path batch produces mesh indices");
+
+        // Circle instance fields are correctly transferred.
+        let ci = &data.circle_instances[0];
+        assert!((ci.center[0] - 80.0).abs() < 1e-3, "circle cx");
+        assert!((ci.center[1] - 80.0).abs() < 1e-3, "circle cy");
+        assert!((ci.radius - 12.0).abs() < 1e-3, "circle radius");
+        assert!((ci.opacity - 0.9).abs() < 1e-3, "circle opacity");
+        assert!((ci.stroke_opacity - 0.7).abs() < 1e-3, "circle stroke_opacity");
+        assert!((ci.stroke_dash - 1.0).abs() < 1e-3, "circle stroke_dash index 1 (dashed)");
+        assert!((ci.angle - 15.0).abs() < 1e-3, "circle angle");
+
+        // Rect instance fields are correctly transferred.
+        let ri = &data.rect_instances[0];
+        assert!((ri.position[0] - 50.0).abs() < 1e-3, "rect x");
+        assert!((ri.corner_radius - 3.0).abs() < 1e-3, "rect corner_radius");
+
+        // Draw commands: Normal circle (is_mark, not additive), Additive rect (is_mark, additive).
+        let circle_cmds: Vec<_> = data.draw_commands.iter()
+            .filter(|c| c.kind == DrawKind::Circle && c.is_mark).collect();
+        let rect_cmds: Vec<_> = data.draw_commands.iter()
+            .filter(|c| c.kind == DrawKind::Rect && c.is_mark).collect();
+        assert_eq!(circle_cmds.len(), 1, "one circle draw command");
+        assert!(!circle_cmds[0].additive, "circle batch is Normal blend");
+        assert_eq!(rect_cmds.len(), 1, "one rect draw command");
+        assert!(rect_cmds[0].additive, "rect batch is Additive blend");
+
+        // Text element content is preserved.
+        assert_eq!(data.text_elements[0].content, "Title");
+        assert!((data.text_elements[0].x - 150.0).abs() < 1e-3);
+    }
+
+    // ── M9: annotation mesh is separate from static mesh ─────────────
+
+    /// Annotation Line nodes must land in `annotation_mesh_buffers`, not
+    /// `static_mesh_buffers`.  Grid Line nodes (non-annotation) must land in
+    /// `static_mesh_buffers`, not `annotation_mesh_buffers`.
+    ///
+    /// This regression test guards the z-order fix: annotation lines from
+    /// `annotate_hline`/`annotate_vline` should appear above data marks in
+    /// WASM, matching SVG painter order.  The separation into a distinct mesh
+    /// buffer is the mechanism that enables `render_frame` to draw annotation
+    /// lines after mark batches.
+    #[test]
+    fn test_annotation_mesh_separate_from_static_mesh() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind,
+            Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+        };
+
+        let stroke = StrokeStyle {
+            color: Color { r: 255, g: 0, b: 0, a: 255 },
+            width: 2.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+
+        // A grid line (non-annotation) and an annotation line.
+        let grid_line = SceneNode::Line {
+            x1: 50.0, y1: 0.0, x2: 50.0, y2: 400.0,
+            style: stroke.clone(),
+        };
+        let annotation_line = SceneNode::Line {
+            x1: 0.0, y1: 200.0, x2: 500.0, y2: 200.0,
+            style: stroke.clone(),
+        };
+
+        let scene = SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![grid_line],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Rule,
+                    nodes: vec![],
+                    data_indices: None, tooltips: None, hrefs: None,
+                    descriptions: None, keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![annotation_line],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+
+        // Grid line → static_mesh (not annotation_mesh).
+        assert!(
+            !data.static_mesh_buffers.vertices.is_empty(),
+            "grid Line must produce static_mesh vertices"
+        );
+
+        // Annotation line → annotation_mesh (not static_mesh).
+        assert!(
+            !data.annotation_mesh_buffers.vertices.is_empty(),
+            "annotation Line must produce annotation_mesh vertices"
+        );
+        assert!(
+            !data.annotation_mesh_buffers.indices.is_empty(),
+            "annotation Line must produce annotation_mesh indices"
+        );
+
+        // Verify that the static_mesh and annotation_mesh have different vertex
+        // counts (both contribute but are in different buffers).  A grid
+        // vertical line and an annotation horizontal line tessellate to the
+        // same number of vertices, so we verify both buffers are non-empty and
+        // that each contains exactly the geometry for one line.
+        assert!(
+            data.static_mesh_buffers.indices.len() >= 6,
+            "grid line must tessellate to ≥6 indices in static_mesh; got {}",
+            data.static_mesh_buffers.indices.len()
+        );
+        assert!(
+            data.annotation_mesh_buffers.indices.len() >= 6,
+            "annotation line must tessellate to ≥6 indices in annotation_mesh; got {}",
+            data.annotation_mesh_buffers.indices.len()
+        );
+
+        // Mark mesh must be empty (no mark nodes were added).
+        assert!(
+            data.mesh_buffers.vertices.is_empty(),
+            "mark mesh must be empty when no mark nodes are present"
+        );
     }
 }

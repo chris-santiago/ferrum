@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json as _json
 import re
 from pathlib import Path
@@ -183,6 +184,7 @@ def assemble_html(
     title: str = "Ferrum chart",
     embed_wasm: bool = True,
     csp_nonce: str | None = None,
+    toolbar: bool = True,
 ) -> str:
     """Build a self-contained HTML string that renders a chart via WASM.
 
@@ -204,6 +206,9 @@ def assemble_html(
         Optional Content-Security-Policy nonce.  When provided, both the
         ``<style>`` and ``<script type="module">`` tags receive a
         ``nonce="..."`` attribute so they pass strict CSP headers.
+    toolbar : bool, default True
+        Whether to show the interactive toolbar.  Overrides the ``toolbar``
+        field in the scene's interaction config.
     """
     js_glue = _read_wasm_artifact("ferrum_wasm.js").decode("utf-8")
     css = (_WASM_DIR / "ferrum-interactive.css").read_text()
@@ -250,7 +255,10 @@ def assemble_html(
         scene_dict = {}
 
     # Interaction config for the standalone adapter.
-    interaction_config = _interaction_config_from_dict(scene_dict)
+    # Override toolbar with the caller-supplied flag (Python API controls it).
+    _raw_cfg = _json.loads(_interaction_config_from_dict(scene_dict))
+    _raw_cfg["toolbar"] = toolbar
+    interaction_config = _json.dumps(_raw_cfg)
     # Escape for embedding in a JS single-quoted string.
     interaction_config_escaped = interaction_config.replace("\\", "\\\\").replace("'", "\\'")
 
@@ -265,7 +273,7 @@ def assemble_html(
         "<html>\n"
         "<head>\n"
         '<meta charset="utf-8">\n'
-        f"<title>{title}</title>\n"
+        f"<title>{html.escape(title)}</title>\n"
         f"<style{nonce_attr}>{css}</style>\n"
         "</head>\n"
         f'<body style="background:{bg_css};margin:0;display:flex;'

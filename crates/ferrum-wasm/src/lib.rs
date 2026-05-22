@@ -6,7 +6,9 @@ pub mod error;
 pub mod hit_test;
 pub mod scene_load;
 pub mod selection_state;
+pub mod spatial_index;
 pub mod tessellate;
+pub mod text_json;
 pub mod transition;
 pub mod zoom_pan;
 
@@ -24,8 +26,6 @@ use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 #[cfg(target_arch = "wasm32")]
-use crate::conditional::resolve_conditionals;
-#[cfg(target_arch = "wasm32")]
 use crate::error::WasmRenderError;
 #[cfg(target_arch = "wasm32")]
 use crate::gpu::GpuContext;
@@ -37,6 +37,8 @@ use crate::render::{GpuBuffers, Uniforms};
 use crate::scene_load::SceneData;
 #[cfg(target_arch = "wasm32")]
 use crate::selection_state::InteractionState;
+#[cfg(target_arch = "wasm32")]
+use crate::spatial_index::SpatialIndex;
 #[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 #[cfg(target_arch = "wasm32")]
@@ -53,6 +55,7 @@ pub struct WasmRenderer {
     interaction_state: InteractionState,
     zoom: ZoomPanState,
     interaction: ferrum_scene::InteractionConfig,
+    spatial_index: Option<SpatialIndex>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -86,6 +89,7 @@ impl WasmRenderer {
             interaction_state: InteractionState::new(&[]),
             zoom: ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default()),
             interaction: ferrum_scene::InteractionConfig::default(),
+            spatial_index: None,
         })
     }
 
@@ -95,7 +99,7 @@ impl WasmRenderer {
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
 
         let data = scene_load::load_scene_with_packed(&scene, packed_data);
-        let text_json = build_text_json(&data);
+        let text_json = text_json::build_text_json(&data);
         let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &data);
         let clear_color = data.background;
 
@@ -103,6 +107,9 @@ impl WasmRenderer {
         self.interaction_state = InteractionState::new(&self.selections);
         self.interaction = scene.interaction.clone();
         self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
+        // Build spatial index over all panels for O(log n) hit-testing.
+        // Pass scene data so packed instances (>= 1000 marks) are also indexed.
+        self.spatial_index = Some(SpatialIndex::build_with_packed(&scene.panels, Some(&data)));
         self.loaded = Some(LoadedScene { data, buffers, scene });
 
         if let Some(ref loaded) = self.loaded {
@@ -180,6 +187,8 @@ impl WasmRenderer {
                 circle_instances: lerped_circles,
                 rect_instances: lerped_rects,
                 mesh_buffers: tr.new_data.mesh_buffers.clone(),
+                static_mesh_buffers: tr.new_data.static_mesh_buffers.clone(),
+                annotation_mesh_buffers: tr.new_data.annotation_mesh_buffers.clone(),
                 text_elements: tr.new_data.text_elements.clone(),
                 image_quads: tr.new_data.image_quads.clone(),
                 background: tr.new_data.background,
@@ -215,13 +224,15 @@ impl WasmRenderer {
         };
 
         // Update selection state via Rust hit-test (authoritative — operates on actual scene data).
-        self.interaction_state.handle_click(
+        // Pass spatial index for O(log n) circle/rect hit-testing.
+        self.interaction_state.handle_click_with_index(
             &loaded.scene.panels,
             &self.selections,
             x as f64,
             y as f64,
             &self.zoom,
             shift_held,
+            self.spatial_index.as_ref(),
         );
 
         self.apply_conditionals_and_render()
@@ -274,7 +285,7 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
         if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
-            return Ok(build_text_json_from(&loaded.data.text_elements));
+            return Ok(text_json::build_text_json_from(&loaded.data.text_elements));
         }
         let scale_mode = match coord {
             Some(ferrum_scene::CoordKind::Fixed { .. }) => ScaleMode::Uniform,
@@ -292,7 +303,7 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
         if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
-            return Ok(build_text_json_from(&loaded.data.text_elements));
+            return Ok(text_json::build_text_json_from(&loaded.data.text_elements));
         }
         self.zoom.on_pan(panel_id as usize, dx as f64, dy as f64);
         self.upload_transform_and_render(panel_id as usize)
@@ -309,7 +320,7 @@ impl WasmRenderer {
         loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
         render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
             .map_err(JsValue::from)?;
-        Ok(build_text_json(&loaded.data))
+        Ok(text_json::build_text_json(&loaded.data))
     }
 
     /// Set an absolute zoom+pan transform from D3-zoom.
@@ -336,6 +347,11 @@ impl WasmRenderer {
         let _ = self.render_frame_js();
     }
 
+    #[wasm_bindgen(js_name = "maxTextureSize")]
+    pub fn max_texture_size(&self) -> u32 {
+        self.gpu.device.limits().max_texture_dimension_2d
+    }
+
     /// Return tooltip JSON for a specific mark instance.
     ///
     /// `panel_id` and `batch_idx` identify the packed batch; `node_idx` is
@@ -344,54 +360,20 @@ impl WasmRenderer {
     pub fn hit_test_at(&self, x: f32, y: f32) -> String {
         let Some(loaded) = &self.loaded else { return "{}".to_string(); };
 
-        // Try scene-node hit-test first (non-packed batches).
-        if let Some(hr) = hit_test::hit_test_nearest(
+        // Spatial-index + scene-graph hit-test (covers both packed and
+        // non-packed batches via the R-tree built in load_scene).
+        if let Some(hr) = hit_test::hit_test_nearest_with_index(
             &loaded.scene.panels, x as f64, y as f64, &self.zoom,
+            self.spatial_index.as_ref(),
         ) {
-            return format!(
-                "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
-                hr.panel_id, hr.batch_idx, hr.node_idx
-            );
+            return serde_json::json!({
+                "panel": hr.panel_id,
+                "batch": hr.batch_idx,
+                "idx": hr.node_idx,
+            }).to_string();
         }
 
-        // Fallback: search packed circle instances directly.
-        let px = x as f64;
-        let py = y as f64;
-        let mut best: Option<(f64, u32, u32, usize)> = None; // (dist, panel, batch, idx)
-        for (&(panel_id, batch_idx), meta) in &loaded.data.packed_batch_meta {
-            if meta.kind != 0 { continue; } // only circles for now
-            // B1 fix: convert canvas-space (px, py) to scene-space before comparing
-            // against mark positions. The scene-node path (above) uses
-            // hit_test::hit_test_nearest which applies self.zoom internally, but
-            // this packed-circle fallback operates on raw instance data in
-            // scene-space coordinates. Without the inverse transform, zoomed/panned
-            // charts would miss hits because canvas pixels no longer align with
-            // scene-space mark positions.
-            let (sx, sy) = self.zoom.transforms
-                .get(panel_id as usize)
-                .map(|t| t.inverse_apply(px, py))
-                .unwrap_or((px, py));
-            for i in 0..meta.instance_count {
-                let ci = &loaded.data.circle_instances[meta.instance_start + i];
-                let dx = sx - ci.center[0] as f64;
-                let dy = sy - ci.center[1] as f64;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let r = ci.radius as f64;
-                if dist <= r * 3.0 { // generous hit radius for dense scatter
-                    if best.as_ref().is_none_or(|(d, _, _, _)| dist < *d) {
-                        best = Some((dist, panel_id, batch_idx, i));
-                    }
-                }
-            }
-        }
-
-        match best {
-            Some((_, panel_id, batch_idx, idx)) => format!(
-                "{{\"panel\":{},\"batch\":{},\"idx\":{}}}",
-                panel_id, batch_idx, idx
-            ),
-            None => "{}".to_string(),
-        }
+        "{}".to_string()
     }
 
     /// `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
@@ -401,14 +383,107 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else {
             return "{}".to_string();
         };
+
+        // Try packed batch tooltip bytes first (binary sidecar for >= 1000 marks).
         let key = (panel_id, batch_idx);
-        let Some(meta) = loaded.data.packed_batch_meta.get(&key) else {
-            return "{}".to_string();
+        if let Some(meta) = loaded.data.packed_batch_meta.get(&key) {
+            if let Some(ref tooltip_bytes) = meta.tooltip_bytes {
+                return scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize);
+            }
+        }
+
+        // Fall back to scene-graph tooltips (non-packed batches with < 1000 marks).
+        if let Some(tooltip) = loaded.scene.panels
+            .get(panel_id as usize)
+            .and_then(|p| p.marks.get(batch_idx as usize))
+            .and_then(|b| b.tooltips.as_ref())
+            .and_then(|tips| tips.get(node_idx as usize))
+        {
+            return text_json::format_tooltip_content(tooltip);
+        }
+
+        "{}".to_string()
+    }
+
+    /// Return the href string for a specific mark node, or an empty string if
+    /// none is present.
+    ///
+    /// `panel_id`, `batch_idx`, and `node_idx` correspond to the triple returned
+    /// by `hitTestAt`.  The href is sourced from `batch.hrefs[node_idx]` in the
+    /// scene graph.
+    #[wasm_bindgen(js_name = "getHref")]
+    pub fn get_href(&self, panel_id: u32, batch_idx: u32, node_idx: u32) -> String {
+        let Some(loaded) = &self.loaded else {
+            return String::new();
         };
-        let Some(ref tooltip_bytes) = meta.tooltip_bytes else {
-            return "{}".to_string();
-        };
-        scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize)
+        loaded
+            .scene
+            .panels
+            .get(panel_id as usize)
+            .and_then(|p| p.marks.get(batch_idx as usize))
+            .and_then(|b| b.hrefs.as_ref())
+            .and_then(|hrefs| hrefs.get(node_idx as usize))
+            .and_then(|opt| opt.as_deref())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Select all indexed marks (circles and rects) within the given scene-space
+    /// rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
+    ///
+    /// Updates the first `Interval` selection spec found in `self.selections`,
+    /// then applies conditional encodings and re-renders.  Returns the new
+    /// selection state JSON.
+    ///
+    /// If no spatial index has been built yet (scene not loaded), returns `"{}"`.
+    #[wasm_bindgen(js_name = "selectInRect")]
+    pub fn select_in_rect(
+        &mut self,
+        _panel_id: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> Result<String, JsValue> {
+        if self.loaded.is_none() {
+            return Ok("{}".to_string());
+        }
+
+        // Normalise the selection rectangle to (lo, hi) on each axis.
+        let lo_x = (x0 as f64).min(x1 as f64);
+        let hi_x = (x0 as f64).max(x1 as f64);
+        let lo_y = (y0 as f64).min(y1 as f64);
+        let hi_y = (y0 as f64).max(y1 as f64);
+
+        // Update the interval selection state with the bounding rectangle.
+        // The Interval selection uses spatial containment (contains_point) during
+        // conditional encoding resolution — it does not need explicit data indices.
+        // The R-tree query above determines *which* marks are inside the box;
+        // the conditional layer uses contains_point against mark positions at
+        // render time, so storing x_range/y_range is sufficient.
+        for spec in &self.selections {
+            if let ferrum_scene::SelectionSpec::Interval { name, .. } = spec {
+                let name = name.clone();
+                self.interaction_state.selections.insert(
+                    name,
+                    crate::selection_state::SelectionState::Interval {
+                        x_range: Some((lo_x, hi_x)),
+                        y_range: Some((lo_y, hi_y)),
+                    },
+                );
+                break;
+            }
+        }
+
+        self.apply_conditionals_and_render()
+    }
+
+    #[wasm_bindgen(js_name = "clearSelections")]
+    pub fn clear_selections(&mut self) -> Result<String, JsValue> {
+        for state in self.interaction_state.selections.values_mut() {
+            *state = selection_state::SelectionState::Empty;
+        }
+        self.apply_conditionals_and_render()
     }
 }
 
@@ -420,270 +495,40 @@ impl WasmRenderer {
     /// return the serialized selection state JSON.
     ///
     /// Called by both `handle_click` and `handle_drag` after they update the
-    /// selection state. Centralising this ensures that if `SceneData` gains a
-    /// field, only one site needs updating.
+    /// selection state. Delegates to `conditional::apply_conditionals_and_render`.
     fn apply_conditionals_and_render(&mut self) -> Result<String, JsValue> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok("{}".to_string());
         };
-
-        // Apply conditional encodings to produce dimmed/highlighted instance colors.
-        let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals(
-            &loaded.scene.panels,
-            conditionals,
-            &self.interaction_state.selections,
-            &loaded.data.circle_instances,
-            &loaded.data.rect_instances,
-        );
-
-        // Rebuild GPU buffers with updated colors and re-render.
-        let updated_data = SceneData {
-            circle_instances: updates.circle_instances,
-            rect_instances: updates.rect_instances,
-            mesh_buffers: loaded.data.mesh_buffers.clone(),
-            text_elements: loaded.data.text_elements.clone(),
-            image_quads: loaded.data.image_quads.clone(),
-            background: loaded.data.background,
-            width: loaded.data.width,
-            height: loaded.data.height,
-            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
-            draw_commands: loaded.data.draw_commands.clone(),
-        };
-        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
-        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
-            .map_err(JsValue::from)?;
-        loaded.buffers = new_buffers;
-
-        // Serialize current selection state for Python sync.
-        let state_json = self.interaction_state.to_json();
-        Ok(state_json)
+        conditional::apply_conditionals_and_render(
+            &loaded.scene,
+            &loaded.data,
+            &mut loaded.buffers,
+            &self.interaction_state,
+            &self.gpu,
+            &self.pipelines,
+        )
     }
 
     /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
+    /// Delegates to `render::upload_transform_and_render`.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        let transform = self.zoom.transforms.get(panel_id)
-            .copied()
-            .unwrap_or_else(crate::zoom_pan::Affine2::identity);
-        let uniforms = Uniforms {
-            canvas_w: loaded.data.width,
-            canvas_h: loaded.data.height,
-            _canvas_pad: [0.0; 2],
-            sx: transform.sx as f32,
-            sy: transform.sy as f32,
-            tx: transform.tx as f32,
-            ty: transform.ty as f32,
-            clip_x: 0.0,
-            clip_y: 0.0,
-            clip_w: loaded.data.width,
-            clip_h: loaded.data.height,
-        };
-        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
-        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
-            .map_err(JsValue::from)?;
-        let text_json = build_zoomed_text_json(&loaded.data.text_elements, &self.interaction, panel_id, &transform);
-        Ok(text_json)
+        render::upload_transform_and_render(
+            &self.gpu,
+            &self.pipelines,
+            &loaded.buffers,
+            &loaded.data,
+            &loaded.scene.panels,
+            &self.interaction,
+            &self.zoom.transforms,
+            panel_id,
+        )
+        .map_err(JsValue::from)
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn build_text_json(data: &SceneData) -> String {
-    let elements: Vec<serde_json::Value> = data
-        .text_elements
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "x": t.x,
-                "y": t.y,
-                "content": t.content,
-                "fontSize": t.style.font_size,
-                "fontWeight": match &t.style.font_weight {
-                    ferrum_scene::FontWeight::Normal => "normal".to_string(),
-                    ferrum_scene::FontWeight::Bold => "bold".to_string(),
-                    ferrum_scene::FontWeight::Custom(s) => s.clone(),
-                },
-                "fontFamily": t.style.font_family,
-                "anchor": match t.style.anchor {
-                    ferrum_scene::TextAnchor::Start => "start",
-                    ferrum_scene::TextAnchor::Middle => "center",
-                    ferrum_scene::TextAnchor::End => "end",
-                },
-                "baseline": match &t.style.baseline {
-                    ferrum_scene::TextBaseline::Top => "top".to_string(),
-                    ferrum_scene::TextBaseline::Middle => "middle".to_string(),
-                    ferrum_scene::TextBaseline::Bottom => "bottom".to_string(),
-                    ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
-                    ferrum_scene::TextBaseline::Custom(s) => s.clone(),
-                },
-                "angle": t.style.angle,
-                "color": format!("rgba({},{},{},{})",
-                    t.style.color.r, t.style.color.g, t.style.color.b,
-                    t.style.opacity),
-            })
-        })
-        .collect();
-    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
-}
 
-/// Build text-element JSON for a zoomed panel.
-///
-/// Axis tick labels are identified by clustering text elements that share the
-/// same y coordinate (x-axis row) or same x coordinate (y-axis column) and
-/// whose content appears in the known tick-label set.  Each identified tick
-/// label is repositioned by applying the affine zoom transform to its varying
-/// coordinate (x for x-axis ticks, y for y-axis ticks).  All other text
-/// (chart title, axis title, legend) is emitted at its original position.
-///
-/// This replaces the old pixel-match approach, which compared `tick_data`
-/// scale-function outputs against axis text positions.  Those values differ
-/// because the axis layout uses uniform band centering (`plot_area.x +
-/// (i+0.5)*slot_w`) while `tick_data` uses the actual scale function — a
-/// systematically different mapping that never matches.
-#[cfg(target_arch = "wasm32")]
-fn build_zoomed_text_json(
-    all_text: &[crate::scene_load::TextElementData],
-    interaction: &ferrum_scene::InteractionConfig,
-    panel_id: usize,
-    transform: &crate::zoom_pan::Affine2,
-) -> String {
-    use std::collections::{HashMap, HashSet};
-
-    let Some(ptl) = interaction.tick_levels.iter().find(|p| p.panel_id == panel_id) else {
-        return build_text_json_from(all_text);
-    };
-
-    // Union of tick label strings across all zoom levels.
-    let x_tick_labels: HashSet<&str> = ptl.x_levels.iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
-        .collect();
-    let y_tick_labels: HashSet<&str> = ptl.y_levels.iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
-        .collect();
-
-    // --- Identify x-axis tick row ------------------------------------------
-    // All x-axis tick labels share the same y coordinate.  Find the most
-    // common rounded-y among elements whose content is a known x-tick label.
-    let mut x_y_freq: HashMap<i64, usize> = HashMap::new();
-    for te in all_text.iter().filter(|te| x_tick_labels.contains(te.content.as_str())) {
-        *x_y_freq.entry((te.y * 10.0) as i64).or_insert(0) += 1;
-    }
-    let x_axis_y: Option<f64> = x_y_freq.into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k as f64 / 10.0);
-
-    // --- Identify y-axis tick column ----------------------------------------
-    // All y-axis tick labels share the same x coordinate.
-    let mut y_x_freq: HashMap<i64, usize> = HashMap::new();
-    for te in all_text.iter().filter(|te| y_tick_labels.contains(te.content.as_str())) {
-        *y_x_freq.entry((te.x * 10.0) as i64).or_insert(0) += 1;
-    }
-    let y_axis_x: Option<f64> = y_x_freq.into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k as f64 / 10.0);
-
-    // 1 px tolerance covers label_font_size / 3.0 baseline offset and rounding.
-    const COORD_TOL: f64 = 1.5;
-
-    let is_x_tick = |te: &crate::scene_load::TextElementData| {
-        x_tick_labels.contains(te.content.as_str())
-            && x_axis_y.map(|ay| (te.y - ay).abs() < COORD_TOL).unwrap_or(false)
-    };
-    let is_y_tick = |te: &crate::scene_load::TextElementData| {
-        y_tick_labels.contains(te.content.as_str())
-            && y_axis_x.map(|ax| (te.x - ax).abs() < COORD_TOL).unwrap_or(false)
-    };
-
-    let mut elements: Vec<serde_json::Value> = Vec::new();
-    for te in all_text {
-        if is_x_tick(te) {
-            // Apply sx + tx to the x coordinate; y stays at the axis level.
-            let new_x = te.x * transform.sx + transform.tx;
-            elements.push(tick_label_json(new_x, te.y, &te.content, "center", Some(&te.style)));
-        } else if is_y_tick(te) {
-            // Apply sy + ty to the y coordinate; x stays at the axis level.
-            let new_y = te.y * transform.sy + transform.ty;
-            elements.push(tick_label_json(te.x, new_y, &te.content, "end", Some(&te.style)));
-        } else {
-            elements.push(text_element_to_json(te));
-        }
-    }
-
-    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn build_text_json_from(all_text: &[crate::scene_load::TextElementData]) -> String {
-    let elements: Vec<serde_json::Value> = all_text.iter().map(text_element_to_json).collect();
-    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn text_element_to_json(t: &crate::scene_load::TextElementData) -> serde_json::Value {
-    serde_json::json!({
-        "x": t.x,
-        "y": t.y,
-        "content": t.content,
-        "fontSize": t.style.font_size,
-        "fontWeight": match &t.style.font_weight {
-            ferrum_scene::FontWeight::Normal => "normal".to_string(),
-            ferrum_scene::FontWeight::Bold => "bold".to_string(),
-            ferrum_scene::FontWeight::Custom(s) => s.clone(),
-        },
-        "fontFamily": t.style.font_family,
-        "anchor": match t.style.anchor {
-            ferrum_scene::TextAnchor::Start => "start",
-            ferrum_scene::TextAnchor::Middle => "center",
-            ferrum_scene::TextAnchor::End => "end",
-        },
-        "baseline": match &t.style.baseline {
-            ferrum_scene::TextBaseline::Top => "top".to_string(),
-            ferrum_scene::TextBaseline::Middle => "middle".to_string(),
-            ferrum_scene::TextBaseline::Bottom => "bottom".to_string(),
-            ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
-            ferrum_scene::TextBaseline::Custom(s) => s.clone(),
-        },
-        "angle": t.style.angle,
-        "color": format!("rgba({},{},{},{})",
-            t.style.color.r, t.style.color.g, t.style.color.b,
-            t.style.opacity),
-    })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn tick_label_json(
-    x: f64, y: f64, label: &str, anchor: &str,
-    style: Option<&ferrum_scene::TextStyle>,
-) -> serde_json::Value {
-    let (font_size, font_weight, font_family, baseline, angle, color) = match style {
-        Some(s) => (
-            s.font_size,
-            match &s.font_weight {
-                ferrum_scene::FontWeight::Normal => "normal".to_string(),
-                ferrum_scene::FontWeight::Bold => "bold".to_string(),
-                ferrum_scene::FontWeight::Custom(v) => v.clone(),
-            },
-            s.font_family.clone(),
-            match &s.baseline {
-                ferrum_scene::TextBaseline::Top => "top".to_string(),
-                ferrum_scene::TextBaseline::Middle => "middle".to_string(),
-                ferrum_scene::TextBaseline::Bottom => "bottom".to_string(),
-                ferrum_scene::TextBaseline::Alphabetic => "alphabetic".to_string(),
-                ferrum_scene::TextBaseline::Custom(v) => v.clone(),
-            },
-            s.angle,
-            format!("rgba({},{},{},{})", s.color.r, s.color.g, s.color.b, s.opacity),
-        ),
-        None => (11.0, "normal".to_string(), "sans-serif".to_string(),
-                 "alphabetic".to_string(), 0.0, "rgba(51,51,51,1)".to_string()),
-    };
-    serde_json::json!({
-        "x": x, "y": y, "content": label,
-        "fontSize": font_size, "fontWeight": font_weight,
-        "fontFamily": font_family, "anchor": anchor,
-        "baseline": baseline, "angle": angle, "color": color,
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -707,7 +552,7 @@ mod tests {
             angle: 45.0,
         };
 
-        let json = tick_label_json(100.0, 200.0, "label", "center", Some(&style));
+        let json = text_json::tick_label_json(100.0, 200.0, "label", "center", Some(&style));
         let angle = json["angle"].as_f64().expect("angle must be present");
         assert!(
             (angle - 45.0).abs() < 0.01,
@@ -718,7 +563,7 @@ mod tests {
     /// When no style is provided, the default angle must be 0.0.
     #[test]
     fn w1_tick_label_json_defaults_angle_to_zero() {
-        let json = tick_label_json(0.0, 0.0, "0", "center", None);
+        let json = text_json::tick_label_json(0.0, 0.0, "0", "center", None);
         let angle = json["angle"].as_f64().expect("angle must be present");
         assert!(
             angle.abs() < 0.01,
@@ -742,11 +587,179 @@ mod tests {
             angle: 0.0,
         };
 
-        let json = tick_label_json(50.0, 300.0, "tick", "end", Some(&style));
+        let json = text_json::tick_label_json(50.0, 300.0, "tick", "end", Some(&style));
         let angle = json["angle"].as_f64().expect("angle field must be present");
         assert!(
             angle.abs() < 0.01,
             "zero angle must produce angle=0.0 in JSON, got {angle}"
         );
+    }
+
+    // ── Bug 1a: format_tooltip_content for scene-graph tooltips ─────────
+
+    #[test]
+    fn format_tooltip_content_single_field() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![TooltipField {
+                name: "x".to_string(),
+                value: "1.23".to_string(),
+            }],
+        };
+        let json = text_json::format_tooltip_content(&tooltip);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["fields"][0]["name"], "x");
+        assert_eq!(parsed["fields"][0]["value"], "1.23");
+        assert_eq!(parsed["fields"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn format_tooltip_content_multiple_fields() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![
+                TooltipField { name: "x".to_string(), value: "1.23".to_string() },
+                TooltipField { name: "y".to_string(), value: "4.56".to_string() },
+            ],
+        };
+        let json = text_json::format_tooltip_content(&tooltip);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["fields"][0]["name"], "x");
+        assert_eq!(parsed["fields"][0]["value"], "1.23");
+        assert_eq!(parsed["fields"][1]["name"], "y");
+        assert_eq!(parsed["fields"][1]["value"], "4.56");
+        assert_eq!(parsed["fields"].as_array().map(|a| a.len()), Some(2));
+    }
+
+    #[test]
+    fn format_tooltip_content_empty_fields() {
+        use ferrum_scene::TooltipContent;
+        let tooltip = TooltipContent { fields: vec![] };
+        let json = text_json::format_tooltip_content(&tooltip);
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn format_tooltip_content_escapes_quotes() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![TooltipField {
+                name: "label".to_string(),
+                value: r#"say "hello""#.to_string(),
+            }],
+        };
+        let json = text_json::format_tooltip_content(&tooltip);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["fields"][0]["name"], "label");
+        assert_eq!(parsed["fields"][0]["value"], "say \"hello\"");
+    }
+
+    // ── R2: hit-testing packed batches via spatial index ─────────────────
+
+    #[test]
+    fn test_hit_test_packed_uses_spatial_index() {
+        // Verify that packed batches (empty nodes, instances in binary sidecar)
+        // are findable through the spatial index path in hit_test_nearest_with_index.
+        use crate::scene_load::{CircleInstance, PackedBatchMeta, SceneData};
+        use crate::spatial_index::SpatialIndex;
+        use ferrum_scene::{
+            BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
+        use lyon::tessellation::VertexBuffers;
+        use std::collections::HashMap;
+
+        // Build a panel with one packed batch (empty nodes).
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![],  // empty — packed batch
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 0u32),
+            PackedBatchMeta {
+                data_indices: Some(vec![7, 8, 9]),
+                tooltip_bytes: None,
+                kind: 0,
+                instance_start: 0,
+                instance_count: 3,
+            },
+        );
+
+        let data = SceneData {
+            circle_instances: vec![
+                CircleInstance {
+                    center: [100.0, 100.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+                CircleInstance {
+                    center: [200.0, 200.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+                CircleInstance {
+                    center: [300.0, 300.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+            ],
+            rect_instances: vec![],
+            mesh_buffers: VertexBuffers::new(),
+            static_mesh_buffers: VertexBuffers::new(),
+            annotation_mesh_buffers: VertexBuffers::new(),
+            text_elements: vec![],
+            image_quads: vec![],
+            background: None,
+            width: 500.0,
+            height: 500.0,
+            packed_batch_meta: packed_meta,
+            draw_commands: vec![],
+        };
+
+        // Build spatial index with packed data.
+        let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
+        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+
+        // Use the spatial-index-aware hit test (the same path hit_test_at uses).
+        let result = hit_test::hit_test_nearest_with_index(
+            &panels, 100.0, 100.0, &zoom, Some(&idx),
+        );
+        let hr = result.expect("packed circle at (100,100) must be found via spatial index");
+        assert_eq!(hr.panel_id, 0);
+        assert_eq!(hr.batch_idx, 0);
+        assert_eq!(hr.node_idx, 0);
+        assert_eq!(hr.data_idx, Some(7));
+
+        // Also check the second packed circle.
+        let result2 = hit_test::hit_test_nearest_with_index(
+            &panels, 200.0, 200.0, &zoom, Some(&idx),
+        );
+        let hr2 = result2.expect("packed circle at (200,200) must be found");
+        assert_eq!(hr2.data_idx, Some(8));
     }
 }

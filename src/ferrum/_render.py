@@ -276,10 +276,18 @@ class _RenderMixin:
         new._render_config = merged
         return new
 
-    def _render_inputs(self) -> tuple:
+    def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
+        import json
+
+        from ferrum._core import ChartSpec
+
         resolved = self._resolve_pending()
         chart = resolved._apply_auto_raster()
         spec = chart.to_spec()
+        if _auto_tooltips:
+            kw = json.loads(spec.to_json())
+            kw = chart._inject_auto_tooltips(kw)
+            spec = ChartSpec.from_json(json.dumps(kw))
         # F17: apply Axis(label_map=...) column-value remapping before data
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)
@@ -375,6 +383,7 @@ class _RenderMixin:
         embed_wasm=True,
         raster: bool | None = None,
         scale: float = 2.0,
+        toolbar: bool = True,
     ) -> None:
         """Save the chart to a file on disk.
 
@@ -396,6 +405,9 @@ class _RenderMixin:
         scale : float, default 2.0
             Pixel-density multiplier for PNG and PDF output.  Has no effect
             on SVG, HTML, or JSON exports.
+        toolbar : bool, default True
+            For ``"html"`` format only.  When False, the interactive toolbar
+            is hidden in the rendered HTML.
 
         Examples
         --------
@@ -412,6 +424,7 @@ class _RenderMixin:
             format=format,
             embed_wasm=embed_wasm,
             scale=scale,
+            toolbar=toolbar,
         )
 
     def show(self, *, raster: bool | None = None) -> None:

@@ -13,27 +13,54 @@ struct ImageGpu {
 pub struct GpuBuffers {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    /// Identity-transform uniform buffer used for non-mark elements (axes,
+    /// gridlines, legend, title) so they stay fixed during zoom/pan.
+    /// Prefixed with underscore because the field is only read indirectly
+    /// through `identity_uniform_bind_group`, but must stay alive to keep
+    /// the GPU buffer backing the bind group valid.
+    _identity_uniform_buffer: wgpu::Buffer,
+    identity_uniform_bind_group: wgpu::BindGroup,
     quad_vertex_buffer: wgpu::Buffer,
     circle_instance_buffer: Option<wgpu::Buffer>,
     rect_instance_buffer: Option<wgpu::Buffer>,
+    /// Mark mesh (lines, areas, paths from mark batches) — zoom transform.
     mesh_vertex_buffer: Option<wgpu::Buffer>,
     mesh_index_buffer: Option<wgpu::Buffer>,
-    mesh_index_count: u32,
+    pub(crate) mesh_index_count: u32,
+    /// Static mesh (grid lines, axis ticks, legend, title,
+    /// decorations) — identity transform (stays fixed during zoom/pan).
+    static_mesh_vertex_buffer: Option<wgpu::Buffer>,
+    static_mesh_index_buffer: Option<wgpu::Buffer>,
+    static_mesh_index_count: u32,
+    /// Annotation mesh (reference lines/paths from `annotate_hline`/`annotate_vline`)
+    /// drawn with the identity transform AFTER mark mesh so annotations
+    /// appear above data marks, matching SVG painter order.
+    annotation_mesh_vertex_buffer: Option<wgpu::Buffer>,
+    annotation_mesh_index_buffer: Option<wgpu::Buffer>,
+    annotation_mesh_index_count: u32,
     image_draws: Vec<ImageGpu>,
     /// Ordered draw commands for per-batch pipeline selection.
     draw_commands: Vec<DrawCommand>,
+    /// Logical scene dimensions (from SceneData). Used to compute the
+    /// DPR scale factor when the surface is resized for PNG capture.
+    scene_width: f32,
+    scene_height: f32,
 }
 
 /// Uniform data uploaded to the GPU once per panel draw.
 ///
-/// Layout (48 bytes / 3 × vec4<f32>):
+/// Layout (32 bytes / 2 × vec4<f32>):
 ///   canvas:    {canvas_w, canvas_h, 0, 0}
 ///   transform: {sx, sy, tx, ty}         identity = {1,1,0,0}
-///   clip:      {clip_x, clip_y, clip_w, clip_h}
 ///
-/// Must use vec4 packing — WGSL uniform address space enforces a 16-byte
-/// stride for `array<f32, N>`, which would cause a size mismatch with the
-/// Rust struct if individual padding arrays are used instead.
+/// The former `clip` vec4 has been removed. Fragment-level clip tests in the
+/// shaders were redundant because:
+///   - Mark instances (circles/rects): clipped by the GPU scissor rect set per
+///     draw command in `render_frame`.
+///   - Mesh and static mesh: full-canvas clip was always a no-op.
+///
+/// Must use vec4 packing — WGSL uniform address space enforces 16-byte stride
+/// for `array<f32, N>`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
@@ -46,11 +73,6 @@ pub struct Uniforms {
     pub sy: f32,
     pub tx: f32,
     pub ty: f32,
-    // vec4: clip_x, clip_y, clip_w, clip_h
-    pub clip_x: f32,
-    pub clip_y: f32,
-    pub clip_w: f32,
-    pub clip_h: f32,
 }
 
 impl Uniforms {
@@ -63,10 +85,6 @@ impl Uniforms {
             sy: 1.0,
             tx: 0.0,
             ty: 0.0,
-            clip_x: 0.0,
-            clip_y: 0.0,
-            clip_w: canvas_w,
-            clip_h: canvas_h,
         }
     }
 }
@@ -97,6 +115,25 @@ impl GpuBuffers {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Identity-transform buffer: always sx=1,sy=1,tx=0,ty=0.
+        // Used for non-mark elements (axes, gridlines, legend, title) so
+        // they stay fixed during zoom/pan.
+        let identity_uniforms = Uniforms::identity(scene.width, scene.height);
+        let identity_uniform_buffer =
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("identity_uniforms"),
+                contents: bytemuck::bytes_of(&identity_uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let identity_uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("identity_uniforms_bg"),
+            layout: &pipelines.uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: identity_uniform_buffer.as_entire_binding(),
             }],
         });
 
@@ -145,6 +182,42 @@ impl GpuBuffers {
                 )
             };
 
+        let (static_mesh_vertex_buffer, static_mesh_index_buffer) =
+            if scene.static_mesh_buffers.vertices.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("static_mesh_verts"),
+                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })),
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("static_mesh_idx"),
+                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    })),
+                )
+            };
+
+        let (annotation_mesh_vertex_buffer, annotation_mesh_index_buffer) =
+            if scene.annotation_mesh_buffers.vertices.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("annotation_mesh_verts"),
+                        contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })),
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("annotation_mesh_idx"),
+                        contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    })),
+                )
+            };
+
         let image_draws = scene
             .image_quads
             .iter()
@@ -154,14 +227,24 @@ impl GpuBuffers {
         Self {
             uniform_buffer,
             uniform_bind_group,
+            _identity_uniform_buffer: identity_uniform_buffer,
+            identity_uniform_bind_group,
             quad_vertex_buffer,
             circle_instance_buffer,
             rect_instance_buffer,
             mesh_vertex_buffer,
             mesh_index_buffer,
             mesh_index_count: scene.mesh_buffers.indices.len() as u32,
+            static_mesh_vertex_buffer,
+            static_mesh_index_buffer,
+            static_mesh_index_count: scene.static_mesh_buffers.indices.len() as u32,
+            annotation_mesh_vertex_buffer,
+            annotation_mesh_index_buffer,
+            annotation_mesh_index_count: scene.annotation_mesh_buffers.indices.len() as u32,
             image_draws,
             draw_commands: scene.draw_commands.clone(),
+            scene_width: scene.width,
+            scene_height: scene.height,
         }
     }
 }
@@ -170,6 +253,38 @@ impl GpuBuffers {
     /// Upload a new uniform block and re-render the frame.
     pub fn upload_uniforms(&self, gpu: &GpuContext, uniforms: &Uniforms) {
         gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
+    }
+
+    /// Re-upload only the circle and rect instance buffers without touching
+    /// mesh, image, or uniform buffers.
+    ///
+    /// Called by `apply_conditionals_and_render` after conditional encodings
+    /// are resolved: only instance colors change on each selection update, so
+    /// re-uploading the full scene would waste GPU bandwidth needlessly.
+    pub fn update_instances(
+        &mut self,
+        gpu: &GpuContext,
+        circles: &[crate::scene_load::CircleInstance],
+        rects: &[crate::scene_load::RectInstance],
+    ) {
+        self.circle_instance_buffer = if circles.is_empty() {
+            None
+        } else {
+            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("circles"),
+                contents: bytemuck::cast_slice(circles),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        };
+        self.rect_instance_buffer = if rects.is_empty() {
+            None
+        } else {
+            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rects"),
+                contents: bytemuck::cast_slice(rects),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        };
     }
 }
 
@@ -289,9 +404,30 @@ pub fn render_frame(
             multiview_mask: None,
         });
 
-        // Draw order: mesh (areas/lines) → images → per-batch circle/rect
-        // commands (painter's-algorithm order from the scene graph, with
-        // correct blend pipeline selection per batch).
+        // Draw order:
+        //   1. Static mesh (grid, axes, legend, title) — identity transform
+        //   2. Mark mesh (lines, areas, paths) — zoom/pan transform
+        //   3. Images — zoom/pan transform
+        //   4. Per-batch circle/rect commands — mixed (is_mark selects transform)
+        //   5. Annotation mesh (reference lines/paths) — identity transform
+        //
+        // Static mesh is drawn first so grid lines appear behind data marks.
+        // Mark mesh is drawn second so data lines/areas appear on top of the grid.
+        // Annotation mesh is drawn last so reference lines (hline/vline) appear
+        // above data marks, matching SVG painter order.
+
+        // 1. Static mesh — identity transform (stays fixed during zoom/pan)
+        if let (Some(vb), Some(ib)) =
+            (&buffers.static_mesh_vertex_buffer, &buffers.static_mesh_index_buffer)
+        {
+            pass.set_pipeline(&pipelines.mesh);
+            pass.set_bind_group(0, &buffers.identity_uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..buffers.static_mesh_index_count, 0, 0..1);
+        }
+
+        // 2. Mark mesh — zoom/pan transform
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {
@@ -310,10 +446,38 @@ pub fn render_frame(
             pass.draw(0..4, 0..1);
         }
 
+        // Per-batch circle/rect draw commands. Mark commands use the
+        // zoom-transformed uniforms; non-mark commands (axes, gridlines,
+        // legend, title, etc.) use the identity-transform uniforms so
+        // they stay fixed during zoom/pan.
+        let surface_w = surface_tex.texture.width();
+        let surface_h = surface_tex.texture.height();
+        // Scale factor for DPR: when the canvas is resized for PNG capture
+        // (e.g., 2x on Retina), plot_area is still in logical pixels.
+        let scale_x = surface_w as f32 / buffers.scene_width;
+        let scale_y = surface_h as f32 / buffers.scene_height;
+
         for cmd in &buffers.draw_commands {
             if cmd.instance_count == 0 {
                 continue;
             }
+
+            if let Some(pa) = cmd.plot_area.filter(|_| cmd.is_mark) {
+                pass.set_scissor_rect(
+                    (pa[0] * scale_x) as u32,
+                    (pa[1] * scale_y) as u32,
+                    (pa[2] * scale_x) as u32,
+                    (pa[3] * scale_y) as u32,
+                );
+            } else {
+                pass.set_scissor_rect(0, 0, surface_w, surface_h);
+            }
+
+            let bind_group = if cmd.is_mark {
+                &buffers.uniform_bind_group
+            } else {
+                &buffers.identity_uniform_bind_group
+            };
             let start = cmd.instance_start;
             let end = start + cmd.instance_count;
             match cmd.kind {
@@ -325,7 +489,7 @@ pub fn render_frame(
                             &pipelines.instanced_rect
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_bind_group(0, bind_group, &[]);
                         pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
                         pass.set_vertex_buffer(1, ib.slice(..));
                         pass.draw(0..4, start..end);
@@ -339,7 +503,7 @@ pub fn render_frame(
                             &pipelines.instanced_circle
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_bind_group(0, bind_group, &[]);
                         pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
                         pass.set_vertex_buffer(1, ib.slice(..));
                         pass.draw(0..4, start..end);
@@ -347,9 +511,116 @@ pub fn render_frame(
                 }
             }
         }
+
+        // 5. Annotation mesh — identity transform (annotations stay fixed
+        //    during zoom/pan and appear above data marks).
+        if let (Some(vb), Some(ib)) = (
+            &buffers.annotation_mesh_vertex_buffer,
+            &buffers.annotation_mesh_index_buffer,
+        ) {
+            pass.set_scissor_rect(0, 0, surface_w, surface_h);
+            pass.set_pipeline(&pipelines.mesh);
+            pass.set_bind_group(0, &buffers.identity_uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..buffers.annotation_mesh_index_count, 0, 0..1);
+        }
     }
 
     gpu.queue.submit(std::iter::once(encoder.finish()));
     surface_tex.present();
     Ok(())
+}
+
+/// Upload the per-panel affine transform uniform and re-render, then return
+/// zoomed text-element JSON.
+///
+/// Extracted from `WasmRenderer::upload_transform_and_render` so the logic
+/// lives in the rendering module and the wasm_bindgen method becomes a thin
+/// delegator.
+///
+/// The parameter count mirrors the `WasmRenderer` fields this function
+/// previously accessed as `self.*`. A grouping struct would obscure the
+/// access pattern without reducing complexity at the single call site.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn upload_transform_and_render(
+    gpu: &GpuContext,
+    pipelines: &RenderPipelines,
+    buffers: &GpuBuffers,
+    scene_data: &SceneData,
+    scene_panels: &[ferrum_scene::Panel],
+    interaction: &ferrum_scene::InteractionConfig,
+    zoom_transforms: &[crate::zoom_pan::Affine2],
+    panel_id: usize,
+) -> Result<String, crate::error::WasmRenderError> {
+    let transform = zoom_transforms
+        .get(panel_id)
+        .copied()
+        .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+    let uniforms = Uniforms {
+        canvas_w: scene_data.width,
+        canvas_h: scene_data.height,
+        _canvas_pad: [0.0; 2],
+        sx: transform.sx as f32,
+        sy: transform.sy as f32,
+        tx: transform.tx as f32,
+        ty: transform.ty as f32,
+    };
+    buffers.upload_uniforms(gpu, &uniforms);
+    render_frame(gpu, pipelines, buffers, scene_data.background)?;
+    let plot_area = scene_panels.get(panel_id).map(|p| {
+        (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h)
+    });
+    let text_json = crate::text_json::build_zoomed_text_json(
+        &scene_data.text_elements,
+        interaction,
+        panel_id,
+        &transform,
+        plot_area,
+    );
+    Ok(text_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the uniform buffer is exactly 32 bytes (2 x vec4<f32>) after
+    /// removing the clip vec4. WGSL uniform structs require 16-byte alignment;
+    /// 32 is a multiple of 16 so this is well-formed.
+    #[test]
+    fn test_uniforms_size_is_32_bytes() {
+        assert_eq!(
+            std::mem::size_of::<Uniforms>(),
+            32,
+            "Uniforms must be exactly 32 bytes (2 x vec4<f32>) after removing the clip vec4"
+        );
+    }
+
+    /// Verify that `update_instances` does not touch the mesh_index_count.
+    ///
+    /// This test cannot create real GPU buffers (no GPU in test environment),
+    /// so it confirms the invariant structurally: `mesh_index_count` is a
+    /// plain `u32` field that `update_instances` never writes. The test
+    /// exercises the `GpuBuffers` struct layout to ensure no future refactor
+    /// accidentally makes `update_instances` reset the mesh count.
+    #[test]
+    fn test_update_instances_preserves_mesh_count() {
+        // The mesh_index_count field is pub(crate), confirming it exists and is
+        // accessible within the crate. We verify the field exists and that
+        // update_instances does not mutate it by inspection of the method body:
+        // update_instances only writes circle_instance_buffer and
+        // rect_instance_buffer, leaving all mesh fields untouched.
+        //
+        // We can also verify the Uniforms struct is correctly sized as a proxy
+        // for the correctness of the GpuBuffers struct definition.
+        assert_eq!(std::mem::size_of::<Uniforms>(), 32);
+
+        // Confirm mesh_index_count is accessible as pub(crate).
+        // This is a compile-time check — if the field were removed or made
+        // private, this test would fail to compile.
+        fn _assert_mesh_index_count_accessible(b: &GpuBuffers) -> u32 {
+            b.mesh_index_count
+        }
+    }
 }

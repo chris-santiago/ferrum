@@ -74,7 +74,21 @@ impl InteractionState {
         zoom: &crate::zoom_pan::ZoomPanState,
         shift_held: bool,
     ) {
-        let hit = hit_test::hit_test(panels, x, y, zoom);
+        self.handle_click_with_index(panels, specs, x, y, zoom, shift_held, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_click_with_index(
+        &mut self,
+        panels: &[ferrum_scene::Panel],
+        specs: &[SelectionSpec],
+        x: f64,
+        y: f64,
+        zoom: &crate::zoom_pan::ZoomPanState,
+        shift_held: bool,
+        spatial_index: Option<&crate::spatial_index::SpatialIndex>,
+    ) {
+        let hit = hit_test::hit_test_with_index(panels, x, y, zoom, spatial_index);
 
         for spec in specs {
             match spec {
@@ -153,6 +167,14 @@ impl InteractionState {
         }
     }
 
+    /// Update the hover hit-result for a mousemove event.
+    ///
+    /// NOTE: this method is not called from `lib.rs`. Mousemove hover in the
+    /// WASM renderer is handled directly by `WasmRenderer::hitTestAt`, which
+    /// already uses `hit_test::hit_test_nearest_with_index` (spatial-index
+    /// aware). This method is retained for unit-test use and as an integration
+    /// point for any future non-WASM consumer; it delegates to
+    /// `handle_mousemove_with_index` with `None` so the two paths stay in sync.
     pub fn handle_mousemove(
         &mut self,
         panels: &[ferrum_scene::Panel],
@@ -160,7 +182,20 @@ impl InteractionState {
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
     ) -> Option<&HitResult> {
-        self.hover = hit_test::hit_test(panels, x, y, zoom);
+        self.handle_mousemove_with_index(panels, x, y, zoom, None)
+    }
+
+    /// Update the hover hit-result, using `spatial_index` for O(log n)
+    /// circle/rect lookups when one is available.
+    pub fn handle_mousemove_with_index(
+        &mut self,
+        panels: &[ferrum_scene::Panel],
+        x: f64,
+        y: f64,
+        zoom: &crate::zoom_pan::ZoomPanState,
+        spatial_index: Option<&crate::spatial_index::SpatialIndex>,
+    ) -> Option<&HitResult> {
+        self.hover = hit_test::hit_test_with_index(panels, x, y, zoom, spatial_index);
         self.hover.as_ref()
     }
 

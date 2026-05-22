@@ -1121,6 +1121,7 @@ dependencies = [
  "lyon",
  "png",
  "raw-window-handle",
+ "rstar 0.12.2",
  "serde",
  "serde_json",
  "wasm-bindgen",

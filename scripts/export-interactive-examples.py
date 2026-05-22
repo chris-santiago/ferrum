@@ -140,4 +140,22 @@ vconcat8 = top8 & bottom8
 vconcat8.interactive().save(str(OUT / "08_vconcat.html"))
 print("8/8 VConcat composition")
 
-print(f"\nAll 8 HTML files saved to {OUT.resolve()}")
+# 9. Large scatter — 50k points to exercise R-tree, grid snap, zoom clip
+import numpy as np
+rng = np.random.default_rng(42)
+n = 50_000
+df9 = pl.DataFrame({"x": rng.normal(size=n), "y": rng.normal(size=n)})
+brush9 = fm.selection_interval()
+chart9 = (
+    fm.Chart(df9)
+    .mark_point(size=4, opacity=0.3)
+    .encode(x="x:Q", y="y:Q")
+    .add_selection(brush9)
+    .conditional(brush9.when(fm.value("#2563eb")).otherwise(fm.value("#cccccc")))
+    .properties(title="50k Point Cloud (zoom clip + grid snap test)")
+    .interactive()
+)
+chart9.save(str(OUT / "09_large_scatter.html"))
+print("9/9 large scatter (50k points)")
+
+print(f"\nAll 9 HTML files saved to {OUT.resolve()}")

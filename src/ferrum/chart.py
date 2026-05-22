@@ -5021,6 +5021,50 @@ class Chart(_RenderMixin):
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
         return ChartSpec(**kw)
 
+    def _inject_auto_tooltips(self, kw: dict) -> dict:
+        """Inject auto-generated tooltip fields into a serialised spec dict.
+
+        Takes a plain-dict representation of a ``ChartSpec`` (as returned by
+        ``json.loads(spec.to_json())``) and adds ``encoding.tooltip_fields``
+        from the encoded channels when no explicit tooltip is already present.
+        Returns the mutated dict.
+
+        This is called by the interactive renderer after ``to_spec()``; static
+        SVG/PNG renders skip it to avoid bloating the output with tooltip data.
+        Explicit ``tooltip=`` or ``tooltip_fields=`` encodings always win.
+
+        Parameters
+        ----------
+        kw : dict
+            Parsed JSON dict from ``json.loads(spec.to_json())``.  Modified
+            in place and returned.
+
+        Returns
+        -------
+        dict
+            The same dict with ``encoding.tooltip_fields`` added when
+            applicable.
+        """
+        enc = kw.get("encoding") or {}
+        if "tooltip" in enc or "tooltip_fields" in enc:
+            return kw
+        _TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
+        auto_fields: list[dict] = []
+        seen_auto: set[str] = set()
+        for _ch_name in _RENDERER_HONORED_CHANNELS:
+            if _ch_name in _TOOLTIP_SKIP:
+                continue
+            ch_dict = enc.get(_ch_name)
+            if ch_dict is None:
+                continue
+            field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
+            if field and isinstance(field, str) and field not in seen_auto:
+                auto_fields.append({"field": field})
+                seen_auto.add(field)
+        if auto_fields:
+            kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
+        return kw
+
     def _build_spec(self):
         """Build the chart spec for callers that want typed Python access to
         layers (composite-mark tests, future internal renderer wiring).
@@ -5129,13 +5173,19 @@ class Chart(_RenderMixin):
         new._selections.extend(selections)
         return new
 
-    def interactive(self) -> "Chart":
+    def interactive(self, *, toolbar: bool = True) -> "Chart":
         """Mark this chart as interactive.
 
         Per ``ferrum-spec.md §3.10`` (L736), interactive features (selections,
         pan/zoom, conditional encodings) are silently ignored under SVG/PNG.
         Returns a new ``Chart`` so chained construction patterns work today
         and will gain real interactivity once the Phase 11 WASM renderer ships.
+
+        Parameters
+        ----------
+        toolbar : bool, default True
+            Whether to show the interactive toolbar (zoom/pan controls, export
+            button). Set to ``False`` to render without the toolbar.
 
         Returns
         -------
@@ -5151,7 +5201,7 @@ class Chart(_RenderMixin):
         """
         from ferrum._interactive import InteractiveChart
 
-        return InteractiveChart(self)
+        return InteractiveChart(self, toolbar=toolbar)
 
     def conditional(self, spec: Any) -> "Chart":
         """Apply a conditional encoding to this chart.

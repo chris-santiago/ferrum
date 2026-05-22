@@ -18,12 +18,57 @@ export class WasmRenderer {
         wasm.__wbg_wasmrenderer_free(ptr, 0);
     }
     /**
+     * @returns {string}
+     */
+    clearSelections() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_clearSelections(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * @param {HTMLCanvasElement} canvas
      * @returns {Promise<WasmRenderer>}
      */
     static create(canvas) {
         const ret = wasm.wasmrenderer_create(canvas);
         return ret;
+    }
+    /**
+     * Return the href string for a specific mark node, or an empty string if
+     * none is present.
+     *
+     * `panel_id`, `batch_idx`, and `node_idx` correspond to the triple returned
+     * by `hitTestAt`.  The href is sourced from `batch.hrefs[node_idx]` in the
+     * scene graph.
+     * @param {number} panel_id
+     * @param {number} batch_idx
+     * @param {number} node_idx
+     * @returns {string}
+     */
+    getHref(panel_id, batch_idx, node_idx) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmrenderer_getHref(this.__wbg_ptr, panel_id, batch_idx, node_idx);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
@@ -153,6 +198,13 @@ export class WasmRenderer {
         }
     }
     /**
+     * @returns {number}
+     */
+    maxTextureSize() {
+        const ret = wasm.wasmrenderer_maxTextureSize(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Apply a pan delta on the given panel and re-render via GPU affine transform.
      *
      * Returns updated text-element JSON.
@@ -245,6 +297,40 @@ export class WasmRenderer {
      */
     resize(width, height) {
         wasm.wasmrenderer_resize(this.__wbg_ptr, width, height);
+    }
+    /**
+     * Select all indexed marks (circles and rects) within the given scene-space
+     * rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
+     *
+     * Updates the first `Interval` selection spec found in `self.selections`,
+     * then applies conditional encodings and re-renders.  Returns the new
+     * selection state JSON.
+     *
+     * If no spatial index has been built yet (scene not loaded), returns `"{}"`.
+     * @param {number} _panel_id
+     * @param {number} x0
+     * @param {number} y0
+     * @param {number} x1
+     * @param {number} y1
+     * @returns {string}
+     */
+    selectInRect(_panel_id, x0, y0, x1, y1) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmrenderer_selectInRect(this.__wbg_ptr, _panel_id, x0, y0, x1, y1);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
     }
     /**
      * Set an absolute zoom+pan transform from D3-zoom.
@@ -1335,7 +1421,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 175, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 184, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02);
             return ret;
         },

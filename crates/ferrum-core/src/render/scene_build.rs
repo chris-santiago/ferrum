@@ -279,6 +279,7 @@ pub fn build_scene(
         conditionals: spec.conditionals.clone(),
         linked_panels: Vec::new(),
         tick_levels,
+        toolbar: true,
     };
 
     Ok(SceneGraph {

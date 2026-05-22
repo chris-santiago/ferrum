@@ -1,11 +1,13 @@
-// Uniforms layout (3 × vec4 = 48 bytes):
+// Uniforms layout (2 x vec4 = 32 bytes):
 //   canvas.xy    = canvas width, height
 //   transform    = {sx, sy, tx, ty}  (identity = 1,1,0,0)
-//   clip         = {clip_x, clip_y, clip_w, clip_h}
+//
+// The former `clip` vec4 has been removed. Fragment-level clip tests were
+// redundant: mark instances are clipped by the GPU scissor rect set per draw
+// command in render_frame; full-canvas clip on mesh was always a no-op.
 struct Uniforms {
     canvas: vec4<f32>,
     transform: vec4<f32>,
-    clip: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -33,7 +35,6 @@ struct VertexOutput {
     @location(5) opacity: f32,
     @location(6) stroke_opacity: f32,
     @location(7) stroke_dash: f32,
-    @location(8) scene_pos: vec2<f32>,
 };
 
 @vertex
@@ -51,11 +52,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         in.quad_pos.x * sin_a + in.quad_pos.y * cos_a,
     );
 
-    let px_local = in.center + rotated_quad * extent;
-    // Apply per-panel affine transform: transform.xy = (sx, sy), transform.zw = (tx, ty).
+    // Apply per-panel affine transform to the center only, so zoom
+    // repositions marks without scaling their visual size (radius, stroke).
     let sx = u.transform.x; let sy = u.transform.y;
     let tx = u.transform.z; let ty = u.transform.w;
-    let px = vec2<f32>(px_local.x * sx + tx, px_local.y * sy + ty);
+    let center_tx = vec2<f32>(in.center.x * sx + tx, in.center.y * sy + ty);
+    let px = center_tx + rotated_quad * extent;
     let ndc = vec2<f32>(
         px.x / u.canvas.x * 2.0 - 1.0,
         1.0 - px.y / u.canvas.y * 2.0,
@@ -70,18 +72,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.opacity = in.opacity;
     out.stroke_opacity = in.stroke_opacity;
     out.stroke_dash = in.stroke_dash;
-    // Pass pre-transform position for fragment-stage panel clipping.
-    out.scene_pos = px_local;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Clip to panel boundaries (scene-space, pre-transform).
-    if (in.scene_pos.x < u.clip.x || in.scene_pos.x > u.clip.x + u.clip.z ||
-        in.scene_pos.y < u.clip.y || in.scene_pos.y > u.clip.y + u.clip.w) {
-        discard;
-    }
     let dist = length(in.local_pos);
     let sdf = dist - in.radius;
     let fill_alpha = 1.0 - smoothstep(-0.5, 0.5, sdf);
@@ -100,19 +95,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let dash_idx = i32(clamp(floor(in.stroke_dash + 0.5), 0.0, 3.0));
         var dash_visible = 1.0;
         if dash_idx == 1 {
-            // Dashed: 6 on, 3 off — period = 9
+            // Dashed: 6 on, 3 off -- period = 9
             let period = 9.0;
             let on_frac = 6.0 / period;
             let phase = fract(dist / period);
             dash_visible = select(0.0, 1.0, phase < on_frac);
         } else if dash_idx == 2 {
-            // Dotted: 2 on, 3 off — period = 5
+            // Dotted: 2 on, 3 off -- period = 5
             let period = 5.0;
             let on_frac = 2.0 / period;
             let phase = fract(dist / period);
             dash_visible = select(0.0, 1.0, phase < on_frac);
         } else if dash_idx == 3 {
-            // Dash-dot: 6 on, 3 off, 2 on, 3 off — period = 14
+            // Dash-dot: 6 on, 3 off, 2 on, 3 off -- period = 14
             let period = 14.0;
             let phase = fract(dist / period) * period;
             dash_visible = select(0.0, 1.0,

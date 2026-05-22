@@ -27,8 +27,14 @@ class _ChartLike:
     def show_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement show_svg")
 
-    def interactive(self):
+    def interactive(self, *, toolbar: bool = True):
         """Return an interactive rendering of this composition.
+
+        Parameters
+        ----------
+        toolbar : bool, default True
+            Whether to show the interactive toolbar (zoom/pan controls, export
+            button). Set to ``False`` to render without the toolbar.
 
         Returns
         -------
@@ -37,7 +43,7 @@ class _ChartLike:
         """
         from ferrum._interactive import InteractiveChart
 
-        return InteractiveChart(self)
+        return InteractiveChart(self, toolbar=toolbar)
 
     # Subclasses provide ``charts`` as either an instance attribute
     # (symmetric containers — HConcat / VConcat) or as a ``@property``
@@ -86,7 +92,15 @@ class _ChartLike:
 
         return bytes(rasterize_svg(self.show_svg(), scale=scale))
 
-    def save(self, path: str, *, format=None, scale: float = 2.0, **kwargs) -> None:
+    def save(
+        self,
+        path: str,
+        *,
+        format=None,
+        scale: float = 2.0,
+        toolbar: bool = True,
+        **kwargs,
+    ) -> None:
         """Save the composition to a file.
 
         Parameters
@@ -100,6 +114,10 @@ class _ChartLike:
         scale : float, default 2.0
             Pixel-density multiplier for PNG and PDF output.  Has no effect
             on SVG or HTML exports.
+        toolbar : bool, default True
+            Whether to include the interactive toolbar (zoom/pan controls,
+            export button) when saving as HTML.  Has no effect on SVG, PNG,
+            or PDF exports.
 
         Raises
         ------
@@ -117,7 +135,7 @@ class _ChartLike:
         elif fmt == "pdf":
             save_chart_svg(self.show_svg(), str(dest), scale=scale)
         elif fmt == "html":
-            ic = self.interactive()
+            ic = self.interactive(toolbar=toolbar)
             ic.save(str(dest), **kwargs)
         else:
             raise ValueError(
