@@ -20,23 +20,27 @@ import ferrum as fm
 @pytest.fixture
 def scatter_df():
     """A small DataFrame for scatter/point chart tests."""
-    return pl.DataFrame({
-        "x": list(range(20)),
-        "y": [i * 2.0 + 1.0 for i in range(20)],
-        "fo": [0.3] * 20,
-        "so": [0.7] * 20,
-    })
+    return pl.DataFrame(
+        {
+            "x": list(range(20)),
+            "y": [i * 2.0 + 1.0 for i in range(20)],
+            "fo": [0.3] * 20,
+            "so": [0.7] * 20,
+        }
+    )
 
 
 @pytest.fixture
 def large_scatter_df():
     """A >1000-row DataFrame to exercise the packed-instance path."""
     n = 1200
-    return pl.DataFrame({
-        "x": list(range(n)),
-        "y": [float(i % 100) for i in range(n)],
-        "fo": [0.3] * n,
-    })
+    return pl.DataFrame(
+        {
+            "x": list(range(n)),
+            "y": [float(i % 100) for i in range(n)],
+            "fo": [0.3] * n,
+        }
+    )
 
 
 class TestFillOpacity:
@@ -44,28 +48,18 @@ class TestFillOpacity:
 
     def test_fill_opacity_in_svg(self, scatter_df):
         """encode(fill_opacity='fo') must emit fill-opacity in SVG."""
-        chart = (
-            fm.Chart(scatter_df)
-            .mark_point()
-            .encode(x="x", y="y", fill_opacity="fo")
-        )
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
         svg = chart.show_svg()
-        assert "fill-opacity" in svg, (
-            "Expected fill-opacity attribute in SVG output"
-        )
+        assert "fill-opacity" in svg, "Expected fill-opacity attribute in SVG output"
         # Extract fill-opacity values; at least one should be ~0.3
         values = re.findall(r'fill-opacity="([^"]+)"', svg)
-        assert any(
-            abs(float(v) - 0.3) < 0.05 for v in values
-        ), f"Expected fill-opacity near 0.3; got values: {values}"
+        assert any(abs(float(v) - 0.3) < 0.05 for v in values), (
+            f"Expected fill-opacity near 0.3; got values: {values}"
+        )
 
     def test_fill_opacity_on_large_batch(self, large_scatter_df):
         """fill_opacity on >1000 points (packed path) produces valid SVG."""
-        chart = (
-            fm.Chart(large_scatter_df)
-            .mark_point()
-            .encode(x="x", y="y", fill_opacity="fo")
-        )
+        chart = fm.Chart(large_scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
         svg = chart.show_svg()
         # SVG should render without error and contain circle elements
         assert "<circle" in svg or "<path" in svg or "fill-opacity" in svg, (
@@ -84,30 +78,24 @@ class TestStrokeOpacity:
             .encode(x="x", y="y", stroke_opacity="so")
         )
         svg = chart.show_svg()
-        assert "stroke-opacity" in svg, (
-            "Expected stroke-opacity attribute in SVG output"
-        )
+        assert "stroke-opacity" in svg, "Expected stroke-opacity attribute in SVG output"
         values = re.findall(r'stroke-opacity="([^"]+)"', svg)
-        assert any(
-            abs(float(v) - 0.7) < 0.05 for v in values
-        ), f"Expected stroke-opacity near 0.7; got values: {values}"
+        assert any(abs(float(v) - 0.7) < 0.05 for v in values), (
+            f"Expected stroke-opacity near 0.7; got values: {values}"
+        )
 
     def test_stroke_opacity_on_bars(self):
         """mark_bar with encode(stroke_opacity=...) renders correctly."""
-        df = pl.DataFrame({
-            "cat": ["a", "b", "c"],
-            "val": [10.0, 20.0, 15.0],
-            "so": [0.5, 0.5, 0.5],
-        })
-        chart = (
-            fm.Chart(df)
-            .mark_bar(stroke="black")
-            .encode(x="cat", y="val", stroke_opacity="so")
+        df = pl.DataFrame(
+            {
+                "cat": ["a", "b", "c"],
+                "val": [10.0, 20.0, 15.0],
+                "so": [0.5, 0.5, 0.5],
+            }
         )
+        chart = fm.Chart(df).mark_bar(stroke="black").encode(x="cat", y="val", stroke_opacity="so")
         svg = chart.show_svg()
-        assert "stroke-opacity" in svg, (
-            "Expected stroke-opacity on bar chart SVG"
-        )
+        assert "stroke-opacity" in svg, "Expected stroke-opacity on bar chart SVG"
 
 
 class TestOpacityNoDoubleApply:
@@ -149,11 +137,11 @@ class TestOpacityNoDoubleApply:
         stroke_opacities = re.findall(r'stroke-opacity="([^"]+)"', svg)
 
         # fill_opacity values should be near 0.3
-        assert any(
-            abs(float(v) - 0.3) < 0.05 for v in fill_opacities
-        ), f"Expected fill-opacity ~0.3; got {fill_opacities}"
+        assert any(abs(float(v) - 0.3) < 0.05 for v in fill_opacities), (
+            f"Expected fill-opacity ~0.3; got {fill_opacities}"
+        )
 
         # stroke_opacity values should be near 0.7
-        assert any(
-            abs(float(v) - 0.7) < 0.15 for v in stroke_opacities
-        ), f"Expected stroke-opacity ~0.7; got {stroke_opacities}"
+        assert any(abs(float(v) - 0.7) < 0.15 for v in stroke_opacities), (
+            f"Expected stroke-opacity ~0.7; got {stroke_opacities}"
+        )

@@ -1,4 +1,5 @@
 """Regression tests for WASM audit remediation."""
+
 import warnings
 
 
@@ -8,8 +9,11 @@ def test_html_title_escapes_special_chars(tmp_path):
     import polars as pl
 
     df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
-    chart = fm.Chart(df).mark_point().encode(x="x", y="y").properties(
-        title='<script>alert("xss")</script>'
+    chart = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .properties(title='<script>alert("xss")</script>')
     )
     out = tmp_path / "xss_test.html"
     chart.save(str(out))

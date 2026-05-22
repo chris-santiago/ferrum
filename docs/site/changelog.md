@@ -6,6 +6,50 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.11.0
+
+*2026-05-22*
+
+### Added
+
+- R-tree spatial indexing (`rstar` crate) for O(log n) hit-testing on large point clouds
+- Interactive toolbar: Pan, Box Zoom, Box Select, Reset, Save PNG buttons (Bokeh-style)
+- `Chart.interactive(toolbar=True/False)` and `Chart.save(toolbar=True/False)` kwargs
+- Auto-tooltips: interactive renders automatically inject tooltip fields from encoded channels
+- `WasmRenderer.maxTextureSize()` WASM export for adaptive DPR capture
+- Keyboard shortcuts for toolbar modes (P/Z/S/R/Escape)
+
+### Fixed
+
+- Opacity semantics: `fill_opacity` used correctly for packed batches (>1000 marks), `stroke_opacity` applied in tessellated paths/polygons, no double-apply on strokes
+- Grid pixel-snap in WASM renderer eliminates sub-pixel aliasing
+- Mark clip region: GPU scissor rect clips zoomed marks to panel plot area (DPR-aware)
+- Tick label clipping: zoomed tick labels filtered by panel plot area
+- Save PNG: adaptive DPR clamping to GPU max texture size (prevents crash on wide charts)
+- Save PNG: ResizeObserver disconnected during capture (prevents race condition)
+- Save PNG: SVG viewBox uses actual canvas dimensions (not stale scene dimensions)
+- Annotation z-order: reference lines drawn above data marks (matching SVG renderer)
+- Reset button forwards selection state to Jupyter kernel
+- Cursor CSS targets SVG overlay in select/boxzoom modes
+- HTML title XSS: `html.escape()` applied to `<title>` tag
+- Hex color shorthand: 3-char (`#ccc`) and 4-char (`#abcd`) correctly expanded
+- Malformed hex colors now emit a warning instead of silently returning black
+- `_render_scene_json` collapsed into `_render_scene` (eliminated duplication)
+
+### Changed
+
+- `SceneCollector` accumulator replaces 8-parameter `collect_nodes`/`emit_draw_commands`
+- Uniform clip vec4 removed from shaders — GPU scissor rect handles clipping (32-byte uniforms)
+- `text_json.rs` extracted from `lib.rs` with deduplicated text serialization helpers
+- `lib.rs` split: tooltip formatting, conditional render, transform upload moved to focused modules
+- Partial GPU buffer update for conditional re-render (only re-uploads instance data)
+- Dead packed-batch linear fallback removed from hit-test (spatial index covers it)
+- Hand-rolled JSON replaced with `serde_json` in hit-test and tooltip paths
+- `_auto_tooltips` removed from public `Chart.to_spec()` signature
+- `_ChartLike.save()` uses explicit `toolbar` parameter instead of `kwargs.pop`
+- `ResizeObserver` reads CSS layout size (not backing-store size)
+- Transition RAF loop cancels stale animations on rapid scene changes
+
 ## 0.10.0
 
 *2026-05-20*

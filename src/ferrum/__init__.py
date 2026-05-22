@@ -250,7 +250,9 @@ from ferrum.encoding import (
     FacetCol,
 )
 
-__version__ = "0.10.0"
+from importlib.metadata import version as _pkg_version
+
+__version__ = _pkg_version("ferrum-viz")
 
 
 def hconcat(*charts, spacing=10.0):

@@ -157,8 +157,7 @@ def test_assemble_html_toolbar_false_config_arg_has_toolbar_false():
     adapter_lines = [
         line
         for line in html_false.splitlines()
-        if "createStandaloneAdapter" in line
-        and line.strip().startswith("const adapter")
+        if "createStandaloneAdapter" in line and line.strip().startswith("const adapter")
     ]
     assert adapter_lines, "HTML must contain 'const adapter = createStandaloneAdapter(...)' line"
     adapter_line = adapter_lines[0]
@@ -310,9 +309,7 @@ def test_explicit_tooltip_wins_over_auto():
     from ferrum.display import _render_scene_json
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"]})
-    chart = fm.Chart(df).mark_point().encode(
-        x="x", y="y", color="g", tooltip=fm.Tooltip("g")
-    )
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g", tooltip=fm.Tooltip("g"))
     scene_json, _ = _render_scene_json(chart)
     scene = json.loads(scene_json)
     batch = scene["panels"][0]["marks"][0]
