@@ -317,7 +317,7 @@ async function _render(container, sceneJson, adapter) {
         svgClone.setAttribute('width', String(off.width));
         svgClone.setAttribute('height', String(off.height));
         if (captureScale > 1) {
-          svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+          svgClone.setAttribute('viewBox', `0 0 ${origW} ${origH}`);
         }
         // Inline @font-face from the document's stylesheets so the SVG
         // renders text correctly when rasterized via Image.
