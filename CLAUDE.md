@@ -180,6 +180,7 @@ These were identified by a 4-agent wiring audit and intentionally deferred. They
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
 - **Missing spec implementations:** `ferrum.Grid`, full palette library, `SceneNode::Raw` WASM, `compare=` routing for 3 diagnostic charts
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
+- **Resolved (2026-05-22):** Opacity semantics (`fill_opacity`/`stroke_opacity` now applied per-channel in WASM shaders; `opacity` no longer double-applied to stroke) and annotation z-order (annotation mesh drawn after marks, not before) were fixed in the `feat/rtree-toolbar` merge.
 
 When fixing a bug or adding a feature that overlaps with an open item, update the archaeology doc's status column and check off the corresponding action-list entry.
 

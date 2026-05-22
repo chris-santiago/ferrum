@@ -150,9 +150,29 @@ Chart(data=None, *, width=None, height=None, title=None, description=None)
 - `.conditional(selection, **true_encodings, **false_encodings)` — Conditional encoding based on selection state.
 - `.properties(**kwargs)` — Set chart-level metadata (title, width, height, description).
 - `.theme(theme)` — Apply a `Theme` object.
-- `.interactive()` — Switch render target to WASM. Returns `InteractiveChart`.
+- `.interactive(*, toolbar: bool = True)` — Switch render target to WASM. Returns `InteractiveChart`.
 - `.resolve(scale=None, axis=None, legend=None)` — Override shared/independent resolution in compound views.
 - `.save(path, *, format=None, scale=2.0, backend=None, **render_kwargs)` — Render and write to disk. `format` inferred from extension if `None`. `backend` overrides auto-selection. `scale` applies to raster backends only.
+
+> **2026-05-22 (feat/rtree-toolbar — Toolbar & Auto-tooltips):**
+>
+> `.interactive(*, toolbar: bool = True)` — the `toolbar` kwarg (default `True`)
+> renders a Bokeh-style toolbar overlaid on the canvas. Five tools are included:
+> Pan (keyboard shortcut P), Box Zoom (Z), Box Select (S), Reset (R), and Save PNG.
+> The default active tool depends on whether the chart has an `selection_interval`
+> declared: if so, Box Select is active on load; otherwise Pan is active. Pass
+> `toolbar=False` to suppress the toolbar entirely (useful for embedded or
+> space-constrained contexts).
+>
+> **Auto-tooltips** — when rendering interactively, hover tooltips are
+> automatically injected from the chart's encoded channels (x, y, color, size,
+> etc.). No explicit `tooltip=` encoding is needed for basic hover. If an explicit
+> `tooltip=` encoding is present it takes precedence and auto-injection is skipped.
+> Auto-tooltips only affect interactive renders; SVG and PNG output are unchanged.
+>
+> `.save(path, *, ..., toolbar: bool = True)` — for HTML format, `toolbar`
+> controls whether the toolbar appears in the exported file. Defaults to `True`.
+> Has no effect on SVG/PNG/JSON output.
 - `.show()` — Display in current environment (notebook, terminal sixel, or browser).
 - `.to_spec()` — Return the internal `ChartSpec` dataclass (serializable).
 - `.to_json()` — Return JSON string of the chart spec.

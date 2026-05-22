@@ -1,5 +1,7 @@
 # WASM Rendering Fixes — Implementation Plan
 
+> **Status:** Both tasks completed and merged to main on 2026-05-22.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
 ## 1. Objective
@@ -29,19 +31,19 @@ Fix two remaining visual issues in the interactive WASM renderer: uneven grid li
 ## 5. Tasks
 
 ### Task 1: Grid pixel-snap in WASM scene loading
-- [ ] In `scene_load.rs` `load_scene_with_packed`, snap grid `SceneNode::Line` positions to pixel centers (`round() + 0.5`) before passing to `collect_nodes` for `static_mesh`. Only vertical lines (x1≈x2) snap x; only horizontal lines (y1≈y2) snap y.
-- [ ] This is WASM-only — `ferrum-core/axis.rs` is untouched, so SVG output is unchanged and goldens remain valid.
-- [ ] Verify: `source ~/.cargo/env && DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test -p ferrum-wasm`
-- [ ] Verify: `uv run pytest tests/ -n auto -q` — 0 failures
+- [x] In `scene_load.rs` `load_scene_with_packed`, snap grid `SceneNode::Line` positions to pixel centers (`round() + 0.5`) before passing to `collect_nodes` for `static_mesh`. Only vertical lines (x1≈x2) snap x; only horizontal lines (y1≈y2) snap y.
+- [x] This is WASM-only — `ferrum-core/axis.rs` is untouched, so SVG output is unchanged and goldens remain valid.
+- [x] Verify: `source ~/.cargo/env && DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test -p ferrum-wasm`
+- [x] Verify: `uv run pytest tests/ -n auto -q` — 0 failures
 
 ### Task 2: Clip zoomed marks to panel plot_area
-- [ ] Currently the clip uniform is `(0, 0, canvas_w, canvas_h)` for all draw commands. For `is_mark: true` draw commands, set clip to the panel's `plot_area` so zoomed marks don't leak into axis margins.
-- [ ] Approach: store `plot_area: Option<[f32; 4]>` on `DrawCommand` (set from `panel.plot_area` during mark batch processing in `scene_load.rs`). In `render.rs`, when uploading uniforms for mark commands, use `cmd.plot_area` as the clip region instead of the full canvas.
-- [ ] For non-mark commands, clip remains the full canvas (they render in margins intentionally).
-- [ ] The identity uniform buffer's clip stays at full canvas. The zoom uniform buffer's clip is updated per-command before each mark draw call.
-- [ ] Verify: `source ~/.cargo/env && DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test -p ferrum-wasm`
-- [ ] Verify: `source ~/.cargo/env && cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings`
-- [ ] Verify: `uv run pytest tests/ -n auto -q` — 0 failures
+- [x] Currently the clip uniform is `(0, 0, canvas_w, canvas_h)` for all draw commands. For `is_mark: true` draw commands, set clip to the panel's `plot_area` so zoomed marks don't leak into axis margins.
+- [x] Approach: store `plot_area: Option<[f32; 4]>` on `DrawCommand` (set from `panel.plot_area` during mark batch processing in `scene_load.rs`). In `render.rs`, when uploading uniforms for mark commands, use `cmd.plot_area` as the clip region instead of the full canvas.
+- [x] For non-mark commands, clip remains the full canvas (they render in margins intentionally).
+- [x] The identity uniform buffer's clip stays at full canvas. The zoom uniform buffer's clip is updated per-command before each mark draw call.
+- [x] Verify: `source ~/.cargo/env && DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test -p ferrum-wasm`
+- [x] Verify: `source ~/.cargo/env && cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings`
+- [x] Verify: `uv run pytest tests/ -n auto -q` — 0 failures
 
 ## 6. Acceptance checks
 

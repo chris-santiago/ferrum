@@ -118,6 +118,22 @@ Outside of a notebook, [`.show()`][ferrum.Chart.show] writes a temporary SVG and
 
 This is the right format for sharing interactive charts via email, Slack, or static hosting.
 
+### Toolbar in exported HTML
+
+By default, exported HTML files include the interactive toolbar (Pan, Box Zoom, Box Select, Reset, Save PNG). Pass `toolbar=False` to suppress it:
+
+```python
+chart.save("out.html", toolbar=False)
+```
+
+The default is `toolbar=True`. The `toolbar=` parameter has no effect on SVG, PNG, or JSON output — it is only meaningful for the HTML format.
+
+`toolbar=` also works on composed views:
+
+```python
+(chart1 | chart2).save("out.html", toolbar=False)
+```
+
 ## Compound views
 
 All composition operators produce objects with the same export surface. A four-panel report saves exactly like a single chart:

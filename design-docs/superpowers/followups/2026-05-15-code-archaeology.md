@@ -63,7 +63,7 @@
 | `Href` (encoding channel) | ✅ Already working — `_RENDERER_HONORED_CHANNELS` → `EncodingSpec` → `MetadataColumns` → `svg_walk.rs` wraps each mark in `<a href="...">`. Verified: 3 `<a>` tags for 3-row DataFrame |
 | `Description` (encoding channel) | ✅ Already working — same path → `svg_walk.rs` emits `<desc>` per mark. Verified: 3 `<desc>` tags for 3-row DataFrame |
 | `Key` | Intentionally silent — stored for future interactive/animated rendering (`_SILENT_CHANNELS`); not a static SVG gap |
-| `fill_opacity` | ✅ Fixed `1623cee` — promoted from `_SILENT_CHANNELS` to `_RENDERER_HONORED_CHANNELS`; `fill_opacity: Option<EncodingSpec>` added to Rust `Encoding`; per-row reading in `point.rs`/`bar.rs`; `fill-opacity` SVG attribute emitted (omitted when 1.0). Old alias to `opacity` removed. 12 regression tests. WASM GPU instances do not yet carry `fill_opacity` to shaders (S2, non-blocking). |
+| `fill_opacity` | ✅ Fixed `1623cee` — promoted from `_SILENT_CHANNELS` to `_RENDERER_HONORED_CHANNELS`; `fill_opacity: Option<EncodingSpec>` added to Rust `Encoding`; per-row reading in `point.rs`/`bar.rs`; `fill-opacity` SVG attribute emitted (omitted when 1.0). Old alias to `opacity` removed. 12 regression tests. ✅ WASM GPU shader path also fixed (2026-05-22, feat/rtree-toolbar): `pack_instances.rs` + `tessellate.rs` now use `fill_opacity`/`stroke_opacity` per-channel; `opacity` no longer double-applied to stroke color in circle.wgsl/rect.wgsl. |
 
 ### 5 `EncodingSpec` fields deserialized, never read by Rust renderer
 

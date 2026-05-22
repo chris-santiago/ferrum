@@ -243,6 +243,59 @@ interactive  # display in Jupyter
 
 The callback receives the current selection state as a dict. In Jupyter, output from the callback appears below the chart widget (via an `ipywidgets.Output` area that clears on each new selection).
 
+## Toolbar
+
+Every interactive chart displays a toolbar by default. It contains five tools:
+
+| Tool | Shortcut | Description |
+|---|---|---|
+| Pan | P | Click-drag to pan the canvas |
+| Box Zoom | Z | Draw a rectangle to zoom into that region |
+| Box Select | S | Draw a rectangle to select marks inside it |
+| Reset | R | Restore the original zoom and pan |
+| Save PNG | — | Download the current canvas as a PNG image |
+
+The default active tool depends on the chart: if the chart has an `selection_interval` declared, Box Select is active on load; otherwise Pan is active.
+
+To hide the toolbar — for example, in an embedded or space-constrained context:
+
+```python
+chart.interactive(toolbar=False)
+```
+
+## Auto-tooltips
+
+Hover tooltips are enabled automatically in interactive mode. Ferrum injects tooltip fields from the chart's encoded channels — `x`, `y`, `color`, `size`, and others — so hovering over any mark shows the underlying data values without any extra declaration.
+
+```python
+import ferrum as fm
+import polars as pl
+
+df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 1, 5, 3], "label": list("abcde")})
+
+# Hovering shows x, y, and color values automatically — no tooltip= needed:
+chart = (
+    fm.Chart(df)
+    .mark_point(size=100)
+    .encode(x="x", y="y", color="label:N")
+    .interactive()
+)
+```
+
+If an explicit `tooltip=` encoding is present it takes precedence and auto-injection is skipped:
+
+```python
+# Only "label" appears in the tooltip — x and y are suppressed:
+chart = (
+    fm.Chart(df)
+    .mark_point(size=100)
+    .encode(x="x", y="y", color="label:N", tooltip="label")
+    .interactive()
+)
+```
+
+Auto-tooltips only affect interactive renders. SVG and PNG output are unchanged.
+
 ## Saving interactive output
 
 Save an interactive chart as a self-contained HTML file:
