@@ -176,8 +176,8 @@ pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_f32(&mut buf, *cx as f32);
             push_f32(&mut buf, *cy as f32);
             push_f32(&mut buf, *r as f32);
-            push_color(&mut buf, style.fill.as_ref(), style.opacity);
-            push_color(&mut buf, style.stroke.as_ref(), style.opacity);
+            push_color(&mut buf, style.fill.as_ref(), style.fill_opacity);
+            push_color(&mut buf, style.stroke.as_ref(), 1.0);
             push_f32(&mut buf, style.stroke_width as f32);
             push_f32(&mut buf, style.opacity as f32);
             push_f32(&mut buf, style.stroke_opacity as f32);
@@ -217,8 +217,8 @@ pub fn pack_rect_batch(nodes: &[SceneNode]) -> Vec<u8> {
             push_f32(&mut buf, *w as f32);
             push_f32(&mut buf, *h as f32);
             push_f32(&mut buf, *corner_radius as f32);
-            push_color(&mut buf, style.fill.as_ref(), style.opacity);
-            push_color(&mut buf, style.stroke.as_ref(), style.opacity);
+            push_color(&mut buf, style.fill.as_ref(), style.fill_opacity);
+            push_color(&mut buf, style.stroke.as_ref(), 1.0);
             push_f32(&mut buf, style.stroke_width as f32);
             push_f32(&mut buf, style.opacity as f32);
             push_f32(&mut buf, style.stroke_opacity as f32);
@@ -239,15 +239,19 @@ fn push_f32(buf: &mut Vec<u8>, v: f32) {
 
 /// Convert an optional Color to [f32; 4] and push all four components.
 /// Matches the WASM renderer's `opt_color_to_f32` exactly:
-///   rgb → [0..1], alpha → (color.a / 255) * opacity
+///   rgb → [0..1], alpha → (color.a / 255) * alpha_factor
+///
+/// For fill colors, `alpha_factor` is `fill_opacity`.
+/// For stroke colors, `alpha_factor` is `1.0` (raw color; the shader
+/// applies `stroke_opacity` and `opacity` independently).
 #[inline]
-fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, opacity: f64) {
+fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
     match color {
         Some(c) => {
             push_f32(buf, c.r as f32 / 255.0);
             push_f32(buf, c.g as f32 / 255.0);
             push_f32(buf, c.b as f32 / 255.0);
-            push_f32(buf, (c.a as f32 / 255.0) * opacity as f32);
+            push_f32(buf, (c.a as f32 / 255.0) * alpha_factor as f32);
         }
         None => {
             push_f32(buf, 0.0);
@@ -360,19 +364,21 @@ mod tests {
         assert!((floats[1] - 200.0).abs() < 1e-6, "center_y");
         // radius
         assert!((floats[2] - 10.0).abs() < 1e-6, "radius");
-        // fill_color: (255/255, 0, 0, (255/255)*0.5) = (1.0, 0.0, 0.0, 0.5)
+        // fill_color: (255/255, 0, 0, (255/255)*fill_opacity) = (1.0, 0.0, 0.0, 1.0)
+        // fill uses fill_opacity (1.0), not opacity (0.5)
         assert!((floats[3] - 1.0).abs() < 1e-5, "fill_r");
         assert!((floats[4] - 0.0).abs() < 1e-5, "fill_g");
         assert!((floats[5] - 0.0).abs() < 1e-5, "fill_b");
-        assert!((floats[6] - 0.5).abs() < 1e-5, "fill_a = (255/255)*0.5");
-        // stroke_color: (0, 0, 0, (128/255)*0.5)
+        assert!((floats[6] - 1.0).abs() < 1e-5, "fill_a = (255/255)*fill_opacity(1.0)");
+        // stroke_color: raw color, no opacity baked in — shader applies stroke_opacity and opacity
+        // (0, 0, 0, (128/255)*1.0)
         assert!((floats[7] - 0.0).abs() < 1e-5, "stroke_r");
         assert!((floats[8] - 0.0).abs() < 1e-5, "stroke_g");
         assert!((floats[9] - 0.0).abs() < 1e-5, "stroke_b");
-        let expected_stroke_a = (128.0_f32 / 255.0) * 0.5;
+        let expected_stroke_a = 128.0_f32 / 255.0;
         assert!(
             (floats[10] - expected_stroke_a).abs() < 1e-5,
-            "stroke_a = (128/255)*0.5"
+            "stroke_a = (128/255)*1.0 (raw, no opacity baked)"
         );
         // stroke_width
         assert!((floats[11] - 2.0).abs() < 1e-6, "stroke_width");
@@ -581,5 +587,125 @@ mod tests {
         assert!((stroke_dash_index(&Some(vec![2.0, 3.0])) - 2.0).abs() < 1e-6);
         assert!((stroke_dash_index(&Some(vec![6.0, 3.0, 2.0, 3.0])) - 3.0).abs() < 1e-6);
         assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6);
+    }
+
+    // ── B1/B3: opacity semantics regression tests ─────────────────────
+
+    #[test]
+    fn packed_circle_fill_uses_fill_opacity_not_opacity() {
+        // fill_opacity=0.5, opacity=1.0 → fill_a = (255/255)*0.5 = 0.5
+        let style = FillStroke {
+            fill: Some(Color::rgba(255, 255, 255, 255)),
+            stroke: Some(Color::rgb(0, 0, 0)),
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.5,
+            angle: 0.0,
+        };
+        let nodes = vec![SceneNode::Circle {
+            cx: 50.0, cy: 50.0, r: 5.0, style,
+        }];
+        let bytes = pack_circle_batch(&nodes);
+        let floats: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // fill_a at index 6: (255/255)*fill_opacity(0.5) = 0.5
+        assert!(
+            (floats[6] - 0.5).abs() < 1e-5,
+            "fill alpha must use fill_opacity (0.5), got {}",
+            floats[6]
+        );
+    }
+
+    #[test]
+    fn packed_circle_stroke_uses_raw_color_no_opacity_baked() {
+        // stroke_opacity=0.75, opacity=0.5 → stroke_a should be raw: (255/255)*1.0
+        // (shader applies stroke_opacity and opacity separately)
+        let style = FillStroke {
+            fill: Some(Color::rgb(255, 0, 0)),
+            stroke: Some(Color::rgba(0, 0, 0, 255)),
+            stroke_width: 2.0,
+            opacity: 0.5,
+            stroke_dash: None,
+            stroke_opacity: 0.75,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let nodes = vec![SceneNode::Circle {
+            cx: 50.0, cy: 50.0, r: 5.0, style,
+        }];
+        let bytes = pack_circle_batch(&nodes);
+        let floats: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // stroke_a at index 10: (255/255)*1.0 = 1.0 (raw, no opacity baked)
+        assert!(
+            (floats[10] - 1.0).abs() < 1e-5,
+            "stroke alpha must be raw (1.0), got {} — shader handles opacity/stroke_opacity",
+            floats[10]
+        );
+    }
+
+    #[test]
+    fn packed_rect_fill_uses_fill_opacity_not_opacity() {
+        let style = FillStroke {
+            fill: Some(Color::rgba(100, 200, 50, 255)),
+            stroke: Some(Color::rgb(0, 0, 0)),
+            stroke_width: 1.0,
+            opacity: 0.8,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 0.6,
+            angle: 0.0,
+        };
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0, y: 20.0, w: 30.0, h: 40.0, style, corner_radius: 0.0,
+        }];
+        let bytes = pack_rect_batch(&nodes);
+        let floats: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // fill_a at index 8 (after pos(2)+size(2)+corner_radius(1)+fill_rgb(3))
+        // = (255/255)*fill_opacity(0.6) = 0.6
+        assert!(
+            (floats[8] - 0.6).abs() < 1e-5,
+            "rect fill alpha must use fill_opacity (0.6), got {}",
+            floats[8]
+        );
+    }
+
+    #[test]
+    fn packed_rect_stroke_uses_raw_color_no_opacity_baked() {
+        let style = FillStroke {
+            fill: Some(Color::rgb(100, 200, 50)),
+            stroke: Some(Color::rgba(0, 0, 0, 200)),
+            stroke_width: 2.0,
+            opacity: 0.5,
+            stroke_dash: None,
+            stroke_opacity: 0.75,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0, y: 20.0, w: 30.0, h: 40.0, style, corner_radius: 0.0,
+        }];
+        let bytes = pack_rect_batch(&nodes);
+        let floats: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // stroke_a at index 12 (pos(2)+size(2)+corner(1)+fill(4)+stroke_rgb(3))
+        // = (200/255)*1.0 (raw, no opacity baked)
+        let expected = 200.0_f32 / 255.0;
+        assert!(
+            (floats[12] - expected).abs() < 1e-5,
+            "rect stroke alpha must be raw ({expected}), got {} — shader handles opacity/stroke_opacity",
+            floats[12]
+        );
     }
 }

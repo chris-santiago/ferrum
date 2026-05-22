@@ -43,7 +43,8 @@ pub fn tessellate_path(
     let path = pathcmds_to_lyon(commands, closed);
 
     if let Some(fill) = &style.fill {
-        let color = color_to_f32(fill, style.opacity);
+        let fill_alpha = style.opacity * style.fill_opacity;
+        let color = color_to_f32(fill, fill_alpha);
         let mut tess = FillTessellator::new();
         let _ = tess.tessellate_path(
             &path,
@@ -56,7 +57,8 @@ pub fn tessellate_path(
     }
 
     if let Some(stroke) = &style.stroke {
-        let color = color_to_f32(stroke, style.opacity);
+        let stroke_alpha = style.opacity * style.stroke_opacity;
+        let color = color_to_f32(stroke, stroke_alpha);
         let mut opts = StrokeOptions::default().with_line_width(style.stroke_width as f32);
         apply_cap_join(&mut opts, batch_cap, batch_join);
         stroke_path_dashed(&path, style.stroke_dash.as_deref(), &opts, color, buffers);
@@ -115,7 +117,8 @@ pub fn tessellate_polygon(
     let path = builder.build();
 
     if let Some(fill) = &style.fill {
-        let color = color_to_f32(fill, style.opacity);
+        let fill_alpha = style.opacity * style.fill_opacity;
+        let color = color_to_f32(fill, fill_alpha);
         let mut tess = FillTessellator::new();
         let _ = tess.tessellate_path(
             &path,
@@ -128,7 +131,8 @@ pub fn tessellate_polygon(
     }
 
     if let Some(stroke) = &style.stroke {
-        let color = color_to_f32(stroke, style.opacity);
+        let stroke_alpha = style.opacity * style.stroke_opacity;
+        let color = color_to_f32(stroke, stroke_alpha);
         let opts = StrokeOptions::default().with_line_width(style.stroke_width as f32);
         let mut tess = StrokeTessellator::new();
         let _ = tess.tessellate_path(
@@ -447,6 +451,121 @@ mod tests {
             assert!(
                 (v.color[3] - 1.0).abs() < 0.05,
                 "full opacity must give alpha=1.0, got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    // ── B2: tessellate_path and tessellate_polygon apply stroke_opacity ──
+
+    fn make_fill_stroke_style(opacity: f64, stroke_opacity: f64, fill_opacity: f64) -> FillStroke {
+        FillStroke {
+            fill: Some(Color { r: 200, g: 100, b: 50, a: 255 }),
+            stroke: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            stroke_width: 2.0,
+            opacity,
+            stroke_dash: None,
+            stroke_opacity,
+            fill_opacity,
+            angle: 0.0,
+        }
+    }
+
+    /// tessellate_path stroke must apply opacity * stroke_opacity.
+    #[test]
+    fn b2_path_stroke_applies_stroke_opacity() {
+        use ferrum_scene::PathCmd;
+        let style = make_fill_stroke_style(1.0, 0.6, 1.0);
+        let commands = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 100.0 },
+            PathCmd::Close,
+        ];
+        // Tessellate with fill=None so we only get stroke vertices.
+        let mut stroke_only_style = style;
+        stroke_only_style.fill = None;
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_path(&commands, &stroke_only_style, true, None, None, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "path stroke must produce vertices");
+        for v in &buffers.vertices {
+            // Expected alpha = opacity(1.0) * stroke_opacity(0.6) = 0.6
+            assert!(
+                (v.color[3] - 0.6).abs() < 0.05,
+                "path stroke alpha must be opacity*stroke_opacity (0.6), got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// tessellate_path fill must apply opacity * fill_opacity.
+    #[test]
+    fn b2_path_fill_applies_fill_opacity() {
+        use ferrum_scene::PathCmd;
+        let style = make_fill_stroke_style(0.8, 1.0, 0.5);
+        let commands = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 100.0 },
+            PathCmd::Close,
+        ];
+        // Tessellate with stroke=None so we only get fill vertices.
+        let mut fill_only_style = style;
+        fill_only_style.stroke = None;
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_path(&commands, &fill_only_style, true, None, None, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "path fill must produce vertices");
+        for v in &buffers.vertices {
+            // Expected alpha = opacity(0.8) * fill_opacity(0.5) = 0.4
+            assert!(
+                (v.color[3] - 0.4).abs() < 0.05,
+                "path fill alpha must be opacity*fill_opacity (0.4), got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// tessellate_polygon stroke must apply opacity * stroke_opacity.
+    #[test]
+    fn b2_polygon_stroke_applies_stroke_opacity() {
+        let style = make_fill_stroke_style(1.0, 0.6, 1.0);
+        let mut stroke_only_style = style;
+        stroke_only_style.fill = None;
+        let rings = vec![vec![
+            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
+        ]];
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_polygon(&rings, &stroke_only_style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "polygon stroke must produce vertices");
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 0.6).abs() < 0.05,
+                "polygon stroke alpha must be opacity*stroke_opacity (0.6), got {}",
+                v.color[3]
+            );
+        }
+    }
+
+    /// tessellate_polygon fill must apply opacity * fill_opacity.
+    #[test]
+    fn b2_polygon_fill_applies_fill_opacity() {
+        let style = make_fill_stroke_style(0.8, 1.0, 0.5);
+        let mut fill_only_style = style;
+        fill_only_style.stroke = None;
+        let rings = vec![vec![
+            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
+        ]];
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_polygon(&rings, &fill_only_style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "polygon fill must produce vertices");
+        for v in &buffers.vertices {
+            assert!(
+                (v.color[3] - 0.4).abs() < 0.05,
+                "polygon fill alpha must be opacity*fill_opacity (0.4), got {}",
                 v.color[3]
             );
         }

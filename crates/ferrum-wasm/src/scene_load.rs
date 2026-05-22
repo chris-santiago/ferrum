@@ -522,7 +522,7 @@ fn collect_nodes(
                     center: [*cx as f32, *cy as f32],
                     radius: *r as f32,
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
-                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
+                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
@@ -536,7 +536,7 @@ fn collect_nodes(
                     size: [*w as f32, *h as f32],
                     corner_radius: *corner_radius as f32,
                     fill_color: opt_color_to_f32(style.fill.as_ref(), style.fill_opacity),
-                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), style.opacity),
+                    stroke_color: opt_color_to_f32(style.stroke.as_ref(), 1.0),
                     stroke_width: style.stroke_width as f32,
                     opacity: style.opacity as f32,
                     stroke_opacity: style.stroke_opacity as f32,
@@ -2841,5 +2841,62 @@ mod tests {
         assert_eq!(rect_cmds.len(), 1);
         assert!(rect_cmds[0].additive, "rect batch should be additive");
         assert_eq!(rect_cmds[0].instance_count, 1);
+    }
+
+    // ── B3: stroke color uses raw alpha, no opacity baked ─────────────
+
+    #[test]
+    fn circle_stroke_color_uses_raw_alpha_not_opacity() {
+        // opacity=0.5, stroke_opacity=0.8
+        // Stroke color alpha must be raw (color.a/255 * 1.0), NOT baked with opacity.
+        // The shader applies stroke_opacity and opacity independently.
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke_width: 2.0,
+            opacity: 0.5,
+            stroke_opacity: 0.8,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let node = SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style };
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![node]);
+        let data = load_scene(&scene);
+        let ci = &data.circle_instances[0];
+        // stroke_color.a should be linearized raw alpha ≈ color_to_linear(black, 1.0)[3] = 1.0
+        // NOT color_to_linear(black, 0.5)[3] = 0.5 (the old buggy behavior)
+        assert!(
+            (ci.stroke_color[3] - 1.0).abs() < 1e-5,
+            "circle stroke alpha must be raw (1.0), not opacity-baked; got {}",
+            ci.stroke_color[3]
+        );
+    }
+
+    #[test]
+    fn rect_stroke_color_uses_raw_alpha_not_opacity() {
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 128, b: 255, a: 255 }),
+            stroke: Some(Color { r: 0, g: 0, b: 0, a: 200 }),
+            stroke_width: 1.0,
+            opacity: 0.5,
+            stroke_opacity: 0.8,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+        let node = SceneNode::Rect {
+            x: 10.0, y: 20.0, w: 40.0, h: 30.0, style, corner_radius: 0.0,
+        };
+        let scene = make_scene_with_nodes(MarkBatchKind::Bar, vec![node]);
+        let data = load_scene(&scene);
+        let ri = &data.rect_instances[0];
+        // stroke_color.a = (200/255)*1.0 (raw), linearized alpha is unchanged
+        let expected_raw = 200.0_f32 / 255.0;
+        assert!(
+            (ri.stroke_color[3] - expected_raw).abs() < 1e-5,
+            "rect stroke alpha must be raw ({expected_raw}), not opacity-baked; got {}",
+            ri.stroke_color[3]
+        );
     }
 }
