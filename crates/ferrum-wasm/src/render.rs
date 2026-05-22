@@ -23,9 +23,15 @@ pub struct GpuBuffers {
     quad_vertex_buffer: wgpu::Buffer,
     circle_instance_buffer: Option<wgpu::Buffer>,
     rect_instance_buffer: Option<wgpu::Buffer>,
+    /// Mark mesh (lines, areas, paths from mark batches) — zoom transform.
     mesh_vertex_buffer: Option<wgpu::Buffer>,
     mesh_index_buffer: Option<wgpu::Buffer>,
     mesh_index_count: u32,
+    /// Static mesh (grid lines, axis ticks, annotations, legend, title,
+    /// decorations) — identity transform (stays fixed during zoom/pan).
+    static_mesh_vertex_buffer: Option<wgpu::Buffer>,
+    static_mesh_index_buffer: Option<wgpu::Buffer>,
+    static_mesh_index_count: u32,
     image_draws: Vec<ImageGpu>,
     /// Ordered draw commands for per-batch pipeline selection.
     draw_commands: Vec<DrawCommand>,
@@ -171,6 +177,24 @@ impl GpuBuffers {
                 )
             };
 
+        let (static_mesh_vertex_buffer, static_mesh_index_buffer) =
+            if scene.static_mesh_buffers.vertices.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("static_mesh_verts"),
+                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })),
+                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("static_mesh_idx"),
+                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    })),
+                )
+            };
+
         let image_draws = scene
             .image_quads
             .iter()
@@ -188,6 +212,9 @@ impl GpuBuffers {
             mesh_vertex_buffer,
             mesh_index_buffer,
             mesh_index_count: scene.mesh_buffers.indices.len() as u32,
+            static_mesh_vertex_buffer,
+            static_mesh_index_buffer,
+            static_mesh_index_count: scene.static_mesh_buffers.indices.len() as u32,
             image_draws,
             draw_commands: scene.draw_commands.clone(),
         }
@@ -317,13 +344,27 @@ pub fn render_frame(
             multiview_mask: None,
         });
 
-        // Draw order: mesh (areas/lines) → images → per-batch circle/rect
-        // commands (painter's-algorithm order from the scene graph, with
-        // correct blend pipeline selection per batch).
+        // Draw order:
+        //   1. Static mesh (grid, axes, annotations, legend, title) — identity transform
+        //   2. Mark mesh (lines, areas, paths) — zoom/pan transform
+        //   3. Images — zoom/pan transform
+        //   4. Per-batch circle/rect commands — mixed (is_mark selects transform)
         //
-        // Mesh and image draws use the zoom-transformed uniforms (mesh
-        // vertices are pre-tessellated positions that should move with
-        // zoom; images represent raster tiles that should scale).
+        // Static mesh is drawn first so grid lines appear behind data marks.
+        // Mark mesh is drawn second so data lines/areas appear on top of the grid.
+
+        // 1. Static mesh — identity transform (stays fixed during zoom/pan)
+        if let (Some(vb), Some(ib)) =
+            (&buffers.static_mesh_vertex_buffer, &buffers.static_mesh_index_buffer)
+        {
+            pass.set_pipeline(&pipelines.mesh);
+            pass.set_bind_group(0, &buffers.identity_uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..buffers.static_mesh_index_count, 0, 0..1);
+        }
+
+        // 2. Mark mesh — zoom/pan transform
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {

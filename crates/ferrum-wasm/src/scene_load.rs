@@ -117,7 +117,14 @@ pub struct RectInstance {
 pub struct SceneData {
     pub circle_instances: Vec<CircleInstance>,
     pub rect_instances: Vec<RectInstance>,
+    /// Mesh vertices/indices for mark batches (lines, areas, paths,
+    /// polygons, polylines). Drawn with the zoom/pan transform.
     pub mesh_buffers: VertexBuffers<MeshVertex, u32>,
+    /// Mesh vertices/indices for non-mark elements (grid lines, axis
+    /// ticks, annotations, legend lines, title decorations, etc.).
+    /// Drawn with the identity transform so they stay fixed during
+    /// zoom/pan.
+    pub static_mesh_buffers: VertexBuffers<MeshVertex, u32>,
     pub text_elements: Vec<TextElementData>,
     pub image_quads: Vec<ImageQuad>,
     pub background: Option<[f32; 4]>,
@@ -206,7 +213,13 @@ pub fn load_scene(scene: &SceneGraph) -> SceneData {
 pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneData {
     let mut circles = Vec::new();
     let mut rects = Vec::new();
+    // Mark mesh: lines, areas, paths, polygons, polylines from mark batches.
+    // Drawn with the zoom/pan transform.
     let mut mesh = VertexBuffers::new();
+    // Static mesh: grid lines, axis ticks, annotations, legend lines,
+    // title decorations, etc. Drawn with the identity transform so they
+    // stay fixed during zoom/pan.
+    let mut static_mesh = VertexBuffers::new();
     let mut images = Vec::new();
     let mut texts = Vec::new();
     let mut batch_meta = HashMap::new();
@@ -223,11 +236,13 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let mut prev_c = circles.len();
     let mut prev_r = rects.len();
 
-    collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    // Title: non-mark → static mesh
+    collect_nodes(&scene.title, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
     emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
-        collect_nodes(&panel.grid, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        // Grid: non-mark → static mesh
+        collect_nodes(&panel.grid, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
         emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
@@ -250,6 +265,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     is_mark: true,
                 });
             } else {
+                // Mark batches → mark mesh (zoom transform)
                 collect_nodes(
                     &batch.nodes,
                     &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
@@ -259,23 +275,26 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             }
         }
 
-        collect_nodes(&panel.axes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        // Axes, strip titles, annotations: non-mark → static mesh
+        collect_nodes(&panel.axes, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
         emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
-        collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
         emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
-        collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+        collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
         emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
     }
 
-    collect_nodes(&scene.legend, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    // Legend, decorations: non-mark → static mesh
+    collect_nodes(&scene.legend, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
     emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
-    collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
+    collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
     emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
     SceneData {
         circle_instances: circles,
         rect_instances: rects,
         mesh_buffers: mesh,
+        static_mesh_buffers: static_mesh,
         text_elements: texts,
         image_quads: images,
         background,
