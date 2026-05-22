@@ -234,3 +234,105 @@ def test_composition_interactive_toolbar_default_true():
     ic = composed.interactive()
     assert isinstance(ic, InteractiveChart)
     assert ic._toolbar is True
+
+
+# ── Regression tests for bugs fixed in feat/rtree-toolbar ──────────────
+
+
+def test_hex_shorthand_3char():
+    """#ccc should expand to r=204,g=204,b=204 — not black (r=0,g=0,b=0)."""
+    from ferrum.selection import _hex_to_color_dict
+
+    result = _hex_to_color_dict("#ccc")
+    assert result == {"r": 204, "g": 204, "b": 204, "a": 255}, f"got {result}"
+
+
+def test_hex_shorthand_4char():
+    """#abcd should expand to r=170,g=187,b=204,a=221."""
+    from ferrum.selection import _hex_to_color_dict
+
+    result = _hex_to_color_dict("#abcd")
+    assert result == {"r": 170, "g": 187, "b": 204, "a": 221}, f"got {result}"
+
+
+def test_hex_full_6char_unchanged():
+    """Full 6-char hex should work as before."""
+    from ferrum.selection import _hex_to_color_dict
+
+    assert _hex_to_color_dict("#ff0000") == {"r": 255, "g": 0, "b": 0, "a": 255}
+
+
+def test_auto_tooltips_injected_for_interactive():
+    """to_spec(_auto_tooltips=True) should inject tooltip_fields from encoded channels."""
+    import json
+
+    import polars as pl
+
+    import ferrum as fm
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"]})
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
+    spec = chart.to_spec(_auto_tooltips=True)
+    spec_dict = json.loads(spec.to_json())
+    tf = spec_dict.get("encoding", {}).get("tooltip_fields")
+    assert tf is not None, "tooltip_fields should be injected"
+    fields = json.loads(tf) if isinstance(tf, str) else tf
+    field_names = {f["field"] for f in fields}
+    assert "x" in field_names
+    assert "y" in field_names
+    assert "g" in field_names
+
+
+def test_auto_tooltips_not_injected_for_static():
+    """to_spec() without _auto_tooltips should NOT inject tooltip_fields."""
+    import json
+
+    import polars as pl
+
+    import ferrum as fm
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+    spec = chart.to_spec()
+    spec_dict = json.loads(spec.to_json())
+    tf = spec_dict.get("encoding", {}).get("tooltip_fields")
+    assert tf is None, f"tooltip_fields should NOT be injected for static, got {tf}"
+
+
+def test_explicit_tooltip_wins_over_auto():
+    """Explicit tooltip= should not be overridden by auto-tooltip injection."""
+    import json
+
+    import polars as pl
+
+    import ferrum as fm
+    from ferrum.display import _render_scene_json
+
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"]})
+    chart = fm.Chart(df).mark_point().encode(
+        x="x", y="y", color="g", tooltip=fm.Tooltip("g")
+    )
+    scene_json, _ = _render_scene_json(chart)
+    scene = json.loads(scene_json)
+    batch = scene["panels"][0]["marks"][0]
+    assert batch["tooltips"] is not None
+    # Only the explicit 'g' field, not auto-injected x/y
+    field_names = {f["name"] for f in batch["tooltips"][0]["fields"]}
+    assert field_names == {"g"}, f"expected only 'g', got {field_names}"
+
+
+def test_static_mesh_separate_from_mark_mesh():
+    """Grid lines should tessellate into static_mesh, not mark mesh."""
+    import json
+
+    import polars as pl
+
+    import ferrum as fm
+    from ferrum.display import _render_scene_json
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+    scene_json, _packed = _render_scene_json(chart)
+    scene = json.loads(scene_json)
+    panel = scene["panels"][0]
+    assert len(panel.get("grid", [])) > 0, "panel should have grid lines"
