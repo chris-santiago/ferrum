@@ -386,23 +386,24 @@ async function _render(container, sceneJson, adapter) {
       renderer.renderFrame();
       await new Promise(r => requestAnimationFrame(r));
 
-      // Blit GPU canvas 1:1 to an offscreen 2D canvas (WebGPU canvases clear
-      // after present(), so we must capture into a persistent 2D context).
+      // Export at full Retina resolution (w × rawDPR).  The GPU canvas may be
+      // clamped below rawDPR by the texture limit; drawImage upscales in that
+      // case.  The 2D offscreen canvas has no GPU texture limit (16k+).
+      const rawDpr = window.devicePixelRatio || 1;
+      const exportW = Math.round(w * rawDpr);
+      const exportH = Math.round(h * rawDpr);
       const off = document.createElement('canvas');
-      off.width = canvas.width; off.height = canvas.height;
+      off.width = exportW; off.height = exportH;
       const ctx = off.getContext('2d');
-      ctx.drawImage(canvas, 0, 0);
+      ctx.drawImage(canvas, 0, 0, exportW, exportH);
 
       // Composite SVG text overlay (axis labels, title, legend text).
-      // The SVG is authored in CSS pixels; the offscreen canvas is at physical
-      // pixels (CSS × DPR).  Set a viewBox so the SVG scales up correctly.
+      // The SVG is authored in CSS pixels; viewBox scales to export size.
       try {
         const svgClone = svgEl.cloneNode(true);
-        const svgW = parseInt(svgEl.getAttribute('width'), 10) || off.width;
-        const svgH = parseInt(svgEl.getAttribute('height'), 10) || off.height;
-        svgClone.setAttribute('width', String(off.width));
-        svgClone.setAttribute('height', String(off.height));
-        svgClone.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+        svgClone.setAttribute('width', String(exportW));
+        svgClone.setAttribute('height', String(exportH));
+        svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
         // Inline @font-face from the document's stylesheets so the SVG
         // renders text correctly when rasterized via Image.
         const fontRules = [];
@@ -436,7 +437,7 @@ async function _render(container, sceneJson, adapter) {
       }
 
       const a = document.createElement('a');
-      a.href = injectPHYs(off.toDataURL('image/png'), effectiveDpr);
+      a.href = injectPHYs(off.toDataURL('image/png'), rawDpr);
       a.download = 'ferrum-chart.png';
       a.style.display = 'none';
       document.body.appendChild(a);

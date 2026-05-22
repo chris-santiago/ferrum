@@ -154,7 +154,7 @@ def test_save_png_no_canvas_resize(tmp_path):
     on_save_body = content[start:end] if start != -1 and end != -1 else ""
     assert on_save_body, "onSave function must exist in the HTML"
     assert "renderer.resize" not in on_save_body, "onSave must not call renderer.resize"
-    assert "off.width = canvas.width" in on_save_body, "offscreen canvas should match canvas 1:1"
+    assert "off.width = exportW" in on_save_body, "offscreen canvas should use full-DPR export size"
 
 
 def test_canvas_dpr_clamped_to_max_texture(tmp_path):
