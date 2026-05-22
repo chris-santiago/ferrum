@@ -49,11 +49,13 @@ pub fn hit_test_with_index(
         // R-tree path for indexed batch kinds (Point, Bar, Rect).
         if let Some(idx) = spatial_index {
             if let Some(entry) = idx.hit_test(panel_pos, px, py, 0.0) {
-                let data_idx = panel
-                    .marks
-                    .get(entry.batch_idx)
-                    .and_then(|b| b.data_indices.as_ref())
-                    .and_then(|ids| ids.get(entry.node_idx).copied());
+                let data_idx = entry.data_idx.or_else(|| {
+                    panel
+                        .marks
+                        .get(entry.batch_idx)
+                        .and_then(|b| b.data_indices.as_ref())
+                        .and_then(|ids| ids.get(entry.node_idx).copied())
+                });
                 return Some(HitResult {
                     panel_id: panel_pos,
                     batch_idx: entry.batch_idx,
@@ -127,11 +129,17 @@ pub fn hit_test_nearest_with_index(
         // R-tree nearest for indexed batch kinds.
         if let Some(idx) = spatial_index {
             if let Some((entry, dist)) = idx.nearest(panel_pos, px, py) {
-                let data_idx = panel
-                    .marks
-                    .get(entry.batch_idx)
-                    .and_then(|b| b.data_indices.as_ref())
-                    .and_then(|ids| ids.get(entry.node_idx).copied());
+                // Prefer the data_idx stored in the spatial index entry (which
+                // is populated from PackedBatchMeta for packed batches). Fall
+                // back to the scene-graph's batch.data_indices for non-packed
+                // batches where the entry's data_idx may be None.
+                let data_idx = entry.data_idx.or_else(|| {
+                    panel
+                        .marks
+                        .get(entry.batch_idx)
+                        .and_then(|b| b.data_indices.as_ref())
+                        .and_then(|ids| ids.get(entry.node_idx).copied())
+                });
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {
                     best = Some((dist, HitResult {
