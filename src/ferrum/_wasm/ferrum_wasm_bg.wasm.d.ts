@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmrenderer_free: (a: number, b: number) => void;
+export const wasmrenderer_clearSelections: (a: number) => [number, number, number, number];
 export const wasmrenderer_create: (a: any) => any;
 export const wasmrenderer_getHref: (a: number, b: number, c: number, d: number) => [number, number];
 export const wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];

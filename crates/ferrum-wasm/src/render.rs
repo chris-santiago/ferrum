@@ -35,6 +35,10 @@ pub struct GpuBuffers {
     image_draws: Vec<ImageGpu>,
     /// Ordered draw commands for per-batch pipeline selection.
     draw_commands: Vec<DrawCommand>,
+    /// Logical scene dimensions (from SceneData). Used to compute the
+    /// DPR scale factor when the surface is resized for PNG capture.
+    scene_width: f32,
+    scene_height: f32,
 }
 
 /// Uniform data uploaded to the GPU once per panel draw.
@@ -217,6 +221,8 @@ impl GpuBuffers {
             static_mesh_index_count: scene.static_mesh_buffers.indices.len() as u32,
             image_draws,
             draw_commands: scene.draw_commands.clone(),
+            scene_width: scene.width,
+            scene_height: scene.height,
         }
     }
 }
@@ -387,10 +393,29 @@ pub fn render_frame(
         // zoom-transformed uniforms; non-mark commands (axes, gridlines,
         // legend, title, etc.) use the identity-transform uniforms so
         // they stay fixed during zoom/pan.
+        let surface_w = surface_tex.texture.width();
+        let surface_h = surface_tex.texture.height();
+        // Scale factor for DPR: when the canvas is resized for PNG capture
+        // (e.g., 2x on Retina), plot_area is still in logical pixels.
+        let scale_x = surface_w as f32 / buffers.scene_width;
+        let scale_y = surface_h as f32 / buffers.scene_height;
+
         for cmd in &buffers.draw_commands {
             if cmd.instance_count == 0 {
                 continue;
             }
+
+            if let Some(pa) = cmd.plot_area.filter(|_| cmd.is_mark) {
+                pass.set_scissor_rect(
+                    (pa[0] * scale_x) as u32,
+                    (pa[1] * scale_y) as u32,
+                    (pa[2] * scale_x) as u32,
+                    (pa[3] * scale_y) as u32,
+                );
+            } else {
+                pass.set_scissor_rect(0, 0, surface_w, surface_h);
+            }
+
             let bind_group = if cmd.is_mark {
                 &buffers.uniform_bind_group
             } else {

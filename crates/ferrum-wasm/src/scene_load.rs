@@ -204,6 +204,11 @@ pub struct DrawCommand {
     /// etc.), the identity transform is used so these elements stay fixed
     /// during zoom.
     pub is_mark: bool,
+    /// For mark draw commands (`is_mark == true`), the panel's plot area
+    /// `[x, y, w, h]` in canvas pixels. The render loop uses this to
+    /// restrict the GPU clip region so zoomed marks do not bleed into axis
+    /// margins. `None` for non-mark commands (axes, grid, legend, title).
+    pub plot_area: Option<[f32; 4]>,
 }
 
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
@@ -238,12 +243,40 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
 
     // Title: non-mark → static mesh
     collect_nodes(&scene.title, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
 
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
-        // Grid: non-mark → static mesh
-        collect_nodes(&panel.grid, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+        // Grid: non-mark → static mesh. Snap Line nodes to pixel centers to
+        // avoid sub-pixel aliasing in the GPU rasterizer (the SVG renderer
+        // handles this natively; WASM needs explicit snapping).
+        let snapped_grid: Vec<SceneNode> = panel.grid.iter().map(|node| {
+            if let SceneNode::Line { x1, y1, x2, y2, style } = node {
+                let (sx1, sy1, sx2, sy2) = if (x1 - x2).abs() < 0.5 {
+                    // Vertical line: snap x to pixel center (round + 0.5)
+                    let snapped_x = x1.round() + 0.5;
+                    (snapped_x, *y1, snapped_x, *y2)
+                } else if (y1 - y2).abs() < 0.5 {
+                    // Horizontal line: snap y to pixel center (round + 0.5)
+                    let snapped_y = y1.round() + 0.5;
+                    (*x1, snapped_y, *x2, snapped_y)
+                } else {
+                    // Diagonal line: pass through unchanged
+                    (*x1, *y1, *x2, *y2)
+                };
+                SceneNode::Line { x1: sx1, y1: sy1, x2: sx2, y2: sy2, style: style.clone() }
+            } else {
+                node.clone()
+            }
+        }).collect();
+        collect_nodes(&snapped_grid, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
+
+        let panel_plot_area = Some([
+            panel.plot_area.x as f32,
+            panel.plot_area.y as f32,
+            panel.plot_area.w as f32,
+            panel.plot_area.h as f32,
+        ]);
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
@@ -263,6 +296,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     instance_count: meta.instance_count as u32,
                     additive,
                     is_mark: true,
+                    plot_area: panel_plot_area,
                 });
             } else {
                 // Mark batches → mark mesh (zoom transform)
@@ -271,24 +305,24 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
                     batch.stroke_cap, batch.stroke_join,
                 );
-                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, true, &mut draw_commands);
+                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, true, panel_plot_area, &mut draw_commands);
             }
         }
 
         // Axes, strip titles, annotations: non-mark → static mesh
         collect_nodes(&panel.axes, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
         collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
         collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
     }
 
     // Legend, decorations: non-mark → static mesh
     collect_nodes(&scene.legend, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
     collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut static_mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, None, &mut draw_commands);
 
     SceneData {
         circle_instances: circles,
@@ -306,6 +340,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
 }
 
 /// Emit draw commands for any circles/rects added since the previous snapshot.
+#[allow(clippy::too_many_arguments)]
 fn emit_draw_commands(
     circles: &[CircleInstance],
     rects: &[RectInstance],
@@ -313,6 +348,7 @@ fn emit_draw_commands(
     prev_r: &mut usize,
     additive: bool,
     is_mark: bool,
+    plot_area: Option<[f32; 4]>,
     commands: &mut Vec<DrawCommand>,
 ) {
     let new_c = circles.len();
@@ -323,6 +359,7 @@ fn emit_draw_commands(
             instance_count: (new_c - *prev_c) as u32,
             additive,
             is_mark,
+            plot_area,
         });
     }
     *prev_c = new_c;
@@ -334,6 +371,7 @@ fn emit_draw_commands(
             instance_count: (new_r - *prev_r) as u32,
             additive,
             is_mark,
+            plot_area,
         });
     }
     *prev_r = new_r;

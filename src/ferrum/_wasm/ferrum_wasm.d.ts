@@ -5,6 +5,7 @@ export class WasmRenderer {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    clearSelections(): string;
     static create(canvas: HTMLCanvasElement): Promise<WasmRenderer>;
     /**
      * Return the href string for a specific mark node, or an empty string if
@@ -122,6 +123,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
+    readonly wasmrenderer_clearSelections: (a: number) => [number, number, number, number];
     readonly wasmrenderer_create: (a: any) => any;
     readonly wasmrenderer_getHref: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
