@@ -36,24 +36,12 @@ pub(crate) fn apply_conditionals_and_render(
         &loaded_data.packed_batch_meta,
     );
 
-    // Rebuild GPU buffers with updated colors and re-render.
-    let updated_data = crate::scene_load::SceneData {
-        circle_instances: updates.circle_instances,
-        rect_instances: updates.rect_instances,
-        mesh_buffers: loaded_data.mesh_buffers.clone(),
-        static_mesh_buffers: loaded_data.static_mesh_buffers.clone(),
-        text_elements: loaded_data.text_elements.clone(),
-        image_quads: loaded_data.image_quads.clone(),
-        background: loaded_data.background,
-        width: loaded_data.width,
-        height: loaded_data.height,
-        packed_batch_meta: loaded_data.packed_batch_meta.clone(),
-        draw_commands: loaded_data.draw_commands.clone(),
-    };
-    let new_buffers = crate::render::GpuBuffers::from_scene(gpu, pipelines, &updated_data);
-    crate::render::render_frame(gpu, pipelines, &new_buffers, updated_data.background)
+    // Re-upload only the instance buffers that changed (circle and rect
+    // colors). Mesh, static mesh, annotation mesh, images, and uniforms are
+    // unaffected by selection changes and do not need to be re-uploaded.
+    loaded_buffers.update_instances(gpu, &updates.circle_instances, &updates.rect_instances);
+    crate::render::render_frame(gpu, pipelines, loaded_buffers, loaded_data.background)
         .map_err(wasm_bindgen::JsValue::from)?;
-    *loaded_buffers = new_buffers;
 
     // Serialize current selection state for Python sync.
     let state_json = interaction_state.to_json();

@@ -121,10 +121,15 @@ pub struct SceneData {
     /// polygons, polylines). Drawn with the zoom/pan transform.
     pub mesh_buffers: VertexBuffers<MeshVertex, u32>,
     /// Mesh vertices/indices for non-mark elements (grid lines, axis
-    /// ticks, annotations, legend lines, title decorations, etc.).
+    /// ticks, legend lines, title decorations, etc.).
     /// Drawn with the identity transform so they stay fixed during
     /// zoom/pan.
     pub static_mesh_buffers: VertexBuffers<MeshVertex, u32>,
+    /// Mesh vertices/indices for annotation Line/Path nodes
+    /// (from `annotate_hline` / `annotate_vline` etc.).  Drawn with the
+    /// identity transform AFTER mark mesh so reference lines appear above
+    /// data marks, matching SVG painter order.
+    pub annotation_mesh_buffers: VertexBuffers<MeshVertex, u32>,
     pub text_elements: Vec<TextElementData>,
     pub image_quads: Vec<ImageQuad>,
     pub background: Option<[f32; 4]>,
@@ -211,32 +216,26 @@ pub struct DrawCommand {
     pub plot_area: Option<[f32; 4]>,
 }
 
-/// Which mesh buffer a `collect_static` or `collect_mark` call targets.
-#[allow(dead_code)] // Enum is defined for an in-progress refactor; not yet wired.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MeshTarget {
-    /// Mark mesh — drawn with the zoom/pan transform.
-    Mark,
-    /// Static mesh — drawn with the identity transform (stays fixed during zoom).
-    Static,
-}
-
 /// Accumulator for one full scene-load pass.
 ///
 /// Replaces the 8 loose `let mut` variables previously threaded through every
-/// `collect_nodes` / `emit_draw_commands` call. Callers use the two surface
-/// methods (`collect_static` / `collect_mark`) which handle mesh routing and
-/// draw-command emission internally.
+/// `collect_nodes` / `emit_draw_commands` call. Callers use the three surface
+/// methods (`collect_static` / `collect_mark` / `collect_annotation`) which
+/// handle mesh routing and draw-command emission internally.
 pub struct SceneCollector {
     pub circles: Vec<CircleInstance>,
     pub rects: Vec<RectInstance>,
     /// Mark mesh: lines, areas, paths, polygons, polylines from mark batches.
     /// Drawn with the zoom/pan transform.
     pub mesh: VertexBuffers<MeshVertex, u32>,
-    /// Static mesh: grid lines, axis ticks, annotations, legend lines,
-    /// title decorations, etc. Drawn with the identity transform so they
-    /// stay fixed during zoom/pan.
+    /// Static mesh: grid lines, axis ticks, legend lines, title decorations,
+    /// etc. Drawn with the identity transform so they stay fixed during
+    /// zoom/pan.
     pub static_mesh: VertexBuffers<MeshVertex, u32>,
+    /// Annotation mesh: Line/Path nodes from `panel.annotations`
+    /// (e.g. `annotate_hline` / `annotate_vline`). Drawn with the identity
+    /// transform AFTER mark mesh so reference lines appear above data marks.
+    pub annotation_mesh: VertexBuffers<MeshVertex, u32>,
     pub texts: Vec<TextElementData>,
     pub images: Vec<ImageQuad>,
     pub draw_commands: Vec<DrawCommand>,
@@ -259,6 +258,7 @@ impl SceneCollector {
             rects: Vec::new(),
             mesh: VertexBuffers::new(),
             static_mesh: VertexBuffers::new(),
+            annotation_mesh: VertexBuffers::new(),
             texts: Vec::new(),
             images: Vec::new(),
             draw_commands: Vec::new(),
@@ -311,6 +311,35 @@ impl SceneCollector {
             batch_join,
         );
         self.emit(additive, true, plot_area);
+    }
+
+    /// Collect `nodes` into the annotation mesh.
+    ///
+    /// Annotation Line/Path nodes (from `annotate_hline` / `annotate_vline`
+    /// etc.) are stored separately so they can be drawn AFTER mark mesh in
+    /// `render_frame`, giving them the correct z-order above data marks.
+    /// Circle/Rect annotation nodes are still emitted as draw commands via
+    /// `emit` (they already appear at the correct z-order because they are
+    /// emitted after mark batches).
+    pub fn collect_annotation(
+        &mut self,
+        nodes: &[SceneNode],
+        batch_cap: Option<StrokeCap>,
+        batch_join: Option<StrokeJoin>,
+    ) {
+        collect_nodes(
+            nodes,
+            &mut self.circles,
+            &mut self.rects,
+            &mut self.annotation_mesh,
+            &mut self.texts,
+            &mut self.images,
+            batch_cap,
+            batch_join,
+        );
+        // Emit draw commands for any Circle/Rect annotation nodes so they
+        // appear at the correct z-order (after mark batches).
+        self.emit(false, false, None);
     }
 
     /// Emit draw commands for any circles/rects added since the last snapshot.
@@ -436,10 +465,12 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             }
         }
 
-        // Axes, strip titles, annotations: non-mark → static mesh
+        // Axes, strip titles: non-mark → static mesh
         collector.collect_static(&panel.axes, None, None);
         collector.collect_static(&panel.strip_title, None, None);
-        collector.collect_static(&panel.annotations, None, None);
+        // Annotations: route to annotation_mesh so they appear above data
+        // marks in WASM (matching SVG painter order).
+        collector.collect_annotation(&panel.annotations, None, None);
     }
 
     // Legend, decorations: non-mark → static mesh
@@ -451,6 +482,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         rect_instances: collector.rects,
         mesh_buffers: collector.mesh,
         static_mesh_buffers: collector.static_mesh,
+        annotation_mesh_buffers: collector.annotation_mesh,
         text_elements: collector.texts,
         image_quads: collector.images,
         background,
@@ -3119,5 +3151,116 @@ mod tests {
         // Text element content is preserved.
         assert_eq!(data.text_elements[0].content, "Title");
         assert!((data.text_elements[0].x - 150.0).abs() < 1e-3);
+    }
+
+    // ── M9: annotation mesh is separate from static mesh ─────────────
+
+    /// Annotation Line nodes must land in `annotation_mesh_buffers`, not
+    /// `static_mesh_buffers`.  Grid Line nodes (non-annotation) must land in
+    /// `static_mesh_buffers`, not `annotation_mesh_buffers`.
+    ///
+    /// This regression test guards the z-order fix: annotation lines from
+    /// `annotate_hline`/`annotate_vline` should appear above data marks in
+    /// WASM, matching SVG painter order.  The separation into a distinct mesh
+    /// buffer is the mechanism that enables `render_frame` to draw annotation
+    /// lines after mark batches.
+    #[test]
+    fn test_annotation_mesh_separate_from_static_mesh() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind,
+            Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+        };
+
+        let stroke = StrokeStyle {
+            color: Color { r: 255, g: 0, b: 0, a: 255 },
+            width: 2.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+
+        // A grid line (non-annotation) and an annotation line.
+        let grid_line = SceneNode::Line {
+            x1: 50.0, y1: 0.0, x2: 50.0, y2: 400.0,
+            style: stroke.clone(),
+        };
+        let annotation_line = SceneNode::Line {
+            x1: 0.0, y1: 200.0, x2: 500.0, y2: 200.0,
+            style: stroke.clone(),
+        };
+
+        let scene = SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![grid_line],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Rule,
+                    nodes: vec![],
+                    data_indices: None, tooltips: None, hrefs: None,
+                    descriptions: None, keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![annotation_line],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+
+        // Grid line → static_mesh (not annotation_mesh).
+        assert!(
+            !data.static_mesh_buffers.vertices.is_empty(),
+            "grid Line must produce static_mesh vertices"
+        );
+
+        // Annotation line → annotation_mesh (not static_mesh).
+        assert!(
+            !data.annotation_mesh_buffers.vertices.is_empty(),
+            "annotation Line must produce annotation_mesh vertices"
+        );
+        assert!(
+            !data.annotation_mesh_buffers.indices.is_empty(),
+            "annotation Line must produce annotation_mesh indices"
+        );
+
+        // Verify that the static_mesh and annotation_mesh have different vertex
+        // counts (both contribute but are in different buffers).  A grid
+        // vertical line and an annotation horizontal line tessellate to the
+        // same number of vertices, so we verify both buffers are non-empty and
+        // that each contains exactly the geometry for one line.
+        assert!(
+            data.static_mesh_buffers.indices.len() >= 6,
+            "grid line must tessellate to ≥6 indices in static_mesh; got {}",
+            data.static_mesh_buffers.indices.len()
+        );
+        assert!(
+            data.annotation_mesh_buffers.indices.len() >= 6,
+            "annotation line must tessellate to ≥6 indices in annotation_mesh; got {}",
+            data.annotation_mesh_buffers.indices.len()
+        );
+
+        // Mark mesh must be empty (no mark nodes were added).
+        assert!(
+            data.mesh_buffers.vertices.is_empty(),
+            "mark mesh must be empty when no mark nodes are present"
+        );
     }
 }
