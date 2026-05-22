@@ -7,6 +7,15 @@ export class WasmRenderer {
     [Symbol.dispose](): void;
     static create(canvas: HTMLCanvasElement): Promise<WasmRenderer>;
     /**
+     * Return the href string for a specific mark node, or an empty string if
+     * none is present.
+     *
+     * `panel_id`, `batch_idx`, and `node_idx` correspond to the triple returned
+     * by `hitTestAt`.  The href is sourced from `batch.hrefs[node_idx]` in the
+     * scene graph.
+     */
+    getHref(panel_id: number, batch_idx: number, node_idx: number): string;
+    /**
      * `{"fields":[{"name":"x","value":"1.23"},…]}`, or `"{}"` if no
      * tooltip data is available for this batch/instance.
      */
@@ -56,6 +65,17 @@ export class WasmRenderer {
     resetZoom(panel_id: number): string;
     resize(width: number, height: number): void;
     /**
+     * Select all indexed marks (circles and rects) within the given scene-space
+     * rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
+     *
+     * Updates the first `Interval` selection spec found in `self.selections`,
+     * then applies conditional encodings and re-renders.  Returns the new
+     * selection state JSON.
+     *
+     * If no spatial index has been built yet (scene not loaded), returns `"{}"`.
+     */
+    selectInRect(_panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
+    /**
      * Set an absolute zoom+pan transform from D3-zoom.
      *
      * `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
@@ -103,6 +123,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmrenderer_free: (a: number, b: number) => void;
     readonly wasmrenderer_create: (a: any) => any;
+    readonly wasmrenderer_getHref: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wasmrenderer_getTooltip: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wasmrenderer_handleClick: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -113,6 +134,7 @@ export interface InitOutput {
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];
     readonly wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
     readonly wasmrenderer_resize: (a: number, b: number, c: number) => void;
+    readonly wasmrenderer_selectInRect: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_tickTransition: (a: number, b: number) => [number, number];

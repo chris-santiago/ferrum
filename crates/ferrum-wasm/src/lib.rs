@@ -25,7 +25,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 #[cfg(target_arch = "wasm32")]
-use crate::conditional::resolve_conditionals;
+use crate::conditional::resolve_conditionals_with_packed;
 #[cfg(target_arch = "wasm32")]
 use crate::error::WasmRenderError;
 #[cfg(target_arch = "wasm32")]
@@ -109,7 +109,8 @@ impl WasmRenderer {
         self.interaction = scene.interaction.clone();
         self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
         // Build spatial index over all panels for O(log n) hit-testing.
-        self.spatial_index = Some(SpatialIndex::build(&scene.panels));
+        // Pass scene data so packed instances (>= 1000 marks) are also indexed.
+        self.spatial_index = Some(SpatialIndex::build_with_packed(&scene.panels, Some(&data)));
         self.loaded = Some(LoadedScene { data, buffers, scene });
 
         if let Some(ref loaded) = self.loaded {
@@ -365,16 +366,15 @@ impl WasmRenderer {
             );
         }
 
-        // Fallback: search packed circle instances directly.
+        // Fallback: search packed instances directly (circles and rects).
         let px = x as f64;
         let py = y as f64;
         let mut best: Option<(f64, u32, u32, usize)> = None; // (dist, panel, batch, idx)
         for (&(panel_id, batch_idx), meta) in &loaded.data.packed_batch_meta {
-            if meta.kind != 0 { continue; } // only circles for now
             // B1 fix: convert canvas-space (px, py) to scene-space before comparing
             // against mark positions. The scene-node path (above) uses
             // hit_test::hit_test_nearest which applies self.zoom internally, but
-            // this packed-circle fallback operates on raw instance data in
+            // this packed fallback operates on raw instance data in
             // scene-space coordinates. Without the inverse transform, zoomed/panned
             // charts would miss hits because canvas pixels no longer align with
             // scene-space mark positions.
@@ -382,17 +382,52 @@ impl WasmRenderer {
                 .get(panel_id as usize)
                 .map(|t| t.inverse_apply(px, py))
                 .unwrap_or((px, py));
-            for i in 0..meta.instance_count {
-                let ci = &loaded.data.circle_instances[meta.instance_start + i];
-                let dx = sx - ci.center[0] as f64;
-                let dy = sy - ci.center[1] as f64;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let r = ci.radius as f64;
-                if dist <= r * 3.0 { // generous hit radius for dense scatter
-                    if best.as_ref().is_none_or(|(d, _, _, _)| dist < *d) {
-                        best = Some((dist, panel_id, batch_idx, i));
+
+            match meta.kind {
+                0 => {
+                    // Circles: distance from query point to circle center.
+                    for i in 0..meta.instance_count {
+                        let Some(ci) = loaded.data.circle_instances.get(meta.instance_start + i) else { continue };
+                        let dx = sx - ci.center[0] as f64;
+                        let dy = sy - ci.center[1] as f64;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        let r = ci.radius as f64;
+                        if dist <= r * 3.0 { // generous hit radius for dense scatter
+                            if best.as_ref().is_none_or(|(d, _, _, _)| dist < *d) {
+                                best = Some((dist, panel_id, batch_idx, i));
+                            }
+                        }
                     }
                 }
+                1 => {
+                    // Rects: distance from query point to rect center.
+                    for i in 0..meta.instance_count {
+                        let Some(ri) = loaded.data.rect_instances.get(meta.instance_start + i) else { continue };
+                        let cx = ri.position[0] as f64 + ri.size[0] as f64 / 2.0;
+                        let cy = ri.position[1] as f64 + ri.size[1] as f64 / 2.0;
+                        let dx = sx - cx;
+                        let dy = sy - cy;
+                        // Check if query point is inside the rect.
+                        let inside_x = sx >= ri.position[0] as f64
+                            && sx <= (ri.position[0] + ri.size[0]) as f64;
+                        let inside_y = sy >= ri.position[1] as f64
+                            && sy <= (ri.position[1] + ri.size[1]) as f64;
+                        let dist = if inside_x && inside_y {
+                            0.0
+                        } else {
+                            (dx * dx + dy * dy).sqrt()
+                        };
+                        // Use generous tolerance: half the diagonal as max snap distance.
+                        let half_diag = ((ri.size[0] as f64).powi(2) + (ri.size[1] as f64).powi(2)).sqrt() / 2.0;
+                        let tolerance = half_diag.max(5.0); // at least 5px snap
+                        if dist <= tolerance
+                            && best.as_ref().is_none_or(|(d, _, _, _)| dist < *d)
+                        {
+                            best = Some((dist, panel_id, batch_idx, i));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -412,14 +447,26 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else {
             return "{}".to_string();
         };
+
+        // Try packed batch tooltip bytes first (binary sidecar for >= 1000 marks).
         let key = (panel_id, batch_idx);
-        let Some(meta) = loaded.data.packed_batch_meta.get(&key) else {
-            return "{}".to_string();
-        };
-        let Some(ref tooltip_bytes) = meta.tooltip_bytes else {
-            return "{}".to_string();
-        };
-        scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize)
+        if let Some(meta) = loaded.data.packed_batch_meta.get(&key) {
+            if let Some(ref tooltip_bytes) = meta.tooltip_bytes {
+                return scene_load::parse_tooltip_json(tooltip_bytes, node_idx as usize);
+            }
+        }
+
+        // Fall back to scene-graph tooltips (non-packed batches with < 1000 marks).
+        if let Some(tooltip) = loaded.scene.panels
+            .get(panel_id as usize)
+            .and_then(|p| p.marks.get(batch_idx as usize))
+            .and_then(|b| b.tooltips.as_ref())
+            .and_then(|tips| tips.get(node_idx as usize))
+        {
+            return format_tooltip_content(tooltip);
+        }
+
+        "{}".to_string()
     }
 
     /// Return the href string for a specific mark node, or an empty string if
@@ -513,12 +560,13 @@ impl WasmRenderer {
 
         // Apply conditional encodings to produce dimmed/highlighted instance colors.
         let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals(
+        let updates = resolve_conditionals_with_packed(
             &loaded.scene.panels,
             conditionals,
             &self.interaction_state.selections,
             &loaded.data.circle_instances,
             &loaded.data.rect_instances,
+            &loaded.data.packed_batch_meta,
         );
 
         // Rebuild GPU buffers with updated colors and re-render.
@@ -769,6 +817,28 @@ fn tick_label_json(
     })
 }
 
+/// Format a scene-graph `TooltipContent` to the same JSON structure as
+/// `parse_tooltip_json`: `{"fields":[{"name":"x","value":"1.23"},…]}`.
+///
+/// Used by `get_tooltip` to serve tooltips from non-packed batches where
+/// tooltip data lives in the scene graph rather than a binary sidecar.
+#[cfg(any(target_arch = "wasm32", test))]
+fn format_tooltip_content(tooltip: &ferrum_scene::TooltipContent) -> String {
+    if tooltip.fields.is_empty() {
+        return "{}".to_string();
+    }
+    let fields_json: Vec<String> = tooltip
+        .fields
+        .iter()
+        .map(|f| {
+            let escaped_name = f.name.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_value = f.value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"name":"{}","value":"{}"}}"#, escaped_name, escaped_value)
+        })
+        .collect();
+    format!(r#"{{"fields":[{}]}}"#, fields_json.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,6 +901,64 @@ mod tests {
         assert!(
             angle.abs() < 0.01,
             "zero angle must produce angle=0.0 in JSON, got {angle}"
+        );
+    }
+
+    // ── Bug 1a: format_tooltip_content for scene-graph tooltips ─────────
+
+    #[test]
+    fn format_tooltip_content_single_field() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![TooltipField {
+                name: "x".to_string(),
+                value: "1.23".to_string(),
+            }],
+        };
+        let json = format_tooltip_content(&tooltip);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"x","value":"1.23"}]}"#,
+        );
+    }
+
+    #[test]
+    fn format_tooltip_content_multiple_fields() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![
+                TooltipField { name: "x".to_string(), value: "1.23".to_string() },
+                TooltipField { name: "y".to_string(), value: "4.56".to_string() },
+            ],
+        };
+        let json = format_tooltip_content(&tooltip);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"x","value":"1.23"},{"name":"y","value":"4.56"}]}"#,
+        );
+    }
+
+    #[test]
+    fn format_tooltip_content_empty_fields() {
+        use ferrum_scene::TooltipContent;
+        let tooltip = TooltipContent { fields: vec![] };
+        let json = format_tooltip_content(&tooltip);
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn format_tooltip_content_escapes_quotes() {
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![TooltipField {
+                name: "label".to_string(),
+                value: r#"say "hello""#.to_string(),
+            }],
+        };
+        let json = format_tooltip_content(&tooltip);
+        assert_eq!(
+            json,
+            r#"{"fields":[{"name":"label","value":"say \"hello\""}]}"#,
         );
     }
 }

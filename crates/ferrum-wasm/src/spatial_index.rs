@@ -20,6 +20,8 @@
 use ferrum_scene::{MarkBatch, MarkBatchKind, Panel, SceneNode};
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 
+use crate::scene_load::SceneData;
+
 /// Maximum distance (scene-space pixels) for [`SpatialIndex::nearest`] to
 /// return a result.  Queries farther than this snap threshold return `None`.
 pub const SNAP_DISTANCE: f64 = 50.0;
@@ -130,10 +132,25 @@ impl SpatialIndex {
     ///
     /// Uses `RTree::bulk_load` — O(n log n) construction.
     pub fn build(panels: &[Panel]) -> Self {
+        Self::build_with_packed(panels, None)
+    }
+
+    /// Build the index from panels, also indexing packed instances from the
+    /// binary sidecar when `scene_data` is provided.
+    ///
+    /// Packed batches (>= 1000 marks) have empty `batch.nodes` in the scene
+    /// graph. Without this method, those marks would be invisible to the
+    /// R-tree, making spatial queries O(n) on the fallback path.
+    pub fn build_with_packed(panels: &[Panel], scene_data: Option<&SceneData>) -> Self {
         let trees = panels
             .iter()
-            .map(|panel| {
-                let entries = entries_for_panel(panel);
+            .enumerate()
+            .map(|(panel_idx, panel)| {
+                let mut entries = entries_for_panel(panel);
+                // Also index packed instances from the binary sidecar.
+                if let Some(data) = scene_data {
+                    collect_packed_entries(panel_idx, panel, data, &mut entries);
+                }
                 PanelIndex::new(entries)
             })
             .collect();
@@ -253,6 +270,77 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
                     radius: 0.0,
                     aabb,
                 });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect [`MarkEntry`] values for packed instances in a panel.
+///
+/// For each batch in the panel that has packed metadata in `data.packed_batch_meta`,
+/// creates entries from the circle/rect instance buffers at the recorded offsets.
+fn collect_packed_entries(
+    panel_idx: usize,
+    panel: &Panel,
+    data: &SceneData,
+    out: &mut Vec<MarkEntry>,
+) {
+    for (batch_idx, _batch) in panel.marks.iter().enumerate() {
+        let key = (panel_idx as u32, batch_idx as u32);
+        let Some(meta) = data.packed_batch_meta.get(&key) else {
+            continue;
+        };
+
+        match meta.kind {
+            0 => {
+                // Packed circles.
+                for i in 0..meta.instance_count {
+                    let idx = meta.instance_start + i;
+                    let Some(ci) = data.circle_instances.get(idx) else { continue };
+                    let cx = ci.center[0] as f64;
+                    let cy = ci.center[1] as f64;
+                    let r = ci.radius as f64;
+                    let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
+                    let data_idx = meta.data_indices
+                        .as_ref()
+                        .and_then(|dis| dis.get(i))
+                        .map(|&di| di as usize);
+                    out.push(MarkEntry {
+                        point: [cx, cy],
+                        batch_idx,
+                        node_idx: i,
+                        data_idx,
+                        radius: r,
+                        aabb,
+                    });
+                }
+            }
+            1 => {
+                // Packed rects.
+                for i in 0..meta.instance_count {
+                    let idx = meta.instance_start + i;
+                    let Some(ri) = data.rect_instances.get(idx) else { continue };
+                    let x = ri.position[0] as f64;
+                    let y = ri.position[1] as f64;
+                    let w = ri.size[0] as f64;
+                    let h = ri.size[1] as f64;
+                    let cx = x + w / 2.0;
+                    let cy = y + h / 2.0;
+                    let aabb = AABB::from_corners([x, y], [x + w, y + h]);
+                    let data_idx = meta.data_indices
+                        .as_ref()
+                        .and_then(|dis| dis.get(i))
+                        .map(|&di| di as usize);
+                    out.push(MarkEntry {
+                        point: [cx, cy],
+                        batch_idx,
+                        node_idx: i,
+                        data_idx,
+                        radius: 0.0,
+                        aabb,
+                    });
+                }
             }
             _ => {}
         }
@@ -971,5 +1059,192 @@ mod tests {
         // Distance from edge = 30 - 10 = 20 → distance_2 should be 400
         let d2 = entry.distance_2(&[30.0, 0.0]);
         assert!((d2 - 400.0).abs() < 1e-6, "expected d2=400, got {d2}");
+    }
+
+    // ── Bug 5: SpatialIndex::build_with_packed indexes packed instances ──
+
+    #[test]
+    fn build_with_packed_indexes_circle_instances() {
+        use crate::scene_load::{CircleInstance, PackedBatchMeta, SceneData};
+        use lyon::tessellation::VertexBuffers;
+        use std::collections::HashMap;
+
+        // Panel with one batch that has empty nodes (packed batch).
+        let panels = make_panels(vec![
+            point_batch(vec![], None), // empty nodes — packed
+        ]);
+
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 0u32),
+            PackedBatchMeta {
+                data_indices: Some(vec![10, 20, 30]),
+                tooltip_bytes: None,
+                kind: 0, // circles
+                instance_start: 0,
+                instance_count: 3,
+            },
+        );
+
+        let data = SceneData {
+            circle_instances: vec![
+                CircleInstance {
+                    center: [100.0, 100.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+                CircleInstance {
+                    center: [200.0, 200.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+                CircleInstance {
+                    center: [300.0, 300.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+            ],
+            rect_instances: vec![],
+            mesh_buffers: VertexBuffers::new(),
+            text_elements: vec![],
+            image_quads: vec![],
+            background: None,
+            width: 500.0,
+            height: 500.0,
+            packed_batch_meta: packed_meta,
+            draw_commands: vec![],
+        };
+
+        let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
+
+        // All three packed circles should be indexed and findable.
+        let (e0, d0) = idx.nearest(0, 100.0, 100.0).expect("must find packed circle 0");
+        assert_eq!(e0.data_idx, Some(10));
+        assert!(d0 < 1e-6, "dist must be ~0 at center");
+
+        let (e1, _) = idx.nearest(0, 200.0, 200.0).expect("must find packed circle 1");
+        assert_eq!(e1.data_idx, Some(20));
+
+        let (e2, _) = idx.nearest(0, 300.0, 300.0).expect("must find packed circle 2");
+        assert_eq!(e2.data_idx, Some(30));
+    }
+
+    #[test]
+    fn build_with_packed_indexes_rect_instances() {
+        use crate::scene_load::{RectInstance, PackedBatchMeta, SceneData};
+        use lyon::tessellation::VertexBuffers;
+        use std::collections::HashMap;
+
+        // Panel with one batch that has empty nodes (packed batch).
+        let panels = make_panels(vec![
+            bar_batch(vec![], None), // empty nodes — packed
+        ]);
+
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 0u32),
+            PackedBatchMeta {
+                data_indices: Some(vec![42, 99]),
+                tooltip_bytes: None,
+                kind: 1, // rects
+                instance_start: 0,
+                instance_count: 2,
+            },
+        );
+
+        let data = SceneData {
+            circle_instances: vec![],
+            rect_instances: vec![
+                RectInstance {
+                    position: [90.0, 90.0], size: [20.0, 20.0], corner_radius: 0.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+                RectInstance {
+                    position: [200.0, 200.0], size: [50.0, 30.0], corner_radius: 0.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+            ],
+            mesh_buffers: VertexBuffers::new(),
+            text_elements: vec![],
+            image_quads: vec![],
+            background: None,
+            width: 500.0,
+            height: 500.0,
+            packed_batch_meta: packed_meta,
+            draw_commands: vec![],
+        };
+
+        let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
+
+        // Rect 0 center at (100, 100) — should be findable.
+        let (e0, d0) = idx.nearest(0, 100.0, 100.0).expect("must find packed rect 0");
+        assert_eq!(e0.data_idx, Some(42));
+        assert!(d0 < 1e-6, "point inside rect must have dist 0");
+
+        // Rect 1 center at (225, 215) — should be findable.
+        let (e1, _) = idx.nearest(0, 225.0, 215.0).expect("must find packed rect 1");
+        assert_eq!(e1.data_idx, Some(99));
+    }
+
+    #[test]
+    fn build_with_packed_mixes_packed_and_nonpacked() {
+        use crate::scene_load::{CircleInstance, PackedBatchMeta, SceneData};
+        use lyon::tessellation::VertexBuffers;
+        use std::collections::HashMap;
+
+        // Panel with two batches: one non-packed, one packed.
+        let panels = make_panels(vec![
+            point_batch(vec![circle(50.0, 50.0, 5.0)], Some(vec![1])), // non-packed
+            point_batch(vec![], None), // packed
+        ]);
+
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 1u32), // panel 0, batch 1
+            PackedBatchMeta {
+                data_indices: Some(vec![2]),
+                tooltip_bytes: None,
+                kind: 0,
+                instance_start: 0,
+                instance_count: 1,
+            },
+        );
+
+        let data = SceneData {
+            circle_instances: vec![
+                CircleInstance {
+                    center: [400.0, 400.0], radius: 5.0,
+                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                    stroke_dash: 0.0, angle: 0.0,
+                },
+            ],
+            rect_instances: vec![],
+            mesh_buffers: VertexBuffers::new(),
+            text_elements: vec![],
+            image_quads: vec![],
+            background: None,
+            width: 500.0,
+            height: 500.0,
+            packed_batch_meta: packed_meta,
+            draw_commands: vec![],
+        };
+
+        let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
+
+        // Non-packed circle at (50, 50).
+        let (e_np, _) = idx.nearest(0, 50.0, 50.0).expect("must find non-packed circle");
+        assert_eq!(e_np.data_idx, Some(1));
+
+        // Packed circle at (400, 400).
+        let (e_pk, _) = idx.nearest(0, 400.0, 400.0).expect("must find packed circle");
+        assert_eq!(e_pk.data_idx, Some(2));
     }
 }

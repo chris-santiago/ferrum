@@ -284,33 +284,42 @@ async function _render(container, sceneJson, adapter) {
   select(chartWrapper).on('dblclick.zoom', onReset);
 
   // ── Save PNG handler ──────────────────────────────────────────────
-  function onSave() {
+  // WebGPU canvases clear after present(). We render a frame, wait one
+  // animation frame for the compositor to finish, blit to a 2D offscreen
+  // canvas, then export from there.
+  async function onSave() {
     if (!renderer) return;
     const dpr = window.devicePixelRatio || 1;
-    if (dpr <= 1) {
-      canvas.toBlob(blob => { _downloadBlob(blob); });
-      return;
-    }
     const origW = canvas.width, origH = canvas.height;
-    function _restore() {
-      try {
-        canvas.width = origW;
-        canvas.height = origH;
-        renderer.resize(origW, origH);
-        renderer.render_frame_js();
-      } catch (_) { /* GPU context lost — canvas stays at wrong size until next resize */ }
-    }
+    const captureW = Math.round(origW * dpr);
+    const captureH = Math.round(origH * dpr);
     try {
-      canvas.width = origW * dpr;
-      canvas.height = origH * dpr;
-      renderer.resize(canvas.width, canvas.height);
-      renderer.render_frame_js();
-      canvas.toBlob(blob => {
-        _restore();
-        _downloadBlob(blob);
-      });
-    } catch (_) {
-      _restore();
+      if (dpr > 1) {
+        canvas.width = captureW;
+        canvas.height = captureH;
+        renderer.resize(captureW, captureH);
+      }
+      renderer.renderFrame();
+      await new Promise(r => requestAnimationFrame(r));
+      const off = document.createElement('canvas');
+      off.width = canvas.width; off.height = canvas.height;
+      off.getContext('2d').drawImage(canvas, 0, 0);
+      const a = document.createElement('a');
+      a.href = off.toDataURL('image/png');
+      a.download = 'ferrum-chart.png';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      console.warn('[ferrum] save PNG error:', err);
+    }
+    if (dpr > 1) {
+      try {
+        canvas.width = origW; canvas.height = origH;
+        renderer.resize(origW, origH);
+        renderer.renderFrame();
+      } catch (_) { /* restore failed */ }
     }
   }
 
@@ -446,7 +455,10 @@ async function _render(container, sceneJson, adapter) {
 
   // ── RAF-coalesced mousemove ───────────────────────────────────────
   let _rafId = null, _pendingMove = null;
-  canvas.addEventListener('mousemove', e => {
+  // Listeners on chartWrapper (not canvas) because the SVG overlay with
+  // pointer-events:all for D3 brush sits on top of the canvas and
+  // intercepts events.  chartWrapper receives bubbled events from both.
+  chartWrapper.addEventListener('mousemove', e => {
     _pendingMove = e;
     if (!_rafId) _rafId = requestAnimationFrame(() => {
       _rafId = null;
@@ -454,12 +466,12 @@ async function _render(container, sceneJson, adapter) {
     });
   });
 
-  canvas.addEventListener('mouseleave', () => {
+  chartWrapper.addEventListener('mouseleave', () => {
     tip.style.opacity = '0';
   });
 
   // ── Click: href navigation + point selection (WASM-only) ──────────
-  canvas.addEventListener('click', e => {
+  chartWrapper.addEventListener('click', e => {
     const r = canvas.getBoundingClientRect();
     const cx = (e.clientX - r.left) * (canvas.width / r.width);
     const cy = (e.clientY - r.top) * (canvas.height / r.height);
