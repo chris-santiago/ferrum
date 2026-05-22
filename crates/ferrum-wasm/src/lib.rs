@@ -541,6 +541,14 @@ impl WasmRenderer {
 
         self.apply_conditionals_and_render()
     }
+
+    #[wasm_bindgen(js_name = "clearSelections")]
+    pub fn clear_selections(&mut self) -> Result<String, JsValue> {
+        for state in self.interaction_state.selections.values_mut() {
+            *state = selection_state::SelectionState::Empty;
+        }
+        self.apply_conditionals_and_render()
+    }
 }
 
 /// Private helpers that share implementation across public `wasm_bindgen` methods.

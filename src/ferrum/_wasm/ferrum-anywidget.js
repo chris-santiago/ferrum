@@ -238,10 +238,13 @@ async function _render(container, sceneJson, adapter) {
   function setMode(mode) {
     currentMode = mode;
     container.dataset.mode = mode;
-    // Update active class on toolbar buttons.
     container.querySelectorAll('.ferrum-tool[data-mode]').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === mode);
     });
+    // In pan mode, disable pointer-events on SVG + brush overlays so
+    // hover/click/double-click events reach chartWrapper unblocked.
+    // In select/boxzoom, enable so D3 brush can capture drag gestures.
+    svgEl.style.pointerEvents = (mode === 'pan') ? 'none' : 'all';
   }
 
   // ── D3-zoom on chart wrapper ──────────────────────────────────────
@@ -278,6 +281,7 @@ async function _render(container, sceneJson, adapter) {
   function onReset() {
     if (!renderer) return;
     select(chartWrapper).call(zoomBehavior.transform, zoomIdentity);
+    try { renderer.clearSelections(); } catch (_) {}
   }
 
   // Double-click: reset zoom to identity.
@@ -399,9 +403,6 @@ async function _render(container, sceneJson, adapter) {
       if (intervalSel.mark.stroke) brushStroke = intervalSel.mark.stroke;
     }
 
-    // Enable pointer events on the SVG so brushes can capture gestures.
-    svgEl.style.pointerEvents = 'all';
-
     for (let pi = 0; pi < scene.panels.length; pi++) {
       const pa = scene.panels[pi].plot_area;
       if (!pa) continue;
@@ -442,6 +443,8 @@ async function _render(container, sceneJson, adapter) {
           } catch (err) {
             console.warn('[ferrum] handleDrag error:', err);
           }
+          // Clear the brush rectangle after selection is applied.
+          select(this).call(brushBehavior.move, null);
         }
       });
 
@@ -456,6 +459,9 @@ async function _render(container, sceneJson, adapter) {
         .style('stroke', brushStroke);
     }
   }
+
+  // Apply initial mode — sets container.dataset.mode and SVG pointer-events.
+  setMode(defaultMode);
 
   // ── Tooltip hover handler ─────────────────────────────────────────
   function handleHover(e) {
