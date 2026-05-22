@@ -114,11 +114,10 @@ def test_wide_hconcat_saves_html_without_error(tmp_path):
     assert "disconnect" in content, "onSave should disconnect ResizeObserver"
 
 
-def test_save_png_adaptive_dpr_clamps_to_max_texture(tmp_path):
-    """Regression: Save PNG must clamp capture dimensions to GPU max texture size.
-
-    A 1290px HConcat at DPR=2 requested 2580px, exceeding the 2048 WebGPU
-    limit. The JS must query maxTextureSize and compute an adaptive scale.
+def test_save_png_injects_phys_dpi_metadata(tmp_path):
+    """Regression: Save PNG must inject a pHYs chunk for DPI metadata instead
+    of upscaling the canvas by devicePixelRatio (which caused gridline
+    artifacts in composed charts due to stale pixel-snap positions).
     """
     import ferrum as fm
     import polars as pl
@@ -127,29 +126,56 @@ def test_save_png_adaptive_dpr_clamps_to_max_texture(tmp_path):
     left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="g:N")
     right = fm.Chart(df).mark_bar().encode(x="g:N", y="y:Q", color="g:N")
     comp = left | right
-    out = tmp_path / "adaptive_dpr.html"
+    out = tmp_path / "phys_dpi.html"
     comp.interactive().save(str(out))
     content = out.read_text()
-    assert "maxTextureSize" in content, "onSave must query GPU max texture size"
-    assert "maxScale" in content, "onSave must compute adaptive scale"
+    assert "injectPHYs" in content, "onSave must inject pHYs DPI metadata"
+    assert "pHYs" in content, "pHYs chunk builder must be present"
+    assert "captureScale" not in content, "DPR upscale logic must be removed"
 
 
-def test_save_png_viewbox_uses_canvas_dims(tmp_path):
-    """Regression: SVG viewBox must use origW/origH (current canvas dims),
-    not stale w/h (scene dims), so the SVG composite aligns with GPU content
-    if the ResizeObserver has resized the canvas.
+def test_save_png_no_canvas_resize(tmp_path):
+    """Regression: Save PNG must not resize the canvas — 1:1 capture avoids
+    gridline snap artifacts from stale tessellation.  The viewBox override
+    and origW/origH tracking are no longer needed.
     """
     import ferrum as fm
     import polars as pl
 
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    out = tmp_path / "viewbox.html"
+    out = tmp_path / "no_resize.html"
     chart.interactive().save(str(out))
     content = out.read_text()
-    assert "origW" in content and "origH" in content, "viewBox should use origW/origH"
-    # Must NOT use the stale scene-level w/h for viewBox
-    assert "viewBox', `0 0 ${origW} ${origH}`" in content
+    # Extract onSave body — it sits between "async function onSave" and the
+    # next top-level "// ──" section divider.
+    start = content.find("async function onSave")
+    end = content.find("// ──", start + 1) if start != -1 else -1
+    on_save_body = content[start:end] if start != -1 and end != -1 else ""
+    assert on_save_body, "onSave function must exist in the HTML"
+    assert "renderer.resize" not in on_save_body, "onSave must not call renderer.resize"
+    assert "off.width = canvas.width" in on_save_body, "offscreen canvas should match canvas 1:1"
+
+
+def test_canvas_dpr_clamped_to_max_texture(tmp_path):
+    """Regression: Wide HConcat at DPR=2 must not exceed GPU max texture size.
+
+    Canvas init creates at CSS size, then resizes to clamped DPR after
+    querying maxTextureSize.  The JS must contain the clamping logic.
+    """
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": list(range(8)), "y": [2, 4, 1, 5, 3, 6, 2, 4], "g": ["a", "b"] * 4})
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="g:N")
+    right = fm.Chart(df).mark_bar().encode(x="g:N", y="y:Q", color="g:N")
+    comp = left | right
+    out = tmp_path / "dpr_clamp.html"
+    comp.interactive().save(str(out))
+    content = out.read_text()
+    assert "maxTextureSize" in content, "must query GPU max texture size"
+    assert "effectiveDpr" in content, "must compute clamped effective DPR"
+    assert "canvas.width = w;" in content, "canvas must start at CSS size"
 
 
 # ── M5: _auto_tooltips removed from public to_spec() ─────────────────────────

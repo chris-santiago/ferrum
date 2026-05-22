@@ -25,6 +25,78 @@ async function _ensureWasm() {
 // HTML and Jupyter ESM builds.  The D3 bundle's `export { ... }` is stripped
 // by the assembler, leaving the symbols in module scope.
 
+// ── PNG pHYs DPI injection ────────────────────────────────────────────────
+// Splices a pHYs chunk into a PNG data URL so the exported file carries the
+// screen DPI as metadata.  The chunk is inserted at byte offset 33 (immediately
+// after the 8-byte PNG signature and the 25-byte IHDR chunk), which is the
+// required position before any IDAT chunks.
+//
+// pHYs chunk layout (21 bytes total):
+//   4 bytes — chunk data length = 9 (big-endian uint32)
+//   4 bytes — chunk type "pHYs" (0x70 0x48 0x59 0x73)
+//   4 bytes — pixels-per-unit X (big-endian uint32)
+//   4 bytes — pixels-per-unit Y (big-endian uint32)
+//   1 byte  — unit specifier = 1 (metres)
+//   4 bytes — CRC32 of type + data (13 bytes)
+function injectPHYs(dataUrl, dprOverride) {
+  // Decode base64 payload.
+  const b64 = dataUrl.slice('data:image/png;base64,'.length);
+  const bin = atob(b64);
+  const src = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) src[i] = bin.charCodeAt(i);
+
+  // Compute pixels-per-metre from the effective DPR (clamped to GPU limits).
+  const dpi = (dprOverride || window.devicePixelRatio || 1) * 72;
+  const ppm = Math.round(dpi * 39.3701);
+
+  // Build the 9-byte chunk data: X ppm (4), Y ppm (4), unit=1 (1).
+  const data = new Uint8Array(9);
+  const dv = new DataView(data.buffer);
+  dv.setUint32(0, ppm, false);
+  dv.setUint32(4, ppm, false);
+  data[8] = 1;
+
+  // Build chunk type bytes.
+  const type = new Uint8Array([0x70, 0x48, 0x59, 0x73]); // "pHYs"
+
+  // CRC32 over type (4 bytes) + data (9 bytes) = 13 bytes.
+  const crcBuf = new Uint8Array(13);
+  crcBuf.set(type, 0);
+  crcBuf.set(data, 4);
+  const crc = _crc32(crcBuf);
+
+  // Assemble the 21-byte pHYs chunk.
+  const chunk = new Uint8Array(21);
+  const cv = new DataView(chunk.buffer);
+  cv.setUint32(0, 9, false);          // data length
+  chunk.set(type, 4);                 // chunk type
+  chunk.set(data, 8);                 // chunk data
+  cv.setUint32(17, crc, false);       // CRC
+
+  // Splice: everything before offset 33 | pHYs chunk | rest.
+  const out = new Uint8Array(src.length + 21);
+  out.set(src.subarray(0, 33), 0);
+  out.set(chunk, 33);
+  out.set(src.subarray(33), 54);
+
+  // Re-encode to base64 data URL.
+  let outBin = '';
+  for (let i = 0; i < out.length; i++) outBin += String.fromCharCode(out[i]);
+  return 'data:image/png;base64,' + btoa(outBin);
+}
+
+// Standard reflected CRC32 (PNG polynomial 0xEDB88320).
+function _crc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= buf[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 1) ? (crc >>> 1) ^ 0xEDB88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
 // ── SVG text placement ───────────────────────────────────────────────────
 function _placeTextSvg(svgEl, texts) {
   const svg = select(svgEl);
@@ -183,8 +255,14 @@ async function _render(container, sceneJson, adapter) {
   container.appendChild(chartWrapper);
 
   // ── Canvas ───────────────────────────────────────────────────────
+  // Start at CSS-pixel size (safe for any chart width). After the GPU
+  // renderer is created we query maxTextureSize and resize to the highest
+  // DPR the hardware supports.
   const canvas = document.createElement('canvas');
-  canvas.width = w; canvas.height = h; canvas.style.display = 'block';
+  canvas.width = w; canvas.height = h;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.style.display = 'block';
   chartWrapper.appendChild(canvas);
 
   // ── SVG overlay for text labels ──────────────────────────────────
@@ -208,10 +286,27 @@ async function _render(container, sceneJson, adapter) {
   const hasInterval = (cfg.selections || []).some(s => s.type === 'interval');
 
   // ── GPU init (may fail when WebGPU/WebGL context limit exceeded) ──
+  // Effective DPR after clamping to GPU max texture size. Stored in
+  // closure scope so ResizeObserver and pHYs injection can reuse it.
+  let effectiveDpr = 1;
+  let maxTex = 2048;
   let renderer = null;
   try {
     await _ensureWasm();
     renderer = await WasmRenderer.create(canvas);
+    // Query actual GPU limit and compute the highest safe DPR.
+    maxTex = renderer.maxTextureSize ? renderer.maxTextureSize() : 2048;
+    const rawDpr = window.devicePixelRatio || 1;
+    effectiveDpr = Math.min(rawDpr, maxTex / Math.max(w, h));
+    if (effectiveDpr < 1) effectiveDpr = 1;
+    // Resize canvas to DPR-clamped physical pixels.
+    const physW = Math.round(w * effectiveDpr);
+    const physH = Math.round(h * effectiveDpr);
+    if (physW !== canvas.width || physH !== canvas.height) {
+      canvas.width = physW;
+      canvas.height = physH;
+      renderer.resize(physW, physH);
+    }
     const packedArr = adapter.getPackedData();
     const textJson = renderer.loadScene(sceneJson, packedArr);
     _placeTextSvg(svgEl, JSON.parse(textJson));
@@ -284,41 +379,30 @@ async function _render(container, sceneJson, adapter) {
   // without the parent document's CSS.
   async function onSave() {
     if (!renderer) return;
-    // Disconnect ResizeObserver during save — the DPR-scaled canvas may
-    // exceed the viewport, causing the observer to reset canvas.width to
-    // the CSS-constrained size and corrupt the capture.
+    // Disconnect ResizeObserver during save to prevent layout-triggered resize
+    // events from mutating canvas dimensions during the async capture sequence.
     if (_ro) _ro.disconnect();
-    const dpr = window.devicePixelRatio || 1;
-    const origW = canvas.width, origH = canvas.height;
-    // Adaptive DPR: clamp capture dimensions to GPU max texture size.
-    // Discrete GPUs may support 8192+; integrated GPUs typically 2048.
-    const maxTex = renderer.maxTextureSize ? renderer.maxTextureSize() : 2048;
-    const maxScale = Math.min(dpr, maxTex / Math.max(origW, origH));
-    const captureScale = maxScale >= 1.05 ? maxScale : 1;
-    const captureW = Math.round(origW * captureScale);
-    const captureH = Math.round(origH * captureScale);
     try {
-      if (captureScale > 1) {
-        canvas.width = captureW;
-        canvas.height = captureH;
-        renderer.resize(captureW, captureH);
-      }
       renderer.renderFrame();
       await new Promise(r => requestAnimationFrame(r));
 
+      // Blit GPU canvas 1:1 to an offscreen 2D canvas (WebGPU canvases clear
+      // after present(), so we must capture into a persistent 2D context).
       const off = document.createElement('canvas');
       off.width = canvas.width; off.height = canvas.height;
       const ctx = off.getContext('2d');
       ctx.drawImage(canvas, 0, 0);
 
-      // Composite SVG text overlay onto the offscreen canvas.
+      // Composite SVG text overlay (axis labels, title, legend text).
+      // The SVG is authored in CSS pixels; the offscreen canvas is at physical
+      // pixels (CSS × DPR).  Set a viewBox so the SVG scales up correctly.
       try {
         const svgClone = svgEl.cloneNode(true);
+        const svgW = parseInt(svgEl.getAttribute('width'), 10) || off.width;
+        const svgH = parseInt(svgEl.getAttribute('height'), 10) || off.height;
         svgClone.setAttribute('width', String(off.width));
         svgClone.setAttribute('height', String(off.height));
-        if (captureScale > 1) {
-          svgClone.setAttribute('viewBox', `0 0 ${origW} ${origH}`);
-        }
+        svgClone.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
         // Inline @font-face from the document's stylesheets so the SVG
         // renders text correctly when rasterized via Image.
         const fontRules = [];
@@ -352,7 +436,7 @@ async function _render(container, sceneJson, adapter) {
       }
 
       const a = document.createElement('a');
-      a.href = off.toDataURL('image/png');
+      a.href = injectPHYs(off.toDataURL('image/png'), effectiveDpr);
       a.download = 'ferrum-chart.png';
       a.style.display = 'none';
       document.body.appendChild(a);
@@ -360,13 +444,6 @@ async function _render(container, sceneJson, adapter) {
       document.body.removeChild(a);
     } catch (err) {
       console.warn('[ferrum] save PNG error:', err);
-    }
-    if (captureScale > 1) {
-      try {
-        canvas.width = origW; canvas.height = origH;
-        renderer.resize(origW, origH);
-        renderer.renderFrame();
-      } catch (_) { /* restore failed */ }
     }
     if (_ro) _ro.observe(canvas);
   }
@@ -421,7 +498,7 @@ async function _render(container, sceneJson, adapter) {
 
         if (currentMode === 'boxzoom') {
           // Compute zoom transform to fit the selected rectangle.
-          const plotW = canvas.width, plotH = canvas.height;
+          const plotW = w, plotH = h;
           const selW = x1 - x0, selH = y1 - y0;
           const k = Math.min(plotW / selW, plotH / selH);
           const tx = -x0 * k, ty = -y0 * k;
@@ -464,8 +541,8 @@ async function _render(container, sceneJson, adapter) {
   // ── Tooltip hover handler ─────────────────────────────────────────
   function handleHover(e) {
     const r = canvas.getBoundingClientRect();
-    const mx = (e.clientX - r.left) * (canvas.width / r.width);
-    const my = (e.clientY - r.top) * (canvas.height / r.height);
+    const mx = (e.clientX - r.left) * (w / r.width);
+    const my = (e.clientY - r.top) * (h / r.height);
 
     let tooltipData = null;
     // WASM-only hit-test via renderer.hitTestAt + getTooltip.
@@ -491,9 +568,9 @@ async function _render(container, sceneJson, adapter) {
         tr.appendChild(k); tr.appendChild(v); tbl.appendChild(tr);
       }
       tip.appendChild(tbl);
-      // Position tooltip in CSS coords.
-      const cssMx = mx / (canvas.width / r.width);
-      const csMy = my / (canvas.height / r.height);
+      // Position tooltip in CSS coords (scene → element CSS).
+      const cssMx = mx * (r.width / w);
+      const csMy = my * (r.height / h);
       tip.style.left = (cssMx + 12) + 'px';
       tip.style.top = (csMy - 12) + 'px';
       tip.style.opacity = '1';
@@ -522,8 +599,8 @@ async function _render(container, sceneJson, adapter) {
   // ── Click: href navigation + point selection (WASM-only) ──────────
   chartWrapper.addEventListener('click', e => {
     const r = canvas.getBoundingClientRect();
-    const cx = (e.clientX - r.left) * (canvas.width / r.width);
-    const cy = (e.clientY - r.top) * (canvas.height / r.height);
+    const cx = (e.clientX - r.left) * (w / r.width);
+    const cy = (e.clientY - r.top) * (h / r.height);
 
     // Href navigation via WASM hit-test.
     if (renderer) {
@@ -559,8 +636,10 @@ async function _render(container, sceneJson, adapter) {
     _ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const cr = entry.contentRect;
-        const newW = Math.round(cr.width);
-        const newH = Math.round(cr.height);
+        const curDpr = window.devicePixelRatio || 1;
+        const safeDpr = Math.min(curDpr, maxTex / Math.max(cr.width, cr.height, 1));
+        const newW = Math.round(cr.width * Math.max(1, safeDpr));
+        const newH = Math.round(cr.height * Math.max(1, safeDpr));
         if (newW > 0 && newH > 0 && (newW !== canvas.width || newH !== canvas.height)) {
           canvas.width = newW;
           canvas.height = newH;

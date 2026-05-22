@@ -338,6 +338,11 @@ impl WasmRenderer {
         self.upload_transform_and_render(0)
     }
 
+    #[wasm_bindgen(js_name = "maxTextureSize")]
+    pub fn max_texture_size(&self) -> u32 {
+        self.gpu.device.limits().max_texture_dimension_2d
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.config.width = width.max(1);
         self.gpu.config.height = height.max(1);
@@ -345,11 +350,6 @@ impl WasmRenderer {
             .surface
             .configure(&self.gpu.device, &self.gpu.config);
         let _ = self.render_frame_js();
-    }
-
-    #[wasm_bindgen(js_name = "maxTextureSize")]
-    pub fn max_texture_size(&self) -> u32 {
-        self.gpu.device.limits().max_texture_dimension_2d
     }
 
     /// Return tooltip JSON for a specific mark instance.
