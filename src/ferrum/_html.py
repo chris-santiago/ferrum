@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json as _json
 import re
 from pathlib import Path
@@ -272,7 +273,7 @@ def assemble_html(
         "<html>\n"
         "<head>\n"
         '<meta charset="utf-8">\n'
-        f"<title>{title}</title>\n"
+        f"<title>{html.escape(title)}</title>\n"
         f"<style{nonce_attr}>{css}</style>\n"
         "</head>\n"
         f'<body style="background:{bg_css};margin:0;display:flex;'

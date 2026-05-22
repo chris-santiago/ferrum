@@ -57,8 +57,11 @@
 .ferrum-tool-separator { width: 20px; height: 1px; background: #ddd; margin: 4px auto; }
 
 /* ── Cursor feedback ─────────────────────────────────────── */
+/* Pan mode: SVG has pointer-events:none, so cursor on canvas is visible */
 .ferrum-container[data-mode="pan"] canvas { cursor: grab; }
 .ferrum-container[data-mode="pan"]:active canvas { cursor: grabbing; }
-.ferrum-container[data-mode="select"] canvas { cursor: crosshair; }
-.ferrum-container[data-mode="boxzoom"] canvas { cursor: zoom-in; }
-.ferrum-container[data-mode="boxzoom"]:active canvas { cursor: crosshair; }
+/* Select/boxzoom: SVG overlay has pointer-events:all and sits above canvas,
+   so cursor must be set on svg to be visible */
+.ferrum-container[data-mode="select"] svg { cursor: crosshair; }
+.ferrum-container[data-mode="boxzoom"] svg { cursor: zoom-in; }
+.ferrum-container[data-mode="boxzoom"]:active svg { cursor: crosshair; }

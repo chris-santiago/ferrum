@@ -14,8 +14,9 @@ def test_html_title_escapes_special_chars(tmp_path):
     out = tmp_path / "xss_test.html"
     chart.save(str(out))
     content = out.read_text()
-    assert "<script>" not in content.split("</head>")[0]  # not in <head>
-    assert "&lt;script&gt;" in content or "alert" not in content.split("<title>")[1].split("</title>")[0]
+    title_content = content.split("<title>")[1].split("</title>")[0]
+    assert "<script>" not in title_content
+    assert "&lt;script&gt;" in title_content
 
 
 def test_html_title_escapes_ampersand(tmp_path):

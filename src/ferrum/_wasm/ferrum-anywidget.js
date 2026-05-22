@@ -152,17 +152,6 @@ function _createToolbar(setMode, onReset, onSave, defaultMode) {
   return toolbar;
 }
 
-// ── Download helper ──────────────────────────────────────────────────────
-function _downloadBlob(blob) {
-  if (!blob) return;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'ferrum-chart.png';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 // ── Adapter interface (duck-typed) ───────────────────────────────────────
 // {
 //   getPackedData()           → Uint8Array
@@ -281,7 +270,7 @@ async function _render(container, sceneJson, adapter) {
   function onReset() {
     if (!renderer) return;
     select(chartWrapper).call(zoomBehavior.transform, zoomIdentity);
-    try { renderer.clearSelections(); } catch (_) {}
+    try { const stateJson = renderer.clearSelections(); adapter.onSelectionChange(JSON.parse(stateJson)); } catch (_) {}
   }
 
   // Double-click: reset zoom to identity.
@@ -380,14 +369,13 @@ async function _render(container, sceneJson, adapter) {
 
   // ── Keyboard shortcuts ────────────────────────────────────────────
   function _onKeydown(e) {
-    switch (e.key) {
-      case 'p': setMode('pan'); break;
-      case 'z': setMode('boxzoom'); break;
-      case 's': setMode('select'); break;
-      case 'r': onReset(); break;
-      case 'Escape': setMode(defaultMode); break;
-      default: return;
-    }
+    const k = e.key.toLowerCase();
+    if (k === 'p') setMode('pan');
+    else if (k === 'z') setMode('boxzoom');
+    else if (k === 's') setMode('select');
+    else if (k === 'r') onReset();
+    else if (e.key === 'Escape') setMode(defaultMode);
+    else return;
     e.preventDefault();
   }
   container.addEventListener('keydown', _onKeydown);
