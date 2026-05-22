@@ -84,6 +84,32 @@ def test_render_scene_json_delegates():
     assert packed1 == packed2
 
 
+# ── ResizeObserver vs Save PNG race condition ────────────────────────────────
+
+
+def test_wide_hconcat_saves_html_without_error(tmp_path):
+    """Regression: wide HConcat charts (>viewport) must produce valid HTML.
+
+    The ResizeObserver previously interfered with the Save PNG DPR resize
+    flow on charts wider than the viewport. The observer saw the
+    CSS-constrained contentRect (< canvas.width) and reset canvas.width,
+    corrupting the capture and leaving the chart empty afterward.
+    """
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": list(range(8)), "y": [2, 4, 1, 5, 3, 6, 2, 4], "g": ["a", "b"] * 4})
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="g:N")
+    right = fm.Chart(df).mark_bar().encode(x="g:N", y="y:Q", color="g:N")
+    comp = left | right
+    out = tmp_path / "wide_hconcat.html"
+    comp.interactive().save(str(out))
+    content = out.read_text()
+    # The JS must contain the ResizeObserver disconnect guard in onSave
+    assert "_ro" in content, "ResizeObserver variable should exist"
+    assert "disconnect" in content, "onSave should disconnect ResizeObserver"
+
+
 # ── M5: _auto_tooltips removed from public to_spec() ─────────────────────────
 
 

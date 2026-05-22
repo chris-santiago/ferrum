@@ -284,6 +284,10 @@ async function _render(container, sceneJson, adapter) {
   // without the parent document's CSS.
   async function onSave() {
     if (!renderer) return;
+    // Disconnect ResizeObserver during save — the DPR-scaled canvas may
+    // exceed the viewport, causing the observer to reset canvas.width to
+    // the CSS-constrained size and corrupt the capture.
+    if (_ro) _ro.disconnect();
     const dpr = window.devicePixelRatio || 1;
     const origW = canvas.width, origH = canvas.height;
     const captureW = Math.round(origW * dpr);
@@ -359,6 +363,7 @@ async function _render(container, sceneJson, adapter) {
         renderer.renderFrame();
       } catch (_) { /* restore failed */ }
     }
+    if (_ro) _ro.observe(canvas);
   }
 
   // ── Toolbar (gated on cfg.toolbar !== false) ──────────────────────
