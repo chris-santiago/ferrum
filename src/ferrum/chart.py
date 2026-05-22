@@ -4767,7 +4767,7 @@ class Chart(_RenderMixin):
 
     # ---- Spec output ----
 
-    def to_spec(self, *, _auto_tooltips: bool = False):
+    def to_spec(self):
         """Build the Rust ``ChartSpec`` for this chart.
 
         Resolves any pending statistical-mark desugar, converts Python encoding
@@ -5019,27 +5019,51 @@ class Chart(_RenderMixin):
                     kw["tooltip_fields"] = json.dumps(tf_list)
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
-        # Auto-generate tooltip fields from encoded channels for interactive
-        # rendering only.  Static SVG/PNG output skips this to avoid bloating
-        # the SVG with <title> elements on every mark.  Explicit tooltip= wins.
-        _TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
-        if _auto_tooltips and "tooltip" not in kw and "tooltip_fields" not in kw:
-            auto_fields: list[dict] = []
-            seen_auto: set[str] = set()
-            for _ch_name in _RENDERER_HONORED_CHANNELS:
-                if _ch_name in _TOOLTIP_SKIP:
-                    continue
-                enc_spec = kw.get(_ch_name)
-                if enc_spec is None:
-                    continue
-                # kw values for channels are EncodingSpec instances (have .field).
-                field = getattr(enc_spec, "field", None)
-                if field and isinstance(field, str) and field not in seen_auto:
-                    auto_fields.append({"field": field})
-                    seen_auto.add(field)
-            if auto_fields:
-                kw["tooltip_fields"] = json.dumps(auto_fields)
         return ChartSpec(**kw)
+
+    def _inject_auto_tooltips(self, kw: dict) -> dict:
+        """Inject auto-generated tooltip fields into a serialised spec dict.
+
+        Takes a plain-dict representation of a ``ChartSpec`` (as returned by
+        ``json.loads(spec.to_json())``) and adds ``encoding.tooltip_fields``
+        from the encoded channels when no explicit tooltip is already present.
+        Returns the mutated dict.
+
+        This is called by the interactive renderer after ``to_spec()``; static
+        SVG/PNG renders skip it to avoid bloating the output with tooltip data.
+        Explicit ``tooltip=`` or ``tooltip_fields=`` encodings always win.
+
+        Parameters
+        ----------
+        kw : dict
+            Parsed JSON dict from ``json.loads(spec.to_json())``.  Modified
+            in place and returned.
+
+        Returns
+        -------
+        dict
+            The same dict with ``encoding.tooltip_fields`` added when
+            applicable.
+        """
+        enc = kw.get("encoding") or {}
+        if "tooltip" in enc or "tooltip_fields" in enc:
+            return kw
+        _TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
+        auto_fields: list[dict] = []
+        seen_auto: set[str] = set()
+        for _ch_name in _RENDERER_HONORED_CHANNELS:
+            if _ch_name in _TOOLTIP_SKIP:
+                continue
+            ch_dict = enc.get(_ch_name)
+            if ch_dict is None:
+                continue
+            field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
+            if field and isinstance(field, str) and field not in seen_auto:
+                auto_fields.append({"field": field})
+                seen_auto.add(field)
+        if auto_fields:
+            kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
+        return kw
 
     def _build_spec(self):
         """Build the chart spec for callers that want typed Python access to

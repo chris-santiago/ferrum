@@ -277,9 +277,17 @@ class _RenderMixin:
         return new
 
     def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
+        import json
+
+        from ferrum._core import ChartSpec
+
         resolved = self._resolve_pending()
         chart = resolved._apply_auto_raster()
-        spec = chart.to_spec(_auto_tooltips=_auto_tooltips)
+        spec = chart.to_spec()
+        if _auto_tooltips:
+            kw = json.loads(spec.to_json())
+            kw = chart._inject_auto_tooltips(kw)
+            spec = ChartSpec.from_json(json.dumps(kw))
         # F17: apply Axis(label_map=...) column-value remapping before data
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)

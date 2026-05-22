@@ -263,7 +263,7 @@ def test_hex_full_6char_unchanged():
 
 
 def test_auto_tooltips_injected_for_interactive():
-    """to_spec(_auto_tooltips=True) should inject tooltip_fields from encoded channels."""
+    """_inject_auto_tooltips() should inject tooltip_fields from encoded channels."""
     import json
 
     import polars as pl
@@ -272,8 +272,9 @@ def test_auto_tooltips_injected_for_interactive():
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "g": ["a", "b"]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
-    spec = chart.to_spec(_auto_tooltips=True)
+    spec = chart.to_spec()
     spec_dict = json.loads(spec.to_json())
+    spec_dict = chart._inject_auto_tooltips(spec_dict)
     tf = spec_dict.get("encoding", {}).get("tooltip_fields")
     assert tf is not None, "tooltip_fields should be injected"
     fields = json.loads(tf) if isinstance(tf, str) else tf

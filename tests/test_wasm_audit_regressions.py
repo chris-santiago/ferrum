@@ -82,3 +82,69 @@ def test_render_scene_json_delegates():
     json2, packed2 = _render_scene(chart)
     assert json1 == json2
     assert packed1 == packed2
+
+
+# ── M5: _auto_tooltips removed from public to_spec() ─────────────────────────
+
+
+def test_to_spec_no_auto_tooltips_param():
+    """Regression: M5 — to_spec() no longer accepts _auto_tooltips kwarg."""
+    import pytest
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+    # Public to_spec should NOT accept _auto_tooltips
+    with pytest.raises(TypeError):
+        chart.to_spec(_auto_tooltips=True)
+
+
+def test_interactive_render_still_injects_tooltips():
+    """Regression: M5 — interactive rendering still gets tooltip injection."""
+    import json
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    ic = chart.interactive()
+    scene_json = ic._scene_json
+    scene = json.loads(scene_json)
+    # Check that tooltip data exists in the scene
+    has_tooltips = any(
+        batch.get("tooltips") is not None
+        for panel in scene.get("panels", [])
+        for batch in panel.get("marks", [])
+    )
+    assert has_tooltips, "Interactive render should inject auto-tooltips"
+
+
+def test_svg_render_no_tooltip_injection():
+    """Regression: M5 — SVG render should NOT have tooltip bloat."""
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    svg = chart.show_svg()
+    # SVG should not contain tooltip-related data attributes
+    assert "data-tooltip" not in svg
+
+
+# ── M6: toolbar as explicit param on _ChartLike.save() ───────────────────────
+
+
+def test_chartlike_save_toolbar_explicit_param(tmp_path):
+    """Regression: M6 — compositions accept explicit toolbar param."""
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6], "g": ["a", "b", "a"]})
+    top = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    bottom = fm.Chart(df).mark_bar().encode(x="g:N", y="y:Q")
+    comp = top & bottom
+    out = tmp_path / "comp_toolbar.html"
+    comp.save(str(out), toolbar=False)
+    content = out.read_text()
+    assert '"toolbar": false' in content or '"toolbar":false' in content
