@@ -6,6 +6,17 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.11.1
+
+*2026-05-22*
+
+### Fixed
+
+- PNG export: DPR-aware canvas with pHYs DPI metadata replaces the old DPR-upscale approach, fixing gridline artifacts in composed charts (HConcat) caused by stale pixel-snap positions after canvas resize
+- PNG export: full Retina resolution via 2D offscreen canvas — wide charts clamped by GPU max texture size now export at correct @2x dimensions with proper DPI metadata
+- Canvas initialization: safe three-phase init (CSS size → GPU create → DPR-clamped resize) prevents `Surface::configure` crash on wide HConcat charts exceeding GPU max texture size
+- Mouse coordinate mapping uses scene dimensions instead of canvas backing store, fixing hit-test and tooltip positioning on DPR-aware canvases
+
 ## 0.11.0
 
 *2026-05-22*
