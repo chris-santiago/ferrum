@@ -110,6 +110,44 @@ def test_wide_hconcat_saves_html_without_error(tmp_path):
     assert "disconnect" in content, "onSave should disconnect ResizeObserver"
 
 
+def test_save_png_adaptive_dpr_clamps_to_max_texture(tmp_path):
+    """Regression: Save PNG must clamp capture dimensions to GPU max texture size.
+
+    A 1290px HConcat at DPR=2 requested 2580px, exceeding the 2048 WebGPU
+    limit. The JS must query maxTextureSize and compute an adaptive scale.
+    """
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": list(range(8)), "y": [2, 4, 1, 5, 3, 6, 2, 4], "g": ["a", "b"] * 4})
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", color="g:N")
+    right = fm.Chart(df).mark_bar().encode(x="g:N", y="y:Q", color="g:N")
+    comp = left | right
+    out = tmp_path / "adaptive_dpr.html"
+    comp.interactive().save(str(out))
+    content = out.read_text()
+    assert "maxTextureSize" in content, "onSave must query GPU max texture size"
+    assert "maxScale" in content, "onSave must compute adaptive scale"
+
+
+def test_save_png_viewbox_uses_canvas_dims(tmp_path):
+    """Regression: SVG viewBox must use origW/origH (current canvas dims),
+    not stale w/h (scene dims), so the SVG composite aligns with GPU content
+    if the ResizeObserver has resized the canvas.
+    """
+    import ferrum as fm
+    import polars as pl
+
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+    out = tmp_path / "viewbox.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "origW" in content and "origH" in content, "viewBox should use origW/origH"
+    # Must NOT use the stale scene-level w/h for viewBox
+    assert "viewBox', `0 0 ${origW} ${origH}`" in content
+
+
 # ── M5: _auto_tooltips removed from public to_spec() ─────────────────────────
 
 
