@@ -1,18 +1,11 @@
 ---
 name: regression-test
 description: >
-  Proactively write regression tests after any bug fix. This skill should be
-  invoked WITHOUT the user asking whenever you fix a bug, apply a correction,
-  resolve unexpected behavior, or make a change that addresses a defect — even
-  small one-line fixes. Trigger phrases and contexts include: applying a fix,
-  changing code because something "was wrong" or "didn't work", closing a gap
-  found by code archaeology, correcting a stale test expectation, wiring a
-  missing encoding/channel, or any edit whose intent is "this was broken and now
-  it works." Also trigger when the user says "add regression tests", "prevent
-  this from regressing", "test this fix", or /regression-test. If you just
-  fixed something and are about to report it as done — STOP and invoke this
-  skill first. The cost of a missed regression test is a repeat bug; the cost
-  of invoking this skill unnecessarily is near zero.
+  MANDATORY after ANY bug fix — invoke BEFORE reporting the fix as done or
+  committing. If you edited code to correct something broken, wrong, or
+  missing: STOP and call this skill FIRST. Never skip — the cost of a missed
+  regression test is a repeat bug; the cost of invoking unnecessarily is zero.
+  Also trigger on: "add regression tests", "test this fix", /regression-test.
 ---
 
 # Regression Test Skill
