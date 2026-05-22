@@ -7,6 +7,59 @@ use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
 
+// ── wasm32-only: apply conditionals and re-render ────────────────────────────
+
+/// Resolve conditional encodings against the current selection state,
+/// rebuild GPU buffers with updated instance colors, render a frame, and
+/// return the serialized selection state JSON.
+///
+/// Called by both `handle_click` and `handle_drag` after they update the
+/// selection state. Centralising this ensures that if `SceneData` gains a
+/// field, only one site needs updating.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn apply_conditionals_and_render(
+    loaded_scene: &ferrum_scene::SceneGraph,
+    loaded_data: &crate::scene_load::SceneData,
+    loaded_buffers: &mut crate::render::GpuBuffers,
+    interaction_state: &crate::selection_state::InteractionState,
+    gpu: &crate::gpu::GpuContext,
+    pipelines: &crate::pipelines::RenderPipelines,
+) -> Result<String, wasm_bindgen::JsValue> {
+    // Apply conditional encodings to produce dimmed/highlighted instance colors.
+    let conditionals = &loaded_scene.interaction.conditionals;
+    let updates = resolve_conditionals_with_packed(
+        &loaded_scene.panels,
+        conditionals,
+        &interaction_state.selections,
+        &loaded_data.circle_instances,
+        &loaded_data.rect_instances,
+        &loaded_data.packed_batch_meta,
+    );
+
+    // Rebuild GPU buffers with updated colors and re-render.
+    let updated_data = crate::scene_load::SceneData {
+        circle_instances: updates.circle_instances,
+        rect_instances: updates.rect_instances,
+        mesh_buffers: loaded_data.mesh_buffers.clone(),
+        static_mesh_buffers: loaded_data.static_mesh_buffers.clone(),
+        text_elements: loaded_data.text_elements.clone(),
+        image_quads: loaded_data.image_quads.clone(),
+        background: loaded_data.background,
+        width: loaded_data.width,
+        height: loaded_data.height,
+        packed_batch_meta: loaded_data.packed_batch_meta.clone(),
+        draw_commands: loaded_data.draw_commands.clone(),
+    };
+    let new_buffers = crate::render::GpuBuffers::from_scene(gpu, pipelines, &updated_data);
+    crate::render::render_frame(gpu, pipelines, &new_buffers, updated_data.background)
+        .map_err(wasm_bindgen::JsValue::from)?;
+    *loaded_buffers = new_buffers;
+
+    // Serialize current selection state for Python sync.
+    let state_json = interaction_state.to_json();
+    Ok(state_json)
+}
+
 pub struct ConditionalUpdates {
     pub circle_instances: Vec<CircleInstance>,
     pub rect_instances: Vec<RectInstance>,

@@ -43,14 +43,18 @@ pub struct GpuBuffers {
 
 /// Uniform data uploaded to the GPU once per panel draw.
 ///
-/// Layout (48 bytes / 3 × vec4<f32>):
+/// Layout (32 bytes / 2 × vec4<f32>):
 ///   canvas:    {canvas_w, canvas_h, 0, 0}
 ///   transform: {sx, sy, tx, ty}         identity = {1,1,0,0}
-///   clip:      {clip_x, clip_y, clip_w, clip_h}
 ///
-/// Must use vec4 packing — WGSL uniform address space enforces a 16-byte
-/// stride for `array<f32, N>`, which would cause a size mismatch with the
-/// Rust struct if individual padding arrays are used instead.
+/// The former `clip` vec4 has been removed. Fragment-level clip tests in the
+/// shaders were redundant because:
+///   - Mark instances (circles/rects): clipped by the GPU scissor rect set per
+///     draw command in `render_frame`.
+///   - Mesh and static mesh: full-canvas clip was always a no-op.
+///
+/// Must use vec4 packing — WGSL uniform address space enforces 16-byte stride
+/// for `array<f32, N>`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
@@ -63,11 +67,6 @@ pub struct Uniforms {
     pub sy: f32,
     pub tx: f32,
     pub ty: f32,
-    // vec4: clip_x, clip_y, clip_w, clip_h
-    pub clip_x: f32,
-    pub clip_y: f32,
-    pub clip_w: f32,
-    pub clip_h: f32,
 }
 
 impl Uniforms {
@@ -80,10 +79,6 @@ impl Uniforms {
             sy: 1.0,
             tx: 0.0,
             ty: 0.0,
-            clip_x: 0.0,
-            clip_y: 0.0,
-            clip_w: canvas_w,
-            clip_h: canvas_h,
         }
     }
 }
@@ -459,4 +454,70 @@ pub fn render_frame(
     gpu.queue.submit(std::iter::once(encoder.finish()));
     surface_tex.present();
     Ok(())
+}
+
+/// Upload the per-panel affine transform uniform and re-render, then return
+/// zoomed text-element JSON.
+///
+/// Extracted from `WasmRenderer::upload_transform_and_render` so the logic
+/// lives in the rendering module and the wasm_bindgen method becomes a thin
+/// delegator.
+///
+/// The parameter count mirrors the `WasmRenderer` fields this function
+/// previously accessed as `self.*`. A grouping struct would obscure the
+/// access pattern without reducing complexity at the single call site.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn upload_transform_and_render(
+    gpu: &GpuContext,
+    pipelines: &RenderPipelines,
+    buffers: &GpuBuffers,
+    scene_data: &SceneData,
+    scene_panels: &[ferrum_scene::Panel],
+    interaction: &ferrum_scene::InteractionConfig,
+    zoom_transforms: &[crate::zoom_pan::Affine2],
+    panel_id: usize,
+) -> Result<String, crate::error::WasmRenderError> {
+    let transform = zoom_transforms
+        .get(panel_id)
+        .copied()
+        .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+    let uniforms = Uniforms {
+        canvas_w: scene_data.width,
+        canvas_h: scene_data.height,
+        _canvas_pad: [0.0; 2],
+        sx: transform.sx as f32,
+        sy: transform.sy as f32,
+        tx: transform.tx as f32,
+        ty: transform.ty as f32,
+    };
+    buffers.upload_uniforms(gpu, &uniforms);
+    render_frame(gpu, pipelines, buffers, scene_data.background)?;
+    let plot_area = scene_panels.get(panel_id).map(|p| {
+        (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h)
+    });
+    let text_json = crate::text_json::build_zoomed_text_json(
+        &scene_data.text_elements,
+        interaction,
+        panel_id,
+        &transform,
+        plot_area,
+    );
+    Ok(text_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the uniform buffer is exactly 32 bytes (2 x vec4<f32>) after
+    /// removing the clip vec4. WGSL uniform structs require 16-byte alignment;
+    /// 32 is a multiple of 16 so this is well-formed.
+    #[test]
+    fn test_uniforms_size_is_32_bytes() {
+        assert_eq!(
+            std::mem::size_of::<Uniforms>(),
+            32,
+            "Uniforms must be exactly 32 bytes (2 x vec4<f32>) after removing the clip vec4"
+        );
+    }
 }

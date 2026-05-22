@@ -237,6 +237,29 @@ pub(crate) fn tick_label_json(
     })
 }
 
+/// Format a scene-graph `TooltipContent` to the same JSON structure as
+/// `parse_tooltip_json`: `{"fields":[{"name":"x","value":"1.23"},…]}`.
+///
+/// Used by `get_tooltip` to serve tooltips from non-packed batches where
+/// tooltip data lives in the scene graph rather than a binary sidecar.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn format_tooltip_content(tooltip: &ferrum_scene::TooltipContent) -> String {
+    if tooltip.fields.is_empty() {
+        return "{}".to_string();
+    }
+    let fields: Vec<serde_json::Value> = tooltip
+        .fields
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "value": f.value,
+            })
+        })
+        .collect();
+    serde_json::json!({ "fields": fields }).to_string()
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

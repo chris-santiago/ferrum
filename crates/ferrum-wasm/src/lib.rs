@@ -26,8 +26,6 @@ use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 #[cfg(target_arch = "wasm32")]
-use crate::conditional::resolve_conditionals_with_packed;
-#[cfg(target_arch = "wasm32")]
 use crate::error::WasmRenderError;
 #[cfg(target_arch = "wasm32")]
 use crate::gpu::GpuContext;
@@ -395,7 +393,7 @@ impl WasmRenderer {
             .and_then(|b| b.tooltips.as_ref())
             .and_then(|tips| tips.get(node_idx as usize))
         {
-            return format_tooltip_content(tooltip);
+            return text_json::format_tooltip_content(tooltip);
         }
 
         "{}".to_string()
@@ -491,103 +489,40 @@ impl WasmRenderer {
     /// return the serialized selection state JSON.
     ///
     /// Called by both `handle_click` and `handle_drag` after they update the
-    /// selection state. Centralising this ensures that if `SceneData` gains a
-    /// field, only one site needs updating.
+    /// selection state. Delegates to `conditional::apply_conditionals_and_render`.
     fn apply_conditionals_and_render(&mut self) -> Result<String, JsValue> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok("{}".to_string());
         };
-
-        // Apply conditional encodings to produce dimmed/highlighted instance colors.
-        let conditionals = &loaded.scene.interaction.conditionals;
-        let updates = resolve_conditionals_with_packed(
-            &loaded.scene.panels,
-            conditionals,
-            &self.interaction_state.selections,
-            &loaded.data.circle_instances,
-            &loaded.data.rect_instances,
-            &loaded.data.packed_batch_meta,
-        );
-
-        // Rebuild GPU buffers with updated colors and re-render.
-        let updated_data = SceneData {
-            circle_instances: updates.circle_instances,
-            rect_instances: updates.rect_instances,
-            mesh_buffers: loaded.data.mesh_buffers.clone(),
-            static_mesh_buffers: loaded.data.static_mesh_buffers.clone(),
-            text_elements: loaded.data.text_elements.clone(),
-            image_quads: loaded.data.image_quads.clone(),
-            background: loaded.data.background,
-            width: loaded.data.width,
-            height: loaded.data.height,
-            packed_batch_meta: loaded.data.packed_batch_meta.clone(),
-            draw_commands: loaded.data.draw_commands.clone(),
-        };
-        let new_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &updated_data);
-        render::render_frame(&self.gpu, &self.pipelines, &new_buffers, updated_data.background)
-            .map_err(JsValue::from)?;
-        loaded.buffers = new_buffers;
-
-        // Serialize current selection state for Python sync.
-        let state_json = self.interaction_state.to_json();
-        Ok(state_json)
+        conditional::apply_conditionals_and_render(
+            &loaded.scene,
+            &loaded.data,
+            &mut loaded.buffers,
+            &self.interaction_state,
+            &self.gpu,
+            &self.pipelines,
+        )
     }
 
     /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
+    /// Delegates to `render::upload_transform_and_render`.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        let transform = self.zoom.transforms.get(panel_id)
-            .copied()
-            .unwrap_or_else(crate::zoom_pan::Affine2::identity);
-        let uniforms = Uniforms {
-            canvas_w: loaded.data.width,
-            canvas_h: loaded.data.height,
-            _canvas_pad: [0.0; 2],
-            sx: transform.sx as f32,
-            sy: transform.sy as f32,
-            tx: transform.tx as f32,
-            ty: transform.ty as f32,
-            clip_x: 0.0,
-            clip_y: 0.0,
-            clip_w: loaded.data.width,
-            clip_h: loaded.data.height,
-        };
-        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
-        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
-            .map_err(JsValue::from)?;
-        let plot_area = loaded.scene.panels.get(panel_id).map(|p| {
-            (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h)
-        });
-        let text_json = text_json::build_zoomed_text_json(
-            &loaded.data.text_elements, &self.interaction, panel_id, &transform, plot_area,
-        );
-        Ok(text_json)
+        render::upload_transform_and_render(
+            &self.gpu,
+            &self.pipelines,
+            &loaded.buffers,
+            &loaded.data,
+            &loaded.scene.panels,
+            &self.interaction,
+            &self.zoom.transforms,
+            panel_id,
+        )
+        .map_err(JsValue::from)
     }
 }
 
 
-/// Format a scene-graph `TooltipContent` to the same JSON structure as
-/// `parse_tooltip_json`: `{"fields":[{"name":"x","value":"1.23"},…]}`.
-///
-/// Used by `get_tooltip` to serve tooltips from non-packed batches where
-/// tooltip data lives in the scene graph rather than a binary sidecar.
-#[cfg(any(target_arch = "wasm32", test))]
-fn format_tooltip_content(tooltip: &ferrum_scene::TooltipContent) -> String {
-    if tooltip.fields.is_empty() {
-        return "{}".to_string();
-    }
-    let fields: Vec<serde_json::Value> = tooltip
-        .fields
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "name": f.name,
-                "value": f.value,
-            })
-        })
-        .collect();
-    serde_json::json!({ "fields": fields }).to_string()
-}
 
 #[cfg(test)]
 mod tests {
@@ -665,7 +600,7 @@ mod tests {
                 value: "1.23".to_string(),
             }],
         };
-        let json = format_tooltip_content(&tooltip);
+        let json = text_json::format_tooltip_content(&tooltip);
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(parsed["fields"][0]["name"], "x");
         assert_eq!(parsed["fields"][0]["value"], "1.23");
@@ -681,7 +616,7 @@ mod tests {
                 TooltipField { name: "y".to_string(), value: "4.56".to_string() },
             ],
         };
-        let json = format_tooltip_content(&tooltip);
+        let json = text_json::format_tooltip_content(&tooltip);
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(parsed["fields"][0]["name"], "x");
         assert_eq!(parsed["fields"][0]["value"], "1.23");
@@ -694,7 +629,7 @@ mod tests {
     fn format_tooltip_content_empty_fields() {
         use ferrum_scene::TooltipContent;
         let tooltip = TooltipContent { fields: vec![] };
-        let json = format_tooltip_content(&tooltip);
+        let json = text_json::format_tooltip_content(&tooltip);
         assert_eq!(json, "{}");
     }
 
@@ -707,7 +642,7 @@ mod tests {
                 value: r#"say "hello""#.to_string(),
             }],
         };
-        let json = format_tooltip_content(&tooltip);
+        let json = text_json::format_tooltip_content(&tooltip);
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(parsed["fields"][0]["name"], "label");
         assert_eq!(parsed["fields"][0]["value"], "say \"hello\"");
