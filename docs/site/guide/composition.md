@@ -7,7 +7,7 @@ Ferrum ships six composition operators, each producing a different kind of compo
 | Operator | When to use |
 |---|---|
 | **`+` (Layer)** | Multiple marks against the same axes — scatter + smooth, line + ribbon, bars + text labels. Always layers; never concatenates. |
-| **`\|` (HConcat)** | Independent charts laid out left-to-right. |
+| **`|` (HConcat)** | Independent charts laid out left-to-right. |
 | **`&` (VConcat)** | Independent charts stacked top-to-bottom. |
 | **`fm.hconcat()` / `fm.vconcat()`** | Convenience functions for building concat layouts from more than two charts. |
 | **[`JointChart`][ferrum.JointChart]** | Central plot with marginal distributions on the top and right. |

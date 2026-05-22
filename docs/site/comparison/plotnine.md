@@ -30,14 +30,14 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 | `stat_smooth(method="lm")` | [`.mark_smooth(method="lm")`][ferrum.Chart.mark_smooth] | Stats are part of the mark declaration. |
 | `stat_bin()` | [`.mark_histogram()`][ferrum.Chart.mark_histogram] | — |
 | `stat_density()` | [`.mark_density()`][ferrum.Chart.mark_density] | — |
-| `facet_wrap(~var)` | `.encode(facet="var")` | Faceting is an encoding channel. |
-| `facet_grid(row~col)` | `.encode(facet_row="row", facet_col="col")` | — |
-| `scale_x_log10()` | `.encode(x=fm.X("x", scale=fm.Scale(type="log")))` | Scales are values, not global functions. |
-| `coord_flip()` | `.coord("flip")` | — |
-| `labs(title=, x=, y=)` | `.labs(x=, y=, title=)` | Post-hoc axis label shortcut. Also `.properties(title=)` for chart title only. |
-| `xlim()` / `ylim()` | `.xlim(lo, hi)` / `.ylim(lo, hi)` | Axis limit shortcuts. Also `fm.X("field", scale=fm.LinearScale(domain=[lo, hi]))`. |
-| `geom_abline(slope=, intercept=)` | `fm.annotate_abline(slope, intercept)` | Returns a `Chart`; layer it with `+`. Accepts `stroke=`, `stroke_width=`, `stroke_dash=`. |
-| `color=` / `alpha=` / `linetype=` in `aes()` | `color=` / `alpha=` / `linetype=` on mark kwargs | Friendly aliases for `fill=`, `opacity=`, `stroke_dash=`. Named linetypes: `"dashed"`, `"dotted"`, `"dashdot"`, `"longdash"`, `"solid"`. |
+| `facet_wrap(~var)` | [`.encode(facet="var")`][ferrum.Chart.encode] | Faceting is an encoding channel. |
+| `facet_grid(row~col)` | [`.encode(facet_row="row", facet_col="col")`][ferrum.Chart.encode] | — |
+| `scale_x_log10()` | `.encode(x=`[`fm.X`][ferrum.X]`("x", scale=`[`fm.Scale`][ferrum.Scale]`(type="log")))` | Scales are values, not global functions. |
+| `coord_flip()` | [`.coord("flip")`][ferrum.Chart.coord] | — |
+| `labs(title=, x=, y=)` | [`.labs(x=, y=, title=)`][ferrum.Chart.labs] | Post-hoc axis label shortcut. Also `.properties(title=)` for chart title only. |
+| `xlim()` / `ylim()` | [`.xlim(lo, hi)`][ferrum.Chart.xlim] / [`.ylim(lo, hi)`][ferrum.Chart.ylim] | Axis limit shortcuts. Also `fm.X("field", scale=fm.LinearScale(domain=[lo, hi]))`. |
+| `geom_abline(slope=, intercept=)` | [`fm.annotate_abline(slope, intercept)`][ferrum.annotate_abline] | Returns a `Chart`; layer it with `+`. Accepts `stroke=`, `stroke_width=`, `stroke_dash=`. |
+| `color=` / `alpha=` / `linetype=` on `aes()` | `color=` / `alpha=` / `linetype=` on [mark kwargs][ferrum.Chart.mark_point] | Friendly aliases for `fill=`, `opacity=`, `stroke_dash=`. Named linetypes: `"dashed"`, `"dotted"`, `"dashdot"`, `"longdash"`, `"solid"`. |
 | `theme_bw()` | `fm.themes.minimal` | See [Themes](../guide/themes.md) for all 12. |
 | `theme_set()` | [`fm.set_default_theme()`][ferrum.set_default_theme] | Scope-bounded via context manager; per-chart [`.theme()`][ferrum.Chart.theme] always wins. |
 | `ggsave()` | [`.save()`][ferrum.Chart.save] | Supports SVG, PNG, HTML. |
