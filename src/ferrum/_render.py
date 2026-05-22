@@ -276,10 +276,10 @@ class _RenderMixin:
         new._render_config = merged
         return new
 
-    def _render_inputs(self) -> tuple:
+    def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
         resolved = self._resolve_pending()
         chart = resolved._apply_auto_raster()
-        spec = chart.to_spec()
+        spec = chart.to_spec(_auto_tooltips=_auto_tooltips)
         # F17: apply Axis(label_map=...) column-value remapping before data
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)

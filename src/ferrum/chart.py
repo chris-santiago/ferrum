@@ -4767,7 +4767,7 @@ class Chart(_RenderMixin):
 
     # ---- Spec output ----
 
-    def to_spec(self):
+    def to_spec(self, *, _auto_tooltips: bool = False):
         """Build the Rust ``ChartSpec`` for this chart.
 
         Resolves any pending statistical-mark desugar, converts Python encoding
@@ -5019,6 +5019,26 @@ class Chart(_RenderMixin):
                     kw["tooltip_fields"] = json.dumps(tf_list)
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
+        # Auto-generate tooltip fields from encoded channels for interactive
+        # rendering only.  Static SVG/PNG output skips this to avoid bloating
+        # the SVG with <title> elements on every mark.  Explicit tooltip= wins.
+        _TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
+        if _auto_tooltips and "tooltip" not in kw and "tooltip_fields" not in kw:
+            auto_fields: list[dict] = []
+            seen_auto: set[str] = set()
+            for _ch_name in _RENDERER_HONORED_CHANNELS:
+                if _ch_name in _TOOLTIP_SKIP:
+                    continue
+                enc_spec = kw.get(_ch_name)
+                if enc_spec is None:
+                    continue
+                # kw values for channels are EncodingSpec instances (have .field).
+                field = getattr(enc_spec, "field", None)
+                if field and isinstance(field, str) and field not in seen_auto:
+                    auto_fields.append({"field": field})
+                    seen_auto.add(field)
+            if auto_fields:
+                kw["tooltip_fields"] = json.dumps(auto_fields)
         return ChartSpec(**kw)
 
     def _build_spec(self):
