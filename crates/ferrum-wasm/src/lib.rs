@@ -347,6 +347,11 @@ impl WasmRenderer {
         let _ = self.render_frame_js();
     }
 
+    #[wasm_bindgen(js_name = "maxTextureSize")]
+    pub fn max_texture_size(&self) -> u32 {
+        self.gpu.device.limits().max_texture_dimension_2d
+    }
+
     /// Return tooltip JSON for a specific mark instance.
     ///
     /// `panel_id` and `batch_idx` identify the packed batch; `node_idx` is

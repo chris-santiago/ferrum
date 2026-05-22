@@ -10,6 +10,7 @@ export const wasmrenderer_handleClick: (a: number, b: number, c: number, d: numb
 export const wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
 export const wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const wasmrenderer_maxTextureSize: (a: number) => number;
 export const wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const wasmrenderer_renderFrame: (a: number) => [number, number];

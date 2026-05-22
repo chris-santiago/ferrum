@@ -198,6 +198,13 @@ export class WasmRenderer {
         }
     }
     /**
+     * @returns {number}
+     */
+    maxTextureSize() {
+        const ret = wasm.wasmrenderer_maxTextureSize(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Apply a pan delta on the given panel and re-render via GPU affine transform.
      *
      * Returns updated text-element JSON.

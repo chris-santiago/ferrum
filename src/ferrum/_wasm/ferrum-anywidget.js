@@ -290,10 +290,15 @@ async function _render(container, sceneJson, adapter) {
     if (_ro) _ro.disconnect();
     const dpr = window.devicePixelRatio || 1;
     const origW = canvas.width, origH = canvas.height;
-    const captureW = Math.round(origW * dpr);
-    const captureH = Math.round(origH * dpr);
+    // Adaptive DPR: clamp capture dimensions to GPU max texture size.
+    // Discrete GPUs may support 8192+; integrated GPUs typically 2048.
+    const maxTex = renderer.maxTextureSize ? renderer.maxTextureSize() : 2048;
+    const maxScale = Math.min(dpr, maxTex / Math.max(origW, origH));
+    const captureScale = maxScale >= 1.05 ? maxScale : 1;
+    const captureW = Math.round(origW * captureScale);
+    const captureH = Math.round(origH * captureScale);
     try {
-      if (dpr > 1) {
+      if (captureScale > 1) {
         canvas.width = captureW;
         canvas.height = captureH;
         renderer.resize(captureW, captureH);
@@ -311,7 +316,7 @@ async function _render(container, sceneJson, adapter) {
         const svgClone = svgEl.cloneNode(true);
         svgClone.setAttribute('width', String(off.width));
         svgClone.setAttribute('height', String(off.height));
-        if (dpr > 1) {
+        if (captureScale > 1) {
           svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
         }
         // Inline @font-face from the document's stylesheets so the SVG
@@ -356,7 +361,7 @@ async function _render(container, sceneJson, adapter) {
     } catch (err) {
       console.warn('[ferrum] save PNG error:', err);
     }
-    if (dpr > 1) {
+    if (captureScale > 1) {
       try {
         canvas.width = origW; canvas.height = origH;
         renderer.resize(origW, origH);

@@ -44,6 +44,7 @@ export class WasmRenderer {
      */
     hitTestAt(x: number, y: number): string;
     loadScene(scene_json: string, packed_data: Uint8Array): string;
+    maxTextureSize(): number;
     /**
      * Apply a pan delta on the given panel and re-render via GPU affine transform.
      *
@@ -131,6 +132,7 @@ export interface InitOutput {
     readonly wasmrenderer_handleDrag: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly wasmrenderer_maxTextureSize: (a: number) => number;
     readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];
