@@ -192,6 +192,11 @@ pub struct DrawCommand {
     /// When `true`, the additive-blend pipeline is used instead of the
     /// normal alpha-blend pipeline.
     pub additive: bool,
+    /// When `true`, the zoom/pan affine transform is applied to this
+    /// command's instances. When `false` (axes, gridlines, legend, title,
+    /// etc.), the identity transform is used so these elements stay fixed
+    /// during zoom.
+    pub is_mark: bool,
 }
 
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
@@ -219,11 +224,11 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     let mut prev_r = rects.len();
 
     collect_nodes(&scene.title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
         collect_nodes(&panel.grid, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
@@ -242,6 +247,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     instance_start: meta.instance_start as u32,
                     instance_count: meta.instance_count as u32,
                     additive,
+                    is_mark: true,
                 });
             } else {
                 collect_nodes(
@@ -249,22 +255,22 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     &mut circles, &mut rects, &mut mesh, &mut texts, &mut images,
                     batch.stroke_cap, batch.stroke_join,
                 );
-                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, &mut draw_commands);
+                emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, additive, true, &mut draw_commands);
             }
         }
 
         collect_nodes(&panel.axes, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
         collect_nodes(&panel.strip_title, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
         collect_nodes(&panel.annotations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+        emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
     }
 
     collect_nodes(&scene.legend, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
     collect_nodes(&scene.decorations, &mut circles, &mut rects, &mut mesh, &mut texts, &mut images, None, None);
-    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, &mut draw_commands);
+    emit_draw_commands(&circles, &rects, &mut prev_c, &mut prev_r, false, false, &mut draw_commands);
 
     SceneData {
         circle_instances: circles,
@@ -287,6 +293,7 @@ fn emit_draw_commands(
     prev_c: &mut usize,
     prev_r: &mut usize,
     additive: bool,
+    is_mark: bool,
     commands: &mut Vec<DrawCommand>,
 ) {
     let new_c = circles.len();
@@ -296,6 +303,7 @@ fn emit_draw_commands(
             instance_start: *prev_c as u32,
             instance_count: (new_c - *prev_c) as u32,
             additive,
+            is_mark,
         });
     }
     *prev_c = new_c;
@@ -306,6 +314,7 @@ fn emit_draw_commands(
             instance_start: *prev_r as u32,
             instance_count: (new_r - *prev_r) as u32,
             additive,
+            is_mark,
         });
     }
     *prev_r = new_r;

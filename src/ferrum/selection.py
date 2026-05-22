@@ -441,6 +441,10 @@ def _to_event_expr(s: str) -> str | dict[str, str]:
 
 def _hex_to_color_dict(hex_str: str) -> dict[str, int]:
     h = hex_str.lstrip("#")
+    if len(h) == 3:
+        h = h[0] * 2 + h[1] * 2 + h[2] * 2
+    elif len(h) == 4:
+        h = h[0] * 2 + h[1] * 2 + h[2] * 2 + h[3] * 2
     if len(h) == 6:
         return {
             "r": int(h[0:2], 16),

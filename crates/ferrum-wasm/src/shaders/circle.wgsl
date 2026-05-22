@@ -51,11 +51,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         in.quad_pos.x * sin_a + in.quad_pos.y * cos_a,
     );
 
-    let px_local = in.center + rotated_quad * extent;
-    // Apply per-panel affine transform: transform.xy = (sx, sy), transform.zw = (tx, ty).
+    // Apply per-panel affine transform to the center only, so zoom
+    // repositions marks without scaling their visual size (radius, stroke).
     let sx = u.transform.x; let sy = u.transform.y;
     let tx = u.transform.z; let ty = u.transform.w;
-    let px = vec2<f32>(px_local.x * sx + tx, px_local.y * sy + ty);
+    let center_tx = vec2<f32>(in.center.x * sx + tx, in.center.y * sy + ty);
+    let px = center_tx + rotated_quad * extent;
+    // Pre-transform position for fragment-stage panel clipping.
+    let px_local = in.center + rotated_quad * extent;
     let ndc = vec2<f32>(
         px.x / u.canvas.x * 2.0 - 1.0,
         1.0 - px.y / u.canvas.y * 2.0,

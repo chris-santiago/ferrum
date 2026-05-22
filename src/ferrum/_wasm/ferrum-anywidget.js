@@ -284,9 +284,11 @@ async function _render(container, sceneJson, adapter) {
   select(chartWrapper).on('dblclick.zoom', onReset);
 
   // ── Save PNG handler ──────────────────────────────────────────────
-  // WebGPU canvases clear after present(). We render a frame, wait one
-  // animation frame for the compositor to finish, blit to a 2D offscreen
-  // canvas, then export from there.
+  // Composites the GPU canvas (marks, gridlines) with the SVG text overlay
+  // (axis labels, title, legend text) into a single PNG.  WebGPU canvases
+  // clear after present(), so we render → wait one RAF → blit to 2D canvas.
+  // The SVG is serialized with an inlined @font-face so text renders even
+  // without the parent document's CSS.
   async function onSave() {
     if (!renderer) return;
     const dpr = window.devicePixelRatio || 1;
@@ -301,9 +303,52 @@ async function _render(container, sceneJson, adapter) {
       }
       renderer.renderFrame();
       await new Promise(r => requestAnimationFrame(r));
+
       const off = document.createElement('canvas');
       off.width = canvas.width; off.height = canvas.height;
-      off.getContext('2d').drawImage(canvas, 0, 0);
+      const ctx = off.getContext('2d');
+      ctx.drawImage(canvas, 0, 0);
+
+      // Composite SVG text overlay onto the offscreen canvas.
+      try {
+        const svgClone = svgEl.cloneNode(true);
+        svgClone.setAttribute('width', String(off.width));
+        svgClone.setAttribute('height', String(off.height));
+        if (dpr > 1) {
+          svgClone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        }
+        // Inline @font-face from the document's stylesheets so the SVG
+        // renders text correctly when rasterized via Image.
+        const fontRules = [];
+        try {
+          for (const sheet of document.styleSheets) {
+            for (const rule of sheet.cssRules || []) {
+              if (rule.cssText && rule.cssText.startsWith('@font-face')) {
+                fontRules.push(rule.cssText);
+              }
+            }
+          }
+        } catch (_) { /* cross-origin stylesheet, skip */ }
+        if (fontRules.length > 0) {
+          const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+          styleEl.textContent = fontRules.join('\n');
+          svgClone.insertBefore(styleEl, svgClone.firstChild);
+        }
+        const svgXml = new XMLSerializer().serializeToString(svgClone);
+        const svgBlob = new Blob([svgXml], { type: 'image/svg+xml;charset=utf-8' });
+        const svgUrl = URL.createObjectURL(svgBlob);
+        const img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = reject;
+          i.src = svgUrl;
+        });
+        ctx.drawImage(img, 0, 0, off.width, off.height);
+        URL.revokeObjectURL(svgUrl);
+      } catch (svgErr) {
+        console.warn('[ferrum] SVG text composite failed, exporting without text:', svgErr);
+      }
+
       const a = document.createElement('a');
       a.href = off.toDataURL('image/png');
       a.download = 'ferrum-chart.png';

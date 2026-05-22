@@ -13,6 +13,13 @@ struct ImageGpu {
 pub struct GpuBuffers {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    /// Identity-transform uniform buffer used for non-mark elements (axes,
+    /// gridlines, legend, title) so they stay fixed during zoom/pan.
+    /// Prefixed with underscore because the field is only read indirectly
+    /// through `identity_uniform_bind_group`, but must stay alive to keep
+    /// the GPU buffer backing the bind group valid.
+    _identity_uniform_buffer: wgpu::Buffer,
+    identity_uniform_bind_group: wgpu::BindGroup,
     quad_vertex_buffer: wgpu::Buffer,
     circle_instance_buffer: Option<wgpu::Buffer>,
     rect_instance_buffer: Option<wgpu::Buffer>,
@@ -100,6 +107,25 @@ impl GpuBuffers {
             }],
         });
 
+        // Identity-transform buffer: always sx=1,sy=1,tx=0,ty=0.
+        // Used for non-mark elements (axes, gridlines, legend, title) so
+        // they stay fixed during zoom/pan.
+        let identity_uniforms = Uniforms::identity(scene.width, scene.height);
+        let identity_uniform_buffer =
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("identity_uniforms"),
+                contents: bytemuck::bytes_of(&identity_uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let identity_uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("identity_uniforms_bg"),
+            layout: &pipelines.uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: identity_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         let quad_vertex_buffer =
             gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("quad"),
@@ -154,6 +180,8 @@ impl GpuBuffers {
         Self {
             uniform_buffer,
             uniform_bind_group,
+            _identity_uniform_buffer: identity_uniform_buffer,
+            identity_uniform_bind_group,
             quad_vertex_buffer,
             circle_instance_buffer,
             rect_instance_buffer,
@@ -292,6 +320,10 @@ pub fn render_frame(
         // Draw order: mesh (areas/lines) → images → per-batch circle/rect
         // commands (painter's-algorithm order from the scene graph, with
         // correct blend pipeline selection per batch).
+        //
+        // Mesh and image draws use the zoom-transformed uniforms (mesh
+        // vertices are pre-tessellated positions that should move with
+        // zoom; images represent raster tiles that should scale).
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {
@@ -310,10 +342,19 @@ pub fn render_frame(
             pass.draw(0..4, 0..1);
         }
 
+        // Per-batch circle/rect draw commands. Mark commands use the
+        // zoom-transformed uniforms; non-mark commands (axes, gridlines,
+        // legend, title, etc.) use the identity-transform uniforms so
+        // they stay fixed during zoom/pan.
         for cmd in &buffers.draw_commands {
             if cmd.instance_count == 0 {
                 continue;
             }
+            let bind_group = if cmd.is_mark {
+                &buffers.uniform_bind_group
+            } else {
+                &buffers.identity_uniform_bind_group
+            };
             let start = cmd.instance_start;
             let end = start + cmd.instance_count;
             match cmd.kind {
@@ -325,7 +366,7 @@ pub fn render_frame(
                             &pipelines.instanced_rect
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_bind_group(0, bind_group, &[]);
                         pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
                         pass.set_vertex_buffer(1, ib.slice(..));
                         pass.draw(0..4, start..end);
@@ -339,7 +380,7 @@ pub fn render_frame(
                             &pipelines.instanced_circle
                         };
                         pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
+                        pass.set_bind_group(0, bind_group, &[]);
                         pass.set_vertex_buffer(0, buffers.quad_vertex_buffer.slice(..));
                         pass.set_vertex_buffer(1, ib.slice(..));
                         pass.draw(0..4, start..end);
