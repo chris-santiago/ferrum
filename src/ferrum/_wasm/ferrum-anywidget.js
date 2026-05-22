@@ -546,8 +546,17 @@ async function _render(container, sceneJson, adapter) {
   // ── ResizeObserver ────────────────────────────────────────────────
   let _ro = null;
   if (renderer) {
-    _ro = new ResizeObserver(() => {
-      try { renderer.resize(canvas.width, canvas.height); } catch (err) { /* ignore */ }
+    _ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const cr = entry.contentRect;
+        const newW = Math.round(cr.width);
+        const newH = Math.round(cr.height);
+        if (newW > 0 && newH > 0 && (newW !== canvas.width || newH !== canvas.height)) {
+          canvas.width = newW;
+          canvas.height = newH;
+          try { renderer.resize(newW, newH); renderer.renderFrame(); } catch (err) { /* ignore */ }
+        }
+      }
     });
     _ro.observe(canvas);
   }
@@ -604,11 +613,19 @@ export async function render({ model, el }) {
   el.appendChild(container);
   let _state = null;
   let _prevJson = null;
+  let _transitionRafId = null;
 
   async function _reload(s) {
     try {
       const prev = _prevJson;
       _prevJson = s;
+
+      // Cancel any in-flight transition animation before overwriting _state.
+      if (_transitionRafId !== null) {
+        cancelAnimationFrame(_transitionRafId);
+        _transitionRafId = null;
+      }
+
       _state = await _render(container, s, adapter);
 
       if (_state && prev && _state.renderer) {
@@ -617,15 +634,22 @@ export async function render({ model, el }) {
         // loadScene(s) already loaded the new scene into the renderer, so
         // startTransition needs the old scene to interpolate FROM.
         try {
+          // Capture renderer locally so the closure does not read stale _state
+          // if _reload fires again while this loop is still running.
+          const _renderer = _state.renderer;
           _state.renderer.startTransition(prev);
           const dur = 300;
           const t0 = performance.now();
           function _step() {
             const t = Math.min((performance.now() - t0) / dur, 1.0);
-            try { _state.renderer.tickTransition(t); } catch (_) {}
-            if (t < 1.0) requestAnimationFrame(_step);
+            try { _renderer.tickTransition(t); } catch (_) {}
+            if (t < 1.0) {
+              _transitionRafId = requestAnimationFrame(_step);
+            } else {
+              _transitionRafId = null;
+            }
           }
-          requestAnimationFrame(_step);
+          _transitionRafId = requestAnimationFrame(_step);
         } catch (e) { /* transition not supported — fall back to static render */ }
       }
 
