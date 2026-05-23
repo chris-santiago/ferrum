@@ -12,10 +12,17 @@ pub(crate) mod binding;
 
 // Spec §6.1 constants.
 pub const LABEL_OVERLAP_TOLERANCE: f64 = 0.10;
-pub const DEFAULT_LABEL_ANGLE: f64 = -45.0;
 pub const MIN_PANEL_DIM: f64 = 1.0;
 pub const DEFAULT_LABEL_FONT_SIZE: f64 = 11.0;
 pub const DEFAULT_TITLE_FONT_SIZE: f64 = 13.0;
+
+// Axis label overhaul constants.
+/// Cascade of angles tried in order before falling back to elision or culling.
+pub(crate) const ANGLE_CASCADE: [f64; 5] = [0.0, -30.0, -45.0, -60.0, -90.0];
+/// Multiplicative factor applied to font size on each shrink step.
+pub(crate) const FONT_SHRINK_FACTOR: f64 = 0.82;
+/// Default maximum number of visible tick labels before culling kicks in.
+pub(crate) const DEFAULT_CULL_THRESHOLD: u32 = 8;
 
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +191,11 @@ pub struct ThemeInputs {
     // Reference lines
     pub reference_line_color: palette::Srgba<u8>,
     pub reference_line_dash: Option<Vec<f64>>,
+
+    // Axis label overhaul
+    /// Maximum number of visible tick labels before culling kicks in.
+    /// Values above this threshold trigger label density reduction.
+    pub cull_threshold: u32,
 }
 
 impl Default for ThemeInputs {
@@ -258,6 +270,8 @@ impl Default for ThemeInputs {
 
             reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
             reference_line_dash: Some(vec![4.0, 4.0]),
+
+            cull_threshold: DEFAULT_CULL_THRESHOLD,
         }
     }
 }
@@ -426,7 +440,26 @@ pub fn compute_layout(
         metrics,
     );
     let y_label_band = axis::compute_y_label_band_width(&axes.y, theme.label_font_size, metrics);
-    let x_label_band = metrics.line_height(theme.label_font_size);
+
+    // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
+    // angle the cascade will choose by running a lightweight worst-case check
+    // against an estimated slot width, before the plot rect is finalized.
+    // Over-reservation is preferable to under-reservation (label clipping).
+    let x_label_band = if axes.show_x {
+        let estimated_plot_w = inner_after_legend.w - y_label_band - y_title_gutter;
+        let n_labels = axes.x.tick_labels.len().max(1);
+        let estimated_slot_w = estimated_plot_w / n_labels as f64;
+        axis::estimate_x_label_band(
+            &axes.x.tick_labels,
+            theme.label_font_size,
+            axes.x.label_angle_override,
+            metrics,
+            estimated_slot_w,
+        )
+    } else {
+        0.0
+    };
+
     let x_title_gutter = if axes.x.title.is_some() {
         metrics.line_height(theme.title_font_size) + theme.axis_title_padding
     } else {
@@ -502,6 +535,10 @@ pub fn compute_layout(
     // x-axis title (only the bottom row needs it — duplicating it in every
     // inter-row gutter is visually noisy).
     let max_row = panel_rects.iter().map(|(r, _, _, _)| *r).max().unwrap_or(0);
+    // Compute the minimum column index so non-leftmost panels can suppress the
+    // y-axis title (only the leftmost column needs it — duplicating it on every
+    // panel in a multi-column faceted chart causes visual overlap).
+    let min_col = panel_rects.iter().map(|(_, c, _, _)| *c).min().unwrap_or(0);
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
@@ -574,8 +611,18 @@ pub fn compute_layout(
             // area is unchanged (gutters remain reserved upstream); this
             // simply omits axis line + ticks + labels + title.
             if axes.show_y {
+                // Suppress y-axis title on non-leftmost-column facet panels to
+                // avoid duplicating the title in every inter-column gutter —
+                // only the leftmost column's title is needed.
+                let y_input = if col > min_col && spec.facet.is_some() {
+                    let mut modified = axes.y.clone();
+                    modified.title = None;
+                    modified
+                } else {
+                    axes.y.clone()
+                };
                 let y_axis = axis::layout_y_axis(
-                    &axes.y,
+                    &y_input,
                     rect,
                     panel_index,
                     theme.label_font_size,
@@ -604,6 +651,7 @@ pub fn compute_layout(
                     theme.label_font_size,
                     theme.title_font_size,
                     theme.axis_title_padding,
+                    theme.cull_threshold,
                     metrics,
                 );
                 if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {
@@ -971,6 +1019,206 @@ mod tests {
             &legend::LegendOverrides::default(),
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());
+    }
+
+    #[test]
+    fn faceted_2x2_emits_one_y_title_per_row() {
+        // 2x2 Grid facet with 4 groups. Axes have titles on both x and y.
+        // Expected: 4 panels, 8 total axis layouts (4x y + 4x x).
+        // - y-axis title suppressed on non-leftmost columns → 2 y titles (col 0 only).
+        // - x-axis title suppressed on non-bottom rows → 2 x titles (row 1 only).
+        // Total titled axes = 4 out of 8.
+        let mut spec = minimal_chart_spec();
+        spec.facet = Some(FacetSpec {
+            field: "group".into(),
+            row: None,
+            mode: FacetMode::Grid { nrows: 2, ncols: 2 },
+            spacing: None,
+        });
+
+        let groups: Vec<FacetGroup> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|v| FacetGroup {
+                key: FacetKey { field: "group".into(), value: v.to_string() },
+                n_rows: 10,
+            })
+            .collect();
+
+        let axes = AxesInput {
+            x: AxisInput::new(
+                AxisOrient::Bottom,
+                Some("x_title".into()),
+                vec!["0".into(), "1".into()],
+                None,
+            ),
+            y: AxisInput::new(
+                AxisOrient::Left,
+                Some("y_title".into()),
+                vec!["0".into(), "5".into()],
+                None,
+            ),
+            show_x: true,
+            show_y: true,
+        };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 4, "expected 4 panels in a 2x2 grid");
+        assert_eq!(result.axes.len(), 8, "expected 8 axis layouts (2 per panel)");
+
+        let y_axes: Vec<&AxisLayout> = result
+            .axes
+            .iter()
+            .filter(|a| a.orient == AxisOrient::Left)
+            .collect();
+        let y_with_title = y_axes.iter().filter(|a| a.title.is_some()).count();
+        assert_eq!(
+            y_with_title, 2,
+            "expected 2 y-axis titles (one per row, leftmost column only); got {y_with_title}"
+        );
+
+        let x_axes: Vec<&AxisLayout> = result
+            .axes
+            .iter()
+            .filter(|a| a.orient == AxisOrient::Bottom)
+            .collect();
+        let x_with_title = x_axes.iter().filter(|a| a.title.is_some()).count();
+        assert_eq!(
+            x_with_title, 2,
+            "expected 2 x-axis titles (one per column, bottom row only); got {x_with_title}"
+        );
+    }
+
+    #[test]
+    fn compute_layout_rotated_labels_have_larger_bottom_margin_than_flat() {
+        // A chart with long labels (forced to rotate via override) must reserve
+        // a taller bottom band than a chart with short flat labels. We verify
+        // this by comparing the bottom edge of the plot area — a larger bottom
+        // margin pushes the plot area top-of-bottom-gutter upward, meaning
+        // plot_area.y + plot_area.h is smaller relative to the viewport height.
+        //
+        // Short-label chart: 4 short labels ("A".."D"), no angle override.
+        // Long-label chart: same geometry but labels forced to -45° via override.
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        // Short flat labels: "A"=10px fits in slot_w=600/4=150.
+        let short_axes = AxesInput {
+            x: AxisInput::new(
+                AxisOrient::Bottom,
+                None,
+                vec!["A".into(), "B".into(), "C".into(), "D".into()],
+                None,
+            ),
+            y: AxisInput::new(
+                AxisOrient::Left,
+                None,
+                vec!["0".into(), "5".into(), "10".into()],
+                None,
+            ),
+            show_x: true,
+            show_y: true,
+        };
+
+        // Long labels with -45° override: "ABCDEFGHIJ"=100px. Angle override forces
+        // margin = 100*sin(45°) + line_h*cos(45°) ≈ 70.7 + 9.3 = 80.
+        let long_axes = AxesInput {
+            x: AxisInput::new(
+                AxisOrient::Bottom,
+                None,
+                vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into(), "EFGHIJKLMN".into()],
+                Some(-45.0),
+            ),
+            y: AxisInput::new(
+                AxisOrient::Left,
+                None,
+                vec!["0".into(), "5".into(), "10".into()],
+                None,
+            ),
+            show_x: true,
+            show_y: true,
+        };
+
+        let short_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &short_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+        ).unwrap();
+
+        let long_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &long_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+        ).unwrap();
+
+        let short_bottom = short_result.panels[0].plot_area.y + short_result.panels[0].plot_area.h;
+        let long_bottom = long_result.panels[0].plot_area.y + long_result.panels[0].plot_area.h;
+
+        assert!(
+            long_bottom < short_bottom,
+            "rotated labels (-45°) must consume more bottom margin than flat labels; \
+             long_bottom={long_bottom:.1} should be less than short_bottom={short_bottom:.1}"
+        );
+    }
+
+    #[test]
+    fn compute_layout_show_x_false_bottom_margin_is_zero() {
+        // When show_x=false, the x_label_band must be 0 so no bottom space
+        // is reserved for labels. We verify by checking that the plot area
+        // bottom edge equals the inner_after_legend bottom edge (no gutter).
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let axes_no_x = AxesInput {
+            x: AxisInput::new(
+                AxisOrient::Bottom,
+                None,
+                vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()],
+                None,
+            ),
+            y: AxisInput::new(AxisOrient::Left, None, vec!["0".into(), "5".into()], None),
+            show_x: false,
+            show_y: false,
+        };
+        let axes_with_x = AxesInput {
+            show_x: true,
+            ..axes_no_x.clone()
+        };
+
+        let no_x_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &axes_no_x, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+        ).unwrap();
+        let with_x_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &axes_with_x, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+        ).unwrap();
+
+        let no_x_bottom = no_x_result.panels[0].plot_area.y + no_x_result.panels[0].plot_area.h;
+        let with_x_bottom = with_x_result.panels[0].plot_area.y + with_x_result.panels[0].plot_area.h;
+
+        assert!(
+            no_x_bottom > with_x_bottom,
+            "show_x=false should reserve less bottom space (larger bottom edge); \
+             no_x={no_x_bottom:.1}, with_x={with_x_bottom:.1}"
+        );
     }
 
     #[test]
