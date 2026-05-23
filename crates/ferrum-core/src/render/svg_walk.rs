@@ -133,6 +133,13 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
 
         svg.use_clip_close();
 
+        // Annotations (reference lines, hlines, vlines) — emitted OUTSIDE the
+        // clip region so they can span the full panel width/height, and AFTER
+        // marks so they render above data (matching WASM z-order in scene_load.rs).
+        for node in &panel.annotations {
+            emit_node(&mut svg, node);
+        }
+
         // Text-kind mark batches (mark_text, mark_label) outside clip so
         // dy/dx offsets near panel edges are not cut off.
         for batch in &panel.marks {
@@ -322,6 +329,180 @@ fn emit_text(svg: &mut SvgBuffer, x: f64, y: f64, content: &str, s: &FsText) {
         dominant_baseline: db_owned.as_deref(),
     };
     svg.text(x, y, content, &ts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrum_scene::{
+        BlendMode, Color, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind,
+        Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+    };
+
+    fn minimal_scene(annotations: Vec<SceneNode>) -> SceneGraph {
+        SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                },
+                grid: vec![],
+                axes: vec![],
+                strip_title: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![SceneNode::Circle {
+                        cx: 100.0,
+                        cy: 150.0,
+                        r: 4.0,
+                        style: FillStroke {
+                            fill: Some(Color::rgb(70, 130, 180)),
+                            stroke: None,
+                            stroke_width: 0.0,
+                            opacity: 1.0,
+                            stroke_dash: None,
+                            stroke_opacity: 1.0,
+                            fill_opacity: 1.0,
+                            angle: 0.0,
+                        },
+                    }],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                annotations,
+            }],
+        }
+    }
+
+    fn annotation_line() -> SceneNode {
+        // A horizontal reference line at y=50 with a distinctive red stroke.
+        SceneNode::Line {
+            x1: 50.0,
+            y1: 50.0,
+            x2: 350.0,
+            y2: 50.0,
+            style: StrokeStyle {
+                color: Color::rgb(255, 0, 0),
+                width: 2.0,
+                opacity: 1.0,
+                dash: None,
+                stroke_cap: None,
+                stroke_join: None,
+                stroke_opacity: 1.0,
+            },
+        }
+    }
+
+    // ── Step 1 (TDD): this test was written BEFORE the fix and must fail
+    // without the annotation iteration in walk_svg. ──────────────────────
+    #[test]
+    fn annotation_line_appears_in_svg() {
+        let scene = minimal_scene(vec![annotation_line()]);
+        let svg = walk_svg(&scene, false);
+        // The red stroke color (#ff0000) and y-coordinates are distinctive;
+        // if annotations are emitted this assertion passes.
+        assert!(
+            svg.contains("ff0000") || svg.contains("255,0,0") || svg.contains("#f00"),
+            "annotation line stroke color not found in SVG — annotations are being dropped\nSVG snippet: {}",
+            &svg[..svg.len().min(500)]
+        );
+        // Also confirm the y1=50 coordinate appears (rendered as "50" or "50.0").
+        assert!(
+            svg.contains("y1=\"50\"") || svg.contains("y1=\"50.0\""),
+            "annotation line y1=50 not found in SVG\nSVG: {}",
+            &svg[..svg.len().min(500)]
+        );
+    }
+
+    // ── Step 4: regression tests ─────────────────────────────────────────
+
+    #[test]
+    fn empty_annotations_no_regression() {
+        // A panel with no annotations must produce the same SVG as the
+        // baseline (no crash, no extra elements).
+        let scene_with = minimal_scene(vec![]);
+        let scene_without = minimal_scene(vec![]);
+        let svg_with = walk_svg(&scene_with, false);
+        let svg_without = walk_svg(&scene_without, false);
+        assert_eq!(
+            svg_with, svg_without,
+            "empty annotations changed SVG output"
+        );
+        // Confirm the mark circle is still present.
+        assert!(svg_with.contains("<circle "), "mark circle missing");
+    }
+
+    #[test]
+    fn multiple_annotation_types_both_appear() {
+        // A reference line + a text label — both must appear in SVG output.
+        let text_node = SceneNode::Text {
+            x: 200.0,
+            y: 50.0,
+            content: "ref_label_xyz".to_string(),
+            style: ferrum_scene::TextStyle {
+                font_size: 12.0,
+                font_weight: ferrum_scene::FontWeight::Normal,
+                anchor: ferrum_scene::TextAnchor::Middle,
+                baseline: ferrum_scene::TextBaseline::Alphabetic,
+                angle: 0.0,
+                color: Color::rgb(80, 80, 80),
+                opacity: 1.0,
+                font_family: "sans-serif".to_string(),
+            },
+        };
+        let scene = minimal_scene(vec![annotation_line(), text_node]);
+        let svg = walk_svg(&scene, false);
+
+        assert!(
+            svg.contains("ff0000") || svg.contains("255,0,0"),
+            "annotation line not found in SVG"
+        );
+        assert!(
+            svg.contains("ref_label_xyz"),
+            "annotation text label not found in SVG"
+        );
+    }
+
+    #[test]
+    fn annotations_appear_after_marks_in_svg() {
+        // Annotations must be emitted after marks so they render above data
+        // (matching WASM z-order).
+        let scene = minimal_scene(vec![annotation_line()]);
+        let svg = walk_svg(&scene, false);
+
+        let circle_pos = svg.find("<circle ").expect("mark circle missing from SVG");
+        // The annotation line's distinctive color should appear after the circle.
+        let annotation_pos = svg.find("ff0000")
+            .or_else(|| svg.find("255,0,0"))
+            .expect("annotation line not found in SVG");
+
+        assert!(
+            annotation_pos > circle_pos,
+            "annotation appears before mark in SVG (wrong z-order): \
+             circle at byte {circle_pos}, annotation at byte {annotation_pos}"
+        );
+    }
 }
 
 fn path_cmds_to_d(cmds: &[PathCmd]) -> String {

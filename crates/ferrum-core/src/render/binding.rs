@@ -276,6 +276,9 @@ struct ThemeOverridesSpec {
     axis_title_padding: Option<f64>,
     column_padding: Option<f64>,
     row_padding: Option<f64>,
+
+    // Axis label culling
+    cull_threshold: Option<u32>,
 }
 
 fn parse_color_val(s: &str) -> PyResult<super::color::Color> {
@@ -405,6 +408,9 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     if let Some(v) = spec.axis_title_padding { t.axis_title_padding = v; }
     if let Some(v) = spec.column_padding { t.column_padding = v; }
     if let Some(v) = spec.row_padding { t.row_padding = v; }
+
+    // Axis label culling
+    if let Some(v) = spec.cull_threshold { t.cull_threshold = v; }
 
     Ok(())
 }

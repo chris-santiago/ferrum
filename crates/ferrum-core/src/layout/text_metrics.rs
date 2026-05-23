@@ -27,6 +27,14 @@ impl TextMetrics for HeuristicMetrics {
     }
 }
 
+/// Measure the width of a potentially multi-line label (lines separated by '\n').
+/// Returns the maximum width across all lines.
+pub(crate) fn measure_multiline_width(text: &str, font_size: f64, metrics: &dyn TextMetrics) -> f64 {
+    text.split('\n')
+        .map(|line| metrics.measure_width(line, font_size))
+        .fold(0.0_f64, f64::max)
+}
+
 #[cfg(test)]
 pub(crate) struct MockMetrics<F: Fn(&str, f64) -> f64> {
     pub measure: F,
@@ -89,5 +97,15 @@ mod tests {
         };
         assert_eq!(m.measure_width("abc", 12.0), 30.0);
         assert!((m.line_height(12.0) - 18.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn measure_multiline_width_returns_max_line_width() {
+        // "trivial" = 7 chars * 10.0 = 70.0
+        // "baseline" = 8 chars * 10.0 = 80.0
+        // max = 80.0
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let w = measure_multiline_width("trivial\nbaseline", 11.0, &m);
+        assert!((w - 80.0).abs() < 1e-12);
     }
 }

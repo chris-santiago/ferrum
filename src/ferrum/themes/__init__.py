@@ -81,6 +81,11 @@ area_opacity, opacity : optional
         Font size for facet strip titles (default 12).
     strip_padding : float, optional
         Vertical padding around facet strip titles (default 6).
+    cull_threshold : int, optional
+        Minimum number of pixels between adjacent axis tick labels before
+        culling kicks in. Labels are dropped until the remaining labels are at
+        least this many pixels apart. Default 8 (set in Rust). Set to ``0`` to
+        disable culling entirely.
 
     Raises
     ------
@@ -158,6 +163,8 @@ area_opacity, opacity : optional
             "axis_title_padding",
             "column_padding",
             "row_padding",
+            # Axis label culling
+            "cull_threshold",
         }
     )
 

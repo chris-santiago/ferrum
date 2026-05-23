@@ -28,10 +28,12 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     };
 
     for tick in &axis.ticks {
+        let effective_font_size = tick.label_font_size.unwrap_or(theme.label_font_size);
+
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
                 tick.position, r.y, tick.position, r.y + theme.tick_size,
-                tick.position, r.y + theme.tick_size + theme.label_font_size + 2.0,
+                tick.position, r.y + theme.tick_size + effective_font_size + 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Top => (
@@ -41,12 +43,12 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
             ),
             AxisOrient::Left => (
                 r.x, tick.position, r.x - theme.tick_size, tick.position,
-                r.x - theme.tick_size - 2.0, tick.position + theme.label_font_size / 3.0,
+                r.x - theme.tick_size - 2.0, tick.position + effective_font_size / 3.0,
                 TextAnchor::End, 0.0,
             ),
             AxisOrient::Right => (
                 r.x, tick.position, r.x + theme.tick_size, tick.position,
-                r.x + theme.tick_size + 2.0, tick.position + theme.label_font_size / 3.0,
+                r.x + theme.tick_size + 2.0, tick.position + effective_font_size / 3.0,
                 TextAnchor::Start, 0.0,
             ),
         };
@@ -59,22 +61,47 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                 style: tick_stroke.clone(),
             });
         }
-        if axis.show_labels {
-            nodes.push(SceneNode::Text {
-                x: label_x,
-                y: label_y,
-                content: tick.label.clone(),
-                style: to_scene_text_style(
-                    theme.label_color,
-                    theme.label_font_size,
-                    anchor,
-                    angle,
-                    &theme.label_font_family,
-                    label_fw,
-                    None,
-                    1.0,
-                ),
-            });
+        if axis.show_labels && !tick.culled {
+            let lines: Vec<&str> = tick.label.split('\n').collect();
+            if lines.len() == 1 || axis.orient != AxisOrient::Bottom {
+                // Single-line label, or non-Bottom orient (no multi-line for those).
+                nodes.push(SceneNode::Text {
+                    x: label_x,
+                    y: label_y,
+                    content: tick.label.clone(),
+                    style: to_scene_text_style(
+                        theme.label_color,
+                        effective_font_size,
+                        anchor,
+                        angle,
+                        &theme.label_font_family,
+                        label_fw,
+                        None,
+                        1.0,
+                    ),
+                });
+            } else {
+                // Multi-line label (Bottom orient only): emit one text node per line.
+                let line_height = effective_font_size * 1.2;
+                for (line_idx, line) in lines.iter().enumerate() {
+                    let line_y = label_y + (line_idx as f64) * line_height;
+                    nodes.push(SceneNode::Text {
+                        x: label_x,
+                        y: line_y,
+                        content: line.to_string(),
+                        style: to_scene_text_style(
+                            theme.label_color,
+                            effective_font_size,
+                            anchor,
+                            angle,
+                            &theme.label_font_family,
+                            label_fw,
+                            None,
+                            1.0,
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -169,8 +196,8 @@ mod tests {
             panel_index: 0,
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
             ticks: vec![
-                TickLayout { position: 25.0, label: "0".into(), label_angle: 0.0, elided: false },
-                TickLayout { position: 75.0, label: "1".into(), label_angle: 0.0, elided: false },
+                TickLayout { position: 25.0, label: "0".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+                TickLayout { position: 75.0, label: "1".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
             ],
             title: Some(AxisTitleLayout {
                 text: "x".into(),
@@ -190,5 +217,125 @@ mod tests {
         let text_count = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
         assert!(line_count >= 3, "expected >=3 lines (domain + ticks), got {line_count}");
         assert!(text_count >= 3, "expected >=3 texts (2 labels + title), got {text_count}");
+    }
+
+    #[test]
+    fn culled_tick_skips_label() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![
+                TickLayout { position: 25.0, label: "visible".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+                TickLayout { position: 75.0, label: "culled".into(), label_angle: 0.0, elided: false, culled: true, label_font_size: None },
+            ],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: false,
+            show_grid: false,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+
+        // Both ticks should emit a tick mark line.
+        let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
+        assert_eq!(line_count, 2, "expected 2 tick lines, got {line_count}");
+
+        // Only the non-culled tick emits a text label.
+        let texts: Vec<_> = nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { content, .. } = n { Some(content.as_str()) } else { None }
+        }).collect();
+        assert_eq!(texts, vec!["visible"], "culled tick must not emit a label; got {texts:?}");
+    }
+
+    #[test]
+    fn multiline_label_emits_stacked_text() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![
+                TickLayout {
+                    position: 50.0,
+                    label: "trivial\nbaseline".into(),
+                    label_angle: 0.0,
+                    elided: false,
+                    culled: false,
+                    label_font_size: None,
+                },
+            ],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: false,
+            show_grid: false,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+
+        // One tick line + two text nodes (one per line).
+        let text_contents: Vec<_> = nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { content, .. } = n { Some(content.as_str()) } else { None }
+        }).collect();
+        assert_eq!(
+            text_contents, vec!["trivial", "baseline"],
+            "multi-line label should emit one text node per line; got {text_contents:?}",
+        );
+
+        // The second line should be offset downward from the first.
+        let text_ys: Vec<f64> = nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
+        }).collect();
+        assert_eq!(text_ys.len(), 2);
+        assert!(
+            text_ys[1] > text_ys[0],
+            "second line y ({}) should be below first line y ({})",
+            text_ys[1], text_ys[0],
+        );
+    }
+
+    #[test]
+    fn per_tick_font_size_override() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![
+                TickLayout {
+                    position: 50.0,
+                    label: "small".into(),
+                    label_angle: 0.0,
+                    elided: false,
+                    culled: false,
+                    label_font_size: Some(9.0),
+                },
+            ],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: false,
+            show_grid: false,
+        };
+        let theme = ThemeInputs::default(); // theme.label_font_size == 11.0
+        let nodes = build_axis(&axis, &theme);
+
+        // The text node should use font_size 9.0, not the theme default.
+        let text_node = nodes.iter().find(|n| matches!(n, SceneNode::Text { .. }));
+        assert!(text_node.is_some(), "expected a text node");
+        if let Some(SceneNode::Text { style, y, .. }) = text_node {
+            assert_eq!(
+                style.font_size, 9.0,
+                "expected font_size 9.0 from per-tick override, got {}",
+                style.font_size,
+            );
+            // label_y = r.y + tick_size + effective_font_size + 2.0
+            // With r.y=80, tick_size=4 (default), effective_font_size=9: 80 + 4 + 9 + 2 = 95
+            let expected_y = 80.0 + theme.tick_size + 9.0 + 2.0;
+            assert!(
+                (y - expected_y).abs() < 0.01,
+                "label_y should use per-tick font size for positioning: expected {expected_y}, got {y}",
+            );
+        }
     }
 }
