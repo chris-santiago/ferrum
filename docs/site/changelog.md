@@ -6,6 +6,22 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.11.2
+
+*2026-05-23*
+
+### Added
+
+- Graduated axis label collision cascade — replaces flat→-45°→elide with wrap → font shrink → graduated rotate → tick cull → elide, keeping categorical labels legible without user intervention
+- Multi-line label wrapping: snake_case, space, and camelCase labels split at natural boundaries instead of truncating
+- Dynamic bottom margin: rotation-aware gutter estimation prevents rotated labels from clipping at the viewport boundary
+- Theme-configurable `cull_threshold` for tick label density reduction (`Theme(cull_threshold=N)`)
+
+### Fixed
+
+- Y-axis title duplicated across all facet columns — now suppressed on non-leftmost columns (mirrors existing x-axis bottom-row suppression)
+- Panel annotations silently dropped from SVG output — now emitted after marks, matching WASM z-order
+
 ## 0.11.1
 
 *2026-05-22*
