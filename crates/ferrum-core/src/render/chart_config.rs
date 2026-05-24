@@ -22,6 +22,8 @@ pub struct ChartConfig {
     pub grid: Option<GridConfigSpec>,
     pub padding: Option<PaddingConfigSpec>,
     pub color: Option<ColorConfigSpec>,
+    /// Title-level theme overrides (font size, weight, anchor, color, offset).
+    pub title: Option<TitleConfigSpec>,
     /// Annotation layer: positioned text, lines, arrows, etc. overlaid on the plot.
     #[serde(default)]
     pub annotations: Vec<AnnotationSpec>,
@@ -133,6 +135,16 @@ pub struct AxisConfigSpec {
     pub domain_max: Option<f64>,
     pub nice: Option<bool>,
     pub zero: Option<bool>,
+    /// Explicit tick values for the axis scale.
+    pub tick_values: Option<Vec<f64>>,
+    /// Font size for axis title text.
+    pub title_font_size: Option<f64>,
+    /// Color of the axis title text (hex string).
+    pub title_color: Option<String>,
+    /// Padding between axis title and tick labels (pixels).
+    pub title_padding: Option<f64>,
+    /// d3-format string applied to tick labels.
+    pub label_format_raw: Option<String>,
 }
 
 /// Legend configuration.
@@ -147,6 +159,10 @@ pub struct LegendConfigSpec {
     pub symbol_size: Option<f64>,
     pub offset: Option<f64>,
     pub padding: Option<f64>,
+    /// Shape of legend symbols (e.g. `"circle"`, `"square"`, `"diamond"`).
+    pub symbol_type: Option<String>,
+    /// Length of a continuous gradient bar in pixels.
+    pub gradient_length: Option<f64>,
 }
 
 /// Grid configuration.
@@ -159,6 +175,8 @@ pub struct GridConfigSpec {
     pub width: Option<f64>,
     pub dash: Option<Vec<f64>>,
     pub opacity: Option<f64>,
+    /// Alternating band fill colors for categorical axes (e.g. `["#f0f0f0", "transparent"]`).
+    pub band_colors: Option<Vec<String>>,
 }
 
 /// Padding configuration.
@@ -179,6 +197,21 @@ pub struct ColorConfigSpec {
     pub scheme: Option<String>,
     pub sequential_scheme: Option<String>,
     pub diverging_scheme: Option<String>,
+    /// Explicit numeric domain bounds for continuous color scales.
+    pub domain: Option<Vec<f64>>,
+    /// Explicit hex-string color range for continuous color scales.
+    pub range: Option<Vec<String>>,
+}
+
+/// Chart title configuration (controls title-level theme overrides).
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct TitleConfigSpec {
+    pub font_size: Option<f64>,
+    pub font_weight: Option<String>,
+    pub anchor: Option<String>,
+    pub color: Option<String>,
+    pub offset: Option<f64>,
 }
 
 #[cfg(test)]
@@ -370,5 +403,95 @@ mod tests {
         assert_eq!(cfg.grid.as_ref().unwrap().color.as_deref(), Some("#eee"));
         assert_eq!(cfg.padding.as_ref().unwrap().top, Some(20.0));
         assert_eq!(cfg.color.as_ref().unwrap().scheme.as_deref(), Some("tableau10"));
+    }
+
+    #[test]
+    fn title_config_deserializes() {
+        let json = r##"{
+            "title": {
+                "font_size": 18.0,
+                "font_weight": "bold",
+                "anchor": "middle",
+                "color": "#333333",
+                "offset": 10.0
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let title = cfg.title.unwrap();
+        assert_eq!(title.font_size, Some(18.0));
+        assert_eq!(title.font_weight.as_deref(), Some("bold"));
+        assert_eq!(title.anchor.as_deref(), Some("middle"));
+        assert_eq!(title.color.as_deref(), Some("#333333"));
+        assert_eq!(title.offset, Some(10.0));
+    }
+
+    #[test]
+    fn title_config_absent_means_none() {
+        let cfg: ChartConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.title.is_none());
+    }
+
+    #[test]
+    fn axis_config_new_fields_deserialize() {
+        let json = r##"{
+            "axis": {
+                "tick_values": [0.0, 1.0, 2.0],
+                "title_font_size": 14.0,
+                "title_color": "#555555",
+                "title_padding": 4.0,
+                "label_format_raw": ",.2f"
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let axis = cfg.axis.unwrap();
+        assert_eq!(axis.tick_values, Some(vec![0.0, 1.0, 2.0]));
+        assert_eq!(axis.title_font_size, Some(14.0));
+        assert_eq!(axis.title_color.as_deref(), Some("#555555"));
+        assert_eq!(axis.title_padding, Some(4.0));
+        assert_eq!(axis.label_format_raw.as_deref(), Some(",.2f"));
+    }
+
+    #[test]
+    fn legend_config_new_fields_deserialize() {
+        let json = r##"{
+            "legend": {
+                "symbol_type": "square",
+                "gradient_length": 200.0
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let legend = cfg.legend.unwrap();
+        assert_eq!(legend.symbol_type.as_deref(), Some("square"));
+        assert_eq!(legend.gradient_length, Some(200.0));
+    }
+
+    #[test]
+    fn grid_config_band_colors_deserializes() {
+        let json = r##"{
+            "grid": {"band_colors": ["#f0f0f0", "transparent"]}
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let grid = cfg.grid.unwrap();
+        assert_eq!(
+            grid.band_colors.as_deref(),
+            Some(["#f0f0f0".to_string(), "transparent".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn color_config_domain_and_range_deserialize() {
+        let json = r##"{
+            "color": {
+                "domain": [0.0, 100.0],
+                "range": ["#ffffff", "#000000"]
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let color = cfg.color.unwrap();
+        assert_eq!(color.domain, Some(vec![0.0, 100.0]));
+        assert_eq!(
+            color.range.as_deref(),
+            Some(["#ffffff".to_string(), "#000000".to_string()].as_slice())
+        );
     }
 }
