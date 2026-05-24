@@ -29,7 +29,7 @@ df = pl.DataFrame({
 
 chart = (
     fm.Chart(df)
-    .mark_bar(corner_radius_top_left=3, corner_radius_top_right=3)
+    .mark_bar(corner_radius=3)
     .encode(
         x=fm.X("product:N", sort="-y"),
         y="revenue:Q",

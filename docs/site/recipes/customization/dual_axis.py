@@ -21,6 +21,7 @@ chart = (
         axis_y=fm.AxisConfig(label_format="currency", title_color="#1e40af"),
         axis_y2=fm.AxisConfig(label_format="percent", title_color="#dc2626"),
     )
+    .configure_padding(right=80)
     .labs(title="Revenue and Conversion Rate", y="Revenue")
     + fm.SecondaryY(
         field="conversion_rate",

@@ -5,17 +5,25 @@ chart without breaking the declarative model. Every annotation is an immutable v
 you compose onto a chart with `+`.
 
 ```python
+import polars as pl
 import ferrum as fm
 import ferrum.annotation as ann
 
+df = pl.DataFrame({
+    "x": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5],
+    "y": [2.1, 2.8, 3.2, 3.6, 8.9, 4.2, 4.8, 5.1, 5.5, 5.9],
+})
+
 chart = (
     fm.Chart(df)
-    .mark_point()
+    .mark_point(size=60)
     .encode(x="x:Q", y="y:Q")
-    + ann.text(3.5, 8.2, "Peak", color="#c0392b")
-    + ann.arrow(3.5, 8.0, 3.5, 6.5)
+    + ann.text(3.6, 9.2, "Sensor fault", color="#c0392b", font_size=12, anchor="start")
+    + ann.arrow(3.5, 9.1, 3.1, 8.95, stroke="#c0392b", stroke_width=1.5, curve="arc")
 )
 ```
+
+![Annotating an outlier point with text and arrow](../../assets/recipes/annotated_outlier.png)
 
 ---
 
@@ -234,11 +242,39 @@ ann.span(
 )
 ```
 
-**Example: highlight a y-axis range**
+**Example: highlight a target zone with a reference line**
 
 ```python
-+ ann.span("y", 80, 100, fill="#d1fae5", opacity=0.4, label="Target range")
+import polars as pl
+import ferrum as fm
+import ferrum.annotation as ann
+
+df = pl.DataFrame({
+    "week": list(range(1, 25)),
+    "score": [
+        62, 65, 68, 70, 73, 72, 69, 75, 78, 80,
+        82, 85, 84, 86, 88, 87, 90, 91, 89, 93,
+        95, 94, 96, 98,
+    ],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_line(stroke_width=2)
+    .encode(x="week:Q", y="score:Q")
+    .configure(
+        axis_y=fm.AxisConfig(domain_min=55, domain_max=105),
+        axis_x=fm.AxisConfig(tick_count=12),
+    )
+    + ann.span("y", 80, 100, fill="#d1fae5", opacity=0.35, label="Target zone")
+    + ann.line(
+        fm.norm(0.0), 80, fm.norm(1.0), 80,
+        stroke="#16a34a", stroke_width=1, dash=[4, 4],
+    )
+)
 ```
+
+![Highlighted target zone with span and reference line](../../assets/recipes/highlight_region.png)
 
 **Example: highlight an x-axis time range**
 

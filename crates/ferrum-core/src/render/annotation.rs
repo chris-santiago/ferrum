@@ -312,7 +312,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                     angle: *angle,
                     color: resolve_color(color),
                     opacity: 1.0,
-                    font_family: String::new(),
+                    font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
             });
         }
@@ -509,7 +509,7 @@ fn emit_span(
                     angle: 0.0,
                     color: Color::rgb(51, 51, 51),
                     opacity: 1.0,
-                    font_family: String::new(),
+                    font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
             });
         }
@@ -585,7 +585,7 @@ fn emit_bracket(
                 angle: 0.0,
                 color: Color::rgb(51, 51, 51),
                 opacity: 1.0,
-                font_family: String::new(),
+                font_family: "Inter, system-ui, sans-serif".to_string(),
             },
         });
     }
@@ -663,7 +663,7 @@ fn emit_callout(
             angle: 0.0,
             color: Color::rgb(51, 51, 51),
             opacity: 1.0,
-            font_family: String::new(),
+            font_family: "Inter, system-ui, sans-serif".to_string(),
         },
     });
 }

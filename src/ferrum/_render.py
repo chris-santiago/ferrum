@@ -326,11 +326,30 @@ class _RenderMixin:
                 "break_style": feat.break_style,
             }
         elif isinstance(feat, Inset):
+            from ferrum.annotation.coords import NormCoord, PixelCoord
+
+            def _inset_coord(c: object) -> float:
+                """Convert a bound coordinate to a normalized float for InsetSpec.
+
+                NormCoord and plain floats are passed as-is (both already in [0,1]).
+                PixelCoord is not supported for Inset bounds because the Rust side
+                expects normalized coordinates and has no access to plot dimensions
+                at serialization time.
+                """
+                if isinstance(c, NormCoord):
+                    return c.value
+                if isinstance(c, PixelCoord):
+                    raise TypeError(
+                        "Inset bounds do not support px() coordinates. "
+                        "Use fm.norm(f) (normalized [0, 1]) or plain floats instead."
+                    )
+                return float(c)
+
             inset_svg = feat.chart.show_svg()
             d = {
                 "type": "inset",
                 "svg": inset_svg,
-                "bounds": list(feat.bounds),
+                "bounds": [_inset_coord(c) for c in feat.bounds],
                 "border": feat.border,
                 "border_color": feat.border_color,
                 "background": feat.background,

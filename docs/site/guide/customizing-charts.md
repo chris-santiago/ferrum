@@ -83,6 +83,88 @@ A good rule of thumb: if the setting belongs in your style guide, it belongs in 
 If it depends on the shape of the data (label length, axis range, legend density), use
 configure.
 
+**Recipe: brand theme with custom palette**
+
+```python
+import polars as pl
+import ferrum as fm
+
+BRAND_COLORS = ["#1a3a5c", "#2a9d8f", "#e76f51", "#e9c46a"]
+
+brand_theme = fm.Theme(
+    background="#f8f6f1",
+    mark_color=BRAND_COLORS[0],
+    font_color="#2d2d2d",
+    grid_color="#e8e4da",
+    grid=True,
+    axis_line=False,
+    title_font_weight="bold",
+    title_color="#1a3a5c",
+)
+
+df = pl.DataFrame({
+    "product": ["Core", "Pro", "Enterprise", "Platform"],
+    "revenue": [3_200_000, 5_800_000, 4_100_000, 2_700_000],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar(corner_radius=3)
+    .encode(
+        x=fm.X("product:N", sort="-y"),
+        y="revenue:Q",
+        color="product:N",
+    )
+    .theme(brand_theme)
+    .configure_color(range=BRAND_COLORS)
+    .configure_axis(y=True, x=False, label_format="currency")
+    .configure_title(anchor="start")
+    .configure_legend(orient="none")
+    .labs(title="Revenue by Product Line", subtitle="FY 2026", x=None, y="Revenue")
+)
+```
+
+![Branded chart using a custom theme with company colors](assets/recipes/branded_chart.png)
+
+**Recipe: publication-ready chart**
+
+```python
+import polars as pl
+import ferrum as fm
+import ferrum.annotation as ann
+
+df = pl.DataFrame({
+    "year": [str(y) for y in range(2015, 2025)],
+    "gdp_growth": [3.1, 2.9, 2.4, 2.9, 2.3, -3.4, 5.9, 2.1, 2.5, 2.8],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar()
+    .encode(
+        x=fm.X("year:N", axis=fm.Axis(label_angle=0)),
+        y=fm.Y("gdp_growth:Q", axis=fm.Axis(title="GDP Growth (%)")),
+        color=fm.Color(
+            "gdp_growth:Q",
+            scale=fm.DivergingScale(scheme="rdbu", domain=[-4, 4]),
+            legend=None,
+        ),
+    )
+    .theme(fm.themes.publication)
+    .configure_axis(domain=False, tick_size=0)
+    .configure_title(anchor="start", font_size=14)
+    .configure_legend(orient="none")
+    .labs(title="U.S. GDP Growth Rate, 2015–2024")
+    + ann.text(
+        fm.norm(0.0), fm.norm(1.03),
+        "Source: Bureau of Economic Analysis",
+        font_size=9, color="#666", anchor="start",
+    )
+)
+```
+
+![Publication-ready chart using the built-in publication theme](assets/recipes/publication_ready.png)
+
 ## Configuration Methods
 
 Six `.configure_*()` methods cover the main configuration domains. Each returns a new

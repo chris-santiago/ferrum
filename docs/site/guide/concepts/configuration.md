@@ -81,22 +81,83 @@ AxisConfig(
 - The `x` and `y` booleans control which axes this instance targets. To give x and y
   different settings, use `configure(axis_x=..., axis_y=...)` on the chart.
 
-### Example: rotated x labels, currency y
+### Example: currency-formatted y axis
 
 ```python
+import polars as pl
 import ferrum as fm
-from ferrum import AxisConfig
+
+df = pl.DataFrame({
+    "quarter": ["Q1", "Q2", "Q3", "Q4"],
+    "revenue": [1_240_000, 1_580_000, 1_410_000, 1_920_000],
+})
 
 chart = (
     fm.Chart(df)
     .mark_bar()
-    .encode(x="category:N", y="revenue:Q")
-    .configure(
-        axis_x=AxisConfig(label_angle=-45),
-        axis_y=AxisConfig(label_format="currency"),
+    .encode(
+        x=fm.X("quarter:N", sort=None),
+        y="revenue:Q",
     )
+    .configure_axis(y=True, x=False, label_format="currency")
+    .labs(title="Quarterly Revenue", y="Revenue")
 )
 ```
+
+![Currency-formatted y axis](../../assets/recipes/currency_axis.png)
+
+### Example: rotated x labels for long category names
+
+```python
+import polars as pl
+import ferrum as fm
+
+df = pl.DataFrame({
+    "department": [
+        "Engineering", "Product Management", "Sales & Marketing",
+        "Customer Success", "Research & Development",
+    ],
+    "headcount": [42, 18, 31, 24, 15],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar()
+    .encode(
+        x=fm.X("department:N", sort="-y"),
+        y="headcount:Q",
+    )
+    .configure_axis(x=True, y=False, label_angle=-40)
+    .labs(title="Department Headcount", x=None, y="Headcount")
+)
+```
+
+![Rotated x-axis labels](../../assets/recipes/rotated_labels.png)
+
+### Example: custom tick positions
+
+```python
+import polars as pl
+import ferrum as fm
+
+df = pl.DataFrame({
+    "score": [45, 52, 58, 61, 67, 71, 74, 78, 82, 89, 93, 97],
+    "count": [3, 7, 12, 18, 24, 31, 28, 22, 17, 11, 6, 2],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar()
+    .encode(x="score:Q", y="count:Q")
+    .configure(
+        axis_x=fm.AxisConfig(tick_values=[0, 60, 70, 80, 90, 100], label_font_size=11),
+        axis_y=fm.AxisConfig(tick_count=5, label_format="integer"),
+    )
+    .labs(title="Score Distribution", x="Score", y="Students")
+)
+```
+
+![Custom tick positions at grade thresholds](../../assets/recipes/custom_ticks.png)
 
 ---
 
@@ -144,8 +205,29 @@ LegendConfig(
 ### Example: horizontal legend at bottom
 
 ```python
-chart.configure_legend(orient="bottom", direction="horizontal", columns=3)
+import polars as pl
+import ferrum as fm
+
+df = pl.DataFrame({
+    "month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"] * 3,
+    "region": ["North"] * 6 + ["South"] * 6 + ["West"] * 6,
+    "sales": [
+        120, 145, 132, 168, 181, 175,
+        98, 112, 105, 130, 142, 138,
+        85, 94, 91, 107, 118, 115,
+    ],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_line()
+    .encode(x="month:N", y="sales:Q", color="region:N")
+    .configure_legend(orient="bottom", direction="horizontal")
+    .labs(title="Regional Monthly Sales", x=None, y="Sales (units)")
+)
 ```
+
+![Legend positioned at the bottom with horizontal layout](../../assets/recipes/legend_bottom.png)
 
 ---
 
@@ -270,11 +352,31 @@ PaddingConfig(
 - When `auto=True` and individual sides are set, the provided values act as minimums.
 - When `auto=False`, the provided values are used exactly; labels may clip.
 
-### Example: explicit margins for a tight layout
+### Example: minimal axes with tight padding
 
 ```python
-chart.configure_padding(top=10, right=20, bottom=50, left=60, auto=False)
+import polars as pl
+import ferrum as fm
+
+df = pl.DataFrame({
+    "category": ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"],
+    "value": [0.42, 0.68, 0.55, 0.81, 0.37],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar(corner_radius=3)
+    .encode(
+        x=fm.X("category:N", sort="-y"),
+        y=fm.Y("value:Q", axis=fm.Axis(label_format=".0%")),
+    )
+    .configure_axis(domain=False, tick_size=0, grid=False, label_font_size=11)
+    .configure_padding(top=10, right=10, bottom=10, left=10)
+    .labs(title="Completion Rate by Category", x=None, y=None)
+)
 ```
+
+![Stripped-down axes with minimal decoration](../../assets/recipes/minimal_axes.png)
 
 ---
 

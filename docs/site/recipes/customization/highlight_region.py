@@ -25,7 +25,8 @@ chart = (
         axis_y=fm.AxisConfig(domain_min=55, domain_max=105),
         axis_x=fm.AxisConfig(tick_count=12),
     )
-    + ann.span("y", 80, 100, fill="#d1fae5", opacity=0.35, label="Target zone")
+    + ann.rect(fm.norm(0.0), 80, fm.norm(1.0), fm.norm(0.0), fill="#059669", opacity=0.15)
+    + ann.text(fm.norm(0.02), 90, "Target zone", color="#059669", font_size=11, anchor="start")
     + ann.line(
         fm.norm(0.0), 80, fm.norm(1.0), 80,
         stroke="#16a34a", stroke_width=1, dash=[4, 4],

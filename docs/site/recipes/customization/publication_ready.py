@@ -9,7 +9,7 @@ import ferrum as fm
 import ferrum.annotation as ann
 
 df = pl.DataFrame({
-    "year": list(range(2015, 2026)),
+    "year": [str(y) for y in range(2015, 2025)],
     "gdp_growth": [3.1, 2.9, 2.4, 2.9, 2.3, -3.4, 5.9, 2.1, 2.5, 2.8],
 })
 
@@ -17,7 +17,7 @@ chart = (
     fm.Chart(df)
     .mark_bar()
     .encode(
-        x=fm.X("year:O", axis=fm.Axis(label_angle=0)),
+        x=fm.X("year:N", axis=fm.Axis(label_angle=0)),
         y=fm.Y("gdp_growth:Q", axis=fm.Axis(title="GDP Growth (%)")),
         color=fm.Color(
             "gdp_growth:Q",
@@ -29,7 +29,7 @@ chart = (
     .configure_axis(domain=False, tick_size=0)
     .configure_title(anchor="start", font_size=14)
     .configure_legend(orient="none")
-    .labs(title="U.S. GDP Growth Rate, 2015–2025")
+    .labs(title="U.S. GDP Growth Rate, 2015–2024")
     + ann.text(
         fm.norm(0.0), fm.norm(1.03),
         "Source: Bureau of Economic Analysis",

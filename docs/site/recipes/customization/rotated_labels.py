@@ -25,6 +25,7 @@ chart = (
         y="headcount:Q",
     )
     .configure_axis(x=True, y=False, label_angle=-40)
+    .configure_padding(bottom=80)
     .labs(title="Department Headcount", x=None, y="Headcount")
 )
 

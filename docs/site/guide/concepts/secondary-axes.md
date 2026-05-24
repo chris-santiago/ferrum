@@ -33,6 +33,38 @@ The bars measure revenue on the left y axis; the line measures growth rate on th
 axis. Both axes are independent — their domains, ticks, and formats are computed
 separately.
 
+**Recipe: color-coded dual-axis chart**
+
+```python
+import polars as pl
+import ferrum as fm
+
+df = pl.DataFrame({
+    "month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+    "revenue": [125_000, 138_500, 112_000, 161_000, 183_000, 172_000],
+    "conversion_rate": [0.032, 0.038, 0.029, 0.041, 0.045, 0.043],
+})
+
+chart = (
+    fm.Chart(df)
+    .mark_bar(opacity=0.7, color="#1e40af")
+    .encode(x="month:N", y="revenue:Q")
+    .configure(
+        axis_y=fm.AxisConfig(label_format="currency", title_color="#1e40af"),
+        axis_y2=fm.AxisConfig(label_format="percent", title_color="#dc2626"),
+    )
+    .labs(title="Revenue and Conversion Rate", y="Revenue")
+    + fm.SecondaryY(
+        field="conversion_rate",
+        mark="line",
+        color="#dc2626",
+        axis=fm.Axis(title="Conversion Rate"),
+    )
+)
+```
+
+![Dual-axis chart with revenue bars and conversion rate line](../../assets/recipes/dual_axis.png)
+
 ---
 
 ## Constructor reference

@@ -18,8 +18,8 @@ chart = (
     fm.Chart(df)
     .mark_point(size=60)
     .encode(x="x:Q", y="y:Q")
-    + ann.text(3.6, 9.2, "Sensor fault", color="#c0392b", font_size=12, anchor="start")
-    + ann.arrow(3.5, 9.1, 3.1, 8.95, stroke="#c0392b", stroke_width=1.5, curve="arc")
+    + ann.text(4.0, 7.0, "Sensor fault", color="#c0392b", font_size=14, anchor="start")
+    + ann.arrow(3.9, 7.5, 3.1, 8.8, stroke="#c0392b", stroke_width=1.5)
 )
 
 # chart.save("annotated_outlier.svg")
