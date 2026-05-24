@@ -200,7 +200,13 @@ pub fn from_hex_str(s: &str) -> Result<Color, ColorParseError> {
 }
 
 pub fn with_opacity(c: Color, opacity_0_1: f64) -> Color {
-    let a = (c.alpha as f64 * opacity_0_1.clamp(0.0, 1.0)).round() as u8;
+    // NaN.clamp(0.0, 1.0) returns NaN in Rust; guard explicitly so NaN opacity
+    // doesn't silently produce a=0 (fully transparent element disappears).
+    let a = if opacity_0_1.is_nan() {
+        c.alpha
+    } else {
+        (c.alpha as f64 * opacity_0_1.clamp(0.0, 1.0)).round() as u8
+    };
     Srgba::new(c.red, c.green, c.blue, a)
 }
 

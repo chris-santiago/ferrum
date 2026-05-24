@@ -395,6 +395,160 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
         direction:          prep.legend_direction_override,
         values:             prep.legend_values_override.clone(),
         legend_type:        prep.legend_type_override.clone(),
+        symbol_type:        None, // filled by apply_chart_config_to_legend_overrides
+    }
+}
+
+/// Apply `ChartConfig.legend` fields to a `LegendOverrides`.
+///
+/// Per-encoding `legend=Legend(...)` overrides (level 2) are already in the
+/// `LegendOverrides` built by `legend_overrides_from_prep`. This function
+/// fills in the `configure_legend(...)` overrides (level 3) only when the
+/// per-encoding value is absent (level 2 wins over level 3).
+fn apply_chart_config_to_legend_overrides(
+    overrides: &mut LegendOverrides,
+    config: &ChartConfig,
+) {
+    let Some(ref legend) = config.legend else { return };
+    if overrides.gradient_length.is_none() {
+        overrides.gradient_length = legend.gradient_length;
+    }
+    if overrides.symbol_type.is_none() {
+        overrides.symbol_type = legend.symbol_type.clone();
+    }
+}
+
+/// Apply `ChartConfig.axis` / `axis_x` / `axis_y` fields that are not expressed
+/// in `ThemeInputs` to the per-axis `AxisInput`.
+///
+/// These are the per-axis fields that cannot be represented in the shared theme:
+/// `title_font_size`, `title_color`, `title_padding`, `label_format_raw`,
+/// and `tick_values` (stored for layout-time use).
+///
+/// Called with `config_both` (the `axis` key that applies to both x and y),
+/// then with `config_specific` (the `axis_x` or `axis_y` key). The specific
+/// key wins because it runs last.
+fn apply_axis_config_to_axis_input(
+    axis: &mut crate::layout::AxisInput,
+    config: Option<&chart_config::AxisConfigSpec>,
+) {
+    let Some(cfg) = config else { return };
+    // label_angle_override: per-encoding Axis() wins (already set); only fill if not set.
+    if axis.label_angle_override.is_none() {
+        axis.label_angle_override = cfg.label_angle;
+    }
+    // label_format_raw: d3-format string for tick labels.
+    if axis.label_format_override.is_none() {
+        axis.label_format_override = cfg.label_format_raw.clone()
+            .or_else(|| cfg.label_format.clone());
+    }
+    // tick_values: explicit tick positions in data space.
+    if axis.tick_values_override.is_none() {
+        axis.tick_values_override = cfg.tick_values.clone();
+    }
+    // title_font_size / title_color / title_padding.
+    if axis.title_font_size.is_none() {
+        axis.title_font_size = cfg.title_font_size;
+    }
+    if axis.title_color.is_none() {
+        if let Some(ref c) = cfg.title_color {
+            if let Ok(parsed) = color::from_hex_str(c) {
+                axis.title_color = Some(parsed);
+            }
+        }
+    }
+    if axis.title_padding.is_none() {
+        axis.title_padding = cfg.title_padding;
+    }
+}
+
+/// Re-format tick label strings using a d3-format string override.
+///
+/// When `tick_values_override` is set, tick_labels are replaced entirely
+/// with formatted versions of the explicit tick values. If a
+/// `label_format_override` is also provided the values are formatted using
+/// that d3-format spec; otherwise they are converted to plain decimal strings.
+///
+/// When only `label_format_override` is set (no explicit tick values), each
+/// existing tick label is parsed as a float and reformatted via the d3-format
+/// spec. Non-numeric labels (category names, time strings) are passed through
+/// unchanged.
+fn apply_label_format_to_axis(axis: &mut crate::layout::AxisInput) {
+    if let Some(tick_vals) = axis.tick_values_override.clone() {
+        // Replace tick_labels with formatted versions of the explicit tick_values.
+        let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
+        let fmt = axis.label_format_override.as_deref();
+        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, None);
+    } else if let Some(ref fmt_str) = axis.label_format_override.clone() {
+        // Re-format existing labels using the d3-format spec.
+        axis.tick_labels = prepare::apply_tick_format(
+            std::mem::take(&mut axis.tick_labels),
+            Some(fmt_str),
+            None,
+        );
+    }
+}
+
+/// Apply `ChartConfig.color.domain` and `color.range` overrides to the
+/// resolved color scale. `pub(crate)` so `scene_build` can call it after
+/// per-panel scale resolution (which re-resolves the scale independently of
+/// the provisional_scales copy patched in `render_svg`).
+///
+/// Per-encoding `Color(scale=...)` overrides (level 2) have already been
+/// applied during scale resolution. This function applies `configure_color(...)`
+/// overrides (level 3) only when the per-encoding value is absent (level 2
+/// wins over level 3).
+///
+/// Continuous scales: `domain` pins the data extent; `range` builds an evenly
+/// spaced gradient from the provided hex stops.
+///
+/// Categorical scales: `range` replaces the palette with a heap-allocated
+/// `Cow::Owned` slice of parsed hex colors. Invalid hex strings are silently
+/// skipped; the override is a no-op when no valid colors are parsed.
+pub(crate) fn apply_color_config_to_color_scale(
+    color_scale: &mut Option<scale_resolve::ColorScale>,
+    cfg: &chart_config::ColorConfigSpec,
+) {
+    let Some(ref mut scale) = color_scale else { return };
+    match scale {
+        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme } => {
+            if let Some(ref d) = cfg.domain {
+                if d.len() == 2 {
+                    *domain = (d[0], d[1]);
+                }
+            }
+            if let Some(ref r) = cfg.range {
+                if r.len() >= 2 {
+                    let parsed: Vec<color::Color> = r
+                        .iter()
+                        .filter_map(|s| color::from_hex_str(s).ok())
+                        .collect();
+                    if parsed.len() >= 2 {
+                        // Build a gradient from the parsed stops, evenly spaced.
+                        let stops: Vec<(f64, color::Color)> = parsed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &c)| {
+                                let t = i as f64 / (parsed.len() - 1) as f64;
+                                (t, c)
+                            })
+                            .collect();
+                        *scheme = color::ContinuousScheme::Gradient(stops);
+                    }
+                }
+            }
+        }
+        scale_resolve::ColorScale::Categorical { ref mut palette, .. } => {
+            if let Some(ref range) = cfg.range {
+                let colors: Vec<color::Color> = range
+                    .iter()
+                    .filter_map(|hex| color::from_hex_str(hex).ok())
+                    .collect();
+                if !colors.is_empty() {
+                    *palette = std::borrow::Cow::Owned(colors);
+                }
+            }
+        }
     }
 }
 
@@ -418,8 +572,22 @@ pub fn render_svg(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
+    let mut prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
+
+    // Apply ChartConfig axis overrides (level 3) to AxisInput (level 2 wins when already set).
+    // Order: shared `axis` key first, then axis-specific keys (axis_x / axis_y) win.
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref());
+    // Apply label_format_override to tick labels (requires axis config to be set first).
+    apply_label_format_to_axis(&mut prep.axes.x);
+    apply_label_format_to_axis(&mut prep.axes.y);
+    // Apply color domain/range overrides (level 3) to resolved color scale.
+    if let Some(ref cfg) = chart_config.color {
+        apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg);
+    }
 
     // Build effective_theme: start from the caller-supplied theme, then layer in
     // overrides from lowest to highest priority within the "render" concern:
@@ -447,7 +615,9 @@ pub fn render_svg(
         .clone()
         .or_else(|| prep.legend_title.clone());
 
-    let legend_overrides = legend_overrides_from_prep(&prep);
+    let mut legend_overrides = legend_overrides_from_prep(&prep);
+    // Apply configure_legend overrides (level 3) — only fills in None fields.
+    apply_chart_config_to_legend_overrides(&mut legend_overrides, chart_config);
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
@@ -509,8 +679,19 @@ pub fn render_scene_json(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let prep = prepare::prepare_render_inputs(spec, batch, theme)?;
+    let mut prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
+
+    // Apply ChartConfig axis overrides (level 3) — same logic as render_svg.
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref());
+    apply_label_format_to_axis(&mut prep.axes.x);
+    apply_label_format_to_axis(&mut prep.axes.y);
+    if let Some(ref cfg) = chart_config.color {
+        apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg);
+    }
 
     // Build effective_theme with the same layered override logic as render_svg.
     let mut effective_theme = theme.clone();
@@ -531,7 +712,8 @@ pub fn render_scene_json(
         .clone()
         .or_else(|| prep.legend_title.clone());
 
-    let legend_overrides = legend_overrides_from_prep(&prep);
+    let mut legend_overrides = legend_overrides_from_prep(&prep);
+    apply_chart_config_to_legend_overrides(&mut legend_overrides, chart_config);
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
@@ -1419,5 +1601,190 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         assert_eq!(theme.grid_dash, Some(vec![4.0, 4.0]));
+    }
+
+    // ── New wired fields (configure-punchlist, 2026-05-24) ───────────────────
+
+    #[test]
+    fn axis_config_title_font_size_propagates_to_axis_input() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            Some("X Axis".to_string()),
+            vec!["0".to_string(), "50".to_string(), "100".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec { title_font_size: Some(16.0), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        assert_eq!(axis.title_font_size, Some(16.0));
+    }
+
+    #[test]
+    fn axis_config_title_color_propagates_to_axis_input() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Left,
+            Some("Y".to_string()),
+            vec!["0".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec { title_color: Some("#ff0000".to_string()), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        let c = axis.title_color.expect("title_color should be Some");
+        assert_eq!(c.red, 0xff);
+        assert_eq!(c.green, 0x00);
+        assert_eq!(c.blue, 0x00);
+    }
+
+    #[test]
+    fn axis_config_title_padding_propagates_to_axis_input() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec![],
+            None,
+        );
+        let cfg = AxisConfigSpec { title_padding: Some(12.0), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        assert_eq!(axis.title_padding, Some(12.0));
+    }
+
+    #[test]
+    fn axis_config_label_format_raw_reformats_numeric_labels() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["1000".to_string(), "2000".to_string(), "3000".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec { label_format_raw: Some(",.0f".to_string()), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_label_format_to_axis(&mut axis);
+        // ",.0f" formats with thousands separator and 0 decimal places.
+        assert_eq!(axis.tick_labels, vec!["1,000", "2,000", "3,000"]);
+    }
+
+    #[test]
+    fn axis_config_label_format_raw_with_tick_values_replaces_labels() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["0.0".to_string(), "0.5".to_string(), "1.0".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            label_format_raw: Some(".1%".to_string()),
+            tick_values: Some(vec![0.0, 0.5, 1.0]),
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_label_format_to_axis(&mut axis);
+        assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
+    }
+
+    #[test]
+    fn axis_config_per_channel_wins_over_configure() {
+        // Per-channel label_angle_override (level 2) wins over configure (level 3).
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec![],
+            Some(-45.0), // per-channel override already set
+        );
+        let cfg = AxisConfigSpec { label_angle: Some(-90.0), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        // -45.0 should win because it was already set (Some).
+        assert_eq!(axis.label_angle_override, Some(-45.0));
+    }
+
+    #[test]
+    fn legend_config_gradient_length_fills_legend_overrides() {
+        let prep_overrides = legend_overrides_from_prep_default();
+        // When prep has no gradient_length, configure() should fill it.
+        let mut overrides = prep_overrides;
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                gradient_length: Some(300.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.gradient_length, Some(300.0));
+    }
+
+    #[test]
+    fn legend_config_symbol_type_fills_legend_overrides() {
+        let mut overrides = legend_overrides_from_prep_default();
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                symbol_type: Some("square".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.symbol_type.as_deref(), Some("square"));
+    }
+
+    #[test]
+    fn legend_config_per_encoding_wins_over_configure() {
+        // Per-encoding gradient_length (already set) must not be overwritten by configure.
+        let mut overrides = LegendOverrides {
+            gradient_length: Some(150.0), // already set at level 2
+            ..Default::default()
+        };
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                gradient_length: Some(300.0), // configure (level 3) tries to override
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.gradient_length, Some(150.0)); // level 2 wins
+    }
+
+    #[test]
+    fn color_config_domain_override_updates_continuous_scale() {
+        use scale_resolve::ColorScale;
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
+            domain: (0.0, 1.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+        });
+        let cfg = ColorConfigSpec { domain: Some(vec![10.0, 90.0]), ..Default::default() };
+        apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        if let Some(ColorScale::Continuous { domain, .. }) = color_scale {
+            assert_eq!(domain, (10.0, 90.0));
+        } else {
+            panic!("expected Continuous color scale");
+        }
+    }
+
+    #[test]
+    fn color_config_range_override_builds_gradient() {
+        use scale_resolve::ColorScale;
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
+            domain: (0.0, 1.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+        });
+        let cfg = ColorConfigSpec {
+            range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),
+            ..Default::default()
+        };
+        apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        if let Some(ColorScale::Continuous { scheme: ContinuousScheme::Gradient(stops), .. }) = color_scale {
+            assert_eq!(stops.len(), 2);
+            // First stop at t=0, last at t=1.
+            assert!((stops[0].0 - 0.0).abs() < 1e-9);
+            assert!((stops[1].0 - 1.0).abs() < 1e-9);
+        } else {
+            panic!("expected Gradient color scheme after range override");
+        }
+    }
+
+    /// Helper: build a zero-filled LegendOverrides (as if no per-encoding overrides existed).
+    fn legend_overrides_from_prep_default() -> LegendOverrides {
+        LegendOverrides::default()
     }
 }

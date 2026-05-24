@@ -256,6 +256,124 @@ mod bug_hunt_tests {
         let result = lerp_circles(&old, &new, 0.5);
         assert_eq!(result.len(), 1, "zip truncates to min(1, 2) = 1");
     }
+
+    #[test]
+    fn bug_hunt_lerp_circles_nan_in_new_propagates_nan() {
+        // NaN in the new circle's center must propagate to the result.
+        let old = vec![make_circle(100.0, 200.0, 10.0)];
+        let mut nan_circle = make_circle(f32::NAN, 300.0, 20.0);
+        let result = lerp_circles(&old, &[nan_circle], 0.5);
+        // center[0] = 100.0 + (NaN - 100.0) * 0.5 = NaN
+        assert!(
+            result[0].center[0].is_nan(),
+            "NaN in new.center[0] must propagate: got {}",
+            result[0].center[0]
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_infinity_in_radius() {
+        // Infinity in new.radius: lerp should propagate infinity.
+        let old = vec![make_circle(0.0, 0.0, 10.0)];
+        let mut inf_circle = make_circle(0.0, 0.0, f32::INFINITY);
+        let result = lerp_circles(&old, &[inf_circle], 0.5);
+        assert!(
+            result[0].radius.is_infinite(),
+            "infinity in new.radius must propagate: got {}",
+            result[0].radius
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_nan_in_position_propagates() {
+        // NaN in new rect position must propagate.
+        let old = vec![make_rect(10.0, 20.0, 100.0, 50.0)];
+        let mut nan_rect = make_rect(f32::NAN, 30.0, 200.0, 60.0);
+        let result = lerp_rects(&old, &[nan_rect], 0.5);
+        assert!(
+            result[0].position[0].is_nan(),
+            "NaN in new.position[0] must propagate"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_negative_t() {
+        // t < 0 should extrapolate (not clamp). The function doesn't clamp t.
+        let old = vec![make_circle(0.0, 0.0, 10.0)];
+        let new = vec![make_circle(100.0, 0.0, 10.0)];
+        let result = lerp_circles(&old, &new, -0.5);
+        // center[0] = 0.0 + (100.0 - 0.0) * (-0.5) = -50.0
+        assert!(
+            (result[0].center[0] - (-50.0)).abs() < 0.01,
+            "negative t must extrapolate; got {}",
+            result[0].center[0]
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_t_greater_than_one() {
+        // t > 1 should extrapolate.
+        let old = vec![make_circle(0.0, 0.0, 10.0)];
+        let new = vec![make_circle(100.0, 0.0, 10.0)];
+        let result = lerp_circles(&old, &new, 1.5);
+        // center[0] = 0.0 + (100.0 - 0.0) * 1.5 = 150.0
+        assert!(
+            (result[0].center[0] - 150.0).abs() < 0.01,
+            "t > 1 must extrapolate; got {}",
+            result[0].center[0]
+        );
+    }
+
+    #[test]
+    fn bug_hunt_ease_in_out_cubic_negative_t() {
+        // Negative t should produce negative output (not clamped to 0).
+        let result = ease_in_out_cubic(-0.5);
+        assert!(
+            result < 0.0,
+            "ease_in_out_cubic(-0.5) should be negative; got {result}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_ease_in_out_cubic_t_greater_than_one() {
+        // t > 1 should produce > 1.0 (not clamped).
+        let result = ease_in_out_cubic(1.5);
+        assert!(
+            result > 1.0,
+            "ease_in_out_cubic(1.5) should be > 1.0; got {result}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_circles_stroke_dash_uses_old_value() {
+        // stroke_dash is discrete (palette index): always uses old value, never interpolated.
+        let mut old_c = make_circle(0.0, 0.0, 5.0);
+        old_c.stroke_dash = 1.0; // dashed
+        let mut new_c = make_circle(0.0, 0.0, 5.0);
+        new_c.stroke_dash = 3.0; // dash-dot
+
+        let result = lerp_circles(&[old_c], &[new_c], 0.5);
+        assert!(
+            (result[0].stroke_dash - 1.0).abs() < 1e-6,
+            "stroke_dash must use old value (1.0), not interpolate; got {}",
+            result[0].stroke_dash
+        );
+    }
+
+    #[test]
+    fn bug_hunt_lerp_rects_stroke_dash_uses_old_value() {
+        let mut old_r = make_rect(0.0, 0.0, 100.0, 50.0);
+        old_r.stroke_dash = 2.0; // dotted
+        let mut new_r = make_rect(0.0, 0.0, 100.0, 50.0);
+        new_r.stroke_dash = 0.0; // solid
+
+        let result = lerp_rects(&[old_r], &[new_r], 0.99);
+        assert!(
+            (result[0].stroke_dash - 2.0).abs() < 1e-6,
+            "stroke_dash must use old value (2.0) at any t; got {}",
+            result[0].stroke_dash
+        );
+    }
 }
 
 /// B4 regression: when old_data == new_data, lerp produces no visible change.

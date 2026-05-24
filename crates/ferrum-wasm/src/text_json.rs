@@ -532,4 +532,138 @@ mod tests {
             "without plot_area, no clipping should occur"
         );
     }
+
+    // ── bug_hunt: text_json edge cases ──────────────────────────────────
+
+    #[test]
+    fn bug_hunt_build_text_json_from_empty_slice() {
+        // Empty text elements must produce an empty JSON array "[]".
+        let result = build_text_json_from(&[]);
+        assert_eq!(result, "[]", "empty text elements must produce '[]'");
+    }
+
+    #[test]
+    fn bug_hunt_text_element_with_special_chars_in_content() {
+        // Quotes, newlines, and backslashes in text content must be valid JSON.
+        let te = TextElementData {
+            x: 100.0,
+            y: 200.0,
+            content: r#"say "hello" \ world"#.to_string(),
+            style: make_style(),
+        };
+        let json_str = build_text_json_from(&[te]);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .expect("special chars in content must produce valid JSON");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["content"], r#"say "hello" \ world"#);
+    }
+
+    #[test]
+    fn bug_hunt_text_element_with_nan_coordinates() {
+        // NaN coordinates must not crash serialization.
+        let te = TextElementData {
+            x: f64::NAN,
+            y: f64::NAN,
+            content: "NaN test".to_string(),
+            style: make_style(),
+        };
+        let json_str = build_text_json_from(&[te]);
+        // serde_json serializes NaN as null.
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .expect("NaN coordinates must produce valid JSON");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0]["x"].is_null(), "NaN x must serialize as null");
+    }
+
+    #[test]
+    fn bug_hunt_text_element_with_inf_coordinates() {
+        // Infinity coordinates must not crash serialization.
+        let te = TextElementData {
+            x: f64::INFINITY,
+            y: f64::NEG_INFINITY,
+            content: "inf test".to_string(),
+            style: make_style(),
+        };
+        let json_str = build_text_json_from(&[te]);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .expect("Infinity coordinates must produce valid JSON");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn bug_hunt_text_element_empty_content() {
+        // Empty content string must produce valid JSON.
+        let te = make_text(50.0, 50.0, "");
+        let json_str = build_text_json_from(&[te]);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .expect("empty content must produce valid JSON");
+        assert_eq!(parsed[0]["content"], "");
+    }
+
+    #[test]
+    fn bug_hunt_text_element_unicode_content() {
+        // Unicode (emoji, CJK) in content must serialize correctly.
+        let te = make_text(10.0, 20.0, "\u{1F600}\u{4E16}\u{754C}");
+        let json_str = build_text_json_from(&[te]);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .expect("unicode content must produce valid JSON");
+        assert_eq!(parsed[0]["content"], "\u{1F600}\u{4E16}\u{754C}");
+    }
+
+    #[test]
+    fn bug_hunt_format_tooltip_content_with_unicode() {
+        // Unicode in tooltip name/value must produce valid JSON.
+        use ferrum_scene::{TooltipContent, TooltipField};
+        let tooltip = TooltipContent {
+            fields: vec![TooltipField {
+                name: "\u{1F4CA}chart".to_string(),
+                value: "\u{2714}pass".to_string(),
+            }],
+        };
+        let json = format_tooltip_content(&tooltip);
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("unicode in tooltip must produce valid JSON");
+        assert_eq!(parsed["fields"][0]["name"], "\u{1F4CA}chart");
+    }
+
+    #[test]
+    fn bug_hunt_tick_label_json_with_empty_label() {
+        // Empty label string must produce valid JSON.
+        let json = tick_label_json(0.0, 0.0, "", "center", None);
+        assert_eq!(json["content"], "");
+    }
+
+    #[test]
+    fn bug_hunt_color_string_with_fractional_opacity() {
+        // color_string must produce valid rgba() with fractional opacity.
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 100, g: 200, b: 50, a: 255 },
+            opacity: 0.5,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+        };
+        let result = color_string(&style);
+        assert!(result.starts_with("rgba("), "must start with rgba(");
+        assert!(result.contains("0.5"), "must contain opacity 0.5");
+    }
+
+    #[test]
+    fn bug_hunt_zoomed_text_panel_id_mismatch_falls_back() {
+        // When panel_id doesn't match any tick_level entry, must fall back
+        // to the non-zoomed text JSON (all elements at original positions).
+        let interaction = ferrum_scene::InteractionConfig::default();
+        let texts = vec![make_text(100.0, 200.0, "hello")];
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0,
+        };
+        let result = build_zoomed_text_json(&texts, &interaction, 99, &transform, None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        // Must contain all text elements (no zoom-specific filtering).
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["content"], "hello");
+    }
 }

@@ -504,19 +504,30 @@ def catplot(
     from ferrum.encoding import Color as _Color
     from ferrum.encoding import X as _X, Y as _Y
 
+    # Build the encoding with x=categorical, y=value regardless of orientation.
+    # CoordFlip (added below when horizontal=True) handles the visual axis swap.
+    # Stat-mark desugars (boxplot, violin, swarm, etc.) always expect x=cat, y=val,
+    # so we normalise the encoding here rather than propagating the orientation
+    # through every desugar function.
     enc: dict = {}
-    if x is not None:
-        enc["x"] = x
-    if y is not None:
-        enc["y"] = y
+    if not horizontal:
+        if x is not None:
+            enc["x"] = x
+        if y is not None:
+            enc["y"] = y
+    else:
+        # orient="h": user passed x=val, y=cat — swap so x=cat, y=val for desugars.
+        if y is not None:
+            enc["x"] = y  # cat_field goes on x
+        if x is not None:
+            enc["y"] = x  # val_field goes on y
     if hue is not None:
         enc["color"] = hue
 
     # Wire order → sort on the categorical axis encoding.
+    # After the swap above, cat is always on x, so cat_channel is always "x".
     if order is not None and cat_field is not None:
-        cat_channel = "x" if not horizontal else "y"
-        cls = _X if cat_channel == "x" else _Y
-        enc[cat_channel] = cls(cat_field, sort=list(order))
+        enc["x"] = _X(cat_field, sort=list(order))
 
     # Wire hue_order → sort on the color encoding.
     if hue_order is not None and hue is not None:
@@ -532,9 +543,10 @@ def catplot(
             # adjustments aren't composable in Phase 9c).
             chart = chart.mark_point(position=position)
         elif jitter:
-            jit_axis = "x" if not horizontal else "y"
+            # After the enc normalisation above, cat is always on x, so jitter
+            # always acts on the x axis (the categorical band axis).
             chart = chart.mark_point(
-                position=Jitter(axis=jit_axis, width=0.4, seed=seed),
+                position=Jitter(axis="x", width=0.4, seed=seed),
             )
         else:
             chart = chart.mark_point(position=Identity())
@@ -570,10 +582,9 @@ def catplot(
         chart = chart.transform(Aggregate([op], groupby=[cat_field]))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
         # Remap value axis to the count column.
-        if not horizontal:
-            enc["y"] = "n"
-        else:
-            enc["x"] = "n"
+        # After enc normalisation, val is always on y (cat on x), so "n" always
+        # goes on y regardless of orientation.
+        enc["y"] = "n"
 
     chart = chart.encode(**enc)
 

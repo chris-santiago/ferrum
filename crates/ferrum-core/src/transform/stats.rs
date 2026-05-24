@@ -72,6 +72,11 @@ fn cooks_distance_vec(
     if n <= p_eff {
         return vec![0.0; n];
     }
+    // B19: p_eff=0 would cause division by zero (p_eff as f64 * sigma_sq = 0)
+    // producing NaN. Cook's distance is undefined without predictors; return zeros.
+    if p_eff == 0 {
+        return vec![0.0; n];
+    }
     let sse: f64 = r.iter().map(|ri| ri * ri).sum();
     let sigma_sq = sse / (n - p_eff).max(1) as f64;
     if sigma_sq <= 0.0 {
@@ -80,9 +85,13 @@ fn cooks_distance_vec(
     r.iter()
         .zip(h_diag)
         .map(|(ri, hi)| {
-            let one_minus_h_sq = (1.0 - hi).powi(2);
+            // B18: leverage hi can be negative (e.g. from numerical issues in the
+            // hat matrix). Cook's distance is non-negative by definition, so clamp
+            // the leverage to [0, ∞) before computing the influence term.
+            let hi_clamped = hi.max(0.0);
+            let one_minus_h_sq = (1.0 - hi_clamped).powi(2);
             let denom = if one_minus_h_sq > 0.0 { one_minus_h_sq } else { 1e-24 };
-            (ri * ri / (p_eff as f64 * sigma_sq)) * (hi / denom)
+            (ri * ri / (p_eff as f64 * sigma_sq)) * (hi_clamped / denom)
         })
         .collect()
 }
@@ -113,6 +122,11 @@ fn rankdata_average_vec(arr: &[f64]) -> Vec<f64> {
 }
 
 fn variance_rank_vec(x_flat: &[f64], n: usize, p: usize) -> Vec<f64> {
+    // B21: n=0 produces 0.0/0.0 = NaN through mean/variance computation.
+    // Variance of an empty column is defined as 0.
+    if n == 0 {
+        return vec![0.0; p];
+    }
     let mut result = vec![0.0; p];
     for j in 0..p {
         let mean: f64 = (0..n).map(|i| x_flat[i * p + j]).sum::<f64>() / n as f64;
@@ -213,7 +227,9 @@ pub fn shapiro_w_scalar(x: &[f64]) -> f64 {
     let mean = sorted.iter().sum::<f64>() / n as f64;
     let denom: f64 = sorted.iter().map(|xi| (xi - mean).powi(2)).sum();
     if denom <= 0.0 { return 1.0; }
-    numer / denom
+    // B20: The Royston polynomial approximation can produce W slightly above 1.0
+    // for small n with skewed data (e.g. n=3, W≈1.009). Clamp to the valid range.
+    (numer / denom).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------

@@ -31,11 +31,11 @@ chart = (
     .configure_legend(orient="none")
     .labs(title="U.S. GDP Growth Rate, 2015–2024")
     + ann.text(
-        fm.norm(0.0), fm.norm(1.03),
+        fm.norm(1.0), fm.norm(-0.03),
         "Source: Bureau of Economic Analysis",
         font_size=9,
         color="#666",
-        anchor="start",
+        anchor="end",
     )
 )
 

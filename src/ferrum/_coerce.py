@@ -85,7 +85,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 data = data.with_columns(casts)
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
-            return data.collect().to_arrow()
+            return to_arrow_table(data.collect())
     except ImportError:
         pass
 

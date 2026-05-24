@@ -141,13 +141,8 @@ class _PrecomputedSource:
 
         if strategy == "uniform":
             edges = np.linspace(0.0, 1.0, n_bins + 1)
-        elif strategy == "quantile":
+        else:  # "quantile" — sklearn has already validated strategy above
             edges = np.quantile(y_pred, np.linspace(0.0, 1.0, n_bins + 1))
-        else:
-            raise ValueError(
-                f"calibration_curve(strategy={strategy!r}) not supported; "
-                "use 'uniform' or 'quantile'."
-            )
         bin_idx = np.clip(np.digitize(y_pred, edges[1:-1]), 0, n_bins - 1)
         counts_all = np.bincount(bin_idx, minlength=n_bins)
         centers = edges[:-1] + np.diff(edges) / 2.0

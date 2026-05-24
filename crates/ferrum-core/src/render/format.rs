@@ -4,10 +4,14 @@
 //! when no explicit format is specified.
 
 /// Format a numeric tick value:
+/// - NaN or Infinity: returns empty string (not suitable for SVG text/tooltip).
 /// - Integer-valued in normal range: drop decimal ("0", "5", "100").
 /// - Decimal with ≤ 4 sig figs: drop trailing zeros ("1.5", "0.25").
 /// - |x| >= 1e6 or (0 < |x| < 1e-3): scientific notation ("1.5e6", "1e-4").
 pub fn format_numeric(x: f64) -> String {
+    if x.is_nan() || x.is_infinite() {
+        return String::new();
+    }
     if x == 0.0 {
         return "0".to_string();
     }
@@ -103,7 +107,9 @@ pub fn format_ordinal(value: &str) -> String {
 /// in chart configuration (consumption wired incrementally).
 #[allow(dead_code)]
 pub fn format_ordinal_number(n: i64) -> String {
-    let suffix = match (n.abs() % 100, n.abs() % 10) {
+    // Use unsigned_abs() to avoid i64::MIN overflow (i64::MIN.abs() panics in debug).
+    let abs = n.unsigned_abs();
+    let suffix = match (abs % 100, abs % 10) {
         (11..=13, _) => "th",
         (_, 1) => "st",
         (_, 2) => "nd",

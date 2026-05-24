@@ -340,10 +340,14 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                     fill: Some(fill_color),
                     stroke: stroke_color,
                     stroke_width: if stroke_color.is_some() { 1.0 } else { 0.0 },
-                    opacity: *opacity,
+                    opacity: 1.0,
                     stroke_dash: None,
                     stroke_opacity: 1.0,
-                    fill_opacity: 1.0,
+                    // Store the caller-supplied opacity as fill_opacity so the SVG
+                    // writer emits fill-opacity="<value>" on the <rect> element.
+                    // The FillStroke.opacity field is not forwarded to SVG attributes
+                    // by to_svg_fill_stroke_with_anchor; only fill_opacity is.
+                    fill_opacity: *opacity,
                     angle: 0.0,
                 },
                 corner_radius: *corner_radius,
@@ -385,10 +389,16 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 "end" | "right" => { px -= width; }
                 _ => { px -= width * 0.5; py -= height * 0.5; }
             }
+            // XML-escape src so that a URL containing '"' cannot break SVG structure.
+            let escaped_src = src
+                .replace('&', "&amp;")
+                .replace('"', "&quot;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
             out.push(SceneNode::Raw {
                 svg: format!(
                     r#"<image x="{}" y="{}" width="{}" height="{}" href="{}"/>"#,
-                    px, py, width, height, src
+                    px, py, width, height, escaped_src
                 ),
             });
         }
@@ -607,8 +617,10 @@ fn emit_callout(
     let ty = text_y.map(|v| ctx.resolve_y(v)).unwrap_or(data_y - default_offset);
 
     // Approximate text dimensions for the background box.
+    // Use chars().count() not len() so multi-byte Unicode characters don't
+    // inflate the estimated width (len() returns byte count, not char count).
     let char_width = 7.0;
-    let text_w = text.len() as f64 * char_width + padding * 2.0;
+    let text_w = text.chars().count() as f64 * char_width + padding * 2.0;
     let text_h = 14.0 + padding * 2.0;
 
     // Background rect.

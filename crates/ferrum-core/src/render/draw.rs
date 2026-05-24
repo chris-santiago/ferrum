@@ -415,15 +415,19 @@ pub fn to_scene_stroke(
         opacity,
         dash: dash.map(|d| d.to_vec()),
         stroke_opacity: opacity,
+        // Unknown strings return None so SVG uses its default (butt/miter),
+        // consistent with parse_stroke_cap / parse_stroke_join.
         stroke_cap: cap.and_then(|s| match s {
             "round" => Some(ferrum_scene::StrokeCap::Round),
             "square" => Some(ferrum_scene::StrokeCap::Square),
-            _ => Some(ferrum_scene::StrokeCap::Butt),
+            "butt" => Some(ferrum_scene::StrokeCap::Butt),
+            _ => None,
         }),
         stroke_join: join.and_then(|s| match s {
             "round" => Some(ferrum_scene::StrokeJoin::Round),
             "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
-            _ => Some(ferrum_scene::StrokeJoin::Miter),
+            "miter" => Some(ferrum_scene::StrokeJoin::Miter),
+            _ => None,
         }),
     }
 }

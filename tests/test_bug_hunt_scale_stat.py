@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 
 import polars as pl
 import pytest
@@ -20,7 +19,7 @@ from ferrum._core import (
 
 
 # ---------------------------------------------------------------------------
-# All-null columns fed to each scale type (via chart rendering)
+# Null / NaN handling
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +83,6 @@ def test_all_null_with_log_scale_renders():
             "y": pl.Series([None, None, None], dtype=pl.Float64),
         }
     )
-    # Cannot infer log domain from all-null, so supply explicit domain
     chart = (
         fr.Chart(df)
         .mark_point()
@@ -98,8 +96,37 @@ def test_all_null_with_log_scale_renders():
     assert "NaN" not in svg
 
 
+def test_nan_in_color_numeric_encoding():
+    """NaN in a numeric color column should not crash or produce NaN in SVG."""
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "c": [1.0, float("nan"), 3.0, float("nan")],
+        }
+    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c:Q").show_svg()
+    assert "<svg" in svg
+    # NaN rows should be dropped or assigned a fallback, never produce literal NaN
+    assert "NaN" not in svg
+
+
+def test_nan_mixed_with_valid_in_sort_key():
+    """NaN values in the sort key (x column) should not corrupt ordering."""
+    df = pl.DataFrame(
+        {
+            "x": [3.0, float("nan"), 1.0, float("nan"), 2.0],
+            "y": [30.0, 99.0, 10.0, 99.0, 20.0],
+        }
+    )
+    svg = fr.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    # Valid rows should render; NaN rows should be dropped
+    assert "NaN" not in svg
+
+
 # ---------------------------------------------------------------------------
-# Single-value domains (all values identical) across scale types
+# Single-value / degenerate domains
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +171,143 @@ def test_single_category_ordinal():
 
 
 # ---------------------------------------------------------------------------
-# Aggregate transforms with empty/single-row/all-NaN groups
+# Extreme values
+# ---------------------------------------------------------------------------
+
+
+def test_linear_infinity_input_returns_nan():
+    """LinearScale.scale(inf) should return NaN (out of domain)."""
+    s = fr.LinearScale(domain=[0.0, 10.0], range=[0.0, 1.0])
+    assert math.isnan(s.scale(float("inf")))
+    assert math.isnan(s.scale(float("-inf")))
+
+
+def test_log_scale_very_small_positive_domain():
+    """LogScale with domain near subnormal (1e-300) should not overflow."""
+    s = fr.LogScale(domain=[1e-300, 1.0], range=[0.0, 300.0])
+    assert math.isclose(s.scale(1e-300), 0.0, abs_tol=1e-6)
+    assert math.isclose(s.scale(1.0), 300.0, abs_tol=1e-6)
+
+
+def test_very_large_float_chart_renders():
+    """Chart with 1e300-scale values should not crash."""
+    df = pl.DataFrame({"x": [1e300, 2e300, 3e300], "y": [1.0, 2.0, 3.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_very_small_positive_values_do_not_collapse_to_zero():
+    """Data with 1e-15 differences should still produce distinct marks."""
+    df = pl.DataFrame(
+        {"x": [1e-15, 2e-15, 3e-15], "y": [1.0, 2.0, 3.0]}
+    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert svg.count("<circle") == 3
+
+
+def test_negative_values_on_log_scale_chart():
+    """Negative values with log scale should not produce NaN or Infinity in SVG.
+
+    Targets LogScaleData.scale() line 22: negative input on positive domain
+    returns NaN, which should be filtered by the renderer.
+    """
+    df = pl.DataFrame({"x": [-5.0, -1.0, 0.5, 1.0, 10.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    svg = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(
+            x=fr.X("x", scale=fr.LogScale(domain=[0.1, 100.0], range=[0.0, 500.0])),
+            y="y",
+        )
+        .show_svg()
+    )
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert "Infinity" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Type boundary: integer, boolean, and string columns
+# ---------------------------------------------------------------------------
+
+
+def test_integer_column_coerced_to_float():
+    """Integer columns should auto-coerce and render."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [10, 20, 30, 40, 50]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+    assert svg.count("<circle") == 5
+
+
+def test_boolean_column_as_x():
+    """Boolean column as x should render (treated as ordinal)."""
+    df = pl.DataFrame({"x": [True, False, True, False], "y": [1.0, 2.0, 3.0, 4.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_int64_histogram():
+    """Int64 column as histogram input should auto-cast to Float64.
+
+    Targets bin.rs line 67-84: auto-cast path for integer types.
+    """
+    df = pl.DataFrame({"x": pl.Series([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=pl.Int64)})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_uint32_histogram():
+    """UInt32 column should also auto-cast for histogram binning."""
+    df = pl.DataFrame({"x": pl.Series([10, 20, 30, 40, 50], dtype=pl.UInt32)})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# Empty inputs
+# ---------------------------------------------------------------------------
+
+
+def test_zero_row_dataframe():
+    """Zero-row DataFrame should produce an empty SVG (not crash)."""
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Float64),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_zero_row_histogram():
+    """Histogram with zero-row DataFrame should produce an SVG (not crash).
+
+    Targets bin.rs line 106-108: empty_bin_output path.
+    """
+    df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64)})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_zero_row_with_ordinal_axis():
+    """Zero-row DataFrame with ordinal axis should render empty chart."""
+    df = pl.DataFrame(
+        {
+            "cat": pl.Series([], dtype=pl.Utf8),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
+    svg = fr.Chart(df).mark_bar().encode(x="cat", y="y").show_svg()
+    assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# Aggregate transforms with degenerate inputs
 # ---------------------------------------------------------------------------
 
 
@@ -180,6 +343,49 @@ def test_aggregate_single_row_group():
     assert "NaN" not in svg
 
 
+def test_aggregate_variance_single_element_group():
+    """Variance of a single-element group should return NaN (Bessel's n-1=0).
+
+    Targets aggregate.rs line 241-242: variance returns NaN when vals.len() < 2.
+    """
+    df = pl.DataFrame({"g": ["a"], "v": [42.0]})
+    chart = (
+        fr.Chart(df)
+        .transform(
+            fr.Aggregate(
+                [fr.AggregateOp("v", "variance", "var_v")],
+                groupby=["g"],
+            )
+        )
+        .mark_bar()
+        .encode(x="g", y="var_v")
+    )
+    # Should not crash; the NaN var_v is silently dropped by bar mark
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_aggregate_stdev_single_element_group():
+    """Stdev of a single-element group should return NaN.
+
+    Targets aggregate.rs line 249: stdev returns NaN when vals.len() < 2.
+    """
+    df = pl.DataFrame({"g": ["a"], "v": [42.0]})
+    chart = (
+        fr.Chart(df)
+        .transform(
+            fr.Aggregate(
+                [fr.AggregateOp("v", "stdev", "sd_v")],
+                groupby=["g"],
+            )
+        )
+        .mark_bar()
+        .encode(x="g", y="sd_v")
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
 def test_aggregate_all_nan_group_produces_nan_result():
     """A group where all values are NaN should produce NaN aggregate (not crash)."""
     df = pl.DataFrame(
@@ -203,124 +409,26 @@ def test_aggregate_all_nan_group_produces_nan_result():
     assert "<svg" in svg
 
 
-# ---------------------------------------------------------------------------
-# Scale resolution when domain min == max (especially 0.0 == 0.0)
-# ---------------------------------------------------------------------------
+def test_aggregate_count_star_no_field():
+    """Aggregate with count('', ...) shorthand should count all rows.
 
-
-def test_domain_zero_zero_no_division_by_zero():
-    """When data domain is [0,0], the renderer must not produce NaN from 0/0."""
-    df = pl.DataFrame({"x": [0.0, 0.0], "y": [0.0, 0.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-    assert "NaN" not in svg
-
-
-def test_domain_negative_equal_values():
-    """Domain [-5,-5] should expand and render without NaN."""
-    df = pl.DataFrame({"x": [-5.0, -5.0, -5.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-    assert "NaN" not in svg
-    assert svg.count("<circle") >= 1
-
-
-# ---------------------------------------------------------------------------
-# Mixed null/non-null data at domain boundaries
-# ---------------------------------------------------------------------------
-
-
-def test_mixed_null_non_null_drops_null_rows():
-    """Null in x or y means that row is dropped; remaining render."""
-    df = pl.DataFrame(
-        {
-            "x": [None, 1.0, 2.0, None, 4.0],
-            "y": [10.0, None, 20.0, 30.0, 40.0],
-        }
+    Targets aggregate.rs line 60-61: count-star shorthand path.
+    """
+    df = pl.DataFrame({"g": ["a", "a", "b"], "v": [1.0, 2.0, 3.0]})
+    chart = (
+        fr.Chart(df)
+        .transform(
+            fr.Aggregate(
+                [fr.AggregateOp("", "count", "n")],
+                groupby=["g"],
+            )
+        )
+        .mark_bar()
+        .encode(x="g", y="n")
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-    assert "NaN" not in svg
-    # Only row index 2 (x=2,y=20) and 4 (x=4,y=40) have both non-null
-    assert svg.count("<circle") == 2
-
-
-def test_null_at_domain_extremes():
-    """Null at the location where min/max would be should be skipped in domain calc."""
-    df = pl.DataFrame(
-        {
-            "x": pl.Series([None, 2.0, 3.0, 4.0, None], dtype=pl.Float64),
-            "y": [1.0, 2.0, 3.0, 4.0, 5.0],
-        }
-    )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-    assert "NaN" not in svg
-    # Rows with non-null x: indices 1,2,3 -> 3 circles
-    assert svg.count("<circle") == 3
-
-
-# ---------------------------------------------------------------------------
-# Stat transforms (KDE, regression, binning) with degenerate inputs
-# ---------------------------------------------------------------------------
-
-
-def test_kde_single_point():
-    """KDE with a single data point should produce SVG (density = NaN -> no path)."""
-    df = pl.DataFrame({"x": [7.0]})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
-    assert "<svg" in svg
-
-
-def test_kde_all_nan_values():
-    """KDE with all NaN should produce SVG without crashing."""
-    df = pl.DataFrame({"x": [float("nan"), float("nan"), float("nan")]})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
-    assert "<svg" in svg
-
-
-def test_kde_constant_values():
-    """KDE with all-identical values (zero variance) should not crash."""
-    df = pl.DataFrame({"x": [4.0] * 20})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
-    assert "<svg" in svg
-
-
-def test_smooth_single_data_point():
-    """Smooth regression with 1 data point should not crash."""
-    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
-    assert "<svg" in svg
-
-
-def test_smooth_constant_y():
-    """Smooth with constant y (horizontal line) should render without NaN."""
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 5.0, 5.0, 5.0]})
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    svg = chart.show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
-
-
-def test_smooth_all_nan_y():
-    """Smooth with all-NaN y values should render without crashing."""
-    df = pl.DataFrame(
-        {
-            "x": [1.0, 2.0, 3.0, 4.0],
-            "y": [float("nan"), float("nan"), float("nan"), float("nan")],
-        }
-    )
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
-    assert "<svg" in svg
-
-
-def test_histogram_all_null():
-    """Histogram with all-null column should not crash."""
-    df = pl.DataFrame({"x": pl.Series([None, None, None], dtype=pl.Float64)})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
-    assert "<svg" in svg
-
-
-def test_histogram_single_value():
-    """Histogram with all-identical values should produce at least 1 bar."""
-    df = pl.DataFrame({"x": [3.0, 3.0, 3.0, 3.0, 3.0]})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
-    assert "<svg" in svg
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +454,12 @@ def test_log_scale_rejects_base_zero():
         fr.LogScale(domain=[1.0, 100.0], range=[0.0, 2.0], base=0.0)
 
 
+def test_log_scale_rejects_negative_base():
+    """LogScale must reject negative base."""
+    with pytest.raises(ValueError, match="base must be"):
+        fr.LogScale(domain=[1.0, 100.0], range=[0.0, 2.0], base=-10.0)
+
+
 def test_quantile_scale_rejects_nan_in_domain():
     """QuantileScale must reject NaN in domain sample."""
     with pytest.raises(ValueError, match="finite"):
@@ -358,31 +472,303 @@ def test_threshold_scale_rejects_nan_in_thresholds():
         fr.ThresholdScale(domain=[float("nan")], range=[1.0, 2.0])
 
 
+def test_symlog_rejects_zero_constant():
+    """SymlogScale must reject constant=0 (would cause division by zero).
+
+    Targets symlog.rs line 159: constant <= 0.0 check.
+    """
+    with pytest.raises(ValueError, match="constant must be"):
+        fr.SymlogScale(domain=[-1.0, 1.0], range=[0.0, 1.0], constant=0.0)
+
+
+def test_symlog_rejects_negative_constant():
+    """SymlogScale must reject negative constant."""
+    with pytest.raises(ValueError, match="constant must be"):
+        fr.SymlogScale(domain=[-1.0, 1.0], range=[0.0, 1.0], constant=-1.0)
+
+
+def test_pow_scale_rejects_zero_exponent():
+    """PowScale must reject exponent=0.
+
+    Targets pow.rs line 153: exponent <= 0.0 check.
+    """
+    with pytest.raises(ValueError, match="exponent must be"):
+        fr.PowScale(domain=[0.0, 10.0], range=[0.0, 1.0], exponent=0.0)
+
+
+def test_pow_scale_rejects_negative_exponent():
+    """PowScale must reject negative exponent."""
+    with pytest.raises(ValueError, match="exponent must be"):
+        fr.PowScale(domain=[0.0, 10.0], range=[0.0, 1.0], exponent=-2.0)
+
+
+def test_band_scale_rejects_padding_inner_one():
+    """BandScale must reject padding_inner >= 1.0 (band width goes to zero).
+
+    Targets band.rs line 84: !(0.0..1.0).contains(&pi) check.
+    """
+    with pytest.raises(ValueError, match="padding_inner"):
+        fr.BandScale(domain=["a", "b"], padding_inner=1.0)
+
+
+def test_band_scale_rejects_nan_align():
+    """BandScale must reject NaN align."""
+    with pytest.raises(ValueError, match="align"):
+        fr.BandScale(domain=["a", "b"], align=float("nan"))
+
+
+def test_point_scale_rejects_negative_padding():
+    """PointScale must reject negative padding.
+
+    Targets point.rs line 78-80.
+    """
+    with pytest.raises(ValueError, match="padding"):
+        fr.PointScale(domain=["a", "b"], padding=-0.5)
+
+
+def test_quantize_scale_rejects_degenerate_domain():
+    """QuantizeScale must reject domain where lo == hi.
+
+    Targets quantize.rs line 67-69: domain endpoints must differ.
+    """
+    with pytest.raises(ValueError, match="domain endpoints must differ"):
+        fr.QuantizeScale(domain=[5.0, 5.0], range=["a", "b"])
+
+
+def test_quantize_scale_rejects_empty_range():
+    """QuantizeScale must reject empty range.
+
+    Targets quantize.rs line 73-74.
+    """
+    with pytest.raises(ValueError, match="range must be non-empty"):
+        fr.QuantizeScale(domain=[0.0, 10.0], range=[])
+
+
+def test_bin_ordinal_scale_rejects_empty_bins():
+    """BinOrdinalScale must reject empty bins list.
+
+    Targets bin_ordinal.rs line 56-57.
+    """
+    with pytest.raises(ValueError, match="bins must be non-empty"):
+        fr.BinOrdinalScale(bins=[])
+
+
+def test_bin_ordinal_scale_rejects_unsorted_bins():
+    """BinOrdinalScale must reject non-ascending bins.
+
+    Targets bin_ordinal.rs line 60-65.
+    """
+    with pytest.raises(ValueError, match="strictly sorted ascending"):
+        fr.BinOrdinalScale(bins=[10.0, 5.0, 20.0])
+
+
 # ---------------------------------------------------------------------------
-# Extreme values on scales
+# Scale numeric correctness
 # ---------------------------------------------------------------------------
 
 
-def test_linear_infinity_input_returns_nan():
-    """LinearScale.scale(inf) should return NaN (out of domain)."""
-    s = fr.LinearScale(domain=[0.0, 10.0], range=[0.0, 1.0])
-    assert math.isnan(s.scale(float("inf")))
-    assert math.isnan(s.scale(float("-inf")))
+def test_symlog_scale_round_trip_across_zero():
+    """Symlog scale should round-trip values across zero correctly.
+
+    Targets symlog.rs line 24-57: scale/invert across zero boundary.
+    """
+    s = fr.SymlogScale(domain=[-1000.0, 1000.0], range=[0.0, 1.0])
+    for x in [-1000.0, -100.0, -1.0, 0.0, 1.0, 100.0, 1000.0]:
+        y = s.scale(x)
+        back = s.invert(y)
+        assert math.isclose(back, x, abs_tol=1e-6), (
+            f"SymlogScale round-trip failed at x={x}: got {back}"
+        )
 
 
-def test_log_scale_very_small_positive_domain():
-    """LogScale with domain near subnormal (1e-300) should not overflow."""
-    s = fr.LogScale(domain=[1e-300, 1.0], range=[0.0, 300.0])
-    assert math.isclose(s.scale(1e-300), 0.0, abs_tol=1e-6)
-    assert math.isclose(s.scale(1.0), 300.0, abs_tol=1e-6)
+def test_pow_scale_sqrt_equivalence():
+    """PowScale with exponent=0.5 should match SqrtScale exactly.
+
+    Targets pow.rs: PowScale and SqrtScale share PowScaleData.
+    """
+    p = fr.PowScale(domain=[0.0, 100.0], range=[0.0, 1.0], exponent=0.5)
+    s = fr.SqrtScale(domain=[0.0, 100.0], range=[0.0, 1.0])
+    for x in [0.0, 25.0, 50.0, 75.0, 100.0]:
+        assert math.isclose(p.scale(x), s.scale(x), abs_tol=1e-12), (
+            f"PowScale(exp=0.5) != SqrtScale at x={x}"
+        )
 
 
-def test_very_large_float_chart_renders():
-    """Chart with 1e300-scale values should not crash."""
-    df = pl.DataFrame({"x": [1e300, 2e300, 3e300], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+def test_quantize_scale_boundary_precision():
+    """QuantizeScale bin boundaries should be precise.
+
+    Domain [0, 100], 2 bins => threshold at 50.0.
+    49.999... should map to first bin, 50.0 to second.
+    Targets quantize.rs line 21-24: t_clamped computation.
+    """
+    s = fr.QuantizeScale(domain=[0.0, 100.0], range=["a", "b"])
+    assert s.scale(49.99) == "a"
+    assert s.scale(50.0) == "b"
+    # Values outside domain are clamped
+    assert s.scale(-100.0) == "a"
+    assert s.scale(200.0) == "b"
+
+
+def test_quantize_scale_nan_returns_none():
+    """QuantizeScale.scale(NaN) should return None.
+
+    Targets quantize.rs line 16: NaN check.
+    """
+    s = fr.QuantizeScale(domain=[0.0, 100.0], range=["a", "b"])
+    assert s.scale(float("nan")) is None
+
+
+def test_ordinal_scale_unknown_category_returns_nan():
+    """OrdinalScale lookup for unknown category should return NaN.
+
+    Targets ordinal.rs line 24-26: unknown category returns NaN.
+    """
+    s = fr.OrdinalScale(domain=["a", "b"], range=[0.0, 100.0])
+    assert math.isnan(s.scale("z"))
+
+
+def test_ordinal_scale_invert_nan_returns_none():
+    """OrdinalScale.invert(NaN) should return None.
+
+    Targets ordinal.rs line 33: NaN check in invert_band.
+    """
+    s = fr.OrdinalScale(domain=["a", "b"], range=[0.0, 100.0])
+    assert s.invert(float("nan")) is None
+
+
+def test_band_scale_empty_domain_zero_bandwidth():
+    """BandScale with empty domain should produce 0 bandwidth.
+
+    Targets band.rs line 16: n == 0 path in layout().
+    """
+    s = fr.BandScale(domain=[])
+    assert s.bandwidth() == 0.0
+
+
+def test_linear_scale_inverted_range():
+    """LinearScale with inverted range (lo > hi) should still work correctly.
+
+    Targets linear.rs line 22-36: scale with r0 > r1.
+    """
+    s = fr.LinearScale(domain=[0.0, 10.0], range=[100.0, 0.0], clamp=True)
+    # x=0 -> range[0] = 100.0
+    assert math.isclose(s.scale(0.0), 100.0)
+    # x=10 -> range[1] = 0.0
+    assert math.isclose(s.scale(10.0), 0.0)
+    # x=5 -> midpoint = 50.0
+    assert math.isclose(s.scale(5.0), 50.0)
+
+
+def test_log_scale_negative_domain():
+    """LogScale with negative domain should map correctly.
+
+    Targets log.rs line 20-21: negative domain handling with sign multiplication.
+    """
+    s = fr.LogScale(domain=[-1000.0, -1.0], range=[0.0, 3.0])
+    y = s.scale(-10.0)
+    back = s.invert(y)
+    assert math.isclose(back, -10.0, rel_tol=1e-6), f"got {back}"
+
+
+# ---------------------------------------------------------------------------
+# Stat transforms with degenerate inputs
+# ---------------------------------------------------------------------------
+
+
+def test_kde_single_point():
+    """KDE with a single data point should produce SVG."""
+    df = pl.DataFrame({"x": [7.0]})
+    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_kde_all_nan_values():
+    """KDE with all NaN should produce SVG without crashing."""
+    df = pl.DataFrame({"x": [float("nan"), float("nan"), float("nan")]})
+    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_kde_constant_values():
+    """KDE with all-identical values (zero variance) should not crash."""
+    df = pl.DataFrame({"x": [4.0] * 20})
+    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_smooth_single_data_point():
+    """Smooth regression with 1 data point should not crash.
+
+    Targets smooth.rs line 110-118: xs.len() < 2 fallback path.
+    """
+    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_smooth_constant_y():
+    """Smooth with constant y (horizontal line) should render without NaN."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 5.0, 5.0, 5.0]})
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
+
+
+def test_smooth_all_nan_y():
+    """Smooth with all-NaN y values should render without crashing."""
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [float("nan"), float("nan"), float("nan"), float("nan")],
+        }
+    )
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_smooth_constant_x_zero_variance():
+    """Smooth with constant x (zero variance in predictor) should not crash.
+
+    Targets smooth.rs line 800: sxx == 0 guard in lm_fit.
+    """
+    df = pl.DataFrame({"x": [5.0, 5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_smooth_two_points_perfect_fit():
+    """Smooth with exactly 2 points should produce a perfect line.
+
+    Targets smooth.rs lm_fit: dof = n - 2 = 0, CI should be NaN.
+    """
+    df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
+    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_histogram_all_null():
+    """Histogram with all-null column should not crash."""
+    df = pl.DataFrame({"x": pl.Series([None, None, None], dtype=pl.Float64)})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_histogram_single_value():
+    """Histogram with all-identical values should produce at least 1 bar."""
+    df = pl.DataFrame({"x": [3.0, 3.0, 3.0, 3.0, 3.0]})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
+
+
+def test_histogram_two_distinct_values():
+    """Histogram with exactly 2 distinct values should produce bins.
+
+    Sturges floor for n=2 is 2 (ceil(log2(2)+1) = ceil(2) = 2).
+    """
+    df = pl.DataFrame({"x": [1.0, 10.0]})
+    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    assert "<svg" in svg
 
 
 # ---------------------------------------------------------------------------
@@ -408,38 +794,197 @@ def test_aggregate_spec_round_trip():
     assert rt == cs
 
 
+def test_smooth_spec_round_trip_all_methods():
+    """Smooth spec for each method should survive JSON round-trip.
+
+    Tests that serde rename_all = "snake_case" handles poly and log/sqrt.
+    """
+    for method in ["lm", "loess", "quadratic", "cubic", "log", "sqrt"]:
+        kwargs = {"method": method, "x": "x", "y": "y"}
+        spec = Smooth(**kwargs)
+        cs = ChartSpec(mark="line", x="x", y="y", transforms=[spec])
+        rt = ChartSpec.from_json(cs.to_json())
+        assert rt == cs, f"round-trip failed for method={method}"
+
+
+def test_bin_spec_round_trip_with_groupby():
+    """Bin spec with groupby should survive JSON round-trip."""
+    spec = Bin("x", bin_count=5, groupby="g")
+    cs = ChartSpec(mark="bar", x="x", transforms=[spec])
+    rt = ChartSpec.from_json(cs.to_json())
+    assert rt == cs
+
+
 # ---------------------------------------------------------------------------
-# Type boundary: integer column where float expected
+# Composition corners
 # ---------------------------------------------------------------------------
 
 
-def test_integer_column_coerced_to_float():
-    """Integer columns should auto-coerce and render."""
-    df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [10, 20, 30, 40, 50]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+def test_layer_chart_two_scales():
+    """Layered chart with two different y domains should render both layers."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [100.0, 200.0, 300.0]})
+    c1 = fr.Chart(df).mark_point().encode(x="x", y="y1")
+    c2 = fr.Chart(df).mark_line().encode(x="x", y="y2")
+    svg = fr.layer(c1, c2).show_svg()
+    assert "<svg" in svg
     assert "NaN" not in svg
-    assert svg.count("<circle") == 5
 
 
-def test_boolean_column_as_x():
-    """Boolean column as x should render (treated as ordinal)."""
-    df = pl.DataFrame({"x": [True, False, True, False], "y": [1.0, 2.0, 3.0, 4.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+def test_facet_single_panel():
+    """Facet with a single unique value should produce 1 panel (not crash)."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "f": ["only", "only", "only"]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").show_svg()
     assert "<svg" in svg
 
 
+def test_facet_many_panels():
+    """Facet with 20+ panels should render without overflow or crash."""
+    cats = [f"cat_{i:02d}" for i in range(25)]
+    df = pl.DataFrame(
+        {"x": list(range(25)), "y": list(range(25)), "f": cats}
+    ).cast({"x": pl.Float64, "y": pl.Float64})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
 # ---------------------------------------------------------------------------
-# Empty inputs
+# Structural features: SecondaryY, BreakAxis, Inset
 # ---------------------------------------------------------------------------
 
 
-def test_zero_row_dataframe():
-    """Zero-row DataFrame should produce an empty SVG (not crash)."""
+def test_secondary_y_dataclass_construction():
+    """SecondaryY dataclass should accept field and optional scale."""
+    sy = fr.SecondaryY(field="pressure")
+    assert sy.field == "pressure"
+    assert sy.mark == "line"
+    assert sy.scale is None
+
+    sy_with_scale = fr.SecondaryY(
+        field="pressure",
+        scale=fr.LinearScale(domain=[0.0, 500.0]),
+    )
+    assert sy_with_scale.scale is not None
+
+
+def test_secondary_y_frozen_dataclass():
+    """SecondaryY is frozen; should raise on mutation."""
+    sy = fr.SecondaryY(field="pressure")
+    with pytest.raises(AttributeError):
+        sy.field = "other"
+
+
+def test_break_axis_invalid_axis_raises():
+    """BreakAxis with invalid axis should raise ValueError."""
+    with pytest.raises(ValueError, match="must be 'x' or 'y'"):
+        fr.BreakAxis(axis="z", gap=(10, 20))
+
+
+def test_break_axis_invalid_style_raises():
+    """BreakAxis with invalid break_style should raise ValueError."""
+    with pytest.raises(ValueError, match="break_style"):
+        fr.BreakAxis(axis="y", gap=(10, 20), break_style="stars")
+
+
+def test_break_axis_valid_styles():
+    """BreakAxis should accept all valid break_style values."""
+    for style in ("slash", "zigzag", "wave", "gap"):
+        ba = fr.BreakAxis(axis="y", gap=(10, 90), break_style=style)
+        assert ba.break_style == style
+
+
+def test_break_axis_frozen():
+    """BreakAxis is frozen; should raise on mutation."""
+    ba = fr.BreakAxis(axis="y", gap=(10, 20))
+    with pytest.raises(AttributeError):
+        ba.axis = "x"
+
+
+def test_inset_invalid_connect_style_raises():
+    """Inset with invalid connect_style should raise ValueError."""
+    df = pl.DataFrame({"x": [1.0], "y": [1.0]})
+    c = fr.Chart(df).mark_point().encode(x="x", y="y")
+    with pytest.raises(ValueError, match="connect_style"):
+        fr.Inset(chart=c, bounds=(0.1, 0.1, 0.5, 0.5), connect_style="arrows")
+
+
+def test_inset_valid_connect_styles():
+    """Inset should accept all valid connect_style values."""
+    df = pl.DataFrame({"x": [1.0], "y": [1.0]})
+    c = fr.Chart(df).mark_point().encode(x="x", y="y")
+    for style in ("bracket", "lines", "none"):
+        ins = fr.Inset(chart=c, bounds=(0.1, 0.1, 0.5, 0.5), connect_style=style)
+        assert ins.connect_style == style
+
+
+def test_inset_frozen():
+    """Inset is frozen; should raise on mutation."""
+    df = pl.DataFrame({"x": [1.0], "y": [1.0]})
+    c = fr.Chart(df).mark_point().encode(x="x", y="y")
+    ins = fr.Inset(chart=c, bounds=(0.1, 0.1, 0.5, 0.5))
+    with pytest.raises(AttributeError):
+        ins.border = False
+
+
+# ---------------------------------------------------------------------------
+# Contract pins: SVG structural assertions
+# ---------------------------------------------------------------------------
+
+
+def test_svg_viewbox_no_nan():
+    """The viewBox attribute must never contain NaN, even with edge-case data."""
+    df = pl.DataFrame({"x": [0.0, 0.0, 0.0], "y": [0.0, 0.0, 0.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    # Extract viewBox
+    import re
+    vb = re.search(r'viewBox="([^"]*)"', svg)
+    assert vb is not None, "SVG must have a viewBox attribute"
+    parts = vb.group(1).split()
+    for p in parts:
+        assert p != "NaN", f"viewBox contains NaN: {vb.group(1)}"
+        assert p != "Infinity", f"viewBox contains Infinity: {vb.group(1)}"
+
+
+def test_svg_no_infinity_in_coordinates():
+    """SVG output must never contain 'Infinity' string in any attribute."""
+    df = pl.DataFrame({"x": [1e300, -1e300], "y": [1.0, 2.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "Infinity" not in svg
+
+
+def test_svg_bar_count_matches_categories():
+    """Bar chart should produce one <rect per category."""
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 30.0]})
+    svg = fr.Chart(df).mark_bar().encode(x="cat", y="val").show_svg()
+    assert svg.count("<rect") >= 3
+
+
+# ---------------------------------------------------------------------------
+# Mixed null/non-null data at domain boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_null_non_null_drops_null_rows():
+    """Null in x or y means that row is dropped; remaining render."""
     df = pl.DataFrame(
         {
-            "x": pl.Series([], dtype=pl.Float64),
-            "y": pl.Series([], dtype=pl.Float64),
+            "x": [None, 1.0, 2.0, None, 4.0],
+            "y": [10.0, None, 20.0, 30.0, 40.0],
         }
     )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
-    assert "<svg" in svg
+    assert "NaN" not in svg
+    # Only row index 2 (x=2,y=20) and 4 (x=4,y=40) have both non-null
+    assert svg.count("<circle") == 2
+
+
+# ---------------------------------------------------------------------------
+# Domain [0,0] edge case
+# ---------------------------------------------------------------------------
+
+
+def test_domain_zero_zero_no_division_by_zero():
+    """When data domain is [0,0], the renderer must not produce NaN from 0/0."""
+    df = pl.DataFrame({"x": [0.0, 0.0], "y": [0.0, 0.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg

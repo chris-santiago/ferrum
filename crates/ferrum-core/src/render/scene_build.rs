@@ -69,10 +69,14 @@ pub fn build_scene(
             | Some(crate::spec::coord::CoordKind::Geo { .. })
         );
 
+        let grid_band_colors: &[String] = chart_config.grid
+            .as_ref()
+            .and_then(|g| g.band_colors.as_deref())
+            .unwrap_or(&[]);
         let grid_nodes = if suppress_axes {
             Vec::new()
         } else {
-            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme)
+            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
         };
 
         // Axes
@@ -126,7 +130,7 @@ pub fn build_scene(
         };
 
         // Scale resolution
-        let (scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
+        let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_panel,
             &panel_batch,
             &prep.transform_outputs,
@@ -135,6 +139,14 @@ pub fn build_scene(
             theme,
         )?;
         warnings.extend(scale_warnings);
+
+        // Apply chart_config color overrides (level 3) to the per-panel color scale.
+        // This must run after scale resolution because resolve_scales_with_outputs
+        // independently re-resolves the color scale for each panel, discarding any
+        // provisional_scales override that was applied in render_svg/render_scene_json.
+        if let Some(ref cfg) = chart_config.color {
+            super::apply_color_config_to_color_scale(&mut scales.color, cfg);
+        }
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
 
@@ -844,7 +856,7 @@ fn build_structural_nodes(
             StructuralSpec::BreakAxis(spec_brk) => {
                 // Build break indicators and add them to annotations.
                 let pixel_range = if spec_brk.axis == "y" {
-                    (plot_area.y, plot_area.y + plot_area.h)
+                    (plot_area.y + plot_area.h, plot_area.y)
                 } else {
                     (plot_area.x, plot_area.x + plot_area.w)
                 };
@@ -968,7 +980,6 @@ fn remap_node(
         }
         SceneNode::Rect { x, y, w, h, .. } => {
             if axis == "y" {
-                // Remap both the top and bottom edges; derive new y and height.
                 let top = remap_coord(*y, d_lo, d_hi, px_lo, px_hi, br);
                 let bottom = remap_coord(*y + *h, d_lo, d_hi, px_lo, px_hi, br);
                 match (top, bottom) {
@@ -976,7 +987,7 @@ fn remap_node(
                         *y = t.min(b);
                         *h = (b - t).abs();
                     }
-                    _ => { *h = 0.0; } // rect intersects the gap — collapse it
+                    _ => { *h = 0.0; }
                 }
             } else {
                 let left = remap_coord(*x, d_lo, d_hi, px_lo, px_hi, br);
@@ -1072,6 +1083,7 @@ fn remap_coord(
     let span = px_hi - px_lo;
     if span.abs() < f64::EPSILON { return Some(px); }
     let data_val = d_lo + (px - px_lo) / span * (d_hi - d_lo);
+    let data_val = data_val.clamp(d_lo.min(d_hi), d_lo.max(d_hi));
     break_axis::broken_scale_map(data_val, br)
 }
 

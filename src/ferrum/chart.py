@@ -431,6 +431,39 @@ class Chart(_RenderMixin):
             except (ImportError, TypeError, AttributeError, ValueError):
                 pass
 
+        # boxplot / boxen / violin: Rust box_stats / letter_value / violin transforms
+        # require the value column to be Float64.  Cast integer columns here, where
+        # we have both the encoding (value field name) and the data frame.
+        #
+        # Note: catplot orient="h" encodes x=numeric, y=categorical but does not
+        # pass horizontal=True to mark_boxplot — CoordFlip handles the visual flip
+        # at render time.  Instead of relying on the horizontal kwarg, we detect
+        # the value field by dtype: cast whichever of x_field / y_field holds an
+        # integer column (skipping string/categorical columns which cannot be cast).
+        if kind in ("boxplot", "boxen", "violin"):
+            try:
+                import polars as pl
+
+                _INT_DTYPES = (
+                    pl.Int8,
+                    pl.Int16,
+                    pl.Int32,
+                    pl.Int64,
+                    pl.UInt8,
+                    pl.UInt16,
+                    pl.UInt32,
+                    pl.UInt64,
+                )
+                if new._data is not None and isinstance(new._data, pl.DataFrame):
+                    casts = []
+                    for fld in (x_field, y_field):
+                        if fld and fld in new._data.columns and new._data[fld].dtype in _INT_DTYPES:
+                            casts.append(pl.col(fld).cast(pl.Float64))
+                    if casts:
+                        new._data = new._data.with_columns(casts)
+            except (ImportError, TypeError, AttributeError, ValueError):
+                pass
+
         # Build a scatter layer from the prior mark if present.
         _prior_layer = None
         if _prior_mark is not None and _prior_mark in _PRIMITIVE_MARKS:
@@ -4447,15 +4480,31 @@ class Chart(_RenderMixin):
         from ferrum.configure import AxisConfig, Configure
 
         cfg = AxisConfig(
-            x=x, y=y, label_angle=label_angle, label_font_size=label_font_size,
-            label_color=label_color, label_format=label_format,
-            label_format_raw=label_format_raw, label_overlap=label_overlap,
-            tick_count=tick_count, tick_size=tick_size, tick_values=tick_values,
-            title_font_size=title_font_size, title_color=title_color,
-            title_padding=title_padding, domain=domain, domain_color=domain_color,
-            domain_width=domain_width, grid=grid, grid_color=grid_color,
-            grid_dash=grid_dash, grid_width=grid_width, domain_min=domain_min,
-            domain_max=domain_max, nice=nice, zero=zero,
+            x=x,
+            y=y,
+            label_angle=label_angle,
+            label_font_size=label_font_size,
+            label_color=label_color,
+            label_format=label_format,
+            label_format_raw=label_format_raw,
+            label_overlap=label_overlap,
+            tick_count=tick_count,
+            tick_size=tick_size,
+            tick_values=tick_values,
+            title_font_size=title_font_size,
+            title_color=title_color,
+            title_padding=title_padding,
+            domain=domain,
+            domain_color=domain_color,
+            domain_width=domain_width,
+            grid=grid,
+            grid_color=grid_color,
+            grid_dash=grid_dash,
+            grid_width=grid_width,
+            domain_min=domain_min,
+            domain_max=domain_max,
+            nice=nice,
+            zero=zero,
         )
         new = self._clone()
         new._configure = new._configure + [Configure(axis=cfg)]
@@ -4493,10 +4542,16 @@ class Chart(_RenderMixin):
         from ferrum.configure import LegendConfig, Configure
 
         cfg = LegendConfig(
-            orient=orient, direction=direction, columns=columns,
-            title_font_size=title_font_size, label_font_size=label_font_size,
-            symbol_size=symbol_size, symbol_type=symbol_type,
-            gradient_length=gradient_length, offset=offset, padding=padding,
+            orient=orient,
+            direction=direction,
+            columns=columns,
+            title_font_size=title_font_size,
+            label_font_size=label_font_size,
+            symbol_size=symbol_size,
+            symbol_type=symbol_type,
+            gradient_length=gradient_length,
+            offset=offset,
+            padding=padding,
         )
         new = self._clone()
         new._configure = new._configure + [Configure(legend=cfg)]
@@ -4529,8 +4584,12 @@ class Chart(_RenderMixin):
         from ferrum.configure import TitleConfig, Configure
 
         cfg = TitleConfig(
-            font_size=font_size, font_weight=font_weight, anchor=anchor,
-            color=color, offset=offset, subtitle_font_size=subtitle_font_size,
+            font_size=font_size,
+            font_weight=font_weight,
+            anchor=anchor,
+            color=color,
+            offset=offset,
+            subtitle_font_size=subtitle_font_size,
             subtitle_color=subtitle_color,
         )
         new = self._clone()
@@ -4566,8 +4625,13 @@ class Chart(_RenderMixin):
         from ferrum.configure import GridConfig, Configure
 
         cfg = GridConfig(
-            x=x, y=y, color=color, width=width, dash=dash,
-            opacity=opacity, band_colors=band_colors,
+            x=x,
+            y=y,
+            color=color,
+            width=width,
+            dash=dash,
+            opacity=opacity,
+            band_colors=band_colors,
         )
         new = self._clone()
         new._configure = new._configure + [Configure(grid=cfg)]
@@ -4629,8 +4693,11 @@ class Chart(_RenderMixin):
         from ferrum.configure import ColorConfig, Configure
 
         cfg = ColorConfig(
-            scheme=scheme, sequential_scheme=sequential_scheme,
-            diverging_scheme=diverging_scheme, domain=domain, range=range,
+            scheme=scheme,
+            sequential_scheme=sequential_scheme,
+            diverging_scheme=diverging_scheme,
+            domain=domain,
+            range=range,
         )
         new = self._clone()
         new._configure = new._configure + [Configure(color=cfg)]

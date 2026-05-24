@@ -4,6 +4,7 @@
 //! Phase 8a adds: LogScale, SymlogScale (via explicit ScaleSpec override);
 //! SizeScale, ShapeScale, OpacityScale for new encoding channels.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use arrow::array::Array;
@@ -247,7 +248,7 @@ impl ScaleKind {
 pub enum ColorScale {
     Categorical {
         domain: Vec<String>,
-        palette: &'static [Color],
+        palette: Cow<'static, [Color]>,
     },
     /// Continuous color scale: maps a numeric value to a color via a
     /// ContinuousScheme. Used by heatmap, raster, and any chart with an
@@ -1088,11 +1089,12 @@ pub fn build_color_scale(
         // tableau10 — the canonical Vega-Lite categorical default — rather
         // than collapsing to OKABE_ITO silently.
         let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
-        let palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+        let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
             palette::categorical_palette("tableau10")
         } else {
             palette::categorical_palette(resolved_name)
         };
+        let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
         let warn = (domain.len() > palette.len()).then(|| {
             crate::render::RenderWarning::ColorPaletteOverflowed { categories: domain.len() as u32 }
         });

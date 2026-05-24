@@ -425,6 +425,7 @@ pub fn compute_layout(
             legend_title.as_deref(),
             theme.legend_title_font_size,
             theme.legend_columns,
+            legend_overrides.symbol_type.as_deref(),
         )
     };
     let legend_dropped = legend_entries

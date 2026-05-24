@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
+use palette::Srgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +44,21 @@ pub struct AxisInput {
     /// `layout_y_axis` — tick strings are already pre-formatted before this
     /// struct is built. Reserved for future granularity hints.
     pub tick_format_type: Option<String>,
+    /// Explicit tick values override from `configure_axis(tick_values=[...])`.
+    /// When set, tick labels are replaced with formatted versions of these values.
+    pub tick_values_override: Option<Vec<f64>>,
+    /// d3-format string from `configure_axis(label_format_raw="...")`.
+    /// Applied to tick labels after the tick_values_override is applied.
+    pub label_format_override: Option<String>,
+    /// Axis title font size from `configure_axis(title_font_size=...)`.
+    /// Overrides `theme.title_font_size` for this axis only.
+    pub title_font_size: Option<f64>,
+    /// Axis title color from `configure_axis(title_color="...")`.
+    /// Overrides `theme.title_color` for this axis only.
+    pub title_color: Option<Srgba<u8>>,
+    /// Padding between axis title and tick labels from `configure_axis(title_padding=...)`.
+    /// Overrides `theme.axis_title_padding` for this axis only.
+    pub title_padding: Option<f64>,
 }
 
 impl AxisInput {
@@ -65,6 +81,11 @@ impl AxisInput {
             show_grid: true,
             tick_format: None,
             tick_format_type: None,
+            tick_values_override: None,
+            label_format_override: None,
+            title_font_size: None,
+            title_color: None,
+            title_padding: None,
         }
     }
 }
@@ -102,6 +123,14 @@ pub struct AxisLayout {
     /// D7: whether to render gridlines from this axis. Default `true`.
     #[serde(default = "default_true")]
     pub show_grid: bool,
+    /// Per-axis title font size override from `configure_axis(title_font_size=...)`.
+    /// `None` means use the theme default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_size: Option<f64>,
+    /// Per-axis title color override from `configure_axis(title_color="...")`.
+    /// Stored as [R, G, B, A]. `None` means use the theme default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_color_rgba: Option<[u8; 4]>,
 }
 
 fn default_true() -> bool { true }
@@ -243,7 +272,9 @@ pub fn compute_y_title_width(
     metrics: &dyn TextMetrics,
 ) -> f64 {
     if input.title.is_some() {
-        metrics.line_height(title_font_size) + axis_title_padding
+        let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+        metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
     }
@@ -284,12 +315,15 @@ pub fn layout_y_axis(
         h: panel_area.h,
     };
 
+    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+
     let title = input.title.as_ref().map(|text| {
         let label_band = compute_y_label_band_width(input, label_font_size, metrics);
-        let title_h = metrics.line_height(title_font_size);
+        let title_h = metrics.line_height(effective_title_font_size);
         AxisTitleLayout {
             text: text.clone(),
-            anchor_x: panel_area.x - label_band - axis_title_padding - title_h / 2.0,
+            anchor_x: panel_area.x - label_band - effective_title_padding - title_h / 2.0,
             anchor_y: panel_area.y + panel_area.h / 2.0,
             angle: -90.0,
         }
@@ -305,6 +339,8 @@ pub fn layout_y_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
+        title_font_size: input.title_font_size,
+        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
     }
 }
 
@@ -730,13 +766,16 @@ pub fn layout_x_axis(
         h: 1.0,
     };
 
+    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+
     let title = input.title.as_ref().map(|text| {
-        let title_h = metrics.line_height(title_font_size);
+        let title_h = metrics.line_height(effective_title_font_size);
         let label_h = metrics.line_height(label_font_size);
         AxisTitleLayout {
             text: text.clone(),
             anchor_x: panel_area.x + panel_area.w / 2.0,
-            anchor_y: panel_area.y + panel_area.h + label_h + axis_title_padding + title_h / 2.0,
+            anchor_y: panel_area.y + panel_area.h + label_h + effective_title_padding + title_h / 2.0,
             angle: 0.0,
         }
     });
@@ -751,6 +790,8 @@ pub fn layout_x_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
+        title_font_size: input.title_font_size,
+        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
     }, warning)
 }
 
@@ -782,6 +823,8 @@ mod tests {
             show_ticks: true,
             show_domain: true,
             show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -800,6 +843,8 @@ mod tests {
             show_ticks: true,
             show_domain: true,
             show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));

@@ -419,11 +419,13 @@ pub fn fmt_f(x: f64) -> String {
 }
 
 pub fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    // Strip null bytes first: \x00 is invalid in XML and would produce malformed output.
+    s.replace('\0', "").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 pub fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    // Strip null bytes first: \x00 is invalid in XML and would produce malformed output.
+    s.replace('\0', "").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(test)]

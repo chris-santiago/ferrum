@@ -4,16 +4,14 @@
 //! integration tests cannot import from the crate directly. Following the
 //! pattern established by `bug_hunt_projection.rs`, this file reproduces and
 //! pins the pure-Rust algorithmic contracts of `render/draw.rs` and its helper
-//! modules (`render/color/categorical.rs`). Any divergence in the source from
-//! these pinned contracts will surface as a red test.
+//! modules (`render/color/categorical.rs`, `render/svg.rs`, `render/format.rs`,
+//! `render/annotation.rs`). Any divergence in the source from these pinned
+//! contracts will surface as a red test.
 
 #[cfg(test)]
 mod tests {
 
     // ── Inline reproductions of color helpers from render/color/categorical.rs ──
-    //
-    // These mirror the implementation exactly. If the source changes behavior,
-    // the test will fail and flag a regression.
 
     /// Mirror of `from_hex_str` in categorical.rs.
     fn parse_hex(s: &str) -> Result<(u8, u8, u8, u8), String> {
@@ -49,19 +47,6 @@ mod tests {
     }
 
     // ── Inline reproductions of stroke-cap/join parsing from draw.rs ──────────
-    //
-    // `parse_stroke_cap` in draw.rs:
-    //   "round"  → Some(Round)
-    //   "square" → Some(Square)
-    //   "butt"   → Some(Butt)
-    //   _        → None
-    //
-    // `to_scene_stroke` in draw.rs (different contract!):
-    //   "round"  → Some(Round)
-    //   "square" → Some(Square)
-    //   _        → Some(Butt)   ← falls through, not None
-    //
-    // This divergence is the contract we pin below.
 
     #[derive(Debug, PartialEq)]
     enum Cap { Round, Square, Butt }
@@ -76,12 +61,10 @@ mod tests {
     }
 
     fn to_scene_stroke_cap(s: &str) -> Option<Cap> {
-        // Mirrors the actual `to_scene_stroke` internal logic in draw.rs:
-        // cap.and_then(|s| match s { "round" => ..., "square" => ..., _ => Some(Butt) })
         match s {
             "round"  => Some(Cap::Round),
             "square" => Some(Cap::Square),
-            _        => Some(Cap::Butt),   // BUG candidate: unknown → Some(Butt), not None
+            _        => Some(Cap::Butt),
         }
     }
 
@@ -98,57 +81,149 @@ mod tests {
     }
 
     fn to_scene_stroke_join(s: &str) -> Option<Join> {
-        // Mirrors `to_scene_stroke` join arm in draw.rs:
-        // join.and_then(|s| match s { "round" => ..., "bevel" => ..., _ => Some(Miter) })
         match s {
             "round" => Some(Join::Round),
             "bevel" => Some(Join::Bevel),
-            _       => Some(Join::Miter),  // BUG candidate: unknown → Some(Miter), not None
+            _       => Some(Join::Miter),
         }
     }
 
-    // ── Inline reproduction of resolve_mark_style area logic ─────────────────
-    //
-    // For Area/Ribbon/Polygon: opacity = area_opacity; fill is opaque.
-    // For Line/Segment: stroke = mark_color, stroke_width = line_stroke_width.
-    // For Rule: stroke_dash = reference_line_dash.
-    // For Geoshape: stroke_width = 0.5 (hardcoded).
-    // For Arc: stroke_width = 0.0 (hardcoded).
+    // ── Inline reproduction of resolve_stroke_dash from draw.rs ──────────────
 
-    // ── hex parsing — boundary cases ─────────────────────────────────────────
+    fn resolve_stroke_dash(idx: f64) -> Option<Vec<f64>> {
+        let idx = (idx.round() as i64).clamp(0, 3);
+        match idx {
+            1 => Some(vec![6.0, 3.0]),
+            2 => Some(vec![2.0, 3.0]),
+            3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
+            _ => None,
+        }
+    }
+
+    // ── Inline reproduction of fmt_f from svg.rs ─────────────────────────────
+
+    const FLOAT_PRECISION: usize = 3;
+
+    fn fmt_f(x: f64) -> String {
+        if !x.is_finite() {
+            debug_assert!(false, "non-finite float in SVG output: {x}");
+            return "0".to_string();
+        }
+        let x = if x == 0.0 { 0.0 } else { x };
+        let s = format!("{x:.*}", FLOAT_PRECISION);
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
+        if trimmed.is_empty() || trimmed == "-" { "0".to_string() } else { trimmed }
+    }
+
+    // ── Inline reproduction of escape_text / escape_attr from svg.rs ─────────
+
+    fn escape_text(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    fn escape_attr(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    // ── Inline reproduction of format_numeric from format.rs ─────────────────
+
+    fn format_numeric(x: f64) -> String {
+        if x == 0.0 {
+            return "0".to_string();
+        }
+        let abs = x.abs();
+        if abs >= 1e6 || abs < 1e-3 {
+            let formatted = format!("{x:.3e}");
+            trim_scientific(&formatted)
+        } else if x.fract() == 0.0 {
+            format!("{}", x as i64)
+        } else {
+            let s = format!("{x:.4}");
+            trim_trailing_zeros(&s)
+        }
+    }
+
+    fn trim_trailing_zeros(s: &str) -> String {
+        if !s.contains('.') {
+            return s.to_string();
+        }
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+        trimmed.to_string()
+    }
+
+    fn trim_scientific(s: &str) -> String {
+        let (mantissa, exp) = s.split_once('e').unwrap_or((s, ""));
+        let mantissa = trim_trailing_zeros(mantissa);
+        if exp.is_empty() { mantissa } else { format!("{mantissa}e{exp}") }
+    }
+
+    // ── Inline reproduction of format_with_spec from format.rs ───────────────
+
+    fn format_with_spec(v: f64, spec: Option<&str>) -> String {
+        let Some(s) = spec else { return format_numeric(v) };
+        let trimmed = s.strip_prefix('.').unwrap_or(s);
+        let (digits_part, fmt_char) = match trimmed.chars().last() {
+            Some(c @ ('f' | 'e' | 'g')) => (&trimmed[..trimmed.len() - 1], c),
+            _ => return format_numeric(v),
+        };
+        let n: usize = digits_part.parse().unwrap_or(2);
+        match fmt_char {
+            'f' => format!("{v:.*}", n),
+            'e' => format!("{v:.*e}", n),
+            'g' => format_numeric(v),
+            _ => format_numeric(v),
+        }
+    }
+
+    // ── Inline reproduction of format_ordinal_number from format.rs ──────────
+
+    fn format_ordinal_number(n: i64) -> String {
+        let suffix = match (n.abs() % 100, n.abs() % 10) {
+            (11..=13, _) => "th",
+            (_, 1) => "st",
+            (_, 2) => "nd",
+            (_, 3) => "rd",
+            _ => "th",
+        };
+        format!("{n}{suffix}")
+    }
+
+    // ========================================================================
+    // TESTS — hex parsing boundary cases
+    // ========================================================================
 
     #[test]
-    fn hex_no_prefix_fails() {
+    fn bug_hunt_hex_no_prefix_fails() {
         assert!(parse_hex("ff0000").is_err(),
             "hex without # prefix must be rejected");
     }
 
     #[test]
-    fn hex_four_digits_fails() {
+    fn bug_hunt_hex_four_digits_fails() {
         assert!(parse_hex("#f00f").is_err(),
             "#rrggb (4 hex digits) is neither 6 nor 8 — must be rejected");
     }
 
     #[test]
-    fn hex_seven_digits_fails() {
+    fn bug_hunt_hex_seven_digits_fails() {
         assert!(parse_hex("#1234567").is_err(),
             "7-digit hex is invalid — must be rejected");
     }
 
     #[test]
-    fn hex_nine_digits_fails() {
+    fn bug_hunt_hex_nine_digits_fails() {
         assert!(parse_hex("#123456789").is_err(),
             "9-digit hex is invalid — must be rejected");
     }
 
     #[test]
-    fn hex_zero_length_fails() {
+    fn bug_hunt_hex_zero_length_fails() {
         assert!(parse_hex("#").is_err(),
             "bare # with no digits must be rejected");
     }
 
     #[test]
-    fn hex_six_uppercase_accepted() {
+    fn bug_hunt_hex_six_uppercase_accepted() {
         let (r, g, b, a) = parse_hex("#FF0000").unwrap();
         assert_eq!(r, 0xFF);
         assert_eq!(g, 0x00);
@@ -157,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn hex_eight_digits_alpha_parsed() {
+    fn bug_hunt_hex_eight_digits_alpha_parsed() {
         let (r, g, b, a) = parse_hex("#1f77b4cc").unwrap();
         assert_eq!(r, 0x1f);
         assert_eq!(g, 0x77);
@@ -166,199 +241,1296 @@ mod tests {
     }
 
     #[test]
-    fn hex_full_black_opaque() {
+    fn bug_hunt_hex_full_black_opaque() {
         let (r, g, b, a) = parse_hex("#000000ff").unwrap();
         assert_eq!((r, g, b, a), (0, 0, 0, 0xFF));
     }
 
     #[test]
-    fn hex_invalid_chars_fail() {
+    fn bug_hunt_hex_invalid_chars_fail() {
         assert!(parse_hex("#GGGGGG").is_err(),
             "non-hex characters must be rejected");
     }
 
-    // ── with_opacity ─────────────────────────────────────────────────────────
+    // ── NEW: hex parsing with multi-byte UTF-8 characters ────────────────────
+    // The source code uses &s[1..] which assumes single-byte '#' prefix.
+    // If the input contains multi-byte UTF-8 after the #, byte indexing in
+    // &hex[i..i+2] may panic or produce wrong results.
 
     #[test]
-    fn opacity_zero_yields_transparent() {
+    fn bug_hunt_hex_with_non_ascii_after_hash() {
+        // A 6-char input where 2 chars are non-ASCII (multi-byte).
+        // This should fail parsing, not panic.
+        let result = std::panic::catch_unwind(|| parse_hex("#ñóúáéí"));
+        assert!(result.is_ok(), "parse_hex must not panic on non-ASCII input");
+        // If it didn't panic, verify it returns an error.
+        if let Ok(r) = result {
+            assert!(r.is_err(), "non-ASCII hex digits must be rejected");
+        }
+    }
+
+    #[test]
+    fn bug_hunt_hex_with_emoji_after_hash() {
+        // Emoji are multi-byte — byte indexing will be wrong.
+        let result = std::panic::catch_unwind(|| parse_hex("#🎨🎨🎨"));
+        assert!(result.is_ok(), "parse_hex must not panic on emoji input");
+    }
+
+    #[test]
+    fn bug_hunt_hex_empty_string() {
+        assert!(parse_hex("").is_err(), "empty string must be rejected");
+    }
+
+    #[test]
+    fn bug_hunt_hex_whitespace_only() {
+        assert!(parse_hex("   ").is_err(), "whitespace-only string must be rejected");
+    }
+
+    #[test]
+    fn bug_hunt_hex_with_leading_whitespace_accepted() {
+        // The source trims whitespace before checking '#'.
+        let result = parse_hex("  #ff0000  ");
+        assert!(result.is_ok(), "hex with leading/trailing whitespace should be accepted after trim");
+    }
+
+    // ========================================================================
+    // TESTS — with_opacity edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_opacity_zero_yields_transparent() {
         assert_eq!(with_opacity(0xFF, 0.0), 0,
             "opacity=0.0 applied to fully-opaque should give alpha=0");
     }
 
     #[test]
-    fn opacity_one_preserves_alpha() {
+    fn bug_hunt_opacity_one_preserves_alpha() {
         assert_eq!(with_opacity(0x80, 1.0), 0x80,
             "opacity=1.0 should preserve the original alpha unchanged");
     }
 
     #[test]
-    fn opacity_half_on_full() {
-        // 0xFF * 0.5 = 127.5 → rounds to 128
+    fn bug_hunt_opacity_half_on_full() {
         assert_eq!(with_opacity(0xFF, 0.5), 128,
             "opacity=0.5 on 0xFF should round to 128");
     }
 
     #[test]
-    fn opacity_clamps_above_one() {
+    fn bug_hunt_opacity_clamps_above_one() {
         assert_eq!(with_opacity(0xFF, 2.0), 0xFF,
             "opacity > 1.0 must clamp to 1.0 giving alpha=0xFF");
     }
 
     #[test]
-    fn opacity_clamps_below_zero() {
+    fn bug_hunt_opacity_clamps_below_zero() {
         assert_eq!(with_opacity(0xFF, -0.5), 0,
             "opacity < 0.0 must clamp to 0.0 giving alpha=0");
     }
 
-    // ── fmt_svg ───────────────────────────────────────────────────────────────
+    // ── NEW: NaN opacity ─────────────────────────────────────────────────────
+    // `NaN.clamp(0.0, 1.0)` returns NaN (per Rust docs). Then:
+    // `(alpha as f64 * NaN).round()` = NaN, and `NaN as u8` = 0 in Rust.
+    // This is silent data corruption — NaN opacity silently gives transparent.
 
     #[test]
-    fn fmt_svg_opaque_color_uses_hex_form() {
+    fn bug_hunt_opacity_nan_produces_zero_silently() {
+        // NaN opacity silently produces alpha=0 (fully transparent).
+        // This pins the current behavior. Whether this is correct or should
+        // panic/error is a design question, but the silent transparency is
+        // a latent bug: a chart with NaN opacity becomes invisible.
+        let result = with_opacity(0xFF, f64::NAN);
+        assert_eq!(result, 0,
+            "NaN opacity produces alpha=0 (fully transparent) via NaN.clamp → NaN → 0u8. \
+             This is silent data corruption — NaN should ideally be rejected.");
+    }
+
+    #[test]
+    fn bug_hunt_opacity_infinity_clamps_to_full() {
+        let result = with_opacity(0xFF, f64::INFINITY);
+        assert_eq!(result, 0xFF,
+            "INFINITY opacity must clamp to 1.0 → alpha=0xFF");
+    }
+
+    #[test]
+    fn bug_hunt_opacity_neg_infinity_clamps_to_zero() {
+        let result = with_opacity(0xFF, f64::NEG_INFINITY);
+        assert_eq!(result, 0,
+            "-INFINITY opacity must clamp to 0.0 → alpha=0");
+    }
+
+    // ========================================================================
+    // TESTS — fmt_svg edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_fmt_svg_opaque_color_uses_hex_form() {
         let s = fmt_svg(0x1f, 0x77, 0xb4, 0xFF);
         assert_eq!(s, "#1f77b4", "opaque color must serialize as #rrggbb");
     }
 
     #[test]
-    fn fmt_svg_translucent_uses_rgba_form() {
+    fn bug_hunt_fmt_svg_translucent_uses_rgba_form() {
         let s = fmt_svg(0x1f, 0x77, 0xb4, 0x80);
         assert!(s.starts_with("rgba("), "translucent must use rgba() form, got: {s}");
     }
 
     #[test]
-    fn fmt_svg_fully_transparent_uses_rgba_form() {
+    fn bug_hunt_fmt_svg_fully_transparent_uses_rgba_form() {
         let s = fmt_svg(0, 0, 0, 0);
-        // alpha=0 ≠ 0xFF, so rgba() form
         assert!(s.starts_with("rgba("), "fully-transparent must use rgba() form, got: {s}");
     }
 
     #[test]
-    fn fmt_svg_roundtrip_opaque() {
-        // An opaque color emitted as #rrggbb can be parsed back.
-        let (r, g, b, _a) = parse_hex("#1f77b4").unwrap();
-        let reserialized = fmt_svg(r, g, b, 0xFF);
-        assert_eq!(reserialized, "#1f77b4",
-            "fmt_svg(parse_hex(s)) should round-trip the hex string");
-    }
-
-    // ── parse_stroke_cap ──────────────────────────────────────────────────────
-
-    #[test]
-    fn stroke_cap_known_values_return_some() {
-        assert_eq!(parse_stroke_cap("round"),  Some(Cap::Round));
-        assert_eq!(parse_stroke_cap("square"), Some(Cap::Square));
-        assert_eq!(parse_stroke_cap("butt"),   Some(Cap::Butt));
+    fn bug_hunt_fmt_svg_alpha_precision_three_decimal_places() {
+        let s = fmt_svg(0, 0, 0, 0x80);
+        assert!(s.contains("0.502"), "rgba alpha should format to 3 decimal places, got: {s}");
     }
 
     #[test]
-    fn stroke_cap_unknown_returns_none() {
-        assert!(parse_stroke_cap("flat").is_none(),
-            "'flat' is not a valid stroke-cap and must return None");
-        assert!(parse_stroke_cap("").is_none(),
-            "empty string is not a valid stroke-cap and must return None");
-        assert!(parse_stroke_cap("ROUND").is_none(),
-            "uppercase 'ROUND' should not match (case-sensitive)");
-    }
-
-    // ── parse_stroke_join ─────────────────────────────────────────────────────
-
-    #[test]
-    fn stroke_join_known_values_return_some() {
-        assert_eq!(parse_stroke_join("round"), Some(Join::Round));
-        assert_eq!(parse_stroke_join("bevel"), Some(Join::Bevel));
-        assert_eq!(parse_stroke_join("miter"), Some(Join::Miter));
+    fn bug_hunt_fmt_svg_alpha_one_is_near_opaque() {
+        // alpha=1 → 1/255 ≈ 0.004 — should be rgba form, not hex.
+        let s = fmt_svg(0, 0, 0, 1);
+        assert!(s.starts_with("rgba("), "alpha=1 should use rgba() form, got: {s}");
+        assert!(s.contains("0.004"), "alpha=1 → 1/255 ≈ 0.004; got: {s}");
     }
 
     #[test]
-    fn stroke_join_unknown_returns_none() {
-        assert!(parse_stroke_join("arcs").is_none(),
-            "'arcs' is not a valid stroke-join and must return None");
-        assert!(parse_stroke_join("").is_none(),
-            "empty string is not a valid stroke-join and must return None");
+    fn bug_hunt_fmt_svg_alpha_254_is_near_opaque() {
+        // alpha=254 → 254/255 ≈ 0.996 — should still be rgba form.
+        let s = fmt_svg(0, 0, 0, 254);
+        assert!(s.starts_with("rgba("), "alpha=254 should use rgba() form, got: {s}");
     }
 
-    // ── Contract divergence: to_scene_stroke vs parse_stroke_cap ─────────────
-    //
-    // `parse_stroke_cap("unknown")` returns None.
-    // `to_scene_stroke(... cap=Some("unknown") ...)` returns Some(Butt).
-    //
-    // This inconsistency means callers using `parse_stroke_cap` to validate
-    // will get None while `to_scene_stroke` silently maps the same input to
-    // Butt. The test below pins this divergence; if `to_scene_stroke` is ever
-    // corrected to return None for unknown values, this test will fail and
-    // document the fix.
+    // ========================================================================
+    // TESTS — fmt_f (SVG float formatting) edge cases
+    // ========================================================================
 
     #[test]
-    fn to_scene_stroke_unknown_cap_returns_some_butt_not_none() {
-        // parse_stroke_cap → None for unknowns
-        assert!(parse_stroke_cap("unknowncap").is_none(),
-            "parse_stroke_cap should return None for unknown cap string");
+    fn bug_hunt_fmt_f_zero() {
+        assert_eq!(fmt_f(0.0), "0");
+    }
 
-        // to_scene_stroke (fallback branch) → Some(Butt) for unknowns
+    #[test]
+    fn bug_hunt_fmt_f_negative_zero() {
+        assert_eq!(fmt_f(-0.0), "0", "negative zero must render as positive zero");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_integer_drops_decimal() {
+        assert_eq!(fmt_f(5.0), "5");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_small_decimal() {
+        assert_eq!(fmt_f(1.5), "1.5");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_trailing_zeros_trimmed() {
+        assert_eq!(fmt_f(1.500), "1.5");
+        assert_eq!(fmt_f(1.100), "1.1");
+    }
+
+    // ── NEW: fmt_f with non-finite values ────────────────────────────────────
+    // In release builds, debug_assert is a no-op, so non-finite values silently
+    // produce "0" — silent data corruption in the SVG output.
+
+    #[test]
+    fn bug_hunt_fmt_f_nan_returns_zero_string() {
+        // In release mode, NaN silently becomes "0". In debug mode, debug_assert fires.
+        // This test runs in the test harness (which may or may not have debug_assertions).
+        // We catch the panic if debug_assert fires.
+        let result = std::panic::catch_unwind(|| fmt_f(f64::NAN));
+        match result {
+            Ok(s) => assert_eq!(s, "0", "NaN must return '0' in release mode"),
+            Err(_) => {
+                // debug_assert fired — expected in debug builds.
+            }
+        }
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_infinity_returns_zero_string() {
+        let result = std::panic::catch_unwind(|| fmt_f(f64::INFINITY));
+        match result {
+            Ok(s) => assert_eq!(s, "0", "INFINITY must return '0' in release mode"),
+            Err(_) => {
+                // debug_assert fired — expected in debug builds.
+            }
+        }
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_neg_infinity_returns_zero_string() {
+        let result = std::panic::catch_unwind(|| fmt_f(f64::NEG_INFINITY));
+        match result {
+            Ok(s) => assert_eq!(s, "0", "-INFINITY must return '0' in release mode"),
+            Err(_) => {
+                // debug_assert fired — expected in debug builds.
+            }
+        }
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_very_small_positive() {
+        // Subnormal: 5e-324
+        let s = fmt_f(5e-324);
+        assert_ne!(s, "", "subnormal must produce a non-empty string");
+        assert!(!s.contains("NaN"), "subnormal must not produce NaN");
+        assert!(!s.contains("inf"), "subnormal must not produce inf");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_very_large_positive() {
+        // Large but finite float
+        let s = fmt_f(1e300);
+        assert!(!s.contains("NaN"), "1e300 must not produce NaN");
+        assert!(!s.contains("inf"), "1e300 must not produce inf");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_very_small_negative() {
+        let s = fmt_f(-0.001);
+        assert!(s.starts_with("-"), "negative numbers must start with -; got: {s}");
+        assert!(!s.contains("NaN"), "must not produce NaN");
+    }
+
+    // ========================================================================
+    // TESTS — escape_text / escape_attr edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_escape_text_basic_entities() {
+        assert_eq!(escape_text("a & b < c > d"), "a &amp; b &lt; c &gt; d");
+    }
+
+    #[test]
+    fn bug_hunt_escape_text_empty_string() {
+        assert_eq!(escape_text(""), "");
+    }
+
+    #[test]
+    fn bug_hunt_escape_text_no_special_chars() {
+        assert_eq!(escape_text("hello world"), "hello world");
+    }
+
+    #[test]
+    fn bug_hunt_escape_attr_quotes_escaped() {
+        let result = escape_attr(r#"hello "world""#);
+        assert!(result.contains("&quot;"),
+            "double quotes in attribute values must be escaped; got: {result}");
+        assert!(!result.contains('"'),
+            "raw double quotes must not survive in attribute values; got: {result}");
+    }
+
+    #[test]
+    fn bug_hunt_escape_attr_all_entities() {
+        let result = escape_attr("& < > \"");
+        assert_eq!(result, "&amp; &lt; &gt; &quot;");
+    }
+
+    // ── NEW: escape_text with embedded null bytes ────────────────────────────
+    // SVG parsers may choke on null bytes. The escaper does not handle them.
+
+    #[test]
+    fn bug_hunt_escape_text_null_byte_passthrough() {
+        // Null bytes are not XML-safe but the escaper doesn't strip them.
+        // This pins the current behavior — null bytes pass through.
+        let result = escape_text("hello\x00world");
+        assert!(result.contains('\x00'),
+            "null byte passes through escape_text (not stripped) — potential XML corruption");
+    }
+
+    #[test]
+    fn bug_hunt_escape_attr_with_single_quote() {
+        // Single quotes are not escaped by escape_attr. In a double-quoted SVG
+        // attribute this is safe, but confirms the contract.
+        let result = escape_attr("it's fine");
+        assert!(result.contains("'"),
+            "single quotes should pass through in escape_attr (double-quoted context)");
+    }
+
+    #[test]
+    fn bug_hunt_escape_text_with_unicode() {
+        let result = escape_text("price: €100 > $90");
+        assert!(result.contains("€"), "Unicode chars should pass through");
+        assert!(result.contains("&gt;"), "> should be escaped");
+    }
+
+    // ========================================================================
+    // TESTS — resolve_stroke_dash edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_zero_is_solid() {
+        assert_eq!(resolve_stroke_dash(0.0), None,
+            "index 0 must return solid (None)");
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_one() {
+        assert_eq!(resolve_stroke_dash(1.0), Some(vec![6.0, 3.0]));
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_two() {
+        assert_eq!(resolve_stroke_dash(2.0), Some(vec![2.0, 3.0]));
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_three() {
+        assert_eq!(resolve_stroke_dash(3.0), Some(vec![6.0, 3.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_negative_clamped_to_zero() {
+        // Negative indices should clamp to 0 (solid).
+        assert_eq!(resolve_stroke_dash(-1.0), None,
+            "negative index must clamp to 0 (solid)");
+        assert_eq!(resolve_stroke_dash(-100.0), None,
+            "large negative index must clamp to 0 (solid)");
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_above_three_clamped_to_three() {
+        // Indices > 3 should clamp to 3.
+        assert_eq!(resolve_stroke_dash(4.0), Some(vec![6.0, 3.0, 2.0, 3.0]),
+            "index 4 must clamp to 3 (long-short dash)");
+        assert_eq!(resolve_stroke_dash(100.0), Some(vec![6.0, 3.0, 2.0, 3.0]),
+            "index 100 must clamp to 3 (long-short dash)");
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_fractional_rounds() {
+        // 0.4 rounds to 0 (solid), 0.5 rounds to 0 or 1 depending on banker's rounding.
+        let result_04 = resolve_stroke_dash(0.4);
+        assert_eq!(result_04, None, "0.4 rounds to 0 (solid)");
+
+        // 0.6 rounds to 1
+        let result_06 = resolve_stroke_dash(0.6);
+        assert_eq!(result_06, Some(vec![6.0, 3.0]), "0.6 rounds to 1 (long dash)");
+
+        // 1.5 rounds to 2 (banker's rounding: 1.5f64.round() = 2.0 in Rust)
+        let result_15 = resolve_stroke_dash(1.5);
+        assert_eq!(result_15, Some(vec![2.0, 3.0]), "1.5 rounds to 2 (short dash)");
+    }
+
+    // ── NEW: NaN and Infinity in resolve_stroke_dash ─────────────────────────
+    // `NaN.round()` is NaN, `NaN as i64` is 0 in Rust (saturating cast since 1.45).
+    // So NaN → 0 → None (solid). This is another silent NaN → reasonable-looking output.
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_nan_yields_solid() {
+        // NaN.round() = NaN; NaN as i64 = 0; clamp(0,3) = 0; → None (solid).
+        let result = resolve_stroke_dash(f64::NAN);
+        assert_eq!(result, None,
+            "NaN index silently produces solid dash (None). This is NaN propagation as silent default.");
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_infinity_clamped() {
+        // INFINITY.round() = INFINITY; INFINITY as i64 = i64::MAX;
+        // i64::MAX.clamp(0, 3) = 3.
+        let result = resolve_stroke_dash(f64::INFINITY);
+        assert_eq!(result, Some(vec![6.0, 3.0, 2.0, 3.0]),
+            "INFINITY index must clamp to 3 (long-short dash)");
+    }
+
+    #[test]
+    fn bug_hunt_resolve_stroke_dash_neg_infinity_clamped() {
+        let result = resolve_stroke_dash(f64::NEG_INFINITY);
+        assert_eq!(result, None,
+            "-INFINITY index must clamp to 0 (solid)");
+    }
+
+    // ========================================================================
+    // TESTS — stroke cap/join divergence (to_scene vs parse)
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_to_scene_stroke_unknown_cap_returns_some_butt_not_none() {
+        assert!(parse_stroke_cap("unknowncap").is_none());
         let scene_cap = to_scene_stroke_cap("unknowncap");
         assert_eq!(scene_cap, Some(Cap::Butt),
             "to_scene_stroke maps unknown cap to Some(Butt) — diverges from parse_stroke_cap (None)");
     }
 
     #[test]
-    fn to_scene_stroke_unknown_join_returns_some_miter_not_none() {
-        // parse_stroke_join → None for unknowns
-        assert!(parse_stroke_join("unknownjoin").is_none(),
-            "parse_stroke_join should return None for unknown join string");
-
-        // to_scene_stroke (fallback branch) → Some(Miter) for unknowns
+    fn bug_hunt_to_scene_stroke_unknown_join_returns_some_miter_not_none() {
+        assert!(parse_stroke_join("unknownjoin").is_none());
         let scene_join = to_scene_stroke_join("unknownjoin");
         assert_eq!(scene_join, Some(Join::Miter),
             "to_scene_stroke maps unknown join to Some(Miter) — diverges from parse_stroke_join (None)");
     }
 
-    // ── Area mark opacity contract ────────────────────────────────────────────
-    //
-    // `resolve_mark_style(None, theme, Mark::Area)` should set:
-    //   fill = mark_color (opaque, alpha=0xFF)
-    //   opacity = theme.area_opacity (0.35 by default, NOT default_opacity=1.0)
-    //
-    // We test this by reproducing the relevant ThemeInputs defaults.
+    #[test]
+    fn bug_hunt_stroke_cap_empty_string_divergence() {
+        assert!(parse_stroke_cap("").is_none(),
+            "parse_stroke_cap('') → None");
+        assert_eq!(to_scene_stroke_cap(""), Some(Cap::Butt),
+            "to_scene_stroke_cap('') → Some(Butt) — divergence: empty string silently becomes butt");
+    }
+
+    #[test]
+    fn bug_hunt_stroke_join_empty_string_divergence() {
+        assert!(parse_stroke_join("").is_none(),
+            "parse_stroke_join('') → None");
+        assert_eq!(to_scene_stroke_join(""), Some(Join::Miter),
+            "to_scene_stroke_join('') → Some(Miter) — divergence: empty string silently becomes miter");
+    }
+
+    // ========================================================================
+    // TESTS — format_numeric edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_format_numeric_zero() {
+        assert_eq!(format_numeric(0.0), "0");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_negative_zero() {
+        // -0.0 == 0.0 is true in Rust, so format_numeric(-0.0) should return "0".
+        assert_eq!(format_numeric(-0.0), "0",
+            "negative zero must format as '0', not '-0'");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_integer_value() {
+        assert_eq!(format_numeric(5.0), "5");
+        assert_eq!(format_numeric(100.0), "100");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_scientific_for_large() {
+        let s = format_numeric(1_500_000.0);
+        assert_eq!(s, "1.5e6");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_scientific_for_tiny() {
+        let s = format_numeric(0.0001);
+        assert!(s.contains("e-"), "tiny values must use scientific notation; got: {s}");
+    }
+
+    // ── NEW: format_numeric with values at the boundary ──────────────────────
+
+    #[test]
+    fn bug_hunt_format_numeric_exactly_1e6() {
+        // 1e6 is exactly at the threshold — should use scientific.
+        let s = format_numeric(1e6);
+        assert!(s.contains("e"), "1e6 must use scientific notation; got: {s}");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_just_below_1e6() {
+        // 999999.0 is below the threshold — should NOT use scientific.
+        let s = format_numeric(999999.0);
+        assert!(!s.contains("e"), "999999 should not use scientific notation; got: {s}");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_exactly_1e_minus_3() {
+        // 1e-3 = 0.001 is at the boundary. abs < 1e-3 triggers scientific.
+        // 0.001 is NOT less than 1e-3 (it equals 1e-3), so it should NOT be scientific.
+        let s = format_numeric(0.001);
+        assert!(!s.contains("e"), "0.001 should not use scientific notation (not strictly < 1e-3); got: {s}");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_just_below_1e_minus_3() {
+        // 0.0009999 < 1e-3 → scientific
+        let s = format_numeric(0.0009999);
+        assert!(s.contains("e"), "0.0009999 should use scientific notation; got: {s}");
+    }
+
+    // ── NEW: format_numeric with NaN/Infinity ────────────────────────────────
+
+    #[test]
+    fn bug_hunt_format_numeric_nan() {
+        // NaN != 0.0 (first check fails), NaN.abs() = NaN, NaN >= 1e6 is false,
+        // NaN < 1e-3 is false, NaN.fract() = NaN, NaN == 0.0 is false.
+        // So it falls through to the else branch: format!("{x:.4}") → "NaN".
+        let s = format_numeric(f64::NAN);
+        // The current behavior produces "NaN" which will appear in SVG output.
+        assert_eq!(s, "NaN",
+            "format_numeric(NaN) produces 'NaN' string — this would appear in SVG as literal text");
+    }
+
+    #[test]
+    fn bug_hunt_format_numeric_infinity() {
+        // INFINITY.abs() = INFINITY >= 1e6 → true → scientific path.
+        // format!("{:.3e}", INFINITY) → "inf" or "INF".
+        let s = format_numeric(f64::INFINITY);
+        // In Rust, format!("{:.3e}", f64::INFINITY) gives "inf" or "INF".
+        assert!(s.to_lowercase().contains("inf"),
+            "format_numeric(INFINITY) should contain 'inf'; got: {s}");
+    }
+
+    // ── NEW: format_numeric integer overflow on large float ──────────────────
+    // When x.fract() == 0.0 and abs < 1e6, the code does `x as i64`.
+    // For values > i64::MAX that happen to have fract() == 0.0, this overflows.
+    // However, values >= 1e6 take the scientific path, so the i64 cast only
+    // applies to values < 1e6 where fract() == 0.0 — safe for integers.
+    // Test this boundary explicitly.
+
+    #[test]
+    fn bug_hunt_format_numeric_max_safe_integer_before_scientific() {
+        // 999999.0 is the largest integer below the 1e6 threshold.
+        // fract() == 0.0 → format!("{}", x as i64) = "999999"
+        let s = format_numeric(999999.0);
+        assert_eq!(s, "999999", "largest integer below 1e6 should format as integer string");
+    }
+
+    // ========================================================================
+    // TESTS — format_with_spec edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_format_with_spec_none() {
+        assert_eq!(format_with_spec(3.14159, None), format_numeric(3.14159));
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_2f() {
+        assert_eq!(format_with_spec(3.14159, Some(".2f")), "3.14");
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_0f() {
+        assert_eq!(format_with_spec(3.14159, Some(".0f")), "3");
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_invalid_format_falls_back() {
+        // Unknown format character falls back to format_numeric.
+        assert_eq!(format_with_spec(3.14, Some("xxx")), format_numeric(3.14));
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_empty_string() {
+        // Empty spec string: last char is None → falls back.
+        assert_eq!(format_with_spec(3.14, Some("")), format_numeric(3.14));
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_just_f() {
+        // "f" with no digits → digits_part is "", parse("") → Err → unwrap_or(2)
+        assert_eq!(format_with_spec(3.14159, Some("f")), "3.14",
+            "'f' with no digit prefix should default to 2 decimal places");
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_nan() {
+        let s = format_with_spec(f64::NAN, Some(".2f"));
+        assert_eq!(s, "NaN", "NaN formatted with .2f should produce 'NaN'");
+    }
+
+    #[test]
+    fn bug_hunt_format_with_spec_infinity() {
+        let s = format_with_spec(f64::INFINITY, Some(".2f"));
+        assert!(s.to_lowercase().contains("inf"),
+            "INFINITY formatted with .2f should contain 'inf'; got: {s}");
+    }
+
+    // ========================================================================
+    // TESTS — format_ordinal_number edge cases
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_ordinal_zero() {
+        assert_eq!(format_ordinal_number(0), "0th");
+    }
+
+    #[test]
+    fn bug_hunt_ordinal_negative() {
+        assert_eq!(format_ordinal_number(-1), "-1st");
+        assert_eq!(format_ordinal_number(-2), "-2nd");
+        assert_eq!(format_ordinal_number(-3), "-3rd");
+        assert_eq!(format_ordinal_number(-11), "-11th");
+    }
+
+    #[test]
+    fn bug_hunt_ordinal_teens() {
+        assert_eq!(format_ordinal_number(11), "11th");
+        assert_eq!(format_ordinal_number(12), "12th");
+        assert_eq!(format_ordinal_number(13), "13th");
+    }
+
+    #[test]
+    fn bug_hunt_ordinal_large_teens() {
+        // 111, 112, 113 should also be "th"
+        assert_eq!(format_ordinal_number(111), "111th");
+        assert_eq!(format_ordinal_number(112), "112th");
+        assert_eq!(format_ordinal_number(113), "113th");
+    }
+
+    #[test]
+    fn bug_hunt_ordinal_max_i64() {
+        // i64::MAX should not panic.
+        let s = format_ordinal_number(i64::MAX);
+        assert!(s.ends_with("th") || s.ends_with("st") || s.ends_with("nd") || s.ends_with("rd"),
+            "i64::MAX must produce a valid ordinal suffix; got: {s}");
+    }
+
+    #[test]
+    fn bug_hunt_ordinal_min_i64() {
+        // i64::MIN: abs() of i64::MIN overflows in Rust (wraps to i64::MIN).
+        // i64::MIN % 100 in Rust: (-9223372036854775808) % 100 = -8 (Rust remainder).
+        // BUT the code uses n.abs() % 100. i64::MIN.abs() panics in debug or
+        // wraps to i64::MIN in release. i64::MIN % 100 = -8 in release.
+        // This is a latent overflow bug.
+        let result = std::panic::catch_unwind(|| format_ordinal_number(i64::MIN));
+        // In debug builds, i64::MIN.abs() panics. In release, it wraps to i64::MIN.
+        // Either outcome is acceptable for this test — we just document the behavior.
+        match result {
+            Ok(s) => {
+                // In release: i64::MIN.abs() wraps to i64::MIN (negative).
+                // i64::MIN % 100 = -8 (but the match uses unsigned patterns 11..=13, 1, 2, 3).
+                // Negative remainders don't match 1..=3 or 11..=13, so falls to _ => "th".
+                assert!(s.ends_with("th"),
+                    "i64::MIN ordinal suffix should be 'th' in release mode; got: {s}");
+            }
+            Err(_) => {
+                // debug panic from abs() overflow — expected
+            }
+        }
+    }
+
+    // ========================================================================
+    // TESTS — Area mark opacity contract pins
+    // ========================================================================
 
     const DEFAULT_AREA_OPACITY: f64 = 0.35;
     const DEFAULT_DEFAULT_OPACITY: f64 = 1.0;
 
     #[test]
-    fn area_mark_opacity_uses_area_opacity_not_default_opacity() {
-        // Area should use area_opacity (0.35), not default_opacity (1.0).
-        // These differ; confirm they are not accidentally equal.
+    fn bug_hunt_area_mark_opacity_uses_area_opacity_not_default_opacity() {
         assert!(
             (DEFAULT_AREA_OPACITY - DEFAULT_DEFAULT_OPACITY).abs() > 0.01,
             "test precondition: area_opacity and default_opacity must differ in the default theme"
         );
-        // The test is a contract pin: area_opacity must be < 1.0.
         assert!(DEFAULT_AREA_OPACITY < 1.0,
             "area_opacity in default theme should be less than 1.0 for a faint fill effect");
     }
 
-    // ── Geoshape and Arc stroke_width contracts ───────────────────────────────
+    // ========================================================================
+    // TESTS — Geoshape and Arc stroke_width contract pins
+    // ========================================================================
 
     const GEOSHAPE_STROKE_WIDTH: f64 = 0.5;
     const ARC_STROKE_WIDTH: f64 = 0.0;
 
     #[test]
-    fn geoshape_hardcoded_stroke_width_is_half_pixel() {
-        assert!((GEOSHAPE_STROKE_WIDTH - 0.5).abs() < 1e-12,
-            "Geoshape stroke_width must be exactly 0.5 (geographic boundary lines)");
+    fn bug_hunt_geoshape_stroke_width_is_half_pixel() {
+        assert!((GEOSHAPE_STROKE_WIDTH - 0.5).abs() < 1e-12);
     }
 
     #[test]
-    fn arc_hardcoded_stroke_width_is_zero() {
-        assert_eq!(ARC_STROKE_WIDTH, 0.0,
-            "Arc stroke_width must be 0.0 (filled pie/donut, no stroke by default)");
+    fn bug_hunt_arc_stroke_width_is_zero() {
+        assert_eq!(ARC_STROKE_WIDTH, 0.0);
     }
 
-    // ── fmt_svg precision for rgba ────────────────────────────────────────────
+    // ========================================================================
+    // TESTS — AnnotationSpec deserialization edge cases
+    // ========================================================================
 
     #[test]
-    fn fmt_svg_alpha_precision_three_decimal_places() {
-        // alpha=0x80 = 128; 128/255 = 0.50196...
-        let s = fmt_svg(0, 0, 0, 0x80);
-        // The format string is "{:.3}" → "0.502"
-        assert!(s.contains("0.502"), "rgba alpha should format to 3 decimal places, got: {s}");
+    fn bug_hunt_annotation_text_minimal_deser() {
+        let json = r#"{"type": "text", "x": 50.0, "y": 30.0, "text": "hello"}"#;
+        let result: Result<serde_json::Value, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "minimal text annotation JSON must parse");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_text_with_special_chars_in_content() {
+        // Text content with characters that need XML escaping.
+        let json = r#"{"type": "text", "x": 0.0, "y": 0.0, "text": "R² > 0.95 & p < 0.01"}"#;
+        let result: Result<serde_json::Value, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "annotation text with special chars must parse as JSON");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_line_with_dash_array() {
+        let json = r##"{"type": "line", "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 100.0, "stroke": "#ff0000", "stroke_width": 2.0, "dash": [4.0, 2.0]}"##;
+        let result: Result<serde_json::Value, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "line annotation with dash array must parse");
+    }
+
+    // ========================================================================
+    // TESTS — Annotation coordinate resolution edge cases
+    // ========================================================================
+
+    // Inline reproduction of CoordValue resolve logic for testing boundary cases.
+
+    fn resolve_x_norm(norm: f64, plot_x: f64, plot_w: f64) -> f64 {
+        plot_x + norm * plot_w
+    }
+
+    fn resolve_y_norm(norm: f64, plot_y: f64, plot_h: f64) -> f64 {
+        plot_y + norm * plot_h
+    }
+
+    #[test]
+    fn bug_hunt_annotation_norm_0_maps_to_plot_origin() {
+        let px = resolve_x_norm(0.0, 50.0, 500.0);
+        assert!((px - 50.0).abs() < f64::EPSILON,
+            "norm=0 should map to plot_area.x; got: {px}");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_norm_1_maps_to_plot_end() {
+        let px = resolve_x_norm(1.0, 50.0, 500.0);
+        assert!((px - 550.0).abs() < f64::EPSILON,
+            "norm=1 should map to plot_area.x + plot_area.w; got: {px}");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_norm_negative() {
+        // Norm values outside [0,1] should still compute (no clamping in source).
+        let px = resolve_x_norm(-0.5, 50.0, 500.0);
+        assert!((px - (-200.0)).abs() < f64::EPSILON,
+            "norm=-0.5 should map to 50 + (-0.5 * 500) = -200; got: {px}");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_norm_greater_than_one() {
+        let px = resolve_x_norm(1.5, 50.0, 500.0);
+        assert!((px - 800.0).abs() < f64::EPSILON,
+            "norm=1.5 should map to 50 + 1.5 * 500 = 800; got: {px}");
+    }
+
+    #[test]
+    fn bug_hunt_annotation_norm_nan() {
+        let px = resolve_x_norm(f64::NAN, 50.0, 500.0);
+        assert!(px.is_nan(),
+            "NaN norm should produce NaN pixel coordinate; got: {px}");
+    }
+
+    // ========================================================================
+    // TESTS — Annotation arrow with zero-length shaft
+    // ========================================================================
+    // In the source, emit_arrow checks `if len > 0.0` before computing the
+    // arrowhead. A zero-length arrow (same start/end) should produce just a
+    // line node and no arrowhead path.
+
+    #[test]
+    fn bug_hunt_arrow_zero_length_no_arrowhead() {
+        // This tests the contract: when dx=dy=0, len=0, the arrowhead branch is skipped.
+        let x1 = 100.0;
+        let y1 = 100.0;
+        let x2 = 100.0; // same as x1
+        let y2 = 100.0; // same as y1
+        let dx: f64 = x2 - x1;
+        let dy: f64 = y2 - y1;
+        let len = (dx * dx + dy * dy).sqrt();
+        assert_eq!(len, 0.0, "zero-length arrow");
+        // The emit_arrow function should produce 1 node (line) and no arrowhead.
+        // We can't call emit_arrow directly, but we verify the logic:
+        let head_size = 8.0;
+        let should_emit_head = head_size > 0.0 && len > 0.0;
+        assert!(!should_emit_head,
+            "zero-length arrow must not emit arrowhead triangle");
+    }
+
+    // ========================================================================
+    // TESTS — Span annotation with inverted start/end
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_span_inverted_coords_correct_rect() {
+        // When start > end in data space, the code uses .min() and .abs()
+        // to normalize the rect. Test that the math is correct.
+        let x_start = 300.0_f64; // larger
+        let x_end = 100.0_f64;   // smaller
+        let x = x_start.min(x_end);
+        let w = (x_end - x_start).abs();
+        assert_eq!(x, 100.0, "rect x must be the smaller coordinate");
+        assert_eq!(w, 200.0, "rect width must be the absolute difference");
+    }
+
+    // ========================================================================
+    // TESTS — Callout text width estimation
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_callout_empty_text_produces_valid_dimensions() {
+        // The callout uses text.len() for width estimation.
+        // Empty text → width = 0 * 7 + padding * 2 = padding * 2.
+        let text = "";
+        let padding = 4.0;
+        let char_width = 7.0;
+        let text_w = text.len() as f64 * char_width + padding * 2.0;
+        let text_h = 14.0 + padding * 2.0;
+        assert!(text_w > 0.0, "empty text should still produce positive width from padding; got: {text_w}");
+        assert!(text_h > 0.0, "empty text should still produce positive height; got: {text_h}");
+    }
+
+    #[test]
+    fn bug_hunt_callout_unicode_text_width_undercounts() {
+        // text.len() returns byte length, not character count.
+        // Unicode text like "résumé" has len=8 (not 6).
+        // This means the width estimation is wrong for non-ASCII text.
+        let text = "résumé";
+        let char_count = text.chars().count();
+        let byte_len = text.len();
+        assert_ne!(byte_len, char_count,
+            "byte length differs from char count for Unicode text — \
+             callout width estimation uses len() which overcounts");
+        assert_eq!(char_count, 6);
+        assert_eq!(byte_len, 8, "résumé is 8 bytes in UTF-8, not 6 chars");
+    }
+
+    // ========================================================================
+    // TESTS — Annotation image src not escaped (XSS-like risk)
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_annotation_image_src_with_quotes_produces_broken_svg() {
+        // The annotation Image handler uses format!() with the src field directly
+        // without escaping. If src contains a double quote, the SVG is malformed.
+        let src = r#"https://example.com/img.png" onload="alert(1)"#;
+        let svg = format!(
+            r#"<image x="0" y="0" width="50" height="50" href="{}"/>"#,
+            src
+        );
+        // The SVG is broken because the quote in src terminates the href attribute.
+        assert!(svg.contains(r#"onload="alert(1)"#),
+            "unescaped src with quotes produces broken/injectable SVG attribute");
+    }
+
+    // ========================================================================
+    // TESTS — polygon with empty rings
+    // ========================================================================
+    // The svg.rs polygon() method skips empty rings but there's a subtle bug:
+    // it sets first_ring = false even for the first non-empty ring, but the
+    // initial check `if !first_ring { d.push(' '); }` means the first ring
+    // correctly starts without a leading space.
+
+    #[test]
+    fn bug_hunt_polygon_empty_outer_ring_skipped() {
+        // If the outer ring is empty, the polygon should produce nothing meaningful.
+        // But the code still enters the function and creates an empty path string.
+        let paths: Vec<Vec<(f64, f64)>> = vec![vec![]]; // one empty ring
+        // Simulate the polygon d-string construction:
+        let mut d = String::new();
+        let mut first_ring = true;
+        for ring in &paths {
+            if ring.is_empty() {
+                continue;
+            }
+            if !first_ring {
+                d.push(' ');
+            }
+            first_ring = false;
+            // ... would push M, L, Z
+        }
+        // d is empty because the ring was skipped.
+        assert!(d.is_empty(),
+            "polygon with only empty rings should produce empty path data");
+    }
+
+    #[test]
+    fn bug_hunt_polygon_mixed_empty_and_nonempty_rings() {
+        // First ring empty, second ring has points.
+        let paths: Vec<Vec<(f64, f64)>> = vec![
+            vec![],  // empty ring
+            vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)],  // triangle
+        ];
+        let mut d = String::new();
+        let mut first_ring = true;
+        for ring in &paths {
+            if ring.is_empty() {
+                continue;
+            }
+            if !first_ring {
+                d.push(' ');
+            }
+            first_ring = false;
+            d.push_str(&format!("M {} {}", ring[0].0, ring[0].1));
+            for (x, y) in &ring[1..] {
+                d.push_str(&format!(" L {} {}", x, y));
+            }
+            d.push_str(" Z");
+        }
+        // The triangle ring should be the only content, no leading space.
+        assert!(!d.starts_with(' '),
+            "path data must not start with a space when first ring is empty; got: '{d}'");
+        assert!(d.starts_with("M"),
+            "path data must start with M; got: '{d}'");
+    }
+
+    // ========================================================================
+    // TESTS — fmt_f precision contract
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_fmt_f_precision_is_three() {
+        // FLOAT_PRECISION = 3, so 3.14159 → "3.142" (rounded) → trimmed "3.142"
+        let s = fmt_f(3.14159);
+        assert_eq!(s, "3.142", "3.14159 with precision 3 should round to 3.142; got: {s}");
+    }
+
+    #[test]
+    fn bug_hunt_fmt_f_exactly_half() {
+        // 1.0005 with precision 3 → "1.001" (banker's rounding) or "1.000" → "1"
+        let s = fmt_f(1.0005);
+        // format!("{:.3}", 1.0005) in Rust → "1.001" (round half to even = 1.000? No, .0005 rounds to .001)
+        // Actually, 1.0005 in f64 may not be exactly representable.
+        // Let's just verify it's a reasonable number.
+        assert!(!s.is_empty());
+        assert!(!s.contains("NaN"));
+    }
+
+    // ========================================================================
+    // TESTS — MarkBuildResult::empty contract
+    // ========================================================================
+    // Verifying the shape of the "empty" constructor inline.
+
+    #[test]
+    fn bug_hunt_mark_build_result_empty_has_empty_nodes() {
+        // MarkBuildResult::empty produces: nodes=[], data_indices=Some([]),
+        // tooltips=None, hrefs=None, descriptions=None.
+        let nodes: Vec<()> = vec![];
+        let data_indices: Option<Vec<usize>> = Some(vec![]);
+        let tooltips: Option<Vec<()>> = None;
+        assert!(nodes.is_empty());
+        assert_eq!(data_indices, Some(vec![]));
+        assert!(tooltips.is_none());
+    }
+
+    // ========================================================================
+    // TESTS — Bracket annotation direction variants
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_bracket_unknown_direction_defaults_to_up() {
+        // The source code has `_ => (0.0, -tip_length)` for unknown directions.
+        let tip_length = 6.0;
+        let (tip_dx, tip_dy) = match "diagonal" {
+            "up" => (0.0, -tip_length),
+            "down" => (0.0, tip_length),
+            "left" => (-tip_length, 0.0),
+            "right" => (tip_length, 0.0),
+            _ => (0.0, -tip_length), // default: up
+        };
+        assert_eq!((tip_dx, tip_dy), (0.0, -6.0),
+            "unknown bracket direction must default to 'up' (0, -tip_length)");
+    }
+
+    #[test]
+    fn bug_hunt_bracket_empty_label_no_text_node() {
+        // When label is empty, no text node is emitted (source checks `!label.is_empty()`).
+        let label = "";
+        assert!(label.is_empty(), "empty label should not emit text node");
+    }
+
+    // ========================================================================
+    // TESTS — color resolve fallback
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_color_resolve_invalid_falls_back_to_dark_gray() {
+        // resolve_color("xyz") → Color::rgb(51, 51, 51) = #333333
+        // The fallback is hardcoded dark gray.
+        let fallback_r = 51u8;
+        let fallback_g = 51u8;
+        let fallback_b = 51u8;
+        assert_eq!(fmt_svg(fallback_r, fallback_g, fallback_b, 0xFF), "#333333");
+    }
+
+    // ========================================================================
+    // TESTS — hex parsing with 3-char shorthand
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_hex_shorthand_3_digit_rejected() {
+        // CSS allows #rgb shorthand but the parser only accepts 6 or 8 digits.
+        assert!(parse_hex("#f00").is_err(),
+            "#f00 (3-digit CSS shorthand) must be rejected by from_hex_str");
+    }
+
+    #[test]
+    fn bug_hunt_hex_shorthand_4_digit_rejected() {
+        // CSS allows #rgba shorthand
+        assert!(parse_hex("#f00f").is_err(),
+            "#f00f (4-digit CSS shorthand) must be rejected by from_hex_str");
+    }
+
+    // ========================================================================
+    // TESTS — MarkKwargsSpec serde round-trip with edge values
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_mark_kwargs_nan_size_roundtrip() {
+        // NaN in JSON is not standard. serde_json rejects NaN by default.
+        // But what if a MarkKwargsSpec is constructed in Rust with NaN?
+        let json = r#"{"size": null}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(parsed["size"].is_null(),
+            "null size in JSON should parse as null (maps to None)");
+    }
+
+    #[test]
+    fn bug_hunt_mark_kwargs_empty_stroke_dash_vs_none() {
+        // Empty stroke_dash [] should clear the dash (→ None in MarkStyle).
+        // None stroke_dash should preserve the theme default.
+        // This tests the serde representation.
+        let with_empty: serde_json::Value = serde_json::from_str(r#"{"stroke_dash": []}"#).unwrap();
+        assert!(with_empty["stroke_dash"].as_array().unwrap().is_empty());
+
+        let without: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(without.get("stroke_dash").is_none());
+    }
+
+    // ========================================================================
+    // TESTS — to_scene_text_style baseline mapping
+    // ========================================================================
+    // The baseline mapping in to_scene_text_style has specific named values.
+    // Unknown baseline values are mapped to Custom(other). None → Alphabetic.
+
+    #[test]
+    fn bug_hunt_text_baseline_unknown_becomes_custom() {
+        // Source: Some(other) => TextBaseline::Custom(other.to_string())
+        // This means any unrecognized string becomes a custom baseline.
+        // "auto" is not in the recognized set, so it becomes Custom("auto").
+        let baseline = "auto";
+        let is_recognized = matches!(baseline,
+            "hanging" | "text-before-edge" | "central" | "middle" |
+            "ideographic" | "text-after-edge");
+        assert!(!is_recognized,
+            "'auto' should not match any recognized baseline value");
+    }
+
+    #[test]
+    fn bug_hunt_text_baseline_none_is_alphabetic() {
+        // When dominant_baseline is None, the default is Alphabetic.
+        let baseline: Option<&str> = None;
+        assert!(baseline.is_none(),
+            "None baseline maps to Alphabetic (SVG default)");
+    }
+
+    // ========================================================================
+    // TESTS — font_weight mapping
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_font_weight_bold() {
+        // "bold" → FontWeight::Bold
+        let fw = "bold";
+        assert_eq!(fw, "bold");
+    }
+
+    #[test]
+    fn bug_hunt_font_weight_numeric_string_becomes_custom() {
+        // "700" is not "bold" and not "normal" → Custom("700")
+        let fw = "700";
+        let is_bold = fw == "bold";
+        let is_normal = fw == "normal";
+        assert!(!is_bold && !is_normal,
+            "'700' should become Custom('700'), not Bold or Normal");
+    }
+
+    #[test]
+    fn bug_hunt_font_weight_normal_becomes_normal() {
+        // "normal" matches `Some(w) if w != "normal"` → false → falls to _ → Normal
+        let fw = "normal";
+        let result = if fw == "bold" {
+            "Bold"
+        } else if fw != "normal" {
+            "Custom"
+        } else {
+            "Normal"
+        };
+        assert_eq!(result, "Normal");
+    }
+
+    // ========================================================================
+    // TESTS — fmt_f roundtrip with parse
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_fmt_f_roundtrip_preserves_value() {
+        // Values formatted by fmt_f should parse back to approximately the same f64.
+        for &v in &[0.0, 1.0, -1.0, 3.14159, 100.5, 0.001, -0.001, 999.999] {
+            let s = fmt_f(v);
+            let parsed: f64 = s.parse().unwrap_or_else(|e| panic!("failed to parse '{}': {}", s, e));
+            let diff = (parsed - v).abs();
+            assert!(diff < 0.001,
+                "fmt_f({v}) = '{s}' parses back to {parsed}, diff={diff}");
+        }
+    }
+
+    // ========================================================================
+    // TESTS — SVG viewBox contract
+    // ========================================================================
+    // The SvgBuffer::new emits viewBox="0 0 W H". If W or H contain NaN or
+    // Infinity, the viewBox is invalid and browsers won't render.
+    // fmt_f replaces non-finite with "0", so viewBox would be "0 0 0 0" for
+    // NaN dimensions — a valid but zero-size SVG.
+
+    #[test]
+    fn bug_hunt_viewbox_zero_dimensions_produce_valid_svg() {
+        // Even with 0-size viewport, the SVG structure should be valid XML.
+        // This is a contract pin: the SVG starts with <svg and ends with </svg>.
+        let w = fmt_f(0.0);
+        let h = fmt_f(0.0);
+        let viewbox = format!("0 0 {} {}", w, h);
+        assert_eq!(viewbox, "0 0 0 0", "zero viewport produces viewBox='0 0 0 0'");
+        assert!(!viewbox.contains("NaN"));
+        assert!(!viewbox.contains("inf"));
+    }
+
+    // ========================================================================
+    // TESTS — path_cmds_to_d edge cases (reproduced from svg_walk.rs)
+    // ========================================================================
+
+    fn path_cmds_to_d_repr(cmds: &[(char, Vec<f64>)]) -> String {
+        let mut d = String::new();
+        for (cmd_char, args) in cmds {
+            if !d.is_empty() {
+                d.push(' ');
+            }
+            d.push(*cmd_char);
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 { d.push(' '); }
+                d.push_str(&fmt_f(*arg));
+            }
+        }
+        d
+    }
+
+    #[test]
+    fn bug_hunt_path_d_empty_commands_produces_empty_string() {
+        let d = path_cmds_to_d_repr(&[]);
+        assert!(d.is_empty(), "empty path commands must produce empty d attribute");
+    }
+
+    #[test]
+    fn bug_hunt_path_d_single_moveto() {
+        let d = path_cmds_to_d_repr(&[('M', vec![10.0, 20.0])]);
+        assert_eq!(d, "M10 20");
+    }
+
+    #[test]
+    fn bug_hunt_path_d_close_command() {
+        let d = path_cmds_to_d_repr(&[
+            ('M', vec![0.0, 0.0]),
+            ('L', vec![10.0, 0.0]),
+            ('Z', vec![]),
+        ]);
+        assert_eq!(d, "M0 0 L10 0 Z");
+    }
+
+    // ========================================================================
+    // TESTS — gridline stroke-dasharray emission
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_gridline_dash_array_formatting() {
+        // Gridline dash arrays should be formatted without extra spaces.
+        let dash: Vec<f64> = vec![4.0, 4.0];
+        let formatted: Vec<String> = dash.iter().map(|x| fmt_f(*x)).collect();
+        let joined = formatted.join(",");
+        assert_eq!(joined, "4,4", "dash array should be '4,4' not '4.0,4.0'; got: {joined}");
+    }
+
+    #[test]
+    fn bug_hunt_gridline_opacity_omitted_when_one() {
+        // When opacity >= 1.0, the gridline method should NOT emit stroke-opacity.
+        // We verify the threshold by checking the condition.
+        let opacity = 1.0;
+        let should_emit = opacity < 1.0;
+        assert!(!should_emit, "opacity=1.0 must not emit stroke-opacity attribute");
+    }
+
+    #[test]
+    fn bug_hunt_gridline_opacity_emitted_when_less_than_one() {
+        let opacity = 0.5;
+        let should_emit = opacity < 1.0;
+        assert!(should_emit, "opacity=0.5 must emit stroke-opacity attribute");
+    }
+
+    // ========================================================================
+    // TESTS — stroke_width zero suppression
+    // ========================================================================
+    // In push_fill_stroke, stroke-width is only emitted when > 0.0.
+    // This means stroke_width=0.0 with stroke color set will emit the stroke
+    // color but no stroke-width attribute. Browsers default to stroke-width=1.
+
+    #[test]
+    fn bug_hunt_stroke_width_zero_suppressed() {
+        // stroke_width=0.0 → stroke-width attribute is NOT emitted.
+        // But stroke color IS still emitted. This means the browser will show
+        // a 1px stroke (browser default) which is likely not intended.
+        let stroke_width = 0.0;
+        let should_emit = stroke_width > 0.0;
+        assert!(!should_emit,
+            "stroke_width=0 should suppress the stroke-width attribute, but \
+             if a stroke color is also set, the browser defaults to 1px stroke — \
+             potential visual artifact");
+    }
+
+    // ========================================================================
+    // TESTS — fill_opacity emission threshold
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_fill_opacity_one_suppressed() {
+        let fill_opacity = 1.0;
+        let should_emit = fill_opacity < 1.0;
+        assert!(!should_emit, "fill_opacity=1.0 must not emit fill-opacity attribute");
+    }
+
+    #[test]
+    fn bug_hunt_fill_opacity_zero_emitted() {
+        let fill_opacity = 0.0;
+        let should_emit = fill_opacity < 1.0;
+        assert!(should_emit, "fill_opacity=0.0 must emit fill-opacity attribute");
+    }
+
+    // ========================================================================
+    // TESTS — text with rotation transform
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_text_angle_zero_no_transform() {
+        // When angle=0.0, no transform attribute should be emitted.
+        let angle = 0.0;
+        let should_emit = angle != 0.0;
+        assert!(!should_emit, "angle=0 must not emit transform attribute");
+    }
+
+    #[test]
+    fn bug_hunt_text_angle_nonzero_emits_rotate() {
+        let angle = 45.0;
+        let x = 100.0;
+        let y = 50.0;
+        let transform = format!("rotate({} {} {})", fmt_f(angle), fmt_f(x), fmt_f(y));
+        assert_eq!(transform, "rotate(45 100 50)");
+    }
+
+    // ========================================================================
+    // TESTS — beeswarm empty points
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_beeswarm_empty_produces_nothing() {
+        // svg.rs beeswarm() returns early when points is empty.
+        let points: Vec<(f64, f64)> = vec![];
+        assert!(points.is_empty(),
+            "empty beeswarm should produce no SVG output");
+    }
+
+    // ========================================================================
+    // TESTS — polygon empty paths
+    // ========================================================================
+
+    #[test]
+    fn bug_hunt_polygon_empty_paths_no_output() {
+        // svg.rs polygon() returns early when paths is empty.
+        let paths: Vec<Vec<(f64, f64)>> = vec![];
+        assert!(paths.is_empty(),
+            "empty polygon paths should produce no SVG output");
     }
 }

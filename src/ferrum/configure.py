@@ -118,8 +118,17 @@ class AxisConfig:
             resolve_format(self.label_format)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict, omitting None values."""
-        return _to_dict_omit_none(self)
+        """Serialize to dict, omitting None values.
+
+        ``label_format`` preset names are resolved to their d3-format strings
+        before serialization so the Rust side receives a ready-to-use format spec.
+        """
+        d = _to_dict_omit_none(self)
+        if "label_format" in d and d["label_format"] is not None:
+            from ferrum.format_presets import resolve_format
+
+            d["label_format"] = resolve_format(d["label_format"])
+        return d
 
 
 @dataclass(frozen=True)

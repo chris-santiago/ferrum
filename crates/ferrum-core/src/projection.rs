@@ -113,14 +113,24 @@ fn ne_poly(coeffs: &[f64], phi: f64) -> f64 {
     let p2 = phi * phi;
     let p4 = p2 * p2;
     let p6 = p4 * p2;
-    coeffs[0] + p2*coeffs[1] + p4*coeffs[2] + p6*coeffs[3]
+    let mut result = coeffs[0] + p2*coeffs[1] + p4*coeffs[2] + p6*coeffs[3];
+    if coeffs.len() > 4 {
+        let p8 = p4 * p4;
+        result += p8 * coeffs[4];
+    }
+    result
 }
 
 // Derivative of ne_poly with respect to phi.
 fn ne_poly_deriv(coeffs: &[f64], phi: f64) -> f64 {
     let p3 = phi * phi * phi;
     let p5 = p3 * phi * phi;
-    2.0*phi*coeffs[1] + 4.0*p3*coeffs[2] + 6.0*p5*coeffs[3]
+    let mut result = 2.0*phi*coeffs[1] + 4.0*p3*coeffs[2] + 6.0*p5*coeffs[3];
+    if coeffs.len() > 4 {
+        let p7 = p5 * phi * phi;
+        result += 8.0 * p7 * coeffs[4];
+    }
+    result
 }
 
 fn natural_earth_fwd(lon: f64, lat: f64) -> (f64, f64) {
@@ -161,9 +171,15 @@ fn orthographic_fwd(lon: f64, lat: f64) -> (f64, f64) {
 fn orthographic_inv(x: f64, y: f64) -> (f64, f64) {
     let rho = (x*x + y*y).sqrt();
     if rho > 1.0 { return (f64::NAN, f64::NAN); }
-    let c = rho.asin();
-    let lat = (c.cos() * y / rho.max(1e-12)).asin();
-    let lon = x.atan2((c.cos() * (1.0 - rho*rho).sqrt()));
+    // Snyder formulation for orthographic centered at (lat0=0, lon0=0).
+    // c = asin(rho), sin_c = rho, cos_c = sqrt(1-rho^2).
+    // lat = asin(cos_c * sin(lat0) + y * sin_c * cos(lat0) / rho) = asin(y) for lat0=0.
+    // lon = atan2(x * sin_c, rho * cos(lat0) * cos_c - y * sin(lat0) * sin_c)
+    //     = atan2(x * rho, rho * cos_c) = atan2(x, cos_c) for lat0=0.
+    // Using cos_c directly avoids the degenerate atan2(x, cos_c^2) denominator near poles.
+    let cos_c = (1.0 - rho * rho).max(0.0).sqrt();
+    let lat = y.asin();
+    let lon = x.atan2(cos_c);
     (to_deg(lon), to_deg(lat))
 }
 

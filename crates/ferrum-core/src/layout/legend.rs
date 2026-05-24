@@ -125,6 +125,9 @@ pub struct LegendOverrides {
     pub values: Option<Vec<String>>,
     /// `"gradient"` → force colorbar; `"symbol"` → force discrete entries.
     pub legend_type: Option<String>,
+    /// Override legend symbol shape (e.g. `"circle"`, `"square"`, `"line"`).
+    /// Applies to all categorical legend entries when set.
+    pub symbol_type: Option<String>,
 }
 
 const SYMBOL_WIDTH: f64 = 12.0;
@@ -217,10 +220,17 @@ pub fn layout_legend(
     title: Option<&str>,
     title_font_size: f64,
     columns: Option<u32>,
+    symbol_type_override: Option<&str>,
 ) -> (Option<LegendLayout>, Rect) {
     if entries.is_empty() {
         return (None, inner);
     }
+    let override_symbol: Option<SymbolKind> = symbol_type_override.and_then(|s| match s {
+        "circle"         => Some(SymbolKind::Circle),
+        "square" | "rect" => Some(SymbolKind::Square),
+        "line"           => Some(SymbolKind::Line),
+        _                => None,
+    });
     let size = estimate_legend_size_with_title(
         entries, orient, label_font_size, title, title_font_size, metrics,
     );
@@ -340,7 +350,7 @@ pub fn layout_legend(
                         label_anchor_y: y,
                         symbol_anchor_x: symbol_x,
                         symbol_anchor_y: y,
-                        symbol_kind: e.symbol,
+                        symbol_kind: override_symbol.unwrap_or(e.symbol),
                     }
                 })
                 .collect()
@@ -375,7 +385,7 @@ pub fn layout_legend(
                         label_anchor_y: cy,
                         symbol_anchor_x: symbol_x,
                         symbol_anchor_y: cy,
-                        symbol_kind: e.symbol,
+                        symbol_kind: override_symbol.unwrap_or(e.symbol),
                     }
                 })
                 .collect()
@@ -633,7 +643,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None);
         let legend = legend.expect("legend should be Some");
         assert_eq!(legend.orient, LegendOrient::Right);
         assert_eq!(legend.direction, LegendDirection::Vertical);
@@ -648,7 +658,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Left, inner, 11.0, &m, None, None, 13.0, None, None);
         let legend = legend.unwrap();
         assert_eq!(legend.rect.x, inner.x);
         // plot area starts LEGEND_PLOT_GAP to the right of the legend rect end.
@@ -660,7 +670,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Top, inner, 11.0, &m, None, None, 13.0, None, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert_eq!(legend.rect.y, inner.y);
@@ -672,7 +682,7 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let es = entries(3, 4);
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, plot_inner) = layout_legend(&es, LegendOrient::Bottom, inner, 11.0, &m, None, None, 13.0, None, None);
         let legend = legend.unwrap();
         assert_eq!(legend.direction, LegendDirection::Horizontal);
         assert!((legend.rect.y - (inner.y + plot_inner.h)).abs() < 1e-6);
@@ -682,7 +692,7 @@ mod tests {
     fn legend_layout_empty_entries_returns_none_and_inner_unchanged() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let m = mock(10.0);
-        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, plot_inner) = layout_legend(&[], LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None);
         assert!(legend.is_none());
         assert_eq!(plot_inner, inner);
     }
@@ -692,8 +702,48 @@ mod tests {
         let inner = Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let es = entries(50, 4);
         let m = mock(10.0);
-        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None);
+        let (legend, _) = layout_legend(&es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None);
         let legend = legend.unwrap();
         assert!(legend.entries.len() < 50, "expected overflow drop; got {} entries", legend.entries.len());
+    }
+
+    #[test]
+    fn legend_layout_symbol_type_override_circle() {
+        // Default symbol is Circle for all entries — override to Square should change all.
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let mut es = entries(3, 4);
+        // Set all to Circle by default.
+        for e in &mut es { e.symbol = SymbolKind::Circle; }
+        let m = mock(10.0);
+        let (legend, _) = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m,
+            None, None, 13.0, None,
+            Some("square"), // symbol_type_override
+        );
+        let legend = legend.unwrap();
+        for entry in &legend.entries {
+            assert_eq!(
+                entry.symbol_kind, SymbolKind::Square,
+                "expected Square from symbol_type override, got {:?}", entry.symbol_kind,
+            );
+        }
+    }
+
+    #[test]
+    fn legend_layout_symbol_type_override_none_preserves_entry_symbol() {
+        // When no override, each entry keeps its own symbol.
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let mut es = entries(2, 4);
+        es[0].symbol = SymbolKind::Circle;
+        es[1].symbol = SymbolKind::Square;
+        let m = mock(10.0);
+        let (legend, _) = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m,
+            None, None, 13.0, None,
+            None, // no override
+        );
+        let legend = legend.unwrap();
+        assert_eq!(legend.entries[0].symbol_kind, SymbolKind::Circle);
+        assert_eq!(legend.entries[1].symbol_kind, SymbolKind::Square);
     }
 }
