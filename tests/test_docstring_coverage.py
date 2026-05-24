@@ -236,6 +236,23 @@ _DOC_ALLOWLIST: set[str] = {
     "value",
     # Auto-raster policy (Phase 12)
     "RenderConfig",
+    # Declarative configuration surface
+    "AxisConfig",
+    "LegendConfig",
+    "TitleConfig",
+    "GridConfig",
+    "PaddingConfig",
+    "ColorConfig",
+    "Configure",
+    "Annotate",
+    "SecondaryY",
+    "BreakAxis",
+    "Inset",
+    "PixelCoord",
+    "NormCoord",
+    "px",
+    "norm",
+    "resolve_format",
     # Phase 12 — data transforms
     "transform_filter",
     "transform_calculate",
@@ -257,7 +274,7 @@ _DOC_ALLOWLIST: set[str] = {
 }
 
 # Namespace re-exports — exempt forever (they're submodules, not symbols).
-_NAMESPACE_EXEMPT: set[str] = {"themes", "encoding", "figure", "color", "config"}
+_NAMESPACE_EXEMPT: set[str] = {"themes", "encoding", "figure", "color", "config", "annotation"}
 
 
 def test_allowlist_symbols_have_docstrings() -> None:
