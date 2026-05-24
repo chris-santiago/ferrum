@@ -291,7 +291,59 @@ class _RenderMixin:
             for annotate in self._annotations:
                 ann_list.extend(annotate.to_dict_list())
             merged["annotations"] = ann_list
+        if self._structural:
+            merged["structural"] = [self._serialize_structural(feat) for feat in self._structural]
         return merged
+
+    @staticmethod
+    def _serialize_structural(feat) -> dict:
+        """Convert a structural feature dataclass to its dict form for the Rust binding."""
+        from ferrum.structural import BreakAxis, Inset, SecondaryY
+
+        if isinstance(feat, SecondaryY):
+            d: dict = {"type": "secondary_y", "field": feat.field, "mark": feat.mark}
+            if feat.color is not None:
+                d["color"] = feat.color
+            if feat.opacity is not None:
+                d["opacity"] = feat.opacity
+            return d
+        elif isinstance(feat, BreakAxis):
+            gaps = feat.gap
+            # Normalize single (start, end) tuple to a list of [start, end] pairs.
+            if (
+                isinstance(gaps, tuple)
+                and len(gaps) == 2
+                and not isinstance(gaps[0], (list, tuple))
+            ):
+                normalized_gaps = [list(gaps)]
+            else:
+                normalized_gaps = [list(g) for g in gaps]
+            return {
+                "type": "break_axis",
+                "axis": feat.axis,
+                "gaps": normalized_gaps,
+                "break_size": feat.break_size,
+                "break_style": feat.break_style,
+            }
+        elif isinstance(feat, Inset):
+            inset_svg = feat.chart.show_svg()
+            d = {
+                "type": "inset",
+                "svg": inset_svg,
+                "bounds": list(feat.bounds),
+                "border": feat.border,
+                "border_color": feat.border_color,
+                "background": feat.background,
+                "shadow": feat.shadow,
+                "connect_style": feat.connect_style,
+            }
+            if feat.border_dash is not None:
+                d["border_dash"] = feat.border_dash
+            if feat.connect_to is not None:
+                d["connect_to"] = list(feat.connect_to)
+            return d
+        else:
+            raise TypeError(f"Unknown structural feature type: {type(feat)}")
 
     def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
         import json
@@ -359,7 +411,10 @@ class _RenderMixin:
                 f"<!-- empty dataset --></svg>"
             )
         return render_svg(
-            spec, data, viewport=viewport, theme=theme_dict,
+            spec,
+            data,
+            viewport=viewport,
+            theme=theme_dict,
             chart_config=chart_config_dict or None,
         )
 

@@ -3,8 +3,31 @@
 from __future__ import annotations
 
 import pytest
+import polars as pl
 
+import ferrum as fm
 from ferrum.structural import BreakAxis, Inset, SecondaryY
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def dual_field_df():
+    return pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4, 5],
+            "y": [10, 20, 30, 40, 50],
+            "revenue": [100, 200, 150, 300, 250],
+        }
+    )
+
+
+@pytest.fixture()
+def base_chart(dual_field_df):
+    return fm.Chart(dual_field_df).mark_point().encode(x="x", y="y")
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +191,145 @@ class TestInset:
     def test_connect_to_set(self):
         inset = Inset(chart=object(), bounds=(0, 0, 1, 1), connect_to=(0.5, 0.5))
         assert inset.connect_to == (0.5, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Serialization tests (_resolve_chart_config)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuralSerialization:
+    def test_secondary_y_serialization(self, base_chart):
+        chart = base_chart + SecondaryY("revenue")
+        cfg = chart._resolve_chart_config()
+        assert "structural" in cfg
+        assert len(cfg["structural"]) == 1
+        s = cfg["structural"][0]
+        assert s["type"] == "secondary_y"
+        assert s["field"] == "revenue"
+        assert s["mark"] == "line"
+        # Optional fields omitted when None
+        assert "color" not in s
+        assert "opacity" not in s
+
+    def test_secondary_y_with_optional_fields(self, base_chart):
+        chart = base_chart + SecondaryY("revenue", mark="bar", color="#e45756", opacity=0.7)
+        cfg = chart._resolve_chart_config()
+        s = cfg["structural"][0]
+        assert s["mark"] == "bar"
+        assert s["color"] == "#e45756"
+        assert s["opacity"] == 0.7
+
+    def test_break_axis_single_gap_serialization(self, base_chart):
+        chart = base_chart + BreakAxis(axis="y", gap=(50, 200))
+        cfg = chart._resolve_chart_config()
+        assert "structural" in cfg
+        s = cfg["structural"][0]
+        assert s["type"] == "break_axis"
+        assert s["axis"] == "y"
+        # Single tuple normalized to nested list
+        assert s["gaps"] == [[50, 200]]
+        assert s["break_size"] == 12
+        assert s["break_style"] == "slash"
+
+    def test_break_axis_multiple_gaps(self, base_chart):
+        chart = base_chart + BreakAxis(axis="y", gap=[(10, 20), (50, 60)])
+        cfg = chart._resolve_chart_config()
+        s = cfg["structural"][0]
+        assert s["gaps"] == [[10, 20], [50, 60]]
+
+    def test_break_axis_custom_style(self, base_chart):
+        chart = base_chart + BreakAxis(axis="x", gap=(0, 5), break_size=20, break_style="zigzag")
+        cfg = chart._resolve_chart_config()
+        s = cfg["structural"][0]
+        assert s["axis"] == "x"
+        assert s["break_size"] == 20
+        assert s["break_style"] == "zigzag"
+
+    def test_inset_serialization(self, base_chart, dual_field_df):
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45))
+        cfg = chart._resolve_chart_config()
+        assert "structural" in cfg
+        s = cfg["structural"][0]
+        assert s["type"] == "inset"
+        assert isinstance(s["svg"], str)
+        assert s["svg"].startswith("<svg")
+        assert s["bounds"] == [0.6, 0.1, 0.95, 0.45]
+        assert s["border"] is True
+        assert s["border_color"] == "#999"
+        assert s["background"] == "#fff"
+        assert s["shadow"] is False
+        assert s["connect_style"] == "lines"
+        # Optional fields omitted when None
+        assert "border_dash" not in s
+        assert "connect_to" not in s
+
+    def test_inset_optional_fields(self, base_chart, dual_field_df):
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(
+            chart=inset_chart,
+            bounds=(0.5, 0.5, 1.0, 1.0),
+            border_dash=[4, 4],
+            connect_to=(2.0, 20.0),
+            shadow=True,
+            background=None,
+        )
+        cfg = chart._resolve_chart_config()
+        s = cfg["structural"][0]
+        assert s["border_dash"] == [4, 4]
+        assert s["connect_to"] == [2.0, 20.0]
+        assert s["shadow"] is True
+        assert s["background"] is None
+
+    def test_multiple_structural_features(self, base_chart):
+        chart = base_chart + SecondaryY("revenue") + BreakAxis(axis="y", gap=(10, 90))
+        cfg = chart._resolve_chart_config()
+        assert "structural" in cfg
+        assert len(cfg["structural"]) == 2
+        types = {s["type"] for s in cfg["structural"]}
+        assert types == {"secondary_y", "break_axis"}
+
+    def test_no_structural_key_when_empty(self, base_chart):
+        cfg = base_chart._resolve_chart_config()
+        assert "structural" not in cfg
+
+    def test_structural_with_configure(self, base_chart):
+        from ferrum.configure import Configure, AxisConfig
+
+        chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
+        cfg = chart._resolve_chart_config()
+        assert "structural" in cfg
+        assert cfg["structural"][0]["type"] == "secondary_y"
+        # Configure entry is also present
+        assert "axis" in cfg
+
+
+# ---------------------------------------------------------------------------
+# Rendering integration tests (show_svg round-trip)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuralRendering:
+    def test_secondary_y_renders_svg(self, base_chart):
+        chart = base_chart + SecondaryY("revenue")
+        svg = chart.show_svg()
+        assert svg.startswith("<svg")
+
+    def test_break_axis_renders_svg(self, base_chart):
+        chart = base_chart + BreakAxis(axis="y", gap=(50, 200))
+        svg = chart.show_svg()
+        assert svg.startswith("<svg")
+
+    def test_inset_renders_svg(self, base_chart, dual_field_df):
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45))
+        svg = chart.show_svg()
+        assert svg.startswith("<svg")
+
+    def test_structural_with_configure_renders(self, base_chart):
+        from ferrum.configure import Configure, AxisConfig
+
+        chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
+        svg = chart.show_svg()
+        assert svg.startswith("<svg")

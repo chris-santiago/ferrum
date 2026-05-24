@@ -24,6 +24,9 @@ pub(crate) mod grid_compose;
 pub(crate) mod pack_instances;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
+pub(crate) mod secondary_axis;
+pub(crate) mod break_axis;
+pub(crate) mod inset;
 pub use compositor::{
     compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
 };

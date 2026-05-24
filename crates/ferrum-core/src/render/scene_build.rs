@@ -9,11 +9,15 @@ use crate::layout::{LayoutResult, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
 use super::arrow_cast::col_as_str;
+use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
 use super::marks;
 use super::prepare::PreparedInputs;
-use super::{filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX};
+use super::{
+    break_axis, inset, secondary_axis,
+    filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX,
+};
 
 pub fn build_scene(
     spec: &ChartSpec,
@@ -270,15 +274,47 @@ pub fn build_scene(
             Vec::new()
         };
 
+        // Structural features: secondary Y axis, axis breaks, insets.
+        // Only applied to the first panel (non-faceted charts).
+        let (structural_axes, structural_marks, structural_annotations) =
+            if panel_idx == 0 && !chart_config.structural.is_empty() {
+                build_structural_nodes(
+                    &chart_config.structural,
+                    &panel_batch,
+                    &scales,
+                    &panel.plot_area,
+                    theme,
+                    &rendering_spec_for_panel,
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+
+        let final_axes: Vec<SceneNode> = {
+            let mut v = axes_nodes;
+            v.extend(structural_axes);
+            v
+        };
+        let final_marks: Vec<ferrum_scene::MarkBatch> = {
+            let mut v = mark_batches;
+            v.extend(structural_marks);
+            v
+        };
+        let final_annotations: Vec<SceneNode> = {
+            let mut v = annotation_nodes;
+            v.extend(structural_annotations);
+            v
+        };
+
         panels.push(Panel {
             id: panel_idx,
             plot_area,
             clip: panel_clip,
             coord: scene_coord,
             grid: grid_nodes,
-            marks: mark_batches,
-            axes: axes_nodes,
-            annotations: annotation_nodes,
+            marks: final_marks,
+            axes: final_axes,
+            annotations: final_annotations,
             strip_title: strip_title_nodes,
         });
     }
@@ -707,6 +743,113 @@ fn build_polar_axes(
     }
 
     nodes
+}
+
+// ── Structural feature processing ────────────────────────────────────────────
+
+/// Process structural feature specs (secondary Y axis, axis breaks, insets).
+///
+/// Returns three node vecs: `(extra_axes, extra_mark_batches, extra_annotations)`.
+/// The caller extends the panel's `axes`, `marks`, and `annotations` with these.
+fn build_structural_nodes(
+    structural: &[StructuralSpec],
+    batch: &RecordBatch,
+    scales: &scale_resolve::ResolvedScales,
+    plot_area: &crate::layout::Rect,
+    theme: &crate::layout::ThemeInputs,
+    spec: &crate::spec::chart::ChartSpec,
+) -> (Vec<SceneNode>, Vec<ferrum_scene::MarkBatch>, Vec<SceneNode>) {
+    let mut extra_axes: Vec<SceneNode> = Vec::new();
+    let mut extra_mark_batches: Vec<ferrum_scene::MarkBatch> = Vec::new();
+    let mut extra_annotations: Vec<SceneNode> = Vec::new();
+
+    for item in structural {
+        match item {
+            StructuralSpec::SecondaryY(spec_y2) => {
+                // Resolve secondary Y scale from the named field.
+                let y_pixel_range = (plot_area.y, plot_area.y + plot_area.h);
+                let y2_scale = match secondary_axis::resolve_secondary_y_scale(
+                    &spec_y2.field,
+                    batch,
+                    y_pixel_range,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => continue, // missing column — skip silently
+                };
+
+                // Build right-side axis nodes.
+                let axis_nodes =
+                    secondary_axis::build_secondary_axis(&y2_scale, plot_area, theme, spec_y2);
+                extra_axes.extend(axis_nodes);
+
+                // Build secondary marks if there's an x encoding field.
+                if let Some(x_enc) = spec.encoding.x.as_ref() {
+                    let mark_nodes = secondary_axis::build_secondary_marks(
+                        batch,
+                        &x_enc.field,
+                        &scales.x,
+                        &y2_scale,
+                        spec_y2,
+                        plot_area,
+                    );
+                    if !mark_nodes.is_empty() {
+                        extra_mark_batches.push(ferrum_scene::MarkBatch {
+                            kind: ferrum_scene::MarkBatchKind::Line,
+                            nodes: mark_nodes,
+                            data_indices: None,
+                            tooltips: None,
+                            hrefs: None,
+                            descriptions: None,
+                            keys: None,
+                            blend: ferrum_scene::BlendMode::Normal,
+                            stroke_cap: None,
+                            stroke_join: None,
+                            packed_instances: None,
+                        });
+                    }
+                }
+            }
+
+            StructuralSpec::BreakAxis(spec_brk) => {
+                // Build break indicators and add them to annotations.
+                let pixel_range = if spec_brk.axis == "y" {
+                    (plot_area.y, plot_area.y + plot_area.h)
+                } else {
+                    (plot_area.x, plot_area.x + plot_area.w)
+                };
+
+                // Use the primary axis scale domain if available.
+                let data_domain = if spec_brk.axis == "y" {
+                    scales.y.data_domain().unwrap_or((0.0, 1.0))
+                } else {
+                    scales.x.data_domain().unwrap_or((0.0, 1.0))
+                };
+
+                let break_result = break_axis::apply_break_to_scale(
+                    data_domain,
+                    &spec_brk.gaps,
+                    pixel_range,
+                    spec_brk.break_size,
+                );
+                let indicator_nodes = break_axis::build_break_indicators(
+                    &break_result,
+                    plot_area,
+                    &spec_brk.axis,
+                    spec_brk.break_size,
+                    &spec_brk.break_style,
+                    theme,
+                );
+                extra_annotations.extend(indicator_nodes);
+            }
+
+            StructuralSpec::Inset(spec_inset) => {
+                let inset_nodes = inset::build_inset_nodes(spec_inset, plot_area);
+                extra_annotations.extend(inset_nodes);
+            }
+        }
+    }
+
+    (extra_axes, extra_mark_batches, extra_annotations)
 }
 
 #[cfg(test)]

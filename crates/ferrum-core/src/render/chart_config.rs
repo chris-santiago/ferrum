@@ -25,7 +25,91 @@ pub struct ChartConfig {
     /// Annotation layer: positioned text, lines, arrows, etc. overlaid on the plot.
     #[serde(default)]
     pub annotations: Vec<AnnotationSpec>,
+    /// Structural features: secondary Y axis, axis breaks, inset charts.
+    #[serde(default)]
+    pub structural: Vec<StructuralSpec>,
 }
+
+// ── Structural feature specs ────────────────────────────────────────────────
+
+/// One structural feature descriptor, deserialized from the `structural` array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StructuralSpec {
+    SecondaryY(SecondaryYSpec),
+    BreakAxis(BreakAxisSpec),
+    Inset(InsetSpec),
+}
+
+/// Secondary Y axis — independent right-side scale rendered over a named field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SecondaryYSpec {
+    /// Column name whose range drives the secondary scale.
+    pub field: String,
+    /// Mark type to render against the secondary scale (`"line"`, `"point"`, etc.).
+    pub mark: String,
+    /// Optional fixed fill/stroke color (hex string). Defaults to a contrasting
+    /// color from the theme when absent.
+    pub color: Option<String>,
+    /// Overall opacity [0, 1].
+    pub opacity: Option<f64>,
+}
+
+impl Default for SecondaryYSpec {
+    fn default() -> Self {
+        Self { field: String::new(), mark: "line".to_string(), color: None, opacity: None }
+    }
+}
+
+/// Axis break — removes a range from the data domain and adds visual indicators.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BreakAxisSpec {
+    /// Which axis to break (`"x"` or `"y"`).
+    pub axis: String,
+    /// List of `[start, end]` data-value pairs that are excluded from the scale.
+    pub gaps: Vec<[f64; 2]>,
+    /// Pixel width/height of the break indicator region (default 12).
+    #[serde(default = "default_break_size")]
+    pub break_size: f64,
+    /// Visual style: `"slash"`, `"zigzag"`, `"wave"`, or `"gap"` (default `"slash"`).
+    #[serde(default = "default_break_style")]
+    pub break_style: String,
+}
+
+/// Inset chart — embeds a pre-rendered SVG at normalized plot-area bounds.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InsetSpec {
+    /// Pre-rendered SVG string to embed.
+    pub svg: String,
+    /// `[left, top, right, bottom]` in normalized coordinates [0, 1] relative
+    /// to the plot area.
+    pub bounds: [f64; 4],
+    /// Whether to draw a border rect around the inset (default `true`).
+    #[serde(default = "default_true")]
+    pub border: bool,
+    /// Border stroke color (default `"#999"`).
+    #[serde(default = "default_border_color")]
+    pub border_color: String,
+    /// Optional dash pattern for the border.
+    pub border_dash: Option<Vec<f64>>,
+    /// Optional background fill color.
+    pub background: Option<String>,
+    /// Whether to render a drop shadow (default `false`).
+    #[serde(default)]
+    pub shadow: bool,
+    /// Optional data-space point `[x, y]` to connect to the inset bounds.
+    pub connect_to: Option<[f64; 2]>,
+    /// Connector style: `"lines"` (default).
+    #[serde(default = "default_connect_style")]
+    pub connect_style: String,
+}
+
+fn default_break_size() -> f64 { 12.0 }
+fn default_break_style() -> String { "slash".to_string() }
+fn default_true() -> bool { true }
+fn default_border_color() -> String { "#999999".to_string() }
+fn default_connect_style() -> String { "lines".to_string() }
 
 /// Per-axis configuration. Applied after per-channel values but before theme.
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -112,6 +196,133 @@ mod tests {
         assert!(cfg.padding.is_none());
         assert!(cfg.color.is_none());
         assert!(cfg.annotations.is_empty());
+        assert!(cfg.structural.is_empty());
+    }
+
+    #[test]
+    fn structural_secondary_y_deserializes() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "secondary_y",
+                    "field": "revenue",
+                    "mark": "line",
+                    "color": "#e45756",
+                    "opacity": 0.7
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.structural.len(), 1);
+        match &cfg.structural[0] {
+            StructuralSpec::SecondaryY(spec) => {
+                assert_eq!(spec.field, "revenue");
+                assert_eq!(spec.mark, "line");
+                assert_eq!(spec.color.as_deref(), Some("#e45756"));
+                assert_eq!(spec.opacity, Some(0.7));
+            }
+            other => panic!("expected SecondaryY, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structural_break_axis_deserializes() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "break_axis",
+                    "axis": "y",
+                    "gaps": [[50.0, 200.0]],
+                    "break_size": 12.0,
+                    "break_style": "slash"
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.structural.len(), 1);
+        match &cfg.structural[0] {
+            StructuralSpec::BreakAxis(spec) => {
+                assert_eq!(spec.axis, "y");
+                assert_eq!(spec.gaps.len(), 1);
+                assert_eq!(spec.gaps[0], [50.0, 200.0]);
+                assert_eq!(spec.break_size, 12.0);
+                assert_eq!(spec.break_style, "slash");
+            }
+            other => panic!("expected BreakAxis, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structural_inset_deserializes() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "inset",
+                    "svg": "<svg></svg>",
+                    "bounds": [0.6, 0.1, 0.95, 0.45],
+                    "border": true,
+                    "border_color": "#999",
+                    "shadow": false
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.structural.len(), 1);
+        match &cfg.structural[0] {
+            StructuralSpec::Inset(spec) => {
+                assert_eq!(spec.bounds, [0.6, 0.1, 0.95, 0.45]);
+                assert!(spec.border);
+                assert!(!spec.shadow);
+                assert_eq!(spec.border_color, "#999");
+            }
+            other => panic!("expected Inset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structural_break_axis_defaults() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "break_axis",
+                    "axis": "x",
+                    "gaps": [[10.0, 50.0]]
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        match &cfg.structural[0] {
+            StructuralSpec::BreakAxis(spec) => {
+                assert_eq!(spec.break_size, 12.0);
+                assert_eq!(spec.break_style, "slash");
+            }
+            other => panic!("expected BreakAxis, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structural_inset_defaults() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "inset",
+                    "svg": "<svg></svg>",
+                    "bounds": [0.0, 0.0, 0.5, 0.5]
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        match &cfg.structural[0] {
+            StructuralSpec::Inset(spec) => {
+                assert!(spec.border);
+                assert!(!spec.shadow);
+                assert_eq!(spec.border_color, "#999999");
+                assert_eq!(spec.connect_style, "lines");
+                assert!(spec.background.is_none());
+                assert!(spec.connect_to.is_none());
+            }
+            other => panic!("expected Inset, got {other:?}"),
+        }
     }
 
     #[test]
