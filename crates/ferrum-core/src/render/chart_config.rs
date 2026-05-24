@@ -200,8 +200,9 @@ pub struct ColorConfigSpec {
     pub scheme: Option<String>,
     pub sequential_scheme: Option<String>,
     pub diverging_scheme: Option<String>,
-    /// Explicit numeric domain bounds for continuous color scales.
-    pub domain: Option<Vec<f64>>,
+    /// Explicit domain for color scales. Numeric values for continuous scales,
+    /// string values for categorical scales.
+    pub domain: Option<Vec<serde_json::Value>>,
     /// Explicit hex-string color range for continuous color scales.
     pub range: Option<Vec<String>>,
 }
