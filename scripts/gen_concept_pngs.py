@@ -4,13 +4,11 @@ import traceback
 import ferrum as fm
 import ferrum.annotation as ann
 import polars as pl
-from resvg_py import svg_to_bytes
 
 
-def save_png(chart, path, width=800):
-    """Render chart to SVG, rasterize to PNG, save."""
-    svg_str = chart.show_svg()
-    png_data = svg_to_bytes(svg_string=svg_str, width=width)
+def save_png(chart, path):
+    """Render chart to PNG using ferrum's built-in renderer at 2x scale."""
+    png_data = chart.show_png(scale=2.0)
     with open(path, "wb") as f:
         f.write(png_data)
     print(f"  OK: {path} ({len(png_data)} bytes)")
@@ -36,7 +34,6 @@ def gen_customizing_cascade():
             y=fm.Y("revenue:Q", axis=fm.Axis(label_format="$,.0f")),
         )
         .configure_axis(label_angle=-30)
-        .theme(fm.themes.minimal)
     )
     save_png(chart, f"{BASE}/customizing_cascade.png")
 
