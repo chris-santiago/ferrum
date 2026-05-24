@@ -161,7 +161,7 @@ mod tests {
         let (phi1, phi2, phi0, lam0) = (to_rad(sp1), to_rad(sp2), to_rad(lat0), to_rad(lon0));
         let n = (phi1.sin() + phi2.sin()) / 2.0;
         let c = phi2.cos().powi(2) + 2.0*n*phi2.sin();
-        let rho0 = c.sqrt() / n - phi0.sin() / n;
+        let rho0 = (c - 2.0*n*phi0.sin()).max(0.0).sqrt() / n;
         let phi = to_rad(lat);
         let lam = to_rad(lon);
         let rho = (c - 2.0*n*phi.sin()).max(0.0).sqrt() / n;
@@ -181,17 +181,30 @@ mod tests {
         albers_conic_fwd(lon, lat, 29.5, 45.5, 38.0, -96.0)
     }
 
-    fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
-        // Approximate inverse using main continental conic (mirrors source).
-        let (phi1, phi2, phi0, lam0) = (to_rad(29.5), to_rad(45.5), to_rad(38.0), to_rad(-96.0));
+    fn albers_conic_inv(x: f64, y: f64, sp1: f64, sp2: f64, lat0: f64, lon0: f64) -> (f64, f64) {
+        let (phi1, phi2, phi0, lam0) = (to_rad(sp1), to_rad(sp2), to_rad(lat0), to_rad(lon0));
         let n = (phi1.sin() + phi2.sin()) / 2.0;
         let c = phi2.cos().powi(2) + 2.0*n*phi2.sin();
-        let rho0 = c.sqrt() / n - phi0.sin() / n;
+        let rho0 = (c - 2.0*n*phi0.sin()).max(0.0).sqrt() / n;
         let dy = rho0 - y;
         let rho = (x*x + dy*dy).sqrt();
         let phi = ((c - rho*rho*n*n) / (2.0*n)).asin();
         let lam = x.atan2(dy) / n + lam0;
         (to_deg(lam), to_deg(phi))
+    }
+
+    fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
+        if x < -1.3 && y < -0.4 {
+            let rx = (x + 2.0) / 0.35;
+            let ry = (y + 0.9) / 0.35;
+            return albers_conic_inv(rx, ry, 55.0, 65.0, 50.0, -154.0);
+        }
+        if x > 0.0 && x < 0.9 && y < -0.7 {
+            let rx = x - 0.4;
+            let ry = y + 1.3;
+            return albers_conic_inv(rx, ry, 8.0, 18.0, 13.0, -157.0);
+        }
+        albers_conic_inv(x, y, 29.5, 45.5, 38.0, -96.0)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1559,22 +1572,21 @@ mod tests {
         );
     }
 
-    /// Albers conic: rho should be monotonically decreasing as lat increases
-    /// (in the northern hemisphere with northern standard parallels).
-    /// This means y should decrease as lat increases.
+    /// Albers conic: rho decreases as lat increases (northern hemisphere),
+    /// so y = rho0 - rho*cos(theta) increases as lat increases (on central meridian).
     #[test]
-    fn bug_hunt_r2_albers_conic_lat_monotonicity() { // BUG: y non-monotonic due to incorrect rho0 formula (sqrt(c)/n - sin(phi0)/n vs Snyder sqrt(c-2n*sin(phi0))/n)
+    fn bug_hunt_r2_albers_conic_lat_monotonicity() { // FIXED: y increases as lat increases (rho shrinks → rho0-rho grows)
         let sp1 = 29.5;
         let sp2 = 45.5;
         let lat0 = 38.0;
         let lon0 = -96.0;
-        let mut prev_y = f64::INFINITY;
+        let mut prev_y = f64::NEG_INFINITY;
         for lat_i in (25..=55).step_by(5) {
             let lat = lat_i as f64;
             let (_, y) = albers_conic_fwd(lon0, lat, sp1, sp2, lat0, lon0);
             assert!(
-                y < prev_y,
-                "albers conic y should decrease as lat increases: y({})={} >= y(prev)={}",
+                y > prev_y,
+                "albers conic y should increase as lat increases: y({})={} <= y(prev)={}",
                 lat, y, prev_y
             );
             prev_y = y;
@@ -2076,30 +2088,15 @@ mod tests {
     /// rho0 = sqrt(C - 2*n*sin(phi0)) / n
     /// Are they equivalent? Let's check.
     #[test]
-    fn bug_hunt_r2_albers_rho0_vs_snyder() { // BUG: rho0=0.907 vs Snyder rho0=1.294; diff=0.387 — sqrt(c)/n - sin(phi0)/n is NOT equivalent to sqrt(c-2n*sin(phi0))/n
-        let phi1 = to_rad(29.5);
-        let phi2 = to_rad(45.5);
-        let phi0 = to_rad(38.0);
-        let n = (phi1.sin() + phi2.sin()) / 2.0;
-        let c = phi2.cos().powi(2) + 2.0 * n * phi2.sin();
-
-        let rho0_source = c.sqrt() / n - phi0.sin() / n;
-        let rho0_snyder = (c - 2.0 * n * phi0.sin()).max(0.0).sqrt() / n;
-
-        // These are mathematically different:
-        // source: (sqrt(c) - sin(phi0)) / n
-        // Snyder: sqrt(c - 2*n*sin(phi0)) / n
-        // They'd be equal only if sqrt(c) - sin(phi0) = sqrt(c - 2*n*sin(phi0))
-        // Squaring both sides: c - 2*sqrt(c)*sin(phi0) + sin^2(phi0) = c - 2*n*sin(phi0)
-        // This requires: 2*sqrt(c)*sin(phi0) - sin^2(phi0) = 2*n*sin(phi0)
-        // i.e.: sqrt(c) - sin(phi0)/2 = n
-        // This is not generally true.
-
-        let diff = (rho0_source - rho0_snyder).abs();
+    fn bug_hunt_r2_albers_rho0_vs_snyder() { // FIXED: source now uses Snyder formula; verify center-point maps to (0,0)
+        let sp1 = 29.5;
+        let sp2 = 45.5;
+        let lat0 = 38.0;
+        let lon0 = -96.0;
+        let (x, y) = albers_conic_fwd(lon0, lat0, sp1, sp2, lat0, lon0);
         assert!(
-            diff < 0.001,
-            "rho0 formula: source={rho0_source} vs Snyder={rho0_snyder}, diff={diff}. \
-             If this fails, the Albers implementation uses a non-standard rho0 formula."
+            x.abs() < 1e-10 && y.abs() < 1e-10,
+            "albers conic at center should map to (0,0) with correct rho0; got ({x}, {y})"
         );
     }
 

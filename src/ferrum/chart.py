@@ -267,6 +267,7 @@ class Chart(_RenderMixin):
         "_annotations",  # list[Annotate] — accumulated annotation layers
         "_structural",  # list — accumulated structural features (SecondaryY, BreakAxis, Inset)
         "_overrides",  # dict — spec-path override kwargs
+        "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
     )
 
     def __init__(
@@ -311,6 +312,7 @@ class Chart(_RenderMixin):
         self._annotations: list = []
         self._structural: list = []
         self._overrides: dict = {}
+        self._annotation_primitive = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -339,6 +341,7 @@ class Chart(_RenderMixin):
         new._annotations = list(self._annotations)
         new._structural = list(self._structural)
         new._overrides = dict(self._overrides)
+        new._annotation_primitive = self._annotation_primitive
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -4103,6 +4106,19 @@ class Chart(_RenderMixin):
         new = lhs._clone()
         lhs_layers, _ = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+
+        # When the RHS is an annotate_* helper chart, its annotation primitive
+        # fully describes the visual element for both SVG and interactive
+        # rendering.  The mark layers inside the annotate_* chart (mark_rule,
+        # mark_rect, mark_line, mark_text) must be excluded — they would
+        # produce a duplicate rendering alongside the annotation primitive.
+        # Data merging and transform routing for the RHS are also skipped since
+        # the annotation data is not needed by any layer.
+        if rhs._annotation_primitive is not None:
+            new._layers = lhs_layers  # LHS layers only — no RHS mark layers
+            new._annotations = new._annotations + [Annotate(rhs._annotation_primitive)]
+            _warn_on_layer_conflicts(lhs, rhs)
+            return new
 
         # Data merging: when data differs, decide whether to diagonal-concat
         # or route the RHS through a named Identity transform.

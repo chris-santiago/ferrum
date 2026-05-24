@@ -21,6 +21,38 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
+def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
+    """Decode or cast any Arrow column types that the Rust CDI boundary rejects.
+
+    This is a render-boundary concern, not a coerce concern — ``to_arrow_table``
+    preserves the caller's data as-is so its contract is predictable.  The Rust
+    renderer currently rejects two special types:
+
+    - ``Dictionary`` (categorical / dictionary-encoded) — decode to the plain
+      value type via ``pyarrow.compute.dictionary_decode()``.
+    - ``Null`` (all-None column with unknown type) — cast to ``float64`` so Rust
+      can represent it as a numeric column of NaNs.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    new_cols: list = []
+    needs_rebuild = False
+    for i in range(len(tbl.schema)):
+        col = tbl.column(i)
+        field_type = tbl.schema.field(i).type
+        if pa.types.is_dictionary(field_type):
+            col = pc.dictionary_decode(col)
+            needs_rebuild = True
+        elif pa.types.is_null(field_type):
+            col = col.cast(pa.float64())
+            needs_rebuild = True
+        new_cols.append(col)
+    if not needs_rebuild:
+        return tbl
+    return pa.table({tbl.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
+
+
 def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
     """Collect Axis(label_map=...) entries from a chart's encoding.
 
@@ -380,7 +412,7 @@ class _RenderMixin:
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)
         raw_data = _apply_label_maps(chart._data, label_maps) if label_maps else chart._data
-        data = to_arrow_table(raw_data)
+        data = _sanitize_for_rust(to_arrow_table(raw_data))
         from ferrum import config as _config
 
         viewport = (

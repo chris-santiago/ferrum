@@ -90,8 +90,16 @@ impl LogScaleData {
         let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
         let lo_exp = (lo.ln() / log_base).floor();
         let hi_exp = (hi.ln() / log_base).ceil();
-        let new_lo = sign * self.base.powf(lo_exp);
-        let new_hi = sign * self.base.powf(hi_exp);
+        // For positive domains: new_lo < new_hi (smallest to largest absolute value)
+        // For negative domains: new_lo = sign * base^lo_exp is closest to zero (e.g. -1),
+        // and new_hi = sign * base^hi_exp is most negative (e.g. -1000). Swap them so
+        // the magnitude ordering matches the number-line ordering before applying the
+        // ascending/descending domain logic below.
+        let (new_lo, new_hi) = if neg {
+            (sign * self.base.powf(hi_exp), sign * self.base.powf(lo_exp))
+        } else {
+            (sign * self.base.powf(lo_exp), sign * self.base.powf(hi_exp))
+        };
         let new_domain = if self.domain[0] <= self.domain[1] {
             [new_lo, new_hi]
         } else {

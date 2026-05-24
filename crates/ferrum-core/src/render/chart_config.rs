@@ -221,6 +221,7 @@ pub struct TitleConfigSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn empty_json_deserializes_to_defaults() {
@@ -492,7 +493,7 @@ mod tests {
         }"##;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
         let color = cfg.color.unwrap();
-        assert_eq!(color.domain, Some(vec![0.0, 100.0]));
+        assert_eq!(color.domain, Some(vec![Value::from(0.0), Value::from(100.0)]));
         assert_eq!(
             color.range.as_deref(),
             Some(["#ffffff".to_string(), "#000000".to_string()].as_slice())

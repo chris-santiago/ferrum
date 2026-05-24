@@ -478,8 +478,14 @@ pub fn compute_layout(
         0.0
     };
 
+    // L-3: use per-axis title_font_size/title_padding overrides for gutter
+    // reservation, matching the y-axis pattern in compute_y_title_width.
+    // Previously used theme.title_font_size unconditionally, which caused the
+    // gutter to be undersized when axes.x.title_font_size was larger than theme.
     let x_title_gutter = if axes.x.title.is_some() {
-        metrics.line_height(theme.title_font_size) + theme.axis_title_padding
+        let effective_title_font_size = axes.x.title_font_size.unwrap_or(theme.title_font_size);
+        let effective_title_padding = axes.x.title_padding.unwrap_or(theme.axis_title_padding);
+        metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
     };

@@ -28,7 +28,9 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     };
 
     // Default per-orient gap between tick mark end and label baseline/edge.
-    let label_pad = axis.label_padding.unwrap_or(2.0);
+    // L-2: guard negative label_padding — negative values would place labels
+    // inside the tick area, producing overlapping or invisible labels.
+    let label_pad = axis.label_padding.unwrap_or(2.0).max(0.0);
 
     for tick in &axis.ticks {
         let effective_font_size = tick.label_font_size.unwrap_or(theme.label_font_size);

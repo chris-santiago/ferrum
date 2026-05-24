@@ -117,7 +117,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
             return pa.table({data.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
         return data
     if isinstance(data, pa.RecordBatch):
-        return pa.Table.from_batches([data])
+        return to_arrow_table(pa.Table.from_batches([data]))
 
     # Direct conversions: dict, list, numpy
     if isinstance(data, dict):

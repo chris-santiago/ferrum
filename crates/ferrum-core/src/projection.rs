@@ -189,7 +189,7 @@ fn albers_conic_fwd(lon: f64, lat: f64, sp1: f64, sp2: f64, lat0: f64, lon0: f64
     let (phi1, phi2, phi0, lam0) = (to_rad(sp1), to_rad(sp2), to_rad(lat0), to_rad(lon0));
     let n = (phi1.sin() + phi2.sin()) / 2.0;
     let c = phi2.cos().powi(2) + 2.0*n*phi2.sin();
-    let rho0 = c.sqrt() / n - phi0.sin() / n;
+    let rho0 = (c - 2.0*n*phi0.sin()).max(0.0).sqrt() / n;
     let phi = to_rad(lat);
     let lam = to_rad(lon);
     let rho = (c - 2.0*n*phi.sin()).max(0.0).sqrt() / n;
@@ -211,17 +211,40 @@ fn albers_usa_fwd(lon: f64, lat: f64) -> (f64, f64) {
 
 
 #[cfg(test)]
-fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
-    // Approximate inverse using main continental conic.
-    let (phi1, phi2, phi0, lam0) = (to_rad(29.5), to_rad(45.5), to_rad(38.0), to_rad(-96.0));
+fn albers_conic_inv(x: f64, y: f64, sp1: f64, sp2: f64, lat0: f64, lon0: f64) -> (f64, f64) {
+    let (phi1, phi2, phi0, lam0) = (to_rad(sp1), to_rad(sp2), to_rad(lat0), to_rad(lon0));
     let n = (phi1.sin() + phi2.sin()) / 2.0;
     let c = phi2.cos().powi(2) + 2.0*n*phi2.sin();
-    let rho0 = c.sqrt() / n - phi0.sin() / n;
+    let rho0 = (c - 2.0*n*phi0.sin()).max(0.0).sqrt() / n;
     let dy = rho0 - y;
     let rho = (x*x + dy*dy).sqrt();
     let phi = ((c - rho*rho*n*n) / (2.0*n)).asin();
     let lam = x.atan2(dy) / n + lam0;
     (to_deg(lam), to_deg(phi))
+}
+
+#[cfg(test)]
+fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
+    // Detect Alaska inset output region: forward was (ax*0.35 - 2.0, ay*0.35 - 0.9).
+    // Reverse: ax = (x + 2.0) / 0.35, ay = (y + 0.9) / 0.35.
+    // Alaska inset uses conic(55, 65, 50, -154).
+    // The inset output occupies roughly x in [-2.5, -1.5], y in [-1.5, -0.5].
+    if x < -1.3 && y < -0.4 {
+        let ax = (x + 2.0) / 0.35;
+        let ay = (y + 0.9) / 0.35;
+        return albers_conic_inv(ax, ay, 55.0, 65.0, 50.0, -154.0);
+    }
+    // Detect Hawaii inset output region: forward was (hx + 0.4, hy - 1.3).
+    // Reverse: hx = x - 0.4, hy = y + 1.3.
+    // Hawaii inset uses conic(8, 18, 13, -157).
+    // The inset output occupies roughly x in [0.0, 0.8], y in [-1.6, -0.8].
+    if x > 0.0 && x < 0.9 && y < -0.7 {
+        let hx = x - 0.4;
+        let hy = y + 1.3;
+        return albers_conic_inv(hx, hy, 8.0, 18.0, 13.0, -157.0);
+    }
+    // Continental conic (29.5, 45.5, 38, -96).
+    albers_conic_inv(x, y, 29.5, 45.5, 38.0, -96.0)
 }
 
 

@@ -281,10 +281,29 @@ impl MetadataColumns {
                 .ok()
                 .or_else(|| {
                     col_as_f64(ctx.batch, field).ok().map(|vals| {
+                        // For time formatting, compute spacing from actual data range
+                        // rather than hardcoding 1 day, so sub-day precision is preserved.
+                        let spacing_ms: i64 = if fmt_type == Some("time") {
+                            let finite: Vec<f64> = vals.iter()
+                                .filter_map(|v| v.filter(|f| f.is_finite()))
+                                .collect();
+                            if finite.len() >= 2 {
+                                let lo = finite.iter().cloned().fold(f64::INFINITY, f64::min);
+                                let hi = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                                let range_ms = (hi - lo).abs();
+                                // Estimate spacing as range / (n - 1) for n points,
+                                // clamped to at least 1 ms.
+                                ((range_ms / (finite.len() - 1) as f64).round() as i64).max(1)
+                            } else {
+                                86_400_000 // fallback: 1 day
+                            }
+                        } else {
+                            0 // unused for non-time formatting
+                        };
                         vals.into_iter()
                             .map(|v| v.map(|f| {
                                 if fmt_type == Some("time") {
-                                    format_time(f as i64, 86_400_000)
+                                    format_time(f as i64, spacing_ms)
                                 } else if fmt.is_some() {
                                     format_with_spec(f, fmt)
                                 } else {

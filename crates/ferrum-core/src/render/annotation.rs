@@ -276,8 +276,8 @@ fn parse_anchor(s: &str) -> TextAnchor {
 
 fn parse_baseline(s: &str) -> TextBaseline {
     match s {
-        "top" => TextBaseline::Top,
-        "bottom" => TextBaseline::Bottom,
+        "top" | "hanging" | "text-before-edge" => TextBaseline::Top,
+        "bottom" | "ideographic" => TextBaseline::Bottom,
         "alphabetic" => TextBaseline::Alphabetic,
         _ => TextBaseline::Middle,
     }
@@ -439,6 +439,9 @@ fn emit_arrow(
             let uy = dy / len;
             let px = -uy;
             let py = ux;
+            // Clamp head_size to the shaft length so an epsilon-length arrow
+            // does not produce an arrowhead that vastly overshoots the start point.
+            let head_size = head_size.min(len);
             let half = head_size * 0.5;
             let tip_x = x2;
             let tip_y = y2;
@@ -479,12 +482,20 @@ fn emit_span(
     let (x, y, w, h) = if axis == "x" {
         let x_start = ctx.resolve_x(start);
         let x_end = ctx.resolve_x(end);
+        // Guard NaN: either coordinate being NaN produces NaN width — skip emission.
+        if !x_start.is_finite() || !x_end.is_finite() {
+            return;
+        }
         let x = x_start.min(x_end);
         let w = (x_end - x_start).abs();
         (x, ctx.plot_area.y, w, ctx.plot_area.h)
     } else {
         let y_start = ctx.resolve_y(start);
         let y_end = ctx.resolve_y(end);
+        // Guard NaN: either coordinate being NaN produces NaN height — skip emission.
+        if !y_start.is_finite() || !y_end.is_finite() {
+            return;
+        }
         let y = y_start.min(y_end);
         let h = (y_end - y_start).abs();
         (ctx.plot_area.x, y, ctx.plot_area.w, h)

@@ -319,6 +319,9 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
             }
         ), b""
     return render_interactive(
-        spec, data, viewport=viewport, theme=theme_dict,
+        spec,
+        data,
+        viewport=viewport,
+        theme=theme_dict,
         chart_config=chart_config_dict or None,
     )

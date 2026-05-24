@@ -415,7 +415,9 @@ pub fn fmt_f(x: f64) -> String {
     let x = if x == 0.0 { 0.0 } else { x };
     let s = format!("{x:.*}", FLOAT_PRECISION);
     let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if trimmed.is_empty() || trimmed == "-" { "0".to_string() } else { trimmed }
+    // After trimming, check for bare "-" or "-0" — both represent negative zero,
+    // which is semantically wrong in SVG coordinates.
+    if trimmed.is_empty() || trimmed == "-" || trimmed == "-0" { "0".to_string() } else { trimmed }
 }
 
 pub fn escape_text(s: &str) -> String {

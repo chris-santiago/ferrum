@@ -266,17 +266,73 @@ def displot(
 
     chart = chart.encode(**enc)
 
-    # Optional kde/rug layers (only when not already that kind).
-    if kde and kind != "kde":
-        kde_layer = (
-            Chart(data)
-            .mark_density(bandwidth=bandwidth, bw_adjust=bw_adjust, fill=False)
-            .encode(x=x)
-        )
-        chart = chart + kde_layer
-    if rug and kind != "rug":
-        rug_layer = Chart(data).mark_tick().encode(x=x)
-        chart = chart + rug_layer
+    # Optional kde/rug overlay layers (only when not already that kind).
+    #
+    # These overlays must NOT use Chart.__add__ because the histogram's Bin
+    # transform replaces the original data columns (e.g. "sepal_length" →
+    # "bin_start"/"bin_end"/"count").  __add__ merges all transforms into a
+    # single sequential pipeline, so the Kde overlay would run on the Bin
+    # output and fail to find the original column.
+    #
+    # Instead we resolve the chart, then manually prepend named transforms
+    # for the overlays.  Named transforms read from the current chain head
+    # (the original data, since they run before the unnamed Bin) without
+    # advancing it.  The overlay _Layer objects set data_source to the named
+    # transform key so they read the correct output.
+    if (kde and kind != "kde") or (rug and kind != "rug"):
+        from ferrum._layer import _Layer as _OverlayLayer
+        from ferrum.encoding.base import ChannelBase as _CB_overlay
+
+        chart = chart._resolve_pending()
+        chart = chart._clone()
+        x_field = x.field if isinstance(x, _CB_overlay) else str(x) if x is not None else None
+
+        # Convert single-mark chart to layered mode: promote the existing
+        # mark + encoding into a primary layer so overlay layers can be
+        # appended alongside it.
+        if chart._layers is None and chart._mark is not None:
+            primary_layer = _OverlayLayer(
+                mark=chart._mark,
+                encoding=dict(chart._encoding),
+                mark_kwargs=dict(chart._mark_kwargs) if chart._mark_kwargs else None,
+                position=chart._position,
+            )
+            chart._layers = [primary_layer]
+            chart._mark = None
+
+        if kde and kind != "kde" and x_field is not None:
+            from ferrum import Kde as _KdeTransform
+
+            kde_xform = _KdeTransform(
+                x_field, bandwidth=bandwidth, bw_adjust=bw_adjust, name="kde_overlay"
+            )
+            # Prepend the named Kde before the unnamed Bin so it reads from
+            # the original (pre-Bin) data batch.
+            chart._transforms = [kde_xform] + list(chart._transforms or [])
+            chart._layers.append(
+                _OverlayLayer(
+                    name="kde",
+                    mark="line",
+                    encoding={"x": "value", "y": "density"},
+                    data_source="kde_overlay",
+                )
+            )
+
+        if rug and kind != "rug" and x_field is not None:
+            from ferrum._core import PyIdentity as _IdentityTransform
+
+            rug_xform = _IdentityTransform("rug_data")
+            # Prepend the named Identity before the unnamed Bin so it
+            # captures the original data for the rug tick marks.
+            chart._transforms = [rug_xform] + list(chart._transforms or [])
+            chart._layers.append(
+                _OverlayLayer(
+                    name="rug",
+                    mark="tick",
+                    encoding={"x": x_field},
+                    data_source="rug_data",
+                )
+            )
 
     # Name the layers so override passthrough can target them.
     if chart._layers is not None:
