@@ -8,6 +8,7 @@ use pyo3_arrow::PyRecordBatchReader;
 use crate::layout::{LegendDirection, LegendOrient, TextAnchor, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 
+use super::chart_config::ChartConfig;
 use super::config::RenderConfig;
 use super::RenderError;
 use super::{render_png as render_png_internal, render_svg as render_svg_internal};
@@ -59,7 +60,7 @@ use super::{render_png as render_png_internal, render_svg as render_svg_internal
 /// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 /// >>> svg = fm.render_svg(chart.to_spec(), df, viewport=(400, 300))
 #[pyfunction]
-#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
+#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None, chart_config = None))]
 pub fn render_svg(
     py: Python<'_>,
     spec: &ChartSpec,
@@ -67,15 +68,17 @@ pub fn render_svg(
     viewport: (f64, f64),
     theme: Option<&Bound<'_, PyDict>>,
     config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<String> {
     let batch = collect_single_batch(data)?;
     let t = theme_from_dict(theme)?;
     let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
     let vp = Viewport {
         width: viewport.0,
         height: viewport.1,
     };
-    let result = render_svg_internal(spec, &batch, &t, vp, &c).map_err(render_err_to_py)?;
+    let result = render_svg_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(result.bytes)
 }
@@ -127,7 +130,7 @@ pub fn render_svg(
 /// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 /// >>> png_bytes = fm.render_png(chart.to_spec(), df, viewport=(400, 300))
 #[pyfunction]
-#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
+#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None, chart_config = None))]
 pub fn render_png<'py>(
     py: Python<'py>,
     spec: &ChartSpec,
@@ -135,21 +138,23 @@ pub fn render_png<'py>(
     viewport: (f64, f64),
     theme: Option<&Bound<'_, PyDict>>,
     config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let batch = collect_single_batch(data)?;
     let t = theme_from_dict(theme)?;
     let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
     let vp = Viewport {
         width: viewport.0,
         height: viewport.1,
     };
-    let result = render_png_internal(spec, &batch, &t, vp, &c).map_err(render_err_to_py)?;
+    let result = render_png_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(PyBytes::new(py, &result.bytes))
 }
 
 #[pyfunction]
-#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None))]
+#[pyo3(signature = (spec, data, *, viewport, theme = None, config = None, chart_config = None))]
 pub fn render_interactive(
     py: Python<'_>,
     spec: &ChartSpec,
@@ -157,15 +162,17 @@ pub fn render_interactive(
     viewport: (f64, f64),
     theme: Option<&Bound<'_, PyDict>>,
     config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(String, Py<PyBytes>)> {
     let batch = collect_single_batch(data)?;
     let t = theme_from_dict(theme)?;
     let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
     let vp = Viewport {
         width: viewport.0,
         height: viewport.1,
     };
-    let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c)
+    let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c, &cc)
         .map_err(render_err_to_py)?;
     let py_bytes = PyBytes::new(py, &packed_bytes);
     Ok((json, py_bytes.unbind()))
@@ -563,6 +570,16 @@ fn config_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RenderConfig> {
         c.height = Some(v.extract()?);
     }
     Ok(c)
+}
+
+fn chart_config_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<ChartConfig> {
+    match dict {
+        None => Ok(ChartConfig::default()),
+        Some(d) => {
+            let val = crate::pyo3_serde::from_py(d.as_any(), "chart_config")?;
+            Ok(val)
+        }
+    }
 }
 
 fn render_err_to_py(e: RenderError) -> PyErr {

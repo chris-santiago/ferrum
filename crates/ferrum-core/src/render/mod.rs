@@ -2,6 +2,7 @@
 //! Viewport -> deterministic SVG/PNG. See docs/superpowers/specs/2026-05-09-static-renderer-design.md.
 
 pub(crate) mod arrow_cast;
+pub(crate) mod chart_config;
 pub(crate) mod config;
 pub(crate) mod color;
 pub(crate) mod palette;
@@ -176,6 +177,7 @@ mod tests {
 use crate::layout::{compute_layout, LegendOverrides, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
+use chart_config::ChartConfig;
 
 /// Build a [`LegendOverrides`] from a [`prepare::PreparedInputs`].
 fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides {
@@ -196,6 +198,7 @@ pub fn render_svg(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
+    _chart_config: &ChartConfig,
 ) -> Result<RenderOutput<String>, RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
@@ -274,8 +277,9 @@ pub fn render_png(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
+    chart_config: &ChartConfig,
 ) -> Result<RenderOutput<Vec<u8>>, RenderError> {
-    let svg_out = render_svg(spec, batch, theme, viewport, config)?;
+    let svg_out = render_svg(spec, batch, theme, viewport, config, chart_config)?;
     let w = (svg_out.layout.viewport.w * config.scale).round() as u32;
     let h = (svg_out.layout.viewport.h * config.scale).round() as u32;
     let bytes = png::svg_string_to_png_bytes(&svg_out.bytes, w, h, config.scale)?;
@@ -288,6 +292,7 @@ pub fn render_scene_json(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
+    _chart_config: &ChartConfig,
 ) -> Result<(String, Vec<u8>), RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
@@ -437,7 +442,7 @@ mod orchestration_tests {
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 600.0, height: 400.0 };
         let config = config::RenderConfig::default();
-        let result = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
         let svg = result.bytes;
         assert!(svg.starts_with("<svg "));
         assert!(svg.ends_with("</svg>"));
@@ -455,6 +460,7 @@ mod orchestration_tests {
             &theme,
             Viewport { width: 0.0, height: 100.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         );
         assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
     }
@@ -469,6 +475,7 @@ mod orchestration_tests {
             &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         );
         assert!(matches!(result.unwrap_err(), RenderError::UnknownColumn { .. }));
     }
@@ -520,6 +527,7 @@ mod orchestration_tests {
             &ThemeInputs::default(),
             Viewport { width: 800.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         )
         .unwrap();
         let svg = result.bytes;
@@ -534,8 +542,8 @@ mod orchestration_tests {
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 600.0, height: 400.0 };
         let config = config::RenderConfig::default();
-        let a = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
-        let b = render_svg(&spec, &batch, &theme, viewport, &config).unwrap();
+        let a = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let b = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
         assert_eq!(a.bytes, b.bytes);
     }
 
@@ -545,7 +553,7 @@ mod orchestration_tests {
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 600.0, height: 400.0 };
         let cfg = config::RenderConfig::default();
-        let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg).unwrap().bytes;
+        let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg, &ChartConfig::default()).unwrap().bytes;
 
         let prep = prepare::prepare_render_inputs(&spec, &batch, &theme).unwrap();
         let mut warnings = prep.warnings.clone();
@@ -658,6 +666,7 @@ mod png_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 100.0, height: 80.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         assert_eq!(&result.bytes[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
     }
@@ -692,8 +701,8 @@ mod png_tests {
         let theme = ThemeInputs::default();
         let viewport = Viewport { width: 100.0, height: 80.0 };
         let config = config::RenderConfig::default();
-        let a = render_png(&spec, &batch, &theme, viewport, &config).unwrap();
-        let b = render_png(&spec, &batch, &theme, viewport, &config).unwrap();
+        let a = render_png(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let b = render_png(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
         assert_eq!(a.bytes, b.bytes);
     }
 }
@@ -774,6 +783,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("scatter_minimal", &result.bytes);
 
@@ -781,6 +791,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_png_hash("scatter_minimal.png", &png_result.bytes);
     }
@@ -818,6 +829,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("scatter_color", &result.bytes);
     }
@@ -854,6 +866,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("bar_grouped", &result.bytes);
     }
@@ -889,6 +902,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("line_simple", &result.bytes);
     }
@@ -924,6 +938,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 600.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("area_filled", &result.bytes);
     }
@@ -968,6 +983,7 @@ mod golden_tests {
             &spec, &batch, &ThemeInputs::default(),
             Viewport { width: 800.0, height: 400.0 },
             &config::RenderConfig::default(),
+            &ChartConfig::default(),
         ).unwrap();
         check_golden("faceted_scatter", &result.bytes);
     }

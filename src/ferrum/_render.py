@@ -276,6 +276,18 @@ class _RenderMixin:
         new._render_config = merged
         return new
 
+    def _resolve_chart_config(self) -> dict:
+        """Merge _configure layers into a single dict for the Rust binding."""
+        merged: dict = {}
+        for cfg in self._configure:
+            d = cfg.to_dict()
+            for key, val in d.items():
+                if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+                    merged[key] = {**merged[key], **val}
+                else:
+                    merged[key] = val
+        return merged
+
     def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
         import json
 
@@ -303,7 +315,8 @@ class _RenderMixin:
 
         effective_theme = chart._theme or get_default_theme()
         theme_dict = effective_theme.to_spec_dict() if effective_theme else {}
-        return spec, data, viewport, theme_dict
+        chart_config_dict = chart._resolve_chart_config()
+        return spec, data, viewport, theme_dict, chart_config_dict
 
     def show_svg(self, *, raster: bool | None = None) -> str:
         """Render the chart to an SVG string.
@@ -333,14 +346,17 @@ class _RenderMixin:
         from ferrum._core import render_svg
 
         chart = self._with_raster_override(raster)
-        spec, data, viewport, theme_dict = chart._render_inputs()
+        spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
         if data.num_rows == 0:
             w, h = viewport
             return (
                 f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
                 f"<!-- empty dataset --></svg>"
             )
-        return render_svg(spec, data, viewport=viewport, theme=theme_dict)
+        return render_svg(
+            spec, data, viewport=viewport, theme=theme_dict,
+            chart_config=chart_config_dict or None,
+        )
 
     def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
         """Render the chart to PNG bytes.

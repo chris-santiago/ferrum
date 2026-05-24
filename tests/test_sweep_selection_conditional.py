@@ -30,7 +30,7 @@ from ferrum.selection import selection_interval, selection_point, value
 
 def _render(chart: fm.Chart) -> tuple[str, bytes]:
     """Render a chart to (scene_json_str, packed_bytes)."""
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     return render_interactive(spec, data, viewport=viewport, theme=theme)
 
 

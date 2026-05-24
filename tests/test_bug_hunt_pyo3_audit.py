@@ -53,7 +53,7 @@ class TestB1DefaultThemeInRenderPipeline:
         """Baseline: Theme() (the ferrum default) gives an empty theme dict."""
         chart = fm.Chart(df).mark_point().encode(x="x", y="y")
         assert chart._theme is None  # no per-chart theme
-        _, _, _, theme_dict = chart._render_inputs()
+        _, _, _, theme_dict, _ = chart._render_inputs()
         # The ferrum default Theme() has no properties → empty dict is correct
         assert theme_dict == {}
 
@@ -63,7 +63,7 @@ class TestB1DefaultThemeInRenderPipeline:
         assert chart._theme is None  # no per-chart theme
 
         with fm.set_default_theme(fm.themes.dark):
-            _, _, _, theme_dict = chart._render_inputs()
+            _, _, _, theme_dict, _ = chart._render_inputs()
 
         # dark theme has a non-empty spec dict — spot-check background_color
         assert theme_dict != {}
@@ -76,7 +76,7 @@ class TestB1DefaultThemeInRenderPipeline:
         chart = fm.Chart(df).mark_point().encode(x="x", y="y").theme(custom_theme)
 
         with fm.set_default_theme(fm.themes.dark):
-            _, _, _, theme_dict = chart._render_inputs()
+            _, _, _, theme_dict, _ = chart._render_inputs()
 
         # per-chart theme wins: must have the custom background, not dark's
         assert theme_dict.get("background_color") == "#aabbcc"
@@ -88,7 +88,7 @@ class TestB1DefaultThemeInRenderPipeline:
         with fm.set_default_theme(fm.themes.dark):
             pass  # block exits, default reverts
 
-        _, _, _, theme_dict = chart._render_inputs()
+        _, _, _, theme_dict, _ = chart._render_inputs()
         assert theme_dict == {}
 
 
