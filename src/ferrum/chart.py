@@ -4639,15 +4639,15 @@ class Chart(_RenderMixin):
     def configure(
         self,
         *,
-        axis=None,
-        axis_x=None,
-        axis_y=None,
-        axis_y2=None,
-        legend=None,
-        title=None,
-        grid=None,
-        padding=None,
-        color=None,
+        axis: "AxisConfig | None" = None,
+        axis_x: "AxisConfig | None" = None,
+        axis_y: "AxisConfig | None" = None,
+        axis_y2: "AxisConfig | None" = None,
+        legend: "LegendConfig | None" = None,
+        title: "TitleConfig | None" = None,
+        grid: "GridConfig | None" = None,
+        padding: "PaddingConfig | None" = None,
+        color: "ColorConfig | None" = None,
     ) -> "Chart":
         """Append a :class:`~ferrum.configure.Configure` layer to the chart.
 
@@ -4705,7 +4705,7 @@ class Chart(_RenderMixin):
         new._configure = new._configure + [cfg]
         return new
 
-    def override(self, **kwargs) -> "Chart":
+    def override(self, **kwargs: Any) -> "Chart":
         """Store low-level spec-path overrides to be applied at render time.
 
         Overrides are merged into :attr:`_overrides` with later calls winning
