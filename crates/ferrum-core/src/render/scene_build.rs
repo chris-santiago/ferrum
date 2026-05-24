@@ -22,6 +22,7 @@ pub fn build_scene(
     theme: &ThemeInputs,
     config: &RenderConfig,
     warnings: &mut Vec<RenderWarning>,
+    chart_config: &super::chart_config::ChartConfig,
 ) -> Result<SceneGraph, RenderError> {
     let background = config.background.or(Some(theme.background_color));
 
@@ -257,6 +258,18 @@ pub fn build_scene(
             other => other,
         };
 
+        // Annotations: render user-specified annotations on the first panel only.
+        let annotation_nodes = if panel_idx == 0 && !chart_config.annotations.is_empty() {
+            let ann_ctx = super::annotation::ScaleContext {
+                plot_area: panel.plot_area,
+                x_scale: &scales.x,
+                y_scale: &scales.y,
+            };
+            super::annotation::build_annotations(&chart_config.annotations, &ann_ctx)
+        } else {
+            Vec::new()
+        };
+
         panels.push(Panel {
             id: panel_idx,
             plot_area,
@@ -265,7 +278,7 @@ pub fn build_scene(
             grid: grid_nodes,
             marks: mark_batches,
             axes: axes_nodes,
-            annotations: Vec::new(),
+            annotations: annotation_nodes,
             strip_title: strip_title_nodes,
         });
     }

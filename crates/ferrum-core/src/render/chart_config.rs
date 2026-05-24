@@ -1,4 +1,4 @@
-//! Chart-level configuration (axis, legend, grid, padding, color).
+//! Chart-level configuration (axis, legend, grid, padding, color, annotations).
 //!
 //! `ChartConfig` is the Rust mirror of the `chart_config` dict passed from
 //! Python's `Chart.configure(...)`. It sits between per-channel encoding
@@ -8,6 +8,8 @@
 //! silently accepted; unknown keys produce a serde error for fast feedback.
 
 use serde::Deserialize;
+
+use super::annotation::AnnotationSpec;
 
 /// Top-level chart configuration passed from Python via the `chart_config` dict.
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -20,6 +22,9 @@ pub struct ChartConfig {
     pub grid: Option<GridConfigSpec>,
     pub padding: Option<PaddingConfigSpec>,
     pub color: Option<ColorConfigSpec>,
+    /// Annotation layer: positioned text, lines, arrows, etc. overlaid on the plot.
+    #[serde(default)]
+    pub annotations: Vec<AnnotationSpec>,
 }
 
 /// Per-axis configuration. Applied after per-channel values but before theme.
@@ -106,6 +111,19 @@ mod tests {
         assert!(cfg.grid.is_none());
         assert!(cfg.padding.is_none());
         assert!(cfg.color.is_none());
+        assert!(cfg.annotations.is_empty());
+    }
+
+    #[test]
+    fn annotations_deserialize_from_chart_config() {
+        let json = r##"{
+            "annotations": [
+                {"type": "text", "x": 50.0, "y": {"norm": 0.5}, "text": "hello"},
+                {"type": "line", "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 100.0, "stroke": "#ff0000"}
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.annotations.len(), 2);
     }
 
     #[test]

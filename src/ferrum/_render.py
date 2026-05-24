@@ -277,7 +277,7 @@ class _RenderMixin:
         return new
 
     def _resolve_chart_config(self) -> dict:
-        """Merge _configure layers into a single dict for the Rust binding."""
+        """Merge _configure layers and annotations into a single dict for the Rust binding."""
         merged: dict = {}
         for cfg in self._configure:
             d = cfg.to_dict()
@@ -286,6 +286,11 @@ class _RenderMixin:
                     merged[key] = {**merged[key], **val}
                 else:
                     merged[key] = val
+        if self._annotations:
+            ann_list = []
+            for annotate in self._annotations:
+                ann_list.extend(annotate.to_dict_list())
+            merged["annotations"] = ann_list
         return merged
 
     def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:

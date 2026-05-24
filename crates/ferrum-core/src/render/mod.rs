@@ -1,6 +1,7 @@
 //! Phase 7 — static renderer. Pure functions: ChartSpec + RecordBatch + ThemeInputs +
 //! Viewport -> deterministic SVG/PNG. See docs/superpowers/specs/2026-05-09-static-renderer-design.md.
 
+pub(crate) mod annotation;
 pub(crate) mod arrow_cast;
 pub(crate) mod chart_config;
 pub(crate) mod config;
@@ -198,7 +199,7 @@ pub fn render_svg(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
-    _chart_config: &ChartConfig,
+    chart_config: &ChartConfig,
 ) -> Result<RenderOutput<String>, RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
@@ -264,7 +265,7 @@ pub fn render_svg(
     }
 
     let scene = scene_build::build_scene(
-        spec, &prep, &layout, theme_ref, config, &mut warnings,
+        spec, &prep, &layout, theme_ref, config, &mut warnings, chart_config,
     )?;
     let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
 
@@ -292,7 +293,7 @@ pub fn render_scene_json(
     theme: &ThemeInputs,
     viewport: Viewport,
     config: &config::RenderConfig,
-    _chart_config: &ChartConfig,
+    chart_config: &ChartConfig,
 ) -> Result<(String, Vec<u8>), RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
@@ -353,7 +354,7 @@ pub fn render_scene_json(
     }
 
     let mut scene = scene_build::build_scene(
-        spec, &prep, &layout, theme_ref, config, &mut warnings,
+        spec, &prep, &layout, theme_ref, config, &mut warnings, chart_config,
     )?;
 
     // Extract large homogeneous mark batches as raw packed bytes, clearing
@@ -600,6 +601,7 @@ mod orchestration_tests {
 
         let scene = scene_build::build_scene(
             &spec, &prep, &layout, theme_ref, &cfg, &mut warnings,
+            &ChartConfig::default(),
         ).unwrap();
         let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts);
 
