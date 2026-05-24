@@ -145,6 +145,8 @@ chart = (
 )
 ```
 
+![Scatter chart with x-axis labels rotated via override](../../assets/concepts/override_example.png)
+
 ---
 
 ## Reporting gaps

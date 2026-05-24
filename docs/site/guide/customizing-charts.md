@@ -42,6 +42,8 @@ chart = (
 )
 ```
 
+![Configuration cascade example: bar chart with per-channel formatting, axis config, and minimal theme](../assets/concepts/customizing_cascade.png)
+
 The per-channel `Axis(format=...)` on `y` wins over anything `configure_axis` sets for the
 y axis. The theme's grid and padding preferences apply where neither level 2 nor 3 set a
 value. Rust defaults fill the rest.
@@ -124,7 +126,7 @@ chart = (
 )
 ```
 
-![Branded chart using a custom theme with company colors](assets/recipes/branded_chart.png)
+![Branded chart using a custom theme with company colors](../assets/recipes/branded_chart.png)
 
 **Recipe: publication-ready chart**
 
@@ -163,7 +165,7 @@ chart = (
 )
 ```
 
-![Publication-ready chart using the built-in publication theme](assets/recipes/publication_ready.png)
+![Publication-ready chart using the built-in publication theme](../assets/recipes/publication_ready.png)
 
 ## Configuration Methods
 
@@ -336,6 +338,8 @@ chart = (
 )
 ```
 
+![Scatter plot with text, arrow, and span annotations](../assets/concepts/customizing_annotations_example.png)
+
 Eight annotation primitives are available: `text`, `arrow`, `rect`, `line`, `span`,
 `bracket`, `callout`, and `image`.
 
@@ -358,6 +362,8 @@ chart = (
 )
 ```
 
+![Dual-axis chart with revenue bars and growth rate line](../assets/concepts/customizing_secondaryy.png)
+
 See [Secondary Axes](concepts/secondary-axes.md).
 
 ### BreakAxis — Outlier Gaps
@@ -372,6 +378,8 @@ chart = (
     + fm.BreakAxis(axis="y", gap=(150, 900))
 )
 ```
+
+![Bar chart with broken y axis to suppress outlier](../assets/concepts/customizing_breakaxis.png)
 
 See [Break Axes](concepts/break-axes.md).
 
@@ -392,6 +400,8 @@ chart = (
     + fm.Inset(chart=zoom, bounds=(fm.norm(0.6), fm.norm(0.0), fm.norm(1.0), fm.norm(0.45)))
 )
 ```
+
+![Scatter plot with zoomed inset panel in the top-right](../assets/concepts/customizing_inset.png)
 
 See [Inset Panels](concepts/inset-panels.md).
 

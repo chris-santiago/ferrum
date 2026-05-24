@@ -73,7 +73,7 @@ pub fn build_scene(
             .as_ref()
             .and_then(|g| g.band_colors.as_deref())
             .unwrap_or(&[]);
-        let grid_nodes = if suppress_axes {
+        let mut grid_nodes = if suppress_axes {
             Vec::new()
         } else {
             marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
@@ -302,9 +302,9 @@ pub fn build_scene(
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
-        // Remap mark pixel coordinates through any broken scales so that marks
-        // inside a gap are hidden and marks outside the gap are repositioned
-        // to their compressed pixel positions.
+        // Remap mark, axis, and grid pixel coordinates through any broken scales
+        // so that elements inside a gap are hidden and elements outside the gap
+        // are repositioned to their compressed pixel positions.
         for (axis, break_result) in &break_results {
             let (data_domain, pixel_range) = if axis == "y" {
                 (scales.y.data_domain(), scales.y.pixel_range())
@@ -317,6 +317,14 @@ pub fn build_scene(
                     remap_mark_batch_through_break(
                         &mut batch.nodes, axis, d_lo, d_hi, px_lo, px_hi, break_result,
                     );
+                }
+                // Remap axis tick marks and labels through the broken scale.
+                for node in axes_nodes.iter_mut() {
+                    remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
+                }
+                // Remap grid lines through the broken scale.
+                for node in grid_nodes.iter_mut() {
+                    remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
                 }
             }
         }
@@ -351,7 +359,7 @@ pub fn build_scene(
     }
 
     // Legend
-    build_legend_decorations(layout, spec, prep, theme, &mut legend_nodes)?;
+    build_legend_decorations(layout, spec, prep, theme, chart_config, &mut legend_nodes)?;
 
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
@@ -429,6 +437,7 @@ fn build_legend_decorations(
     spec: &ChartSpec,
     prep: &PreparedInputs,
     theme: &ThemeInputs,
+    chart_config: &super::chart_config::ChartConfig,
     out: &mut Vec<SceneNode>,
 ) -> Result<(), RenderError> {
     let Some(legend) = &layout.legend else { return Ok(()) };
@@ -436,7 +445,7 @@ fn build_legend_decorations(
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
     };
-    let color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
+    let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         let (gs, _) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_legend,
             prep.final_batch(),
@@ -449,6 +458,9 @@ fn build_legend_decorations(
     } else {
         None
     };
+    if let Some(ref cfg) = chart_config.color {
+        super::apply_color_config_to_color_scale(&mut color_scale, cfg);
+    }
     out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
     Ok(())
 }

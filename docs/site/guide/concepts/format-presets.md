@@ -165,6 +165,8 @@ chart = (
 )
 ```
 
+![Revenue chart with currency-formatted y axis and date x axis](../../assets/concepts/format_presets_revenue.png)
+
 ### Percentage axis
 
 ```python
@@ -180,6 +182,8 @@ chart = (
     .configure_axis(y=True, x=False, label_format="percent")
 )
 ```
+
+![Bar chart with percentage-formatted y axis](../../assets/concepts/format_presets_percent.png)
 
 ### SI prefix for large counts
 

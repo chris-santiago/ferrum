@@ -29,6 +29,8 @@ chart = (
 )
 ```
 
+![Revenue bars with growth rate line on secondary y axis](../../assets/concepts/secondary_axes_basic.png)
+
 The bars measure revenue on the left y axis; the line measures growth rate on the right y
 axis. Both axes are independent — their domains, ticks, and formats are computed
 separately.
@@ -145,6 +147,8 @@ chart = (
 )
 ```
 
+![Color-coded dual-axis chart with matching axis title colors](../../assets/concepts/secondary_axes_color_coded.png)
+
 ---
 
 ## Scale configuration
@@ -197,6 +201,8 @@ chart = (
     )
 )
 ```
+
+![Price line with volume overlay on secondary y axis](../../assets/concepts/secondary_axes_volume.png)
 
 ### Score vs. threshold (scatter + reference line)
 

@@ -56,6 +56,8 @@ chart = (
 )
 ```
 
+![Bar chart with broken y axis to handle outlier](../../assets/concepts/break_axes_basic.png)
+
 **Recipe: server response times with color scale and break annotation**
 
 ```python
@@ -179,6 +181,8 @@ chart = (
 )
 ```
 
+![Horizontal break axis on x for grouped scatter plot](../../assets/concepts/break_axes_horizontal.png)
+
 ---
 
 ## Interaction with annotations
@@ -226,3 +230,5 @@ chart = (
                          font_size=9, color="#666", anchor="end")
 )
 ```
+
+![Comparative bar chart with zigzag break axis and annotation](../../assets/concepts/break_axes_comparative.png)

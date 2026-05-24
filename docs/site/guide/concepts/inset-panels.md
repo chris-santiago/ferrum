@@ -43,7 +43,9 @@ chart = (
 )
 ```
 
-The inset occupies the top-right 40% × 45% of the plot area. Scales, ticks, and marks
+![Basic inset panel showing a zoomed sub-chart in the top-right](../../assets/concepts/inset_basic.png)
+
+The inset occupies the top-right 40% x 45% of the plot area. Scales, ticks, and marks
 inside the inset are computed independently from the parent.
 
 **Recipe: scatter with zoomed cluster detail**
@@ -222,6 +224,8 @@ chart = (
 )
 ```
 
+![Detail zoom inset panel over a dense scatter cluster](../../assets/concepts/inset_detail_zoom.png)
+
 ### Marginal histogram inset
 
 ```python
@@ -249,6 +253,8 @@ chart = (
 )
 ```
 
+![Scatter plot with marginal histogram inset at top](../../assets/concepts/inset_marginal_hist.png)
+
 ### Dashboard card with summary inset
 
 ```python
@@ -272,3 +278,5 @@ main = (
     )
 )
 ```
+
+![Area chart with sparkline inset in top-right corner](../../assets/concepts/inset_dashboard.png)
