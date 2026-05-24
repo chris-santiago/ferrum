@@ -152,7 +152,7 @@ import polars as pl
 df = pl.DataFrame({
     "date": ["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"],
     "revenue": [125000, 138500, 112000, 161000],
-})
+}).with_columns(pl.col("date").str.to_date())
 
 chart = (
     fm.Chart(df)

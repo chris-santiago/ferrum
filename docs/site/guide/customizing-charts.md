@@ -328,13 +328,18 @@ coordinate systems:
 - **Normalized coordinates**: `fm.norm(f)`. Fraction of the plot area (0.0 to 1.0).
 
 ```python
+df = pl.DataFrame({
+    "x": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5],
+    "y": [2.1, 3.0, 3.5, 4.0, 4.5, 8.2, 5.0, 5.5, 6.0, 6.5],
+})
+
 chart = (
     fm.Chart(df)
     .mark_point()
     .encode(x="x:Q", y="y:Q")
     + fm.annotation.text(3.5, 8.2, "Anomaly", color="#c0392b", font_size=13)
     + fm.annotation.arrow(3.5, 8.0, 3.5, 6.5)
-    + fm.annotation.span("x", 3.0, 4.5, fill="#fee2e2", opacity=0.2, label="Anomalous region")
+    + fm.annotation.span("x", 3.0, 4.5, fill="#fee2e2", opacity=0.08, label="Anomalous region")
 )
 ```
 
@@ -375,7 +380,7 @@ chart = (
     fm.Chart(df)
     .mark_bar()
     .encode(x="category:N", y="value:Q")
-    + fm.BreakAxis(axis="y", gap=(150, 900))
+    + fm.BreakAxis(axis="y", gap=(100, 800))
 )
 ```
 
@@ -389,15 +394,15 @@ See [Break Axes](concepts/break-axes.md).
 
 ```python
 zoom = (
-    fm.Chart(df.filter(pl.col("x").is_between(1.0, 2.0)))
-    .mark_point()
+    fm.Chart(df.filter(pl.col("x").is_between(1.0, 3.0)))
+    .mark_point(size=120)
     .encode(x="x:Q", y="y:Q")
 )
 chart = (
     fm.Chart(df)
-    .mark_point()
+    .mark_point(size=50)
     .encode(x="x:Q", y="y:Q")
-    + fm.Inset(chart=zoom, bounds=(fm.norm(0.6), fm.norm(0.0), fm.norm(1.0), fm.norm(0.45)))
+    + fm.Inset(chart=zoom, bounds=(fm.norm(0.55), fm.norm(0.0), fm.norm(1.0), fm.norm(0.5)))
 )
 ```
 

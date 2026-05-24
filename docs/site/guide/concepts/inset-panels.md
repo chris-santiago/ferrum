@@ -23,22 +23,22 @@ df = pl.DataFrame({
     "y": [2.1, 2.8, 3.5, 4.1, 4.8, 5.2, 5.8, 6.3, 6.9, 7.4],
 })
 
-# Build a zoom view of the [1.0, 2.0] x range
-zoom_df = df.filter(pl.col("x").is_between(1.0, 2.0))
+# Build a zoom view of the [1.0, 3.0] x range
+zoom_df = df.filter(pl.col("x").is_between(1.0, 3.0))
 zoom = (
     fm.Chart(zoom_df)
-    .mark_point(size=60)
+    .mark_point(size=120)
     .encode(x="x:Q", y="y:Q")
 )
 
 # Embed the zoom in the top-right of the parent
 chart = (
     fm.Chart(df)
-    .mark_point()
+    .mark_point(size=50)
     .encode(x="x:Q", y="y:Q")
     + fm.Inset(
         chart=zoom,
-        bounds=(fm.norm(0.6), fm.norm(0.0), fm.norm(1.0), fm.norm(0.45)),
+        bounds=(fm.norm(0.55), fm.norm(0.0), fm.norm(1.0), fm.norm(0.5)),
     )
 )
 ```
@@ -205,19 +205,26 @@ zoom = (
 
 ```python
 # Scatter with a zoomed inset on the dense cluster
-zoom_df = df.filter(
-    pl.col("x").is_between(2.0, 3.0) & pl.col("y").is_between(40, 60)
+cluster_df = df.filter(
+    pl.col("x").is_between(1.6, 2.4) & pl.col("y").is_between(2.6, 3.4)
 )
-zoom = fm.Chart(zoom_df).mark_point(size=80, opacity=0.9).encode(x="x:Q", y="y:Q")
+zoom = (
+    fm.Chart(cluster_df)
+    .mark_point(size=80, opacity=0.9)
+    .encode(x="x:Q", y="y:Q")
+    .configure_axis(label_font_size=9, tick_count=4)
+    .configure_padding(top=6, right=6, bottom=6, left=6, auto=False)
+)
 
 chart = (
     fm.Chart(df)
-    .mark_point(opacity=0.4)
+    .mark_point(size=40, opacity=0.5)
     .encode(x="x:Q", y="y:Q")
+    .labs(title="Scatter with Cluster Detail")
     + fm.Inset(
         chart=zoom,
-        bounds=(fm.norm(0.55), fm.norm(0.0), fm.norm(1.0), fm.norm(0.42)),
-        connect_to=(2.5, 50),
+        bounds=(fm.norm(0.6), fm.norm(0.0), fm.norm(1.0), fm.norm(0.42)),
+        connect_to=(2.0, 3.0),
         connect_style="lines",
         shadow=True,
     )
@@ -229,13 +236,18 @@ chart = (
 ### Marginal histogram inset
 
 ```python
+# Pre-compute histogram bins for the inset
+hist_df = (
+    df.with_columns(pl.col("x").round(0).alias("x_bin"))
+    .group_by("x_bin")
+    .agg(pl.len().alias("count"))
+    .sort("x_bin")
+)
+
 hist = (
-    fm.Chart(df)
-    .mark_bar(opacity=0.6)
-    .encode(
-        x=fm.X("x:Q", bin=fm.Bin(maxbins=20)),
-        y="count():Q",
-    )
+    fm.Chart(hist_df)
+    .mark_bar(opacity=0.5)
+    .encode(x="x_bin:Q", y="count:Q")
     .configure_axis(domain=False, grid=False, tick_count=0)
     .configure_padding(top=2, right=2, bottom=2, left=2, auto=False)
 )
@@ -246,18 +258,25 @@ chart = (
     .encode(x="x:Q", y="y:Q")
     + fm.Inset(
         chart=hist,
-        bounds=(fm.norm(0.0), fm.norm(0.0), fm.norm(1.0), fm.norm(0.22)),
+        bounds=(fm.norm(0.0), fm.norm(0.78), fm.norm(1.0), fm.norm(1.0)),
         border=False,
         background=None,
     )
 )
 ```
 
-![Scatter plot with marginal histogram inset at top](../../assets/concepts/inset_marginal_hist.png)
+![Scatter plot with marginal histogram inset at bottom](../../assets/concepts/inset_marginal_hist.png)
 
 ### Dashboard card with summary inset
 
 ```python
+import datetime
+
+dates = pl.date_range(datetime.date(2025, 1, 1), datetime.date(2025, 12, 1), "1mo", eager=True)
+metrics = [100, 112, 108, 125, 130, 128, 145, 150, 162, 170, 178, 190]
+df = pl.DataFrame({"date": dates, "metric": metrics})
+recent_df = df.tail(4)
+
 sparkline = (
     fm.Chart(recent_df)
     .mark_line(stroke_width=1.5, color="#16a34a")
@@ -266,7 +285,7 @@ sparkline = (
     .configure_padding(top=2, right=2, bottom=2, left=2, auto=False)
 )
 
-main = (
+chart = (
     fm.Chart(df)
     .mark_area(opacity=0.3)
     .encode(x="date:T", y="metric:Q")

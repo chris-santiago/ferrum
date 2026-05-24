@@ -221,6 +221,11 @@ The two y axes have independent scales and the break applies only to the primary
 ### Comparative bar chart with outlier suppression
 
 ```python
+df = pl.DataFrame({
+    "category": ["A", "B", "C", "D", "E", "F"],
+    "value": [85, 92, 78, 510, 88, 95],
+})
+
 chart = (
     fm.Chart(df)
     .mark_bar()

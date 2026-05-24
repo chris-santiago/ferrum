@@ -133,16 +133,18 @@ the axis labels to match their series. Set `title_color` on each axis:
 ```python
 chart = (
     fm.Chart(df)
-    .mark_bar(color="#1e40af", opacity=0.8)
+    .mark_bar(opacity=0.7, color="#1e40af")
     .encode(x="month:N", y="revenue:Q")
     .configure(
-        axis_y=fm.AxisConfig(title_color="#1e40af"),
+        axis_y=fm.AxisConfig(label_format="currency", title_color="#1e40af"),
+        axis_y2=fm.AxisConfig(label_format="percent", title_color="#dc2626"),
     )
+    .labs(title="Revenue and Conversion Rate", y="Revenue")
     + fm.SecondaryY(
-        field="growth_rate",
+        field="conversion_rate",
         mark="line",
         color="#dc2626",
-        axis=fm.Axis(title="Growth Rate", title_color="#dc2626"),
+        axis=fm.Axis(title="Conversion Rate"),
     )
 )
 ```
@@ -191,13 +193,13 @@ chart = (
     fm.Chart(df)
     .mark_line(stroke_width=2)
     .encode(x="date:T", y="price:Q")
-    .configure_axis(axis_x=fm.AxisConfig(label_format="month_year"))
+    .configure(axis_x=fm.AxisConfig(label_format="month_year"))
     + fm.SecondaryY(
         field="volume",
         mark="bar",
         color="#94a3b8",
         opacity=0.35,
-        axis=fm.Axis(title="Volume", format=".2s"),
+        axis=fm.Axis(title="Volume", label_format=".2s"),
     )
 )
 ```
