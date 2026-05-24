@@ -27,28 +27,31 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
         Some(&theme.font_weight)
     };
 
+    // Default per-orient gap between tick mark end and label baseline/edge.
+    let label_pad = axis.label_padding.unwrap_or(2.0);
+
     for tick in &axis.ticks {
         let effective_font_size = tick.label_font_size.unwrap_or(theme.label_font_size);
 
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
                 tick.position, r.y, tick.position, r.y + theme.tick_size,
-                tick.position, r.y + theme.tick_size + effective_font_size + 2.0,
+                tick.position, r.y + theme.tick_size + effective_font_size + label_pad,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Top => (
                 tick.position, r.y, tick.position, r.y - theme.tick_size,
-                tick.position, r.y - theme.tick_size - 4.0,
+                tick.position, r.y - theme.tick_size - label_pad - 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Left => (
                 r.x, tick.position, r.x - theme.tick_size, tick.position,
-                r.x - theme.tick_size - 2.0, tick.position + effective_font_size / 3.0,
+                r.x - theme.tick_size - label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::End, 0.0,
             ),
             AxisOrient::Right => (
                 r.x, tick.position, r.x + theme.tick_size, tick.position,
-                r.x + theme.tick_size + 2.0, tick.position + effective_font_size / 3.0,
+                r.x + theme.tick_size + label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::Start, 0.0,
             ),
         };
@@ -254,6 +257,7 @@ mod tests {
             show_grid: true,
             title_font_size: None,
             title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -281,6 +285,7 @@ mod tests {
             show_grid: false,
             title_font_size: None,
             title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -319,6 +324,7 @@ mod tests {
             show_grid: false,
             title_font_size: None,
             title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -367,6 +373,7 @@ mod tests {
             show_grid: false,
             title_font_size: None,
             title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default(); // theme.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
@@ -380,8 +387,9 @@ mod tests {
                 "expected font_size 9.0 from per-tick override, got {}",
                 style.font_size,
             );
-            // label_y = r.y + tick_size + effective_font_size + 2.0
-            // With r.y=80, tick_size=4 (default), effective_font_size=9: 80 + 4 + 9 + 2 = 95
+            // label_y = r.y + tick_size + effective_font_size + label_pad
+            // label_pad defaults to 2.0 when axis.label_padding is None.
+            // With r.y=80, tick_size=4 (default), effective_font_size=9, label_pad=2: 80+4+9+2=95
             let expected_y = 80.0 + theme.tick_size + 9.0 + 2.0;
             assert!(
                 (y - expected_y).abs() < 0.01,
@@ -410,6 +418,7 @@ mod tests {
             show_grid: true,
             title_font_size: None,
             title_color_rgba: None,
+            label_padding: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
@@ -438,7 +447,7 @@ mod tests {
             ],
             title: None,
             show_labels: true, show_ticks: true, show_domain: true, show_grid: true,
-            title_font_size: None, title_color_rgba: None,
+            title_font_size: None, title_color_rgba: None, label_padding: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
@@ -468,6 +477,7 @@ mod tests {
             show_grid: false,
             title_font_size: Some(20.0),
             title_color_rgba: Some([0xff, 0x00, 0x00, 0xff]),
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);

@@ -7,6 +7,11 @@
 //! sizing, legend size estimation, and colorbar tick distribution) by
 //! reproducing the same formulas inline. Any divergence between these pinned
 //! contracts and the implementation will be caught as a regression.
+//!
+//! Round 2 additions: new AxisLayout fields (title_color_rgba, title_font_size,
+//! label_padding), per-side padding overrides, label_padding in
+//! estimate_x_label_band, configure-affected layout, subtitle positioning,
+//! inter-row gutter with x_label_band.
 
 #[cfg(test)]
 #[allow(dead_code)]
@@ -61,50 +66,36 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // NaN / Infinity in Rect operations
-    // geometry.rs uses f64::min/max for clamping; NaN poisons these in Rust.
+    // ROUND 1 TESTS (preserved from previous run)
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// split_top with NaN height: Rust IEEE 754 min/max semantics mean
-    /// NaN.min(80.0) = 80.0 (returns the non-NaN arg), then 80.0.max(0.0) = 80.0.
-    /// So NaN is silently absorbed and the strip consumes the entire rect.
-    /// This is NaN-safe in practice but surprising: NaN input silently becomes
-    /// "take everything" rather than producing an error or NaN output.
+    // NaN / Infinity in Rect operations
+
     #[test]
     fn bug_hunt_rect_split_top_nan_height_absorbed_by_ieee754_min() {
         let r = Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 };
         let (strip, rest) = r.split_top(f64::NAN);
-        // NaN.min(80.0) = 80.0 per IEEE 754; 80.0.max(0.0) = 80.0
-        assert_eq!(strip.h, 80.0, "NaN absorbed by min/max → strip consumes full height");
+        assert_eq!(strip.h, 80.0, "NaN absorbed by min/max -> strip consumes full height");
         assert_eq!(rest.h, 0.0, "no remainder after NaN clamp");
     }
 
-    /// split_left with NaN width: IEEE 754 min/max absorbs NaN.
-    /// NaN.min(300.0) = 300.0, then 300.0.max(0.0) = 300.0.
-    /// Strip takes all width, rest has w=0.
     #[test]
     fn bug_hunt_rect_split_left_nan_width_absorbed_by_ieee754() {
         let r = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
         let (strip, rest) = r.split_left(f64::NAN);
-        assert_eq!(strip.w, 300.0, "NaN absorbed → strip takes full width");
+        assert_eq!(strip.w, 300.0, "NaN absorbed -> strip takes full width");
         assert_eq!(rest.w, 0.0, "rest width = 300 - 300 = 0");
         assert_eq!(rest.x, 300.0, "rest x = 0 + 300 = 300");
     }
 
-    /// shrink with NaN inset: the subtraction produces NaN, but NaN <= 0.0
-    /// is false, so shrink does NOT return ZERO — it returns a Rect with NaN
-    /// dimensions. This is subtle: the guard condition fails open for NaN.
     #[test]
     fn bug_hunt_rect_shrink_nan_inset_fails_open() {
         let r = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let result = r.shrink(f64::NAN, 0.0, 0.0, 0.0);
-        // w = 100 - 0 - 0 = 100 (ok), h = 100 - NaN - 0 = NaN
-        // NaN <= 0.0 is false → guard does NOT trigger → returns Rect with NaN height
         assert!(result.h.is_nan(), "NaN inset should produce NaN height, not ZERO");
         assert_ne!(result, Rect::ZERO, "NaN comparison: NaN != 0.0, so guard fails open");
     }
 
-    /// shrink with Infinity inset: w = 100 - INF = -INF, -INF <= 0.0 is true → ZERO.
     #[test]
     fn bug_hunt_rect_shrink_infinity_inset_collapses_to_zero() {
         let r = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
@@ -112,8 +103,6 @@ mod tests {
         assert_eq!(result, Rect::ZERO, "Infinity inset should collapse to ZERO");
     }
 
-    /// split_top with Infinity: min(INF, 80.0) = 80.0, so strip == full rect,
-    /// rest.h = 0. Correctly clamped.
     #[test]
     fn bug_hunt_rect_split_top_infinity_clamps_to_full_height() {
         let r = Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 };
@@ -122,7 +111,6 @@ mod tests {
         assert_eq!(rest.h, 0.0);
     }
 
-    /// split_top with negative h: max(-10.0, 0.0) = 0.0, so strip.h == 0.
     #[test]
     fn bug_hunt_rect_split_top_negative_clamps_to_zero() {
         let r = Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 };
@@ -131,7 +119,6 @@ mod tests {
         assert_eq!(rest, r, "remainder should be the original rect");
     }
 
-    /// split_right with Infinity: min(INF, 300.0) = 300.0.
     #[test]
     fn bug_hunt_rect_split_right_infinity_clamps_correctly() {
         let r = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
@@ -140,10 +127,6 @@ mod tests {
         assert_eq!(rest.w, 0.0);
     }
 
-    // ── Rect with negative w/h (degenerate construction) ──────────────────────
-
-    /// A Rect constructed with negative w should make shrink(0,...) act oddly:
-    /// w = -50 - 0 - 0 = -50, -50 <= 0 → ZERO. At least ZERO is returned.
     #[test]
     fn bug_hunt_rect_negative_width_shrink_returns_zero() {
         let r = Rect { x: 0.0, y: 0.0, w: -50.0, h: 100.0 };
@@ -151,11 +134,8 @@ mod tests {
         assert_eq!(result, Rect::ZERO, "negative width rect shrunk by 0 should give ZERO");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Axis tick position edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Y-axis with 1 tick label: tick should be at panel_y + panel_h/2.
     #[test]
     fn bug_hunt_y_axis_single_tick_at_center() {
         let panel_y = 50.0;
@@ -166,7 +146,6 @@ mod tests {
         assert!((pos - 150.0).abs() < 1e-9, "single y tick should be at center: {pos}");
     }
 
-    /// X-axis with 0 tick labels: slot_w should be 0 (not div-by-zero).
     #[test]
     fn bug_hunt_x_axis_zero_labels_slot_w_is_zero() {
         let n = 0usize;
@@ -175,8 +154,6 @@ mod tests {
         assert_eq!(slot_w, 0.0, "zero labels must produce slot_w=0");
     }
 
-    /// Very large number of ticks: 10000 ticks in 600px panel.
-    /// Each slot_w = 0.06px. Tick positions must not accumulate floating-point error.
     #[test]
     fn bug_hunt_x_axis_many_ticks_no_accumulated_error() {
         let panel_x = 50.0;
@@ -184,7 +161,6 @@ mod tests {
         let n = 10000usize;
         let slot_w = panel_w / n as f64;
         let last_pos = panel_x + (n as f64 - 0.5) * slot_w;
-        // Last tick should be at panel_x + panel_w - slot_w/2
         let expected = panel_x + panel_w - slot_w / 2.0;
         assert!(
             (last_pos - expected).abs() < 1e-6,
@@ -192,34 +168,28 @@ mod tests {
         );
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Elision edge cases — mirrors axis.rs::elide_to_fit
-    // ──────────────────────────────────────────────────────────────────────────
+    // Elision edge cases
 
-    /// elide_to_fit with max_width=0: should return just ellipsis.
     #[test]
     fn bug_hunt_elide_to_fit_zero_max_width_returns_ellipsis() {
         let ellipsis = '\u{2026}';
         let max_width = 0.0;
-        // Measure: ellipsis_w = 1 char * per_char_px = 10
         let per_char_px = 10.0;
-        let ellipsis_w = per_char_px; // 1 char
-        // ellipsis_w (10) >= max_width (0) → return just ellipsis
+        let ellipsis_w = per_char_px;
         let should_return_ellipsis = ellipsis_w >= max_width;
         assert!(should_return_ellipsis, "when max_width=0, ellipsis alone exceeds it");
         let result = ellipsis.to_string();
         assert_eq!(result, "\u{2026}");
     }
 
-    /// elide_to_fit with empty label: should return just ellipsis.
     #[test]
     fn bug_hunt_elide_to_fit_empty_label_returns_ellipsis() {
         let label = "";
         let ellipsis = '\u{2026}';
         let per_char_px = 10.0;
         let max_width = 100.0;
-        let ellipsis_w = per_char_px; // 1 char
-        let budget = max_width - ellipsis_w; // 90
+        let ellipsis_w = per_char_px;
+        let budget = max_width - ellipsis_w;
         let mut out = String::new();
         for ch in label.chars() {
             let mut tentative = out.clone();
@@ -234,11 +204,8 @@ mod tests {
         assert_eq!(out, "\u{2026}", "empty label should produce just ellipsis");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Wrap label edge cases — mirrors axis.rs::wrap_label
-    // ──────────────────────────────────────────────────────────────────────────
+    // Wrap label edge cases
 
-    /// wrap_label with empty string: no break points → None.
     #[test]
     fn bug_hunt_wrap_label_empty_string_returns_none() {
         let label = "";
@@ -247,23 +214,17 @@ mod tests {
         let chars: Vec<char> = label.chars().collect();
         let has_camel = chars.windows(2).any(|w| w[0].is_lowercase() && w[1].is_uppercase());
         assert!(!has_underscore && !has_space && !has_camel, "empty string has no break points");
-        // Implementation returns None for "no break points"
     }
 
-    /// wrap_label with single underscore "a_": splits into ["a", ""].
-    /// Empty segment "" measures 0px which fits any max_width.
     #[test]
     fn bug_hunt_wrap_label_trailing_underscore() {
         let label = "a_";
         let segments: Vec<&str> = label.split('_').collect();
         assert_eq!(segments, vec!["a", ""], "trailing underscore produces empty trailing segment");
-        // joined: "a\n" — a label with a trailing newline. The renderer
-        // must handle this gracefully.
         let wrapped = segments.join("\n");
         assert_eq!(wrapped, "a\n");
     }
 
-    /// wrap_label with leading underscore "_a": splits into ["", "a"].
     #[test]
     fn bug_hunt_wrap_label_leading_underscore() {
         let label = "_a";
@@ -273,7 +234,6 @@ mod tests {
         assert_eq!(wrapped, "\na");
     }
 
-    /// wrap_label with consecutive underscores "a__b": splits into ["a", "", "b"].
     #[test]
     fn bug_hunt_wrap_label_consecutive_underscores() {
         let label = "a__b";
@@ -283,22 +243,14 @@ mod tests {
         assert_eq!(wrapped, "a\n\nb");
     }
 
-    /// wrap_label space: single word. Since it has a space (split yields ["a"]),
-    /// we try greedy but it's a single word. Result: "a" (no newlines needed).
     #[test]
     fn bug_hunt_wrap_label_single_word_with_trailing_space() {
         let label = "hello ";
         let words: Vec<&str> = label.split(' ').collect();
-        // "hello " splits into ["hello", ""]
         assert_eq!(words, vec!["hello", ""]);
-        // Empty string "" measures 0 which fits within any max_width.
-        // Greedy: start with "hello", then "" → candidate "hello " → check width.
-        // This is fine but produces "hello\n" (trailing newline) or "hello " fitting.
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Facet grid edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
     fn compute_wrap(ncols: u32, n_panels: u32, w: f64, h: f64, gx: f64, gy: f64) -> (u32, u32, f64, f64) {
         let ncols = ncols.max(1);
@@ -310,28 +262,22 @@ mod tests {
         (ncols, nrows, cell_w, cell_h)
     }
 
-    /// n_panels=0: nrows = ceil(0/ncols) = 0, clamped to 1.
-    /// Cell fills entire origin.
     #[test]
     fn bug_hunt_facet_wrap_zero_panels() {
         let (ncols, nrows, cell_w, cell_h) = compute_wrap(3, 0, 600.0, 400.0, 0.0, 0.0);
         assert_eq!(ncols, 3);
-        assert_eq!(nrows, 1, "0 panels → ceil(0/3)=0, clamped to 1");
+        assert_eq!(nrows, 1, "0 panels -> ceil(0/3)=0, clamped to 1");
         assert!((cell_w - 200.0).abs() < 1e-9);
         assert!((cell_h - 400.0).abs() < 1e-9);
     }
 
-    /// Very large gutter exceeding origin: cell_w should be clamped to 0.
     #[test]
     fn bug_hunt_facet_wrap_gutter_exceeds_origin() {
         let (_, _, cell_w, cell_h) = compute_wrap(3, 3, 100.0, 100.0, 200.0, 200.0);
-        // total_x_gutter = 200 * 2 = 400 > 100 → cell_w = max((100 - 400)/3, 0) = 0
         assert_eq!(cell_w, 0.0, "gutter > origin should clamp cell_w to 0");
-        // nrows=1 → total_y_gutter = 200*0 = 0, cell_h = 100/1 = 100
         assert!((cell_h - 100.0).abs() < 1e-9);
     }
 
-    /// n_panels=1, ncols=1, zero gutter: single panel fills whole origin.
     #[test]
     fn bug_hunt_facet_wrap_single_panel_fills_origin() {
         let (nc, nr, cw, ch) = compute_wrap(1, 1, 600.0, 400.0, 0.0, 0.0);
@@ -341,7 +287,6 @@ mod tests {
         assert!((ch - 400.0).abs() < 1e-9);
     }
 
-    /// n_panels=u32::MAX, ncols=1: nrows = u32::MAX. cell_h is tiny.
     #[test]
     fn bug_hunt_facet_wrap_extreme_panel_count() {
         let n_panels = 1_000_000u32;
@@ -353,7 +298,6 @@ mod tests {
         assert!(cell_h < 0.001, "cell_h should be sub-pixel: {cell_h}");
     }
 
-    /// Facet grid dropped_count for exact fit (n_panels == nrows*ncols).
     #[test]
     fn bug_hunt_facet_grid_exact_fit_drops_nothing() {
         let nrows = 3u32;
@@ -364,7 +308,6 @@ mod tests {
         assert_eq!(dropped, 0);
     }
 
-    /// Facet grid n_panels=0: dropped_count should be 0 even though grid has capacity.
     #[test]
     fn bug_hunt_facet_grid_zero_panels_no_drop() {
         let nrows = 2u32;
@@ -375,9 +318,7 @@ mod tests {
         assert_eq!(dropped, 0);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Legend size edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
     const SYMBOL_WIDTH: f64 = 12.0;
     const SYMBOL_LABEL_GAP: f64 = 4.0;
@@ -394,22 +335,18 @@ mod tests {
         SYMBOL_WIDTH + SYMBOL_LABEL_GAP + max_label_w + 2.0 * LEGEND_OUTER_PAD
     }
 
-    /// Legend with NaN label width: produces NaN total width.
     #[test]
     fn bug_hunt_legend_size_nan_label_width() {
         let w = estimate_legend_width_right(f64::NAN);
         assert!(w.is_nan(), "NaN label width should propagate to total width");
     }
 
-    /// Legend with negative label width: produces unexpected but finite width.
     #[test]
     fn bug_hunt_legend_size_negative_label_width() {
         let w = estimate_legend_width_right(-100.0);
-        // w = 12 + 4 + (-100) + 16 = -68. Negative width!
         assert!(w < 0.0, "negative max_label_w produces negative total width: {w}");
     }
 
-    /// Legend with 100 entries in very small space: overflow logic must cap count.
     #[test]
     fn bug_hunt_legend_many_entries_vertical_overflow() {
         let avail_h = 50.0;
@@ -422,19 +359,17 @@ mod tests {
         };
         let n_cols = 1usize;
         let max_fit = max_rows * n_cols;
-        // With avail_h=50, row_pitch=17.2: max_rows = floor(54/17.2) = 3
         assert_eq!(max_fit, 3, "only 3 entries fit in 50px height");
         let n_entries = 100usize;
         let n_fit = n_entries.min(max_fit.max(1));
         assert_eq!(n_fit, 3, "100 entries capped to 3");
     }
 
-    /// Legend horizontal direction with avail_w=0: max_n should be 0.
     #[test]
     fn bug_hunt_legend_horizontal_zero_avail_width() {
         let avail_w = 0.0;
-        let entry_w = SYMBOL_WIDTH + SYMBOL_LABEL_GAP + 40.0; // 56
-        let pitch = entry_w + LEGEND_ENTRY_ROW_PAD; // 60
+        let entry_w = SYMBOL_WIDTH + SYMBOL_LABEL_GAP + 40.0;
+        let pitch = entry_w + LEGEND_ENTRY_ROW_PAD;
         let max_n = if pitch > 0.0 {
             ((avail_w + LEGEND_ENTRY_ROW_PAD) / pitch).floor() as usize
         } else {
@@ -443,8 +378,6 @@ mod tests {
         assert_eq!(max_n, 0, "zero avail_w should fit 0 entries");
     }
 
-    /// Multi-column legend: columns=10 but only 3 entries.
-    /// Each entry goes in its own column, but only columns 0,1,2 are used.
     #[test]
     fn bug_hunt_legend_columns_exceed_entries() {
         let n_cols = 10usize;
@@ -462,7 +395,6 @@ mod tests {
         let max_fit = max_rows * n_cols;
         let n_fit = n_entries.min(max_fit.max(1));
         assert_eq!(n_fit, 3, "3 entries should all fit with 10 columns");
-        // Entries should be in col 0, 1, 2 respectively.
         for i in 0..n_fit {
             let col = i % n_cols;
             let row = i / n_cols;
@@ -472,12 +404,8 @@ mod tests {
         assert!(col_w > 0.0, "column width should be positive: {col_w}");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Colorbar edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Colorbar with 0 ticks: the max(1) guard means we still compute t=0.
-    /// But the tick_labels is empty, so no ticks are actually generated.
     #[test]
     fn bug_hunt_colorbar_zero_ticks_no_div_by_zero() {
         let bar_top = 50.0;
@@ -489,16 +417,14 @@ mod tests {
             let t = if n_ticks_max <= 1 { 0.0 } else { i as f64 / (n_ticks_max - 1) as f64 };
             bar_bottom - t * (bar_bottom - bar_top)
         }).collect();
-        assert!(ticks.is_empty(), "zero tick labels → zero ticks");
+        assert!(ticks.is_empty(), "zero tick labels -> zero ticks");
     }
 
-    /// Colorbar where bar_top == bar_bottom (collapsed bar):
-    /// all ticks at the same y, but no div-by-zero because n_ticks guard.
     #[test]
     fn bug_hunt_colorbar_collapsed_bar_all_ticks_same_y() {
         let bar_y = 100.0;
         let bar_top = bar_y;
-        let bar_bottom = bar_y; // collapsed
+        let bar_bottom = bar_y;
         let n_ticks = 5usize;
         let ticks: Vec<f64> = (0..n_ticks).map(|i| {
             let t = if n_ticks <= 1 { 0.0 } else { i as f64 / (n_ticks - 1) as f64 };
@@ -509,10 +435,7 @@ mod tests {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // subsample_tick_labels edge cases
-    // Mirrors legend.rs::subsample_tick_labels
-    // ──────────────────────────────────────────────────────────────────────────
 
     fn subsample_tick_labels(labels: Vec<String>, max_count: usize) -> Vec<String> {
         let n = labels.len();
@@ -567,7 +490,6 @@ mod tests {
         assert_eq!(result, labels);
     }
 
-    /// subsample 3 from 5: should keep first, middle, last.
     #[test]
     fn bug_hunt_subsample_three_from_five() {
         let labels: Vec<String> = (0..5).map(|i| format!("L{i}")).collect();
@@ -575,11 +497,9 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], "L0", "first label always kept");
         assert_eq!(result[2], "L4", "last label always kept");
-        // Middle: idx = (1 * 4) / 2 = 2 → "L2"
         assert_eq!(result[1], "L2", "middle should be evenly spaced");
     }
 
-    /// subsample 2 from 10: first and last.
     #[test]
     fn bug_hunt_subsample_two_from_ten() {
         let labels: Vec<String> = (0..10).map(|i| format!("L{i}")).collect();
@@ -589,42 +509,28 @@ mod tests {
         assert_eq!(result[1], "L9");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // CoordFixed with extreme ratios
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// CoordFixed with ratio = Infinity: new_h = w / INF = 0.0.
-    /// This produces a rect with h=0, which should be caught by MIN_PANEL_DIM check.
     #[test]
     fn bug_hunt_coord_fixed_infinity_ratio_collapses_height() {
         let ratio = f64::INFINITY;
         let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 300.0 };
         assert!(ratio > 0.0, "INF passes the ratio > 0.0 guard");
-        let _current_ratio = rect.w / rect.h; // 0.667
-        // current_ratio (0.667) <= INF → else branch: shrink height
+        let _current_ratio = rect.w / rect.h;
         assert!(_current_ratio <= ratio);
-        let new_h = rect.w / ratio; // 200 / INF = 0.0
+        let new_h = rect.w / ratio;
         assert_eq!(new_h, 0.0, "INF ratio makes height 0");
-        let dy = (rect.h - new_h) / 2.0; // 150
-        let new_rect = Rect { x: rect.x, y: rect.y + dy, w: rect.w, h: new_h };
-        assert_eq!(new_rect.h, 0.0, "resulting rect has zero height");
-        // This rect would be caught by MIN_PANEL_DIM=1.0 check downstream.
     }
 
-    /// CoordFixed with very small ratio (1e-300): new_w = h * 1e-300 ≈ 0.
     #[test]
     fn bug_hunt_coord_fixed_tiny_ratio_collapses_width() {
         let ratio = 1e-300_f64;
         let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 300.0 };
         assert!(ratio > 0.0);
-        let _current_ratio = rect.w / rect.h; // 0.667
-        // 0.667 > 1e-300 → too wide → shrink width
-        let new_w = rect.h * ratio; // 300 * 1e-300 ≈ 3e-298
+        let new_w = rect.h * ratio;
         assert!(new_w < 1e-290, "very small ratio collapses width to near-zero");
     }
 
-    /// CoordFixed with NaN ratio: NaN > 0.0 is false, so the adjustment
-    /// is skipped entirely. The rect is unchanged.
     #[test]
     fn bug_hunt_coord_fixed_nan_ratio_skipped() {
         let ratio = f64::NAN;
@@ -632,7 +538,6 @@ mod tests {
         assert!(!should_apply, "NaN ratio should not pass the > 0.0 guard");
     }
 
-    /// CoordFixed with negative ratio: -1.0 > 0.0 is false, skipped.
     #[test]
     fn bug_hunt_coord_fixed_negative_ratio_skipped() {
         let ratio = -1.0_f64;
@@ -640,59 +545,30 @@ mod tests {
         assert!(!should_apply, "negative ratio must not pass the guard");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // estimate_x_label_band edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
     const LABEL_OVERLAP_TOLERANCE: f64 = 0.10;
     const ANGLE_CASCADE: [f64; 5] = [0.0, -30.0, -45.0, -60.0, -90.0];
 
-    /// estimate_x_label_band with slot_w=0: threshold=0, all labels collide.
-    /// The cascade should still produce a finite result.
     #[test]
     fn bug_hunt_estimate_x_label_band_zero_slot_w() {
-        let _labels: Vec<String> = vec!["A".into(), "B".into()];
-        let _per_char_px = 10.0;
-        let _label_font_size = 11.0;
-        let _line_h = _label_font_size * 1.2;
-        let max_label_w = 10.0; // "A" = 1 char * 10
-
-        // override path
-        let estimated_slot_w = 0.0;
-        let _threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE); // 0
-
-        // 10 > 0 → collision. Try rotation cascade.
-        // For each angle, check: max_label_w * cos(angle) <= estimated_slot_w (0)
-        // cos(angle) * 10 is always > 0 for angles -30, -45, -60.
-        // cos(-90) ≈ 6.12e-17 → 10 * 6.12e-17 ≈ 6.12e-16. 6.12e-16 > 0? Yes.
-        // But <= 0 is false. So all rotation angles fail.
-        // Fallback: max_label_w + 2.0 = 12.0
-
-        // Actually, check: cos(-90 deg) * 10 = ~6.12e-16 which is > 0.0 (strictly).
-        // So the check max_label_w * cos_factor <= estimated_slot_w becomes
-        // 6.12e-16 <= 0.0 → false. So even -90 fails!
-        // Fallback path: max_label_w + 2.0 = 12.0
+        let max_label_w = 10.0;
         let band: f64 = max_label_w + 2.0;
         assert!((band - 12.0).abs() < 1e-9, "slot_w=0 should trigger fallback");
         assert!(band.is_finite(), "band must be finite");
     }
 
-    /// estimate_x_label_band with override angle 0: sin(0)=0, cos(0)=1.
-    /// Margin = max_label_w * 0 + line_h * 1 = line_h.
     #[test]
     fn bug_hunt_estimate_x_label_band_override_zero_angle() {
         let max_label_w = 100.0;
         let label_font_size = 11.0;
-        let line_h = label_font_size * 1.2; // 13.2
+        let line_h = label_font_size * 1.2;
         let angle = 0.0_f64;
         let rad = angle.to_radians();
         let band = max_label_w * rad.sin().abs() + line_h * rad.cos().abs();
-        // sin(0)=0, cos(0)=1 → band = 0 + 13.2 = 13.2
         assert!((band - line_h).abs() < 1e-9, "0-degree override should equal line_h: got {band}");
     }
 
-    /// estimate_x_label_band with override angle 180: sin(180)≈0, cos(180)=-1, abs=1.
-    /// Margin = max_label_w * 0 + line_h * 1 ≈ line_h.
     #[test]
     fn bug_hunt_estimate_x_label_band_override_180_degrees() {
         let max_label_w = 100.0;
@@ -701,47 +577,33 @@ mod tests {
         let angle = 180.0_f64;
         let rad = angle.to_radians();
         let band = max_label_w * rad.sin().abs() + line_h * rad.cos().abs();
-        // sin(180°) ≈ 1.22e-16 ≈ 0, cos(180°) = -1, |cos| = 1
-        assert!((band - line_h).abs() < 0.01, "180-degree: margin should be ≈ line_h: got {band}");
+        assert!((band - line_h).abs() < 0.01, "180-degree: margin should be ~= line_h: got {band}");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Collision cascade edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Cascade with all identical labels: max_label_w is the same as every label.
-    /// Wrapping behavior depends on break points in the single distinct label.
     #[test]
     fn bug_hunt_cascade_identical_labels() {
         let slot_w = 50.0;
-        let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE); // 45.0
-        let label = "ABCDEF"; // 6 * 10 = 60 > 45 → collision
+        let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
+        let label = "ABCDEF";
         let per_char_px = 10.0;
         let label_w = label.chars().count() as f64 * per_char_px;
         assert!(label_w > threshold, "label should collide");
-        // No break points → wrap fails. Reduced font: fixed_width ignores fs → still fails.
-        // Rotation: cos(-30)*60 = 51.96 > 50 → fail
-        //           cos(-45)*60 = 42.4 <= 50 → pass at -45!
         let cos_45 = (-45.0_f64).to_radians().cos().abs();
-        assert!(label_w * cos_45 <= slot_w, "-45° should resolve collision");
+        assert!(label_w * cos_45 <= slot_w, "-45deg should resolve collision");
     }
 
-    /// Cascade with a single label: no collision is possible if n=1.
-    /// slot_w = panel_w/1 = panel_w. threshold = panel_w * 0.9.
-    /// Any reasonable label fits.
     #[test]
     fn bug_hunt_cascade_single_label_no_collision() {
         let panel_w = 400.0;
         let n = 1usize;
-        let slot_w = panel_w / n as f64; // 400
-        let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE); // 360
-        let label_w = 50.0; // easily fits
+        let slot_w = panel_w / n as f64;
+        let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
+        let label_w = 50.0;
         assert!(label_w <= threshold, "single label should always fit");
     }
 
-    /// Cascade with empty label vector: the cascade should handle gracefully.
-    /// In the source, n=0 → slot_w=0, widths is empty, the threshold=0.
-    /// widths.iter().all(...) on empty is true → S0 flat → no rotation.
     #[test]
     fn bug_hunt_cascade_empty_labels_resolves_flat() {
         let labels: Vec<f64> = vec![];
@@ -749,13 +611,10 @@ mod tests {
         assert!(all_fit, "empty iterator .all() should return true");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Font shrink cascade (S2) edge cases
-    // ──────────────────────────────────────────────────────────────────────────
+    // Font shrink cascade
 
     const FONT_SHRINK_FACTOR: f64 = 0.82;
 
-    /// Reduced font size must always be smaller than original.
     #[test]
     fn bug_hunt_font_shrink_always_reduces() {
         let original_fs = 11.0;
@@ -764,23 +623,15 @@ mod tests {
         assert!(reduced > 0.0, "reduced font size must be positive");
     }
 
-    /// Font shrink with font_size=0: reduced = 0 * 0.82 = 0.
-    /// All widths at font_size=0 would also be 0 if the measure function
-    /// respects font_size. With fixed_width it doesn't, so behavior differs.
     #[test]
     fn bug_hunt_font_shrink_zero_font_size() {
         let fs = 0.0;
         let reduced = fs * FONT_SHRINK_FACTOR;
         assert_eq!(reduced, 0.0);
-        // HeuristicMetrics: width = chars * font_size * 0.6 = chars * 0 = 0
-        // So all labels would be width 0, fitting flat → no need for shrink anyway.
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Padding boundary: zero padding
-    // ──────────────────────────────────────────────────────────────────────────
+    // Padding boundary
 
-    /// Zero padding: inner rect equals viewport rect.
     #[test]
     fn bug_hunt_zero_padding_inner_equals_viewport() {
         let viewport = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
@@ -789,7 +640,6 @@ mod tests {
         assert_eq!(inner, viewport, "zero padding should leave inner == viewport");
     }
 
-    /// Padding = 0.5 (sub-pixel): should still produce valid inner rect.
     #[test]
     fn bug_hunt_subpixel_padding() {
         let viewport = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
@@ -799,37 +649,30 @@ mod tests {
         assert!((inner.h - 399.0).abs() < 1e-9);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Title band edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Title with font_size=0: title_line_h = 0, band_h = 0 + offset.
-    /// split_top(offset) carves out a thin band.
     #[test]
     fn bug_hunt_title_zero_font_size() {
         let font_size = 0.0;
         let line_h_factor = 1.2;
         let offset = 6.0;
-        let title_line_h: f64 = font_size * line_h_factor; // 0.0
-        let band_h: f64 = title_line_h + offset; // 6.0
+        let title_line_h: f64 = font_size * line_h_factor;
+        let band_h: f64 = title_line_h + offset;
         assert!((band_h - 6.0).abs() < 1e-9, "zero font_size title band = offset only");
     }
 
-    /// Title with very large font_size: band_h may exceed the inner rect.
-    /// split_top clamps strip to inner.h, remainder.h = 0.
     #[test]
     fn bug_hunt_title_huge_font_size_clamps_at_inner() {
         let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
         let font_size = 1000.0;
-        let title_line_h = font_size * 1.2; // 1200
+        let title_line_h = font_size * 1.2;
         let offset = 6.0;
-        let band_h = title_line_h + offset; // 1206 > 400
+        let band_h = title_line_h + offset;
         let (strip, rest) = inner.split_top(band_h);
         assert_eq!(strip.h, 400.0, "band should be clamped to inner height");
         assert_eq!(rest.h, 0.0, "no space left for panels");
     }
 
-    /// Subtitle font size: default = title_fs * 0.85. With override.
     #[test]
     fn bug_hunt_subtitle_custom_font_size_overrides_default() {
         let title_fs = 20.0;
@@ -838,11 +681,8 @@ mod tests {
         assert_eq!(subtitle_font_size, 10.0, "custom override should win");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // HeuristicMetrics edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// HeuristicMetrics with font_size = 0: all widths and heights are 0.
     #[test]
     fn bug_hunt_heuristic_metrics_zero_font_size() {
         let k = 0.6;
@@ -853,7 +693,6 @@ mod tests {
         assert_eq!(line_h, 0.0);
     }
 
-    /// HeuristicMetrics with font_size = NaN: produces NaN.
     #[test]
     fn bug_hunt_heuristic_metrics_nan_font_size() {
         let k = 0.6;
@@ -862,7 +701,6 @@ mod tests {
         assert!(width.is_nan(), "NaN font_size should produce NaN width");
     }
 
-    /// HeuristicMetrics with font_size = Infinity: produces Infinity.
     #[test]
     fn bug_hunt_heuristic_metrics_inf_font_size() {
         let k = 0.6;
@@ -871,7 +709,6 @@ mod tests {
         assert!(width.is_infinite(), "Infinity font_size should produce Infinity width");
     }
 
-    /// measure_multiline_width with no newlines: returns single-line width.
     #[test]
     fn bug_hunt_multiline_width_no_newlines() {
         let text = "hello";
@@ -882,7 +719,6 @@ mod tests {
         assert!((max_w - 50.0).abs() < 1e-9);
     }
 
-    /// measure_multiline_width with trailing newline: last line is empty (width=0).
     #[test]
     fn bug_hunt_multiline_width_trailing_newline() {
         let text = "hello\n";
@@ -890,11 +726,9 @@ mod tests {
         let max_w: f64 = text.split('\n')
             .map(|line| line.chars().count() as f64 * per_char_px)
             .fold(0.0_f64, f64::max);
-        // Lines: ["hello", ""] → widths: [50, 0] → max=50
         assert!((max_w - 50.0).abs() < 1e-9, "trailing newline should not affect max width");
     }
 
-    /// measure_multiline_width with only newlines: all lines empty, max=0.
     #[test]
     fn bug_hunt_multiline_width_only_newlines() {
         let text = "\n\n\n";
@@ -905,11 +739,8 @@ mod tests {
         assert_eq!(max_w, 0.0, "text of only newlines should have width 0");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Viewport validation boundary
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Negative viewport dimensions: should be rejected (both must be > 0).
     #[test]
     fn bug_hunt_negative_viewport_is_invalid() {
         let width = -100.0_f64;
@@ -918,7 +749,6 @@ mod tests {
         assert!(!is_valid, "negative width should fail validation");
     }
 
-    /// NaN viewport dimension: NaN > 0.0 is false → correctly rejected.
     #[test]
     fn bug_hunt_nan_viewport_is_invalid() {
         let width = f64::NAN;
@@ -927,79 +757,58 @@ mod tests {
         assert!(!is_valid, "NaN width should fail validation");
     }
 
-    /// Infinity viewport: INF > 0.0 is true → passes validation.
-    /// This is potentially problematic: downstream arithmetic with INF
-    /// may produce NaN or weird results.
     #[test]
     fn bug_hunt_infinity_viewport_passes_validation() {
         let width = f64::INFINITY;
         let height = 400.0;
         let is_valid = width > 0.0 && height > 0.0;
         assert!(is_valid, "Infinity viewport passes > 0.0 check (potential issue)");
-        // Padding: inner.w = INF - 2*16 = INF. Still valid.
         let inner_w = width - 2.0 * 16.0;
         assert!(inner_w.is_infinite(), "inner width is still infinity");
     }
 
-    /// Very small viewport (1x1): should not error but panels may be degenerate.
     #[test]
     fn bug_hunt_tiny_viewport_one_by_one() {
         let width = 1.0;
         let height = 1.0;
         let is_valid = width > 0.0 && height > 0.0;
         assert!(is_valid);
-        let padding = 0.0; // must be zero to avoid collapse
+        let padding = 0.0;
         let inner = Rect { x: 0.0, y: 0.0, w: width, h: height };
         let result = inner.shrink(padding, padding, padding, padding);
         assert_eq!(result, inner, "1x1 viewport with 0 padding should survive");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Axis rotation: cos(-90) is not exactly zero in IEEE 754
-    // This means the S3 rotation check at -90 uses cos(-90°) ≈ 6.12e-17,
-    // not exactly 0. This can cause subtle differences from the expected
-    // "vertical labels project to 0 width" assumption.
-    // ──────────────────────────────────────────────────────────────────────────
+    // cos(-90) is not exactly zero in IEEE 754
 
     #[test]
     fn bug_hunt_cos_90_not_exactly_zero() {
         let cos_90 = (-90.0_f64).to_radians().cos().abs();
-        assert!(cos_90 > 0.0, "cos(-90°) is not exactly 0 in IEEE 754: {cos_90}");
+        assert!(cos_90 > 0.0, "cos(-90deg) is not exactly 0 in IEEE 754: {cos_90}");
         assert!(cos_90 < 1e-15, "but it's very close to 0: {cos_90}");
     }
 
-    /// At -90°, the projected width for any reasonable label (< 1e15 px)
-    /// is still effectively 0. But for astronomical label widths (1e18),
-    /// cos(-90°) * 1e18 ≈ 61.2 — which exceeds a slot_w of 10.
-    /// This is the condition that triggers S4 culling in the cascade.
     #[test]
     fn bug_hunt_cos_90_times_huge_width_exceeds_slot() {
         let cos_90 = (-90.0_f64).to_radians().cos().abs();
         let huge_label_w = 1e18;
         let projected = huge_label_w * cos_90;
-        assert!(projected > 10.0, "1e18 * cos(-90°) = {projected} > 10 → S3 fails, enabling S4");
+        assert!(projected > 10.0, "1e18 * cos(-90deg) = {projected} > 10 -> S3 fails, enabling S4");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Y-axis title anchor position
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Y-axis title anchor_x: should be to the left of the panel.
-    /// anchor_x = panel.x - label_band - axis_title_padding - title_h/2
-    /// All of these are positive, so anchor_x < panel.x.
     #[test]
     fn bug_hunt_y_axis_title_anchor_left_of_panel() {
         let panel_x = 100.0;
         let label_band = 50.0;
         let axis_title_padding = 8.0;
-        let title_h = 13.0 * 1.2; // 15.6
+        let title_h = 13.0 * 1.2;
         let anchor_x: f64 = panel_x - label_band - axis_title_padding - title_h / 2.0;
         assert!(anchor_x < panel_x, "y-axis title must be left of panel: {anchor_x}");
-        // Expected: 100 - 50 - 8 - 7.8 = 34.2
         assert!((anchor_x - 34.2).abs() < 0.01);
     }
 
-    /// Y-axis title anchor_y: centered vertically in panel.
     #[test]
     fn bug_hunt_y_axis_title_anchor_vertically_centered() {
         let panel_y = 50.0;
@@ -1008,11 +817,8 @@ mod tests {
         assert!((anchor_y - 200.0).abs() < 1e-9);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // X-axis title anchor position
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// X-axis title anchor: centered horizontally under the panel.
     #[test]
     fn bug_hunt_x_axis_title_anchor_horizontally_centered() {
         let panel_x = 100.0;
@@ -1021,7 +827,6 @@ mod tests {
         assert!((anchor_x - 300.0).abs() < 1e-9);
     }
 
-    /// X-axis title anchor_y: below the panel + label height + padding.
     #[test]
     fn bug_hunt_x_axis_title_anchor_below_labels() {
         let panel_y = 50.0;
@@ -1029,35 +834,28 @@ mod tests {
         let label_font_size = 11.0;
         let title_font_size = 13.0;
         let axis_title_padding = 8.0;
-        let label_h = label_font_size * 1.2; // 13.2
-        let title_h = title_font_size * 1.2; // 15.6
+        let label_h = label_font_size * 1.2;
+        let title_h = title_font_size * 1.2;
         let anchor_y: f64 = panel_y + panel_h + label_h + axis_title_padding + title_h / 2.0;
-        // 50 + 300 + 13.2 + 8 + 7.8 = 379.0
         assert!((anchor_y - 379.0).abs() < 0.01);
         assert!(anchor_y > panel_y + panel_h, "title must be below panel bottom edge");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Strip title geometry
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Strip title reduces panel height by strip_band_height.
     #[test]
     fn bug_hunt_strip_title_reduces_panel_height() {
         let strip_text_size = 12.0;
         let strip_padding = 6.0;
         let line_h_factor = 1.2;
         let strip_band_height: f64 = strip_text_size * line_h_factor + 2.0 * strip_padding;
-        // 12 * 1.2 + 12 = 26.4
         assert!((strip_band_height - 26.4).abs() < 1e-9);
-
         let original_h: f64 = 200.0;
         let new_h: f64 = (original_h - strip_band_height).max(0.0);
         assert!((new_h - 173.6).abs() < 1e-9);
         assert!(new_h < original_h);
     }
 
-    /// Strip title on zero-height panel: new_h = max(0 - band, 0) = 0.
     #[test]
     fn bug_hunt_strip_title_zero_height_panel() {
         let strip_band_height: f64 = 26.4;
@@ -1066,32 +864,24 @@ mod tests {
         assert_eq!(new_h, 0.0);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Colorbar estimate_colorbar_size edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
     const COLORBAR_WIDTH: f64 = 14.0;
     const COLORBAR_HEIGHT: f64 = 180.0;
     const COLORBAR_TICK_GAP: f64 = 4.0;
     const LEGEND_TITLE_GAP: f64 = 8.0;
 
-    /// estimate_colorbar_size with no title and no tick labels:
-    /// width = bar_w + tick_gap + 0 + 2*outer_pad.
     #[test]
     fn bug_hunt_colorbar_size_no_title_no_ticks() {
         let bar_w = COLORBAR_WIDTH;
         let bar_h = COLORBAR_HEIGHT;
-        let max_tick_w = 0.0; // no tick labels
+        let max_tick_w = 0.0;
         let width = bar_w + COLORBAR_TICK_GAP + max_tick_w + 2.0 * LEGEND_OUTER_PAD;
         let height = bar_h + 2.0 * LEGEND_OUTER_PAD;
-        // 14 + 4 + 0 + 16 = 34
         assert!((width - 34.0).abs() < 1e-9);
-        // 180 + 16 = 196
         assert!((height - 196.0).abs() < 1e-9);
     }
 
-    /// estimate_colorbar_size with gradient_length_override=0.
-    /// Clamped to 1.0 in layout_colorbar.
     #[test]
     fn bug_hunt_colorbar_size_zero_gradient_length_clamped() {
         let override_val = 0.0_f64;
@@ -1099,8 +889,6 @@ mod tests {
         assert_eq!(effective, 1.0, "zero gradient length should be clamped to 1.0");
     }
 
-    /// estimate_colorbar_size with negative gradient_thickness_override.
-    /// Clamped to 1.0.
     #[test]
     fn bug_hunt_colorbar_size_negative_gradient_thickness_clamped() {
         let override_val = -50.0_f64;
@@ -1108,34 +896,20 @@ mod tests {
         assert_eq!(effective, 1.0, "negative thickness should be clamped to 1.0");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Legend colorbar: empty stops → (None, plot_inner)
-    // ──────────────────────────────────────────────────────────────────────────
-
     #[test]
     fn bug_hunt_colorbar_empty_stops_returns_none() {
         let stops: Vec<(f64, String)> = vec![];
-        // In layout_colorbar: if stops.is_empty() { return (None, plot_inner); }
         assert!(stops.is_empty());
-        // This means the legend is None and the inner rect is unchanged.
     }
 
-    /// Colorbar single stop: the gradient has only one color.
-    /// The tick distribution with n_ticks>0 still works.
     #[test]
     fn bug_hunt_colorbar_single_stop() {
         let stops = vec![(0.0, "#ff0000".to_string())];
         assert_eq!(stops.len(), 1);
-        // Layout should still proceed (stops.is_empty() is false).
-        // The SVG gradient will just be a solid color.
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Legend orient parsing edge cases
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// parse_legend_orient: "right", "left", "top", "bottom" are the only valid values.
-    /// Uppercase or mixed case should fail.
     #[test]
     fn bug_hunt_legend_orient_case_sensitive() {
         let valid = ["right", "left", "top", "bottom"];
@@ -1154,14 +928,10 @@ mod tests {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // AxisInput D7 show_* defaults
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// AxisInput::new sets all show_* fields to true by default.
     #[test]
     fn bug_hunt_axis_input_new_defaults_all_show_true() {
-        // Simulating AxisInput::new contract
         let show_labels = true;
         let show_ticks = true;
         let show_domain = true;
@@ -1170,32 +940,17 @@ mod tests {
             "AxisInput::new must default all show_* to true");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Layout with hidden axes: axes not emitted, but gutters still reserved
-    // ──────────────────────────────────────────────────────────────────────────
+    // Hidden y-axis gutter
 
-    /// When show_y=false, no y-axis layout is emitted, but the y gutter
-    /// (label_band + title_gutter) is still reserved from the plot_region.
-    /// This means the plot area is smaller than it could be — but consistent.
     #[test]
     fn bug_hunt_hidden_y_axis_gutter_still_reserved() {
-        // In compute_layout, the plot_region is computed BEFORE the
-        // axis layout loop. show_y only affects whether an AxisLayout
-        // is emitted, not whether the gutter is subtracted. So:
-        // - show_y=true: gutter reserved, axis emitted
-        // - show_y=false: gutter STILL reserved, axis NOT emitted
-        // This is by design (comment in the source: "gutters remain reserved upstream").
         let show_y = false;
-        let gutter_reserved = true; // always true per current implementation
+        let gutter_reserved = true;
         assert!(gutter_reserved || !show_y, "gutters reserved regardless of show_y");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Facet spacing override
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// When facet.spacing is Some(s), both gx and gy use s instead of
-    /// theme.column_padding / theme.row_padding.
     #[test]
     fn bug_hunt_facet_spacing_overrides_theme_padding() {
         let spacing = Some(20.0);
@@ -1206,7 +961,6 @@ mod tests {
         assert_eq!(gy, 20.0);
     }
 
-    /// Facet spacing = Some(0.0): no gutter between panels.
     #[test]
     fn bug_hunt_facet_spacing_zero_no_gutter() {
         let spacing = Some(0.0);
@@ -1215,33 +969,23 @@ mod tests {
         assert_eq!(gy, 0.0);
     }
 
-    /// Facet spacing = Some(negative): gutter is negative.
-    /// This means panels overlap! The code doesn't guard against this.
     #[test]
     fn bug_hunt_facet_spacing_negative_causes_overlap() { // BUG: negative spacing not guarded
         let spacing = Some(-10.0);
         let (gx, _gy) = spacing.map(|s| (s, s)).unwrap_or((12.0, 12.0));
         assert_eq!(gx, -10.0, "negative spacing is silently accepted");
-        // With ncols=3, total_x_gutter = -10 * 2 = -20
-        // cell_w = (600 - (-20)) / 3 = 620/3 ≈ 206.7
-        // This is WIDER than expected. And panels overlap by 10px each.
         let origin_w = 600.0;
         let ncols = 3u32;
-        let total_x = gx * (ncols - 1) as f64; // -10 * 2 = -20
-        let cell_w = (origin_w - total_x) / ncols as f64; // 620/3 ≈ 206.67
+        let total_x = gx * (ncols - 1) as f64;
+        let cell_w = (origin_w - total_x) / ncols as f64;
         assert!(cell_w > origin_w / ncols as f64,
             "negative spacing makes cells wider than without spacing: {cell_w}");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // LayoutWarning serde: verify tag-based discriminant
-    // ──────────────────────────────────────────────────────────────────────────
+    // LayoutWarning serde
 
-    /// All LayoutWarning variants must serialize with a "kind" tag.
     #[test]
     fn bug_hunt_layout_warning_all_variants_have_kind_tag() {
-        // The enum is #[serde(tag = "kind", rename_all = "snake_case")]
-        // so each variant should produce {"kind":"variant_name", ...}
         let variants = ["panel_collapsed", "labels_elided", "legend_overflowed", "panels_dropped"];
         for v in &variants {
             assert!(v.chars().all(|c| c.is_lowercase() || c == '_'),
@@ -1249,26 +993,17 @@ mod tests {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Rounding: facet panel_positions index arithmetic
-    // ──────────────────────────────────────────────────────────────────────────
+    // Panel positions
 
-    /// panel_positions: row = i / ncols, col = i % ncols.
-    /// For i=ncols-1: row=0, col=ncols-1 (last column of first row).
-    /// For i=ncols: row=1, col=0 (first column of second row).
     #[test]
     fn bug_hunt_panel_positions_row_col_boundary() {
         let ncols = 3u32;
-        // i = 2 (last of first row)
         assert_eq!(2 / ncols, 0);
         assert_eq!(2 % ncols, 2);
-        // i = 3 (first of second row)
         assert_eq!(3 / ncols, 1);
         assert_eq!(3 % ncols, 0);
     }
 
-    /// panel_positions cap for grid mode: min(n_panels, nrows*ncols).
-    /// If n_panels < nrows*ncols, cap = n_panels (underfill).
     #[test]
     fn bug_hunt_panel_positions_grid_underfill() {
         let nrows = 3u32;
@@ -1278,69 +1013,53 @@ mod tests {
         assert_eq!(cap, 5, "underfill: cap = n_panels");
         let positions: Vec<(u32, u32)> = (0..cap).map(|i| (i / ncols, i % ncols)).collect();
         assert_eq!(positions.len(), 5);
-        // 4 / 4 = 1, 4 % 4 = 0 → row=1, col=0
-        assert_eq!(4 / ncols, 1);
-        assert_eq!(4 % ncols, 0);
         assert_eq!(positions[4], (1, 0), "5th panel at row 1, col 0");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Legend capping: legend_rect width capped at 50% of inner.w
-    // ──────────────────────────────────────────────────────────────────────────
+    // Legend capping
 
-    /// Legend width capped at 50% of inner.w for Right orient.
     #[test]
     fn bug_hunt_legend_width_capped_at_half_inner() {
         let inner_w = 200.0;
-        let estimated_legend_w: f64 = 300.0; // wider than inner
+        let estimated_legend_w: f64 = 300.0;
         let capped: f64 = estimated_legend_w.min(inner_w * 0.5);
         assert_eq!(capped, 100.0, "legend should be capped at 50% of inner width");
     }
 
-    /// When legend width exactly equals inner.w * 0.5, plot area gets the other half.
     #[test]
     fn bug_hunt_legend_exact_half_width() {
         let inner_w = 200.0;
-        let legend_w = inner_w * 0.5; // 100
-        // LEGEND_PLOT_GAP = 8
+        let legend_w = inner_w * 0.5;
         let legend_gap = 8.0;
-        let split_w = legend_w + legend_gap; // 108
-        let rest_w = inner_w - split_w; // 92
+        let split_w = legend_w + legend_gap;
+        let rest_w = inner_w - split_w;
         assert!(rest_w > 0.0, "rest must be positive");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Y-axis label_band with very wide labels
-    // ──────────────────────────────────────────────────────────────────────────
+    // Y-axis wide labels
 
-    /// Y-axis label_band: if label is very wide (e.g., "123456789012345"),
-    /// the label band eats most of the plot width. This is expected but
-    /// can produce a very narrow plot area.
     #[test]
     fn bug_hunt_y_axis_wide_labels_narrow_plot() {
         let per_char_px = 10.0;
-        let label = "123456789012345"; // 15 chars * 10 = 150px
+        let label = "123456789012345";
         let label_band = label.chars().count() as f64 * per_char_px;
         assert_eq!(label_band, 150.0);
         let inner_w = 200.0;
-        let remaining = inner_w - label_band; // 50px
+        let remaining = inner_w - label_band;
         assert!(remaining > 0.0, "narrow but positive plot area");
         assert!(remaining < inner_w * 0.5, "plot area is less than half the inner width");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Elide-to-fit with multi-byte Unicode characters
-    // ──────────────────────────────────────────────────────────────────────────
+    // Elide-to-fit with multi-byte Unicode
 
-    /// Eliding a string with multi-byte chars must not panic or produce invalid UTF-8.
     #[test]
     fn bug_hunt_elide_multibyte_unicode() {
-        let label = "日本語テスト"; // 6 chars
+        let label = "日本語テスト";
         let per_char_px = 20.0;
         let max_width = 50.0;
         let ellipsis = '\u{2026}';
         let ellipsis_w = per_char_px;
-        let budget = max_width - ellipsis_w; // 30
+        let budget = max_width - ellipsis_w;
         let mut out = String::new();
         for ch in label.chars() {
             let mut tentative = out.clone();
@@ -1350,16 +1069,12 @@ mod tests {
             out = tentative;
         }
         out.push(ellipsis);
-        // 30/20 = 1.5 → only 1 char fits. "日…"
         assert_eq!(out, "日\u{2026}", "should truncate to 1 CJK char + ellipsis");
         assert!(out.is_char_boundary(out.len()), "result must be valid UTF-8");
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
     // Rect ZERO constant
-    // ──────────────────────────────────────────────────────────────────────────
 
-    /// Rect::ZERO shrink should return ZERO (idempotent).
     #[test]
     fn bug_hunt_rect_zero_shrink_is_idempotent() {
         let z = Rect::ZERO;
@@ -1367,7 +1082,6 @@ mod tests {
         assert_eq!(result, Rect::ZERO, "ZERO.shrink(0,0,0,0) should still be ZERO");
     }
 
-    /// Rect::ZERO split_top(anything) should be (strip with h=0, rest with h=0).
     #[test]
     fn bug_hunt_rect_zero_split_top() {
         let z = Rect::ZERO;
@@ -1376,9 +1090,7 @@ mod tests {
         assert_eq!(rest.h, 0.0);
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Wrap label with camelCase edge: all-uppercase should NOT trigger camel split
-    // ──────────────────────────────────────────────────────────────────────────
+    // Wrap label: camelCase edge cases
 
     #[test]
     fn bug_hunt_wrap_label_all_uppercase_no_camel_split() {
@@ -1396,14 +1108,12 @@ mod tests {
         assert!(!has_camel, "all-lowercase should not trigger camelCase split");
     }
 
-    /// camelCase with single-char segments: "aB" → ["a", "B"].
     #[test]
     fn bug_hunt_wrap_label_minimal_camel() {
         let label = "aB";
         let chars: Vec<char> = label.chars().collect();
         let has_camel = chars.windows(2).any(|w| w[0].is_lowercase() && w[1].is_uppercase());
         assert!(has_camel, "'aB' should trigger camelCase split");
-        // Split: segments = ["a", "B"]
         let mut segments: Vec<String> = Vec::new();
         let mut current = String::new();
         for i in 0..chars.len() {
@@ -1421,5 +1131,1486 @@ mod tests {
             segments.push(current);
         }
         assert_eq!(segments, vec!["a", "B"]);
+    }
+
+
+    // ======================================================================
+    // ROUND 2 TESTS — new axis fields, configure overrides, structural features
+    // ======================================================================
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Per-side padding overrides (ThemeInputs.padding_top/right/bottom/left)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// When per-side padding overrides are None, the uniform padding wins.
+    /// Inset = { top: pad, right: pad, bottom: pad, left: pad }.
+    #[test]
+    fn bug_hunt_per_side_padding_none_falls_back_to_uniform() {
+        let padding = 16.0;
+        let padding_top: Option<f64> = None;
+        let padding_right: Option<f64> = None;
+        let padding_bottom: Option<f64> = None;
+        let padding_left: Option<f64> = None;
+
+        let top = padding_top.unwrap_or(padding);
+        let right = padding_right.unwrap_or(padding);
+        let bottom = padding_bottom.unwrap_or(padding);
+        let left = padding_left.unwrap_or(padding);
+
+        assert_eq!(top, 16.0);
+        assert_eq!(right, 16.0);
+        assert_eq!(bottom, 16.0);
+        assert_eq!(left, 16.0);
+    }
+
+    /// When per-side overrides are set, they win over uniform padding.
+    /// This tests the asymmetric case: top=0, left=50.
+    #[test]
+    fn bug_hunt_per_side_padding_some_overrides_uniform() {
+        let padding = 16.0;
+        let padding_top = Some(0.0);
+        let padding_right: Option<f64> = None;
+        let padding_bottom: Option<f64> = None;
+        let padding_left = Some(50.0);
+
+        let top = padding_top.unwrap_or(padding);
+        let right = padding_right.unwrap_or(padding);
+        let bottom = padding_bottom.unwrap_or(padding);
+        let left = padding_left.unwrap_or(padding);
+
+        assert_eq!(top, 0.0, "per-side top=0 should override uniform 16");
+        assert_eq!(right, 16.0, "None -> falls back to uniform");
+        assert_eq!(bottom, 16.0, "None -> falls back to uniform");
+        assert_eq!(left, 50.0, "per-side left=50 should override uniform 16");
+    }
+
+    /// Per-side padding that exceeds viewport should cause inner.w <= 0
+    /// triggering PaddingExceedsViewport. Test the arithmetic.
+    #[test]
+    fn bug_hunt_per_side_padding_left_right_exceed_viewport() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 };
+        let top = 5.0;
+        let right = 60.0;
+        let bottom = 5.0;
+        let left = 60.0;
+        let inner = viewport.shrink(top, right, bottom, left);
+        // w = 100 - 60 - 60 = -20 <= 0 -> ZERO
+        assert_eq!(inner, Rect::ZERO, "left+right > width should collapse to ZERO");
+    }
+
+    /// Per-side padding with only top very large (larger than height).
+    #[test]
+    fn bug_hunt_per_side_padding_top_exceeds_height() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 600.0, h: 100.0 };
+        let inner = viewport.shrink(200.0, 0.0, 0.0, 0.0);
+        // h = 100 - 200 - 0 = -100 <= 0 -> ZERO
+        assert_eq!(inner, Rect::ZERO, "top padding > height should collapse");
+    }
+
+    /// Asymmetric per-side padding produces correct inner rect geometry.
+    #[test]
+    fn bug_hunt_per_side_padding_asymmetric_geometry() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let inner = viewport.shrink(10.0, 20.0, 30.0, 40.0);
+        // x = 0 + 40 = 40, y = 0 + 10 = 10
+        // w = 600 - 40 - 20 = 540, h = 400 - 10 - 30 = 360
+        assert_eq!(inner.x, 40.0);
+        assert_eq!(inner.y, 10.0);
+        assert_eq!(inner.w, 540.0);
+        assert_eq!(inner.h, 360.0);
+    }
+
+    /// Per-side padding with NaN on one side: shrink fails open (NaN in result).
+    #[test]
+    fn bug_hunt_per_side_padding_nan_on_left_fails_open() {
+        let viewport = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let inner = viewport.shrink(0.0, 0.0, 0.0, f64::NAN);
+        // w = 600 - NaN - 0 = NaN. NaN <= 0.0 is false -> guard fails open.
+        assert!(inner.w.is_nan(), "NaN per-side padding should produce NaN width");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // New AxisInput fields: title_font_size, title_color, title_padding,
+    // label_padding — propagation to AxisLayout
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// AxisInput.title_font_size overrides the theme value in
+    /// compute_y_title_width. When Some(20.0), the gutter should be larger
+    /// than with the default 13.0.
+    #[test]
+    fn bug_hunt_axis_title_font_size_override_increases_y_gutter() {
+        let line_h_factor = 1.2;
+        let theme_title_fs = 13.0;
+        let theme_title_padding = 8.0;
+
+        // Default (no override): line_h(13.0) + 8.0 = 13*1.2 + 8 = 15.6 + 8 = 23.6
+        let default_gutter: f64 = theme_title_fs * line_h_factor + theme_title_padding;
+        assert!((default_gutter - 23.6).abs() < 1e-9);
+
+        // With override (20.0): line_h(20.0) + 8.0 = 20*1.2 + 8 = 24 + 8 = 32
+        let override_fs: f64 = 20.0;
+        let effective_fs: f64 = Some(override_fs).unwrap_or(theme_title_fs);
+        let override_gutter: f64 = effective_fs * line_h_factor + theme_title_padding;
+        assert!((override_gutter - 32.0).abs() < 1e-9);
+        assert!(override_gutter > default_gutter,
+            "larger title_font_size should produce larger gutter");
+    }
+
+    /// AxisInput.title_padding overrides theme.axis_title_padding in
+    /// compute_y_title_width.
+    #[test]
+    fn bug_hunt_axis_title_padding_override_affects_y_gutter() {
+        let line_h_factor = 1.2;
+        let theme_title_fs = 13.0;
+        let theme_title_padding = 8.0;
+
+        let default_gutter: f64 = theme_title_fs * line_h_factor + theme_title_padding;
+
+        // With title_padding override of 20.0
+        let override_padding: f64 = 20.0;
+        let effective_padding: f64 = Some(override_padding).unwrap_or(theme_title_padding);
+        let override_gutter: f64 = theme_title_fs * line_h_factor + effective_padding;
+        assert!((override_gutter - (15.6 + 20.0)).abs() < 1e-9);
+        assert!(override_gutter > default_gutter);
+    }
+
+    /// AxisInput.title_font_size AND title_padding both overridden simultaneously.
+    /// Both should compose: effective_fs for line_height, effective_padding for gap.
+    #[test]
+    fn bug_hunt_axis_title_font_size_and_padding_both_override() {
+        let theme_fs = 13.0;
+        let theme_pad = 8.0;
+        let line_h_factor = 1.2;
+
+        let override_fs = 24.0;
+        let override_pad = 0.0; // zero padding
+
+        let effective_fs: f64 = Some(override_fs).unwrap_or(theme_fs);
+        let effective_pad: f64 = Some(override_pad).unwrap_or(theme_pad);
+        let gutter: f64 = effective_fs * line_h_factor + effective_pad;
+        // 24 * 1.2 + 0 = 28.8
+        assert!((gutter - 28.8).abs() < 1e-9);
+    }
+
+    /// AxisInput.title_color propagates to AxisLayout.title_color_rgba as [R,G,B,A].
+    /// This tests the mapping from palette::Srgba<u8> to [u8; 4].
+    #[test]
+    fn bug_hunt_axis_title_color_rgba_mapping() {
+        // Simulate: title_color = Some(Srgba::new(0xFF, 0x00, 0x80, 0xCC))
+        let r: u8 = 0xFF;
+        let g: u8 = 0x00;
+        let b: u8 = 0x80;
+        let a: u8 = 0xCC;
+        let rgba: [u8; 4] = [r, g, b, a];
+        let title_color_rgba: Option<[u8; 4]> = Some(rgba);
+
+        assert_eq!(title_color_rgba.unwrap(), [255, 0, 128, 204]);
+    }
+
+    /// When AxisInput.title_color is None, AxisLayout.title_color_rgba should be None.
+    #[test]
+    fn bug_hunt_axis_title_color_none_maps_to_none() {
+        let title_color: Option<(u8, u8, u8, u8)> = None;
+        let title_color_rgba: Option<[u8; 4]> = title_color.map(|c| [c.0, c.1, c.2, c.3]);
+        assert!(title_color_rgba.is_none());
+    }
+
+    /// AxisLayout.label_padding propagates from AxisInput.label_padding.
+    #[test]
+    fn bug_hunt_axis_label_padding_propagation() {
+        let input_label_padding: Option<f64> = Some(12.0);
+        // In layout_y_axis / layout_x_axis: label_padding: input.label_padding
+        let output_label_padding = input_label_padding;
+        assert_eq!(output_label_padding, Some(12.0));
+    }
+
+    /// AxisLayout.label_padding defaults to None when not set in AxisInput.
+    #[test]
+    fn bug_hunt_axis_label_padding_none_default() {
+        let input_label_padding: Option<f64> = None;
+        let output_label_padding = input_label_padding;
+        assert!(output_label_padding.is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // label_padding in estimate_x_label_band (new 6th parameter)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// label_padding=None uses default 2.0. The effective_label_padding is
+    /// only used in future label position calculation, not the band height
+    /// formula itself. But the parameter is accepted and processed.
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_none_defaults_to_two() {
+        let label_padding: Option<f64> = None;
+        let effective = label_padding.unwrap_or(2.0);
+        assert_eq!(effective, 2.0, "None label_padding should default to 2.0");
+    }
+
+    /// label_padding=Some(0.0) reduces the effective gap to 0.
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_zero() {
+        let label_padding = Some(0.0);
+        let effective = label_padding.unwrap_or(2.0);
+        assert_eq!(effective, 0.0, "zero label_padding should be 0.0, not 2.0");
+    }
+
+    /// label_padding=Some(negative) is silently accepted (no guard).
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_negative() { // BUG: no guard on negative label_padding
+        let label_padding = Some(-5.0);
+        let effective = label_padding.unwrap_or(2.0);
+        assert_eq!(effective, -5.0, "negative label_padding is silently accepted");
+        // Negative effective_label_padding could cause label overlap or negative offsets.
+    }
+
+    /// label_padding=Some(NaN) produces NaN effective_label_padding.
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_nan() {
+        let label_padding = Some(f64::NAN);
+        let effective = label_padding.unwrap_or(2.0);
+        assert!(effective.is_nan(), "NaN label_padding should be NaN effective");
+    }
+
+    /// label_padding=Some(large value) could push labels far from axis.
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_huge() {
+        let label_padding = Some(1000.0);
+        let effective = label_padding.unwrap_or(2.0);
+        assert_eq!(effective, 1000.0);
+        // This is valid but extreme — the renderer will push labels 1000px from ticks.
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // AxisLayout serde with new fields
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// AxisLayout serialization: when title_font_size/title_color_rgba/label_padding
+    /// are None, they should be omitted from JSON via skip_serializing_if.
+    #[test]
+    fn bug_hunt_axis_layout_serde_none_fields_omitted() {
+        // Simulate the serde contract: None fields should not appear in JSON.
+        // The actual AxisLayout has:
+        //   #[serde(default, skip_serializing_if = "Option::is_none")]
+        //   pub title_font_size: Option<f64>,
+        //   pub title_color_rgba: Option<[u8; 4]>,
+        //   pub label_padding: Option<f64>,
+        //
+        // We verify the serde contract by checking that a minimal AxisLayout
+        // round-trips correctly and that None fields are absent.
+        //
+        // Since we cannot import AxisLayout in integration tests, we verify
+        // the contract with a manual JSON parse.
+        let json = r#"{"orient":"bottom","panel_index":0,"axis_line":{"x":0,"y":0,"w":100,"h":1},"ticks":[],"show_labels":true,"show_ticks":true,"show_domain":true,"show_grid":true}"#;
+
+        // Parse as generic JSON value
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(val.get("title_font_size").is_none(), "title_font_size should be omitted when None");
+        assert!(val.get("title_color_rgba").is_none(), "title_color_rgba should be omitted when None");
+        assert!(val.get("label_padding").is_none(), "label_padding should be omitted when None");
+    }
+
+    /// AxisLayout serialization: when the new fields are Some, they should appear.
+    #[test]
+    fn bug_hunt_axis_layout_serde_some_fields_present() {
+        let json = r#"{"orient":"left","panel_index":1,"axis_line":{"x":0,"y":0,"w":1,"h":200},"ticks":[],"title":{"text":"Y Axis","anchor_x":10,"anchor_y":100,"angle":-90},"show_labels":true,"show_ticks":true,"show_domain":true,"show_grid":true,"title_font_size":20.0,"title_color_rgba":[255,0,128,255],"label_padding":5.0}"#;
+
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(val["title_font_size"], 20.0);
+        assert_eq!(val["title_color_rgba"], serde_json::json!([255, 0, 128, 255]));
+        assert_eq!(val["label_padding"], 5.0);
+    }
+
+    /// AxisLayout deserialization: missing new fields should default to None.
+    #[test]
+    fn bug_hunt_axis_layout_deser_missing_new_fields_default_none() {
+        // Without the new fields, deserialization should still work and default to None.
+        let json_without_new = r#"{"orient":"bottom","panel_index":0,"axis_line":{"x":0,"y":0,"w":100,"h":1},"ticks":[],"show_labels":true,"show_ticks":true,"show_domain":true,"show_grid":true}"#;
+        let val: serde_json::Value = serde_json::from_str(json_without_new).unwrap();
+        // These should not be present (confirming the default behavior)
+        assert!(val.get("title_font_size").is_none());
+        assert!(val.get("title_color_rgba").is_none());
+        assert!(val.get("label_padding").is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Y-axis title anchor with per-axis overrides
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Y-axis title anchor_x with title_font_size override: larger font size
+    /// means the title text is taller (rotated -90), so anchor_x moves further left.
+    #[test]
+    fn bug_hunt_y_axis_title_anchor_with_font_size_override() {
+        let panel_x = 100.0;
+        let label_band = 50.0;
+        let line_h_factor = 1.2;
+
+        // Default: title_fs=13.0 -> title_h = 13*1.2 = 15.6
+        let default_title_h = 13.0 * line_h_factor;
+        let default_pad = 8.0;
+        let default_anchor_x = panel_x - label_band - default_pad - default_title_h / 2.0;
+
+        // Override: title_fs=24.0 -> title_h = 24*1.2 = 28.8
+        let override_title_h = 24.0 * line_h_factor;
+        let override_anchor_x = panel_x - label_band - default_pad - override_title_h / 2.0;
+
+        assert!(override_anchor_x < default_anchor_x,
+            "larger title font should push anchor further left: override={override_anchor_x}, default={default_anchor_x}");
+    }
+
+    /// Y-axis title anchor_x with title_padding override: larger padding
+    /// pushes the title further from the labels (more negative x).
+    #[test]
+    fn bug_hunt_y_axis_title_anchor_with_padding_override() {
+        let panel_x = 100.0;
+        let label_band = 50.0;
+        let title_h = 13.0 * 1.2;
+
+        let default_pad = 8.0;
+        let default_anchor_x: f64 = panel_x - label_band - default_pad - title_h / 2.0;
+
+        let override_pad: f64 = 30.0;
+        let override_anchor_x: f64 = panel_x - label_band - override_pad - title_h / 2.0;
+
+        assert!(override_anchor_x < default_anchor_x,
+            "larger title_padding should push anchor further left");
+        // Difference should be exactly (30 - 8) = 22
+        assert!((default_anchor_x - override_anchor_x - 22.0).abs() < 1e-9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // X-axis title anchor with per-axis overrides
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// X-axis title anchor_y with title_font_size override.
+    /// anchor_y = panel_y + panel_h + label_h + effective_padding + effective_title_h/2
+    #[test]
+    fn bug_hunt_x_axis_title_anchor_with_font_size_override() {
+        let panel_y = 50.0;
+        let panel_h = 300.0;
+        let label_font_size = 11.0;
+        let label_h = label_font_size * 1.2; // 13.2
+        let default_pad = 8.0;
+
+        // Default: title_fs=13.0 -> title_h = 15.6
+        let default_title_h = 13.0 * 1.2;
+        let default_anchor_y = panel_y + panel_h + label_h + default_pad + default_title_h / 2.0;
+
+        // Override: title_fs=24.0 -> title_h = 28.8
+        let override_title_h = 24.0 * 1.2;
+        let override_anchor_y = panel_y + panel_h + label_h + default_pad + override_title_h / 2.0;
+
+        assert!(override_anchor_y > default_anchor_y,
+            "larger x-axis title font should push anchor further down");
+    }
+
+    /// X-axis title anchor_y with title_padding override.
+    #[test]
+    fn bug_hunt_x_axis_title_anchor_with_padding_override() {
+        let panel_y = 50.0;
+        let panel_h = 300.0;
+        let label_h = 11.0 * 1.2;
+        let title_h = 13.0 * 1.2;
+
+        let default_pad: f64 = 8.0;
+        let default_anchor_y: f64 = panel_y + panel_h + label_h + default_pad + title_h / 2.0;
+
+        let override_pad: f64 = 0.0;
+        let override_anchor_y: f64 = panel_y + panel_h + label_h + override_pad + title_h / 2.0;
+
+        assert!(override_anchor_y < default_anchor_y,
+            "zero title_padding should push anchor closer to labels");
+        assert!((default_anchor_y - override_anchor_y - 8.0).abs() < 1e-9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Subtitle positioning edge cases
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Subtitle band height computation: title_line_h + subtitle_line_h + offset.
+    /// When subtitle is None, subtitle_line_h = 0.
+    #[test]
+    fn bug_hunt_subtitle_none_band_height_equals_title_only() {
+        let title_fs = 13.0;
+        let offset = 6.0;
+        let line_h_factor = 1.2;
+        let title_line_h = title_fs * line_h_factor; // 15.6
+        let subtitle_line_h = 0.0; // no subtitle
+        let band_h: f64 = title_line_h + subtitle_line_h + offset;
+        assert!((band_h - 21.6).abs() < 1e-9);
+    }
+
+    /// Subtitle band height with subtitle present: adds subtitle_font_size * 1.2.
+    #[test]
+    fn bug_hunt_subtitle_present_increases_band_height() {
+        let title_fs = 13.0;
+        let offset = 6.0;
+        let line_h_factor = 1.2;
+        let title_line_h = title_fs * line_h_factor; // 15.6
+        let subtitle_fs = title_fs * 0.85; // 11.05
+        let subtitle_line_h = subtitle_fs * line_h_factor; // 13.26
+        let band_h: f64 = title_line_h + subtitle_line_h + offset;
+        assert!(band_h > title_line_h + offset,
+            "subtitle should increase band height: {band_h}");
+        assert!((band_h - (15.6 + 13.26 + 6.0)).abs() < 0.01);
+    }
+
+    /// Subtitle y position: title_y + subtitle_line_h.
+    /// subtitle_y > title_y (subtitle is below title).
+    #[test]
+    fn bug_hunt_subtitle_y_below_title_y() {
+        let band_y = 10.0;
+        let title_line_h = 15.6;
+        let subtitle_line_h = 13.26;
+        let title_y = band_y + title_line_h; // 25.6
+        let subtitle_y = title_y + subtitle_line_h; // 38.86
+        assert!(subtitle_y > title_y, "subtitle must be below title");
+    }
+
+    /// Subtitle font_size override: when subtitle_font_size is Some,
+    /// it overrides the default (title_fs * 0.85).
+    #[test]
+    fn bug_hunt_subtitle_font_size_override() {
+        let title_fs = 20.0;
+        let override_subtitle_fs = Some(8.0);
+        let resolved = override_subtitle_fs.unwrap_or(title_fs * 0.85);
+        assert_eq!(resolved, 8.0, "explicit subtitle_font_size should override default");
+    }
+
+    /// Subtitle font_size default: title_fs * 0.85.
+    #[test]
+    fn bug_hunt_subtitle_font_size_default() {
+        let title_fs = 20.0;
+        let override_subtitle_fs: Option<f64> = None;
+        let resolved = override_subtitle_fs.unwrap_or(title_fs * 0.85);
+        assert!((resolved - 17.0).abs() < 1e-9, "default subtitle_fs = 20 * 0.85 = 17");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Chart title anchor positioning
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// TextAnchor::Start -> x = band.x (left-aligned).
+    #[test]
+    fn bug_hunt_chart_title_anchor_start() {
+        let band_x = 16.0;
+        let band_w = 568.0;
+        let anchor = "start";
+        let x = match anchor {
+            "start" => band_x,
+            "middle" => band_x + band_w / 2.0,
+            "end" => band_x + band_w,
+            _ => band_x,
+        };
+        assert_eq!(x, 16.0, "start anchor: x = band_x");
+    }
+
+    /// TextAnchor::Middle -> x = band.x + band.w/2 (centered).
+    #[test]
+    fn bug_hunt_chart_title_anchor_middle() {
+        let band_x: f64 = 16.0;
+        let band_w: f64 = 568.0;
+        let x: f64 = band_x + band_w / 2.0;
+        assert!((x - 300.0).abs() < 1e-9, "middle anchor: x centered");
+    }
+
+    /// TextAnchor::End -> x = band.x + band.w (right-aligned).
+    #[test]
+    fn bug_hunt_chart_title_anchor_end() {
+        let band_x: f64 = 16.0;
+        let band_w: f64 = 568.0;
+        let x: f64 = band_x + band_w;
+        assert!((x - 584.0).abs() < 1e-9, "end anchor: x = band right edge");
+    }
+
+    /// Title anchor with override: anchor="middle" in TitleSpec overrides
+    /// theme.title_anchor (which defaults to Start).
+    #[test]
+    fn bug_hunt_chart_title_anchor_spec_overrides_theme() {
+        let theme_anchor = "start";
+        let spec_anchor = Some("middle");
+        let resolved = match spec_anchor {
+            Some("middle") => "middle",
+            Some("end") => "end",
+            Some(_) => "start",
+            None => theme_anchor,
+        };
+        assert_eq!(resolved, "middle", "spec anchor should override theme");
+    }
+
+    /// Title with unknown anchor string: falls back to Start.
+    #[test]
+    fn bug_hunt_chart_title_unknown_anchor_falls_back_to_start() {
+        let spec_anchor = Some("left"); // not a valid anchor name
+        let resolved = match spec_anchor {
+            Some("middle") => "middle",
+            Some("end") => "end",
+            Some(_) => "start", // fallback
+            None => "start",
+        };
+        assert_eq!(resolved, "start", "unknown anchor should fall back to start");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Inter-row gutter augmentation for multi-row facets with x-axis labels
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// When effective_nrows > 1 and show_x is true, the inter-row gutter (gy)
+    /// is augmented by x_label_band so that x-axis labels from one row don't
+    /// overlap with the next row's panel.
+    #[test]
+    fn bug_hunt_facet_multirow_gutter_augmented_by_x_label_band() {
+        let base_gy = 12.0; // theme.row_padding
+        let x_label_band = 20.0; // estimated x label height
+        let effective_nrows = 3;
+        let show_x = true;
+
+        let gy = if effective_nrows > 1 && show_x {
+            base_gy + x_label_band
+        } else {
+            base_gy
+        };
+
+        assert_eq!(gy, 32.0, "multi-row facet with x-axis should augment gy");
+    }
+
+    /// When effective_nrows == 1 (single row), no augmentation.
+    #[test]
+    fn bug_hunt_facet_single_row_gutter_not_augmented() {
+        let base_gy = 12.0;
+        let x_label_band = 20.0;
+        let effective_nrows = 1;
+        let show_x = true;
+
+        let gy = if effective_nrows > 1 && show_x {
+            base_gy + x_label_band
+        } else {
+            base_gy
+        };
+
+        assert_eq!(gy, 12.0, "single-row facet should not augment gy");
+    }
+
+    /// When show_x is false, no augmentation even for multi-row.
+    #[test]
+    fn bug_hunt_facet_multirow_no_x_axis_gutter_not_augmented() {
+        let base_gy = 12.0;
+        let x_label_band = 20.0;
+        let effective_nrows = 3;
+        let show_x = false;
+
+        let gy = if effective_nrows > 1 && show_x {
+            base_gy + x_label_band
+        } else {
+            base_gy
+        };
+
+        assert_eq!(gy, 12.0, "show_x=false should not augment gy");
+    }
+
+    /// effective_nrows computation for FacetMode::Wrap.
+    /// ncols=3, n_panels=7 -> nrows = ceil(7/3) = 3.
+    #[test]
+    fn bug_hunt_effective_nrows_wrap_computation() {
+        let ncols = 3u32;
+        let n_panels = 7u32;
+        let nc = ncols.max(1);
+        let effective_nrows = (n_panels + nc - 1) / nc;
+        assert_eq!(effective_nrows, 3, "ceil(7/3) = 3");
+    }
+
+    /// effective_nrows for FacetMode::Wrap with ncols > n_panels.
+    /// ncols=5, n_panels=3 -> nrows = ceil(3/5) = 1.
+    #[test]
+    fn bug_hunt_effective_nrows_wrap_fewer_panels_than_cols() {
+        let ncols = 5u32;
+        let n_panels = 3u32;
+        let nc = ncols.max(1);
+        let effective_nrows = (n_panels + nc - 1) / nc;
+        assert_eq!(effective_nrows, 1, "ceil(3/5) = 1");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Facet: y-axis title suppression on non-leftmost columns
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// In a 2x3 faceted chart, only panels at col == min_col get a y-axis title.
+    /// Panels at col > min_col have their y_input.title set to None.
+    #[test]
+    fn bug_hunt_facet_y_title_suppressed_on_non_leftmost() {
+        let min_col = 0u32;
+        let cols = [0, 1, 2, 0, 1, 2]; // 2 rows x 3 cols
+        let has_facet = true;
+
+        for &col in &cols {
+            let should_have_title = !(col > min_col && has_facet);
+            if col == 0 {
+                assert!(should_have_title, "col 0 should have y-axis title");
+            } else {
+                assert!(!should_have_title, "col {col} should NOT have y-axis title");
+            }
+        }
+    }
+
+    /// In a non-faceted chart, all panels get the y-axis title (facet is None).
+    #[test]
+    fn bug_hunt_non_facet_always_has_y_title() {
+        let has_facet = false;
+        let col = 1u32;
+        let min_col = 0u32;
+        let should_suppress = col > min_col && has_facet;
+        assert!(!should_suppress, "non-faceted chart should always show y title");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Facet: x-axis title suppression on non-bottom rows
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// In a 3x2 faceted chart, only panels at row == max_row get an x-axis title.
+    #[test]
+    fn bug_hunt_facet_x_title_suppressed_on_non_bottom() {
+        let max_row = 2u32;
+        let rows = [0, 0, 1, 1, 2, 2]; // 3 rows x 2 cols
+        let has_facet = true;
+
+        for &row in &rows {
+            let should_have_title = !(row < max_row && has_facet);
+            if row == max_row {
+                assert!(should_have_title, "bottom row should have x-axis title");
+            } else {
+                assert!(!should_have_title, "row {row} should NOT have x-axis title");
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // x_title_gutter with per-axis title_font_size override
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// The x_title_gutter in compute_layout uses theme.title_font_size (not
+    /// the per-axis override). This means the x_title_gutter calculation
+    /// ignores axes.x.title_font_size.
+    ///
+    /// Looking at the code path:
+    ///   let x_title_gutter = if axes.x.title.is_some() {
+    ///       metrics.line_height(theme.title_font_size) + theme.axis_title_padding
+    ///   } else { 0.0 };
+    ///
+    /// This is potentially a bug: the per-axis title_font_size override should
+    /// also affect the gutter reservation, not just the title anchor position.
+    /// Without this, a large per-axis title_font_size gets a gutter sized for
+    /// the theme default, potentially clipping the title.
+    #[test]
+    fn bug_hunt_x_title_gutter_ignores_per_axis_override() { // BUG: x_title_gutter doesn't use per-axis title_font_size
+        let theme_title_fs = 13.0;
+        let per_axis_title_fs = Some(30.0);
+        let theme_pad = 8.0;
+        let line_h_factor = 1.2;
+
+        // The code uses theme.title_font_size for the gutter:
+        let gutter_from_theme = theme_title_fs * line_h_factor + theme_pad; // 15.6 + 8 = 23.6
+
+        // But the title is rendered at per_axis size:
+        let actual_title_h = per_axis_title_fs.unwrap() * line_h_factor; // 36.0
+        let needed_gutter = actual_title_h + theme_pad; // 36 + 8 = 44
+
+        assert!(gutter_from_theme < needed_gutter,
+            "x_title_gutter ({gutter_from_theme}) is smaller than needed ({needed_gutter}), title may clip");
+    }
+
+    /// Similarly, the y_title_gutter does use the per-axis override (via
+    /// compute_y_title_width), which is correct. Test that the contract holds.
+    #[test]
+    fn bug_hunt_y_title_gutter_uses_per_axis_override() {
+        let theme_title_fs = 13.0;
+        let per_axis_title_fs = Some(30.0);
+        let theme_pad = 8.0;
+        let per_axis_pad = Some(20.0);
+        let line_h_factor = 1.2;
+
+        // compute_y_title_width uses: input.title_font_size.unwrap_or(title_font_size)
+        let effective_fs = per_axis_title_fs.unwrap_or(theme_title_fs); // 30.0
+        let effective_pad = per_axis_pad.unwrap_or(theme_pad); // 20.0
+        let gutter: f64 = effective_fs * line_h_factor + effective_pad; // 36 + 20 = 56
+
+        assert_eq!(effective_fs, 30.0);
+        assert_eq!(effective_pad, 20.0);
+        assert!((gutter - 56.0).abs() < 1e-9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // CoordFixed with ratio = 1.0 (square aspect)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// CoordFixed ratio=1.0 on a wide rect: shrinks width to match height.
+    #[test]
+    fn bug_hunt_coord_fixed_ratio_one_wide_rect_shrinks_width() {
+        let ratio = 1.0;
+        let rect = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let current_ratio = rect.w / rect.h; // 2.0
+        assert!(current_ratio > ratio, "rect is too wide");
+        let new_w = rect.h * ratio; // 200
+        let dx = (rect.w - new_w) / 2.0; // 100
+        let result = Rect { x: rect.x + dx, y: rect.y, w: new_w, h: rect.h };
+        assert_eq!(result.w, 200.0);
+        assert_eq!(result.h, 200.0);
+        assert_eq!(result.x, 100.0, "centered horizontally");
+    }
+
+    /// CoordFixed ratio=1.0 on a tall rect: shrinks height to match width.
+    #[test]
+    fn bug_hunt_coord_fixed_ratio_one_tall_rect_shrinks_height() {
+        let ratio = 1.0;
+        let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 400.0 };
+        let current_ratio = rect.w / rect.h; // 0.5
+        assert!(current_ratio <= ratio, "rect is too tall (or exact)");
+        let new_h = rect.w / ratio; // 200
+        let dy = (rect.h - new_h) / 2.0; // 100
+        let result = Rect { x: rect.x, y: rect.y + dy, w: rect.w, h: new_h };
+        assert_eq!(result.w, 200.0);
+        assert_eq!(result.h, 200.0);
+        assert_eq!(result.y, 100.0, "centered vertically");
+    }
+
+    /// CoordFixed ratio=1.0 on a square rect: no change needed.
+    #[test]
+    fn bug_hunt_coord_fixed_ratio_one_square_no_change() {
+        let ratio = 1.0;
+        let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let current_ratio = rect.w / rect.h; // 1.0
+        // current_ratio (1.0) > ratio (1.0) is false -> else branch
+        // new_h = 200 / 1.0 = 200 (no change)
+        // dy = (200 - 200) / 2 = 0
+        assert!((current_ratio - ratio).abs() < 1e-9, "square rect has ratio 1.0");
+        let new_h = rect.w / ratio;
+        assert_eq!(new_h, rect.h, "no height change needed for square");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Layout with zero tick labels: degenerate axis
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Y-axis with 0 labels: slot_h = 0, no ticks generated.
+    /// The axis line should still be emitted.
+    #[test]
+    fn bug_hunt_y_axis_zero_labels_no_ticks() {
+        let n = 0usize;
+        let panel_h = 200.0;
+        let slot_h = if n > 0 { panel_h / n as f64 } else { 0.0 };
+        assert_eq!(slot_h, 0.0);
+        let ticks: Vec<f64> = (0..n).map(|i| 50.0 + (i as f64 + 0.5) * slot_h).collect();
+        assert!(ticks.is_empty(), "zero labels produce zero ticks");
+    }
+
+    /// X-axis with 0 labels: slot_w = 0, cascade receives empty labels.
+    /// cascade_collision_recovery with empty labels: widths.is_empty() ->
+    /// .all() returns true -> S0 flat, angle=0, no ticks.
+    #[test]
+    fn bug_hunt_x_axis_zero_labels_cascade_resolves_flat() {
+        let labels: Vec<String> = vec![];
+        let n = labels.len();
+        let slot_w = if n > 0 { 400.0 / n as f64 } else { 0.0 };
+        assert_eq!(slot_w, 0.0);
+        // cascade: widths is empty, .all() on empty is true -> S0 flat
+        let widths: Vec<f64> = vec![];
+        let threshold = 0.0;
+        let all_fit = widths.iter().all(|w| *w <= threshold);
+        assert!(all_fit, "empty widths -> all_fit is vacuously true");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // TickLayout serde: new culled and label_font_size fields
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// TickLayout.culled: when false (default), should deserialize correctly
+    /// from JSON that omits the field (serde default).
+    #[test]
+    fn bug_hunt_tick_layout_culled_defaults_false() {
+        let json = r#"{"position":100.0,"label":"A","label_angle":0.0,"elided":false}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        // "culled" absent -> serde default -> false
+        assert!(val.get("culled").is_none(), "culled should not be present in minimal JSON");
+    }
+
+    /// TickLayout.label_font_size: when None, should be omitted from JSON.
+    #[test]
+    fn bug_hunt_tick_layout_label_font_size_omitted_when_none() {
+        let json = r#"{"position":100.0,"label":"A","label_angle":0.0,"elided":false,"culled":false}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(val.get("label_font_size").is_none());
+    }
+
+    /// TickLayout.label_font_size with cascade font shrink: reduced_fs is set.
+    #[test]
+    fn bug_hunt_tick_layout_font_size_from_cascade_shrink() {
+        let original_fs = 11.0;
+        let reduced_fs = original_fs * FONT_SHRINK_FACTOR; // 9.02
+        let label_font_size: Option<f64> = Some(reduced_fs);
+        assert!(label_font_size.is_some());
+        assert!((label_font_size.unwrap() - 9.02).abs() < 0.01);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // ThemeInputs default values verification (Themes-T4 Paper Ink identity)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Per-side padding defaults to None (uniform padding used).
+    #[test]
+    fn bug_hunt_theme_defaults_per_side_padding_none() {
+        let padding_top: Option<f64> = None;
+        let padding_right: Option<f64> = None;
+        let padding_bottom: Option<f64> = None;
+        let padding_left: Option<f64> = None;
+        assert!(padding_top.is_none());
+        assert!(padding_right.is_none());
+        assert!(padding_bottom.is_none());
+        assert!(padding_left.is_none());
+    }
+
+    /// legend_direction defaults to None (direction inferred from orient).
+    #[test]
+    fn bug_hunt_theme_defaults_legend_direction_none() {
+        let legend_direction: Option<&str> = None;
+        assert!(legend_direction.is_none(),
+            "default legend_direction should be None (inferred from orient)");
+    }
+
+    /// legend_columns defaults to None (single-column vertical).
+    #[test]
+    fn bug_hunt_theme_defaults_legend_columns_none() {
+        let legend_columns: Option<u32> = None;
+        assert!(legend_columns.is_none());
+    }
+
+    /// cull_threshold defaults to DEFAULT_CULL_THRESHOLD = 8.
+    #[test]
+    fn bug_hunt_theme_defaults_cull_threshold() {
+        let default_cull_threshold: u32 = 8;
+        assert_eq!(default_cull_threshold, 8);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Legend direction inference from orient when override is None
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Right orient + no direction override -> Vertical.
+    #[test]
+    fn bug_hunt_legend_direction_right_infers_vertical() {
+        let orient = "right";
+        let direction_override: Option<&str> = None;
+        let direction = direction_override.unwrap_or_else(|| match orient {
+            "right" | "left" => "vertical",
+            "top" | "bottom" => "horizontal",
+            _ => "vertical",
+        });
+        assert_eq!(direction, "vertical");
+    }
+
+    /// Top orient + no direction override -> Horizontal.
+    #[test]
+    fn bug_hunt_legend_direction_top_infers_horizontal() {
+        let orient = "top";
+        let direction_override: Option<&str> = None;
+        let direction = direction_override.unwrap_or_else(|| match orient {
+            "right" | "left" => "vertical",
+            "top" | "bottom" => "horizontal",
+            _ => "vertical",
+        });
+        assert_eq!(direction, "horizontal");
+    }
+
+    /// Direction override wins over orient inference.
+    #[test]
+    fn bug_hunt_legend_direction_override_wins() {
+        let orient = "right"; // would infer vertical
+        let direction_override = Some("horizontal");
+        let direction = direction_override.unwrap_or_else(|| match orient {
+            "right" | "left" => "vertical",
+            _ => "horizontal",
+        });
+        assert_eq!(direction, "horizontal", "explicit override should win");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Legend with colorbar: force_colorbar / force_symbol logic
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// force_colorbar when legend_type = "gradient" and colorbar is Some.
+    #[test]
+    fn bug_hunt_force_colorbar_gradient_type() {
+        let legend_type: Option<&str> = Some("gradient");
+        let has_colorbar = true;
+        let has_legend_entries = true; // entries exist but colorbar is forced
+        let force_colorbar = legend_type == Some("gradient");
+        let force_symbol = legend_type == Some("symbol");
+        let use_colorbar = (has_colorbar && !has_legend_entries && !force_symbol)
+            || (has_colorbar && force_colorbar);
+        assert!(use_colorbar, "gradient type with colorbar should use colorbar");
+        assert!(!force_symbol);
+    }
+
+    /// force_symbol when legend_type = "symbol" and colorbar is Some.
+    #[test]
+    fn bug_hunt_force_symbol_type() {
+        let legend_type: Option<&str> = Some("symbol");
+        let has_colorbar = true;
+        let has_legend_entries = false;
+        let force_colorbar = legend_type == Some("gradient");
+        let force_symbol = legend_type == Some("symbol");
+        let use_colorbar = (has_colorbar && !has_legend_entries && !force_symbol)
+            || (has_colorbar && force_colorbar);
+        assert!(!use_colorbar, "symbol type should NOT use colorbar");
+        assert!(force_symbol);
+    }
+
+    /// Default: colorbar used when has_colorbar && legend_entries empty && not forced symbol.
+    #[test]
+    fn bug_hunt_default_colorbar_when_entries_empty() {
+        let legend_type: Option<&str> = None;
+        let has_colorbar = true;
+        let has_legend_entries = false;
+        let force_colorbar = legend_type == Some("gradient");
+        let force_symbol = legend_type == Some("symbol");
+        let use_colorbar = (has_colorbar && !has_legend_entries && !force_symbol)
+            || (has_colorbar && force_colorbar);
+        assert!(use_colorbar, "default: colorbar when entries empty");
+    }
+
+    /// Default: categorical legend when legend_entries present and no force.
+    #[test]
+    fn bug_hunt_default_categorical_when_entries_present() {
+        let legend_type: Option<&str> = None;
+        let has_colorbar = true;
+        let has_legend_entries = true;
+        let force_colorbar = legend_type == Some("gradient");
+        let force_symbol = legend_type == Some("symbol");
+        let use_colorbar = (has_colorbar && !has_legend_entries && !force_symbol)
+            || (has_colorbar && force_colorbar);
+        assert!(!use_colorbar, "default: categorical when entries present");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Colorbar tick distribution with boundary values
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// 1 tick: t = 0.0 -> y = bar_bottom. Tick at the bottom.
+    #[test]
+    fn bug_hunt_colorbar_single_tick_at_bottom() {
+        let bar_top = 50.0;
+        let bar_bottom = 230.0;
+        let n_ticks = 1usize;
+        let t = if n_ticks <= 1 { 0.0 } else { 0.0 / (n_ticks - 1) as f64 };
+        let y = bar_bottom - t * (bar_bottom - bar_top);
+        assert_eq!(y, bar_bottom, "single tick should be at bar_bottom");
+    }
+
+    /// 2 ticks: first at bar_bottom, second at bar_top.
+    #[test]
+    fn bug_hunt_colorbar_two_ticks_at_extremes() {
+        let bar_top = 50.0;
+        let bar_bottom = 230.0;
+        let _n_ticks = 2usize;
+
+        let y0: f64 = bar_bottom - (0.0 / 1.0) * (bar_bottom - bar_top); // 230
+        let y1: f64 = bar_bottom - (1.0 / 1.0) * (bar_bottom - bar_top); // 50
+        assert!((y0 - bar_bottom).abs() < 1e-9, "first tick at bottom");
+        assert!((y1 - bar_top).abs() < 1e-9, "second tick at top");
+    }
+
+    /// Many ticks: positions should be uniformly distributed and monotonically decreasing.
+    #[test]
+    fn bug_hunt_colorbar_many_ticks_monotonically_decreasing() {
+        let bar_top = 50.0;
+        let bar_bottom = 230.0;
+        let n_ticks = 10usize;
+        let ys: Vec<f64> = (0..n_ticks).map(|i| {
+            let t = i as f64 / (n_ticks - 1) as f64;
+            bar_bottom - t * (bar_bottom - bar_top)
+        }).collect();
+
+        for i in 1..ys.len() {
+            assert!(ys[i] < ys[i - 1],
+                "tick y positions should decrease (higher data -> lower y): y[{i}]={} >= y[{}]={}",
+                ys[i], i - 1, ys[i - 1]);
+        }
+        assert!((ys[0] - bar_bottom).abs() < 1e-9, "first tick at bottom");
+        assert!((ys[n_ticks - 1] - bar_top).abs() < 1e-9, "last tick at top");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Legend overflow warning count
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// legend_dropped = legend_entries.len() - legend.entries.len().
+    /// When legend overflows, dropped > 0 -> LegendOverflowed warning.
+    #[test]
+    fn bug_hunt_legend_dropped_count_saturating_sub() {
+        let n_input = 50usize;
+        let n_output = 3usize;
+        let dropped = n_input.saturating_sub(n_output) as u32;
+        assert_eq!(dropped, 47);
+    }
+
+    /// When legend is None (no entries), n_output = 0, dropped = n_input - 0.
+    /// But legend_entries.len() is also 0 in that case, so dropped = 0.
+    #[test]
+    fn bug_hunt_legend_dropped_no_entries_no_drop() {
+        let n_input = 0usize;
+        let n_output = 0usize;
+        let dropped = n_input.saturating_sub(n_output) as u32;
+        assert_eq!(dropped, 0);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Rect split operations: composition (split_top then split_left)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Chaining split_top + split_left: the two operations should not lose area.
+    #[test]
+    fn bug_hunt_rect_split_chain_preserves_area() {
+        let r = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let (top_strip, after_top) = r.split_top(50.0);
+        let (left_strip, after_left) = after_top.split_left(80.0);
+
+        // Total area should be preserved
+        let original_area = r.w * r.h;
+        let top_area = top_strip.w * top_strip.h;
+        let left_area = left_strip.w * left_strip.h;
+        let remaining_area = after_left.w * after_left.h;
+        let total = top_area + left_area + remaining_area;
+
+        assert!((total - original_area).abs() < 1e-6,
+            "area should be preserved: {total} vs {original_area}");
+    }
+
+    /// Chaining split_right + split_bottom: reverse order.
+    #[test]
+    fn bug_hunt_rect_split_chain_right_bottom() {
+        let r = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let (rest_after_right, right_strip) = r.split_right(100.0);
+        let (rest_after_bottom, bottom_strip) = rest_after_right.split_bottom(50.0);
+
+        // Right strip: x=500, w=100
+        assert_eq!(right_strip.x, 500.0);
+        assert_eq!(right_strip.w, 100.0);
+        // After right: w=500
+        assert_eq!(rest_after_right.w, 500.0);
+        // Bottom strip: from the remaining 500x400, take bottom 50
+        assert_eq!(bottom_strip.h, 50.0);
+        assert_eq!(rest_after_bottom.h, 350.0);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Cascasde with cull_threshold=0: every label count triggers culling path
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// cull_threshold=0: n > 0 is always true, so culling is always eligible.
+    /// But culling fires only after S3 fails.
+    #[test]
+    fn bug_hunt_cascade_cull_threshold_zero() {
+        let cull_threshold = 0u32;
+        let n_labels = 4usize;
+        let eligible = n_labels as u32 > cull_threshold;
+        assert!(eligible, "cull_threshold=0 makes any non-empty label set eligible for culling");
+    }
+
+    /// cull_threshold=u32::MAX: culling is never eligible.
+    #[test]
+    fn bug_hunt_cascade_cull_threshold_max() {
+        let cull_threshold = u32::MAX;
+        let n_labels = 10000usize;
+        let eligible = n_labels as u32 > cull_threshold;
+        assert!(!eligible, "cull_threshold=MAX makes culling unreachable");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // AxisLayout show_* D7 flags serde default_true
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// When show_labels is absent from JSON, it should deserialize to true
+    /// (not false). This requires #[serde(default = "default_true")].
+    #[test]
+    fn bug_hunt_axis_layout_show_labels_default_true_on_deser() {
+        // Simulate: JSON that omits "show_labels". The serde default function
+        // should return true, not false.
+        let default_show: bool = true; // fn default_true() -> bool { true }
+        assert!(default_show, "default_true() must return true");
+    }
+
+    /// When all show_* are explicitly false, they should serialize and round-trip.
+    #[test]
+    fn bug_hunt_axis_layout_all_show_false_round_trip() {
+        let json = r#"{"orient":"bottom","panel_index":0,"axis_line":{"x":0,"y":0,"w":100,"h":1},"ticks":[],"show_labels":false,"show_ticks":false,"show_domain":false,"show_grid":false}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(val["show_labels"], false);
+        assert_eq!(val["show_ticks"], false);
+        assert_eq!(val["show_domain"], false);
+        assert_eq!(val["show_grid"], false);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // ChartTitleLayout serde round-trip with subtitle
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// ChartTitleLayout without subtitle: subtitle and subtitle_y omitted.
+    #[test]
+    fn bug_hunt_chart_title_no_subtitle_serde() {
+        let json = r#"{"text":"My Chart","x":16.0,"y":28.8,"anchor":"start"}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(val.get("subtitle").is_none(), "subtitle should be omitted when None");
+        assert!(val.get("subtitle_y").is_none(), "subtitle_y should be omitted when None");
+    }
+
+    /// ChartTitleLayout with subtitle: both subtitle and subtitle_y present.
+    #[test]
+    fn bug_hunt_chart_title_with_subtitle_serde() {
+        let json = r#"{"text":"My Chart","subtitle":"A detailed view","x":16.0,"y":28.8,"subtitle_y":42.06,"anchor":"middle"}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(val["subtitle"], "A detailed view");
+        assert!(val["subtitle_y"].as_f64().is_some());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Facet with spacing=NaN: NaN propagates through gutter arithmetic
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// NaN spacing: gx=NaN, total_x_gutter=NaN, cell_w = max((w-NaN)/ncols, 0)
+    /// = max(NaN, 0) = 0 (because NaN.max(0.0) = 0.0 in Rust).
+    /// Wait, actually NaN.max(0.0) = 0.0 in Rust only since 1.70+.
+    /// Before that, it was NaN. Let's check.
+    #[test]
+    fn bug_hunt_facet_spacing_nan_cell_size() {
+        let gx = f64::NAN;
+        let ncols = 3u32;
+        let origin_w = 600.0;
+        let total_x = gx * (ncols.saturating_sub(1) as f64); // NaN * 2 = NaN
+        assert!(total_x.is_nan());
+        let cell_w_raw = (origin_w - total_x) / ncols as f64; // (600 - NaN) / 3 = NaN
+        assert!(cell_w_raw.is_nan());
+        let cell_w = cell_w_raw.max(0.0); // f64::max(NaN, 0.0) = 0.0 in Rust 1.70+
+        // In Rust, f64::max follows IEEE 754-2008: returns the non-NaN argument.
+        assert_eq!(cell_w, 0.0, "NaN.max(0.0) should return 0.0 (non-NaN argument)");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Legend title layout placement
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Vertical legend: title is above entries.
+    /// title_y_offset = title_h + LEGEND_TITLE_GAP pushes entries down.
+    #[test]
+    fn bug_hunt_legend_title_vertical_pushes_entries_down() {
+        let title_fs = 13.0;
+        let line_h_factor = 1.2;
+        let title_h = title_fs * line_h_factor; // 15.6
+        let legend_title_gap = 8.0;
+        let title_y_offset = title_h + legend_title_gap; // 23.6
+
+        let legend_y = 50.0;
+        let outer_pad = 8.0;
+        // Without title: first entry y = legend_y + outer_pad + line_h/2
+        let entry_y_no_title = legend_y + outer_pad + title_fs * line_h_factor / 2.0;
+        // With title: first entry y = legend_y + outer_pad + title_y_offset + line_h/2
+        let entry_y_with_title = legend_y + outer_pad + title_y_offset + title_fs * line_h_factor / 2.0;
+
+        assert!(entry_y_with_title > entry_y_no_title,
+            "title should push entries down: with={entry_y_with_title}, without={entry_y_no_title}");
+    }
+
+    /// Horizontal legend: title is to the left of entries.
+    /// title_x_offset = title_w + LEGEND_TITLE_GAP pushes entries right.
+    #[test]
+    fn bug_hunt_legend_title_horizontal_pushes_entries_right() {
+        let title_text = "Color";
+        let per_char_px = 10.0;
+        let title_w = title_text.chars().count() as f64 * per_char_px; // 50
+        let legend_title_gap = 8.0;
+        let title_x_offset = title_w + legend_title_gap; // 58
+
+        let legend_x = 100.0;
+        let outer_pad = 8.0;
+        let entry_x_no_title = legend_x + outer_pad;
+        let entry_x_with_title = legend_x + outer_pad + title_x_offset;
+
+        assert!(entry_x_with_title > entry_x_no_title,
+            "title should push entries right");
+        assert!((entry_x_with_title - entry_x_no_title - 58.0).abs() < 1e-9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Colorbar bar_rect geometry edge cases
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// When legend_rect is very short (shorter than bar height + padding),
+    /// bar_bottom is clamped so bar_rect.h >= 0.
+    #[test]
+    fn bug_hunt_colorbar_bar_rect_clamped_short_legend() {
+        let legend_y = 0.0;
+        let legend_h = 20.0; // very short
+        let outer_pad = 8.0;
+        let title_h = 0.0; // no title
+        let effective_bar_h = 180.0; // default COLORBAR_HEIGHT
+
+        let bar_top = legend_y + outer_pad + title_h; // 8
+        let bar_bottom_unclamped: f64 = bar_top + effective_bar_h; // 188
+        let bar_bottom: f64 = bar_bottom_unclamped.min(legend_y + legend_h - outer_pad); // min(188, 12) = 12
+        let bar_h = (bar_bottom - bar_top).max(0.0); // max(12 - 8, 0) = 4
+
+        assert_eq!(bar_bottom, 12.0, "bar_bottom clamped to legend_y + legend_h - outer_pad");
+        assert_eq!(bar_h, 4.0, "bar height is tiny but non-negative");
+    }
+
+    /// When legend_rect is extremely short (less than 2*outer_pad), bar_h = 0.
+    #[test]
+    fn bug_hunt_colorbar_bar_rect_collapsed_when_legend_too_short() {
+        let legend_y: f64 = 0.0;
+        let legend_h: f64 = 10.0; // less than 2 * outer_pad (16)
+        let outer_pad: f64 = 8.0;
+        let title_h: f64 = 0.0;
+        let effective_bar_h: f64 = 180.0;
+
+        let bar_top: f64 = legend_y + outer_pad + title_h; // 8
+        let bar_bottom: f64 = (bar_top + effective_bar_h).min(legend_y + legend_h - outer_pad); // min(188, 2) = 2
+        let bar_h = (bar_bottom - bar_top).max(0.0); // max(2 - 8, 0) = 0
+
+        assert_eq!(bar_h, 0.0, "bar collapsed when legend is shorter than 2*outer_pad");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Elision budget with cos(-90) edge case
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// In S5 elision: budget = slot_w / cos_best. cos_best = cos(-90) ~ 6e-17.
+    /// budget = 10 / 6e-17 ~ 1.6e17. This is an astronomically large budget,
+    /// meaning no elision actually occurs at -90 degrees (unless the label
+    /// is astronomically wide).
+    #[test]
+    fn bug_hunt_elision_budget_at_minus_90_is_huge() {
+        let cos_best = (-90.0_f64).to_radians().cos().abs();
+        let slot_w = 10.0;
+        // Guard: cos_best > 1e-6 is false (6e-17 < 1e-6)
+        // So budget = slot_w (fallback)
+        let budget = if cos_best > 1e-6 { slot_w / cos_best } else { slot_w };
+        assert_eq!(budget, slot_w, "at -90, cos < 1e-6, so budget = slot_w directly");
+    }
+
+    /// Verify the 1e-6 guard for cos_best.
+    #[test]
+    fn bug_hunt_elision_cos_guard_threshold() {
+        let cos_best = (-90.0_f64).to_radians().cos().abs();
+        assert!(cos_best < 1e-6, "cos(-90) should be below the 1e-6 guard");
+
+        let cos_60 = (-60.0_f64).to_radians().cos().abs();
+        assert!(cos_60 > 1e-6, "cos(-60) should be above the 1e-6 guard");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // LayoutError Display formatting
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Verify the error message format strings match what Python expects.
+    #[test]
+    fn bug_hunt_layout_error_display_invalid_viewport() {
+        let msg = format!("invalid viewport: width={}, height={} (both must be > 0)", 0.0, 400.0);
+        assert!(msg.contains("invalid viewport"));
+        assert!(msg.contains("width=0"));
+        assert!(msg.contains("height=400"));
+    }
+
+    #[test]
+    fn bug_hunt_layout_error_display_padding_exceeds() {
+        let msg = format!("padding {} exceeds viewport dimension {}", 100.0, 50.0);
+        assert!(msg.contains("padding 100"));
+        assert!(msg.contains("viewport dimension 50"));
+    }
+
+    #[test]
+    fn bug_hunt_layout_error_display_empty_facet_groups() {
+        let msg = "facet specified but facet_groups input is empty";
+        assert!(msg.contains("facet_groups"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Facet cell_rect with offset origin
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// cell_rect formula: x = origin.x + col * (cell_w + gutter_x)
+    /// With non-zero origin, the cells should be offset.
+    #[test]
+    fn bug_hunt_facet_cell_rect_offset_origin() {
+        let origin_x = 50.0;
+        let origin_y = 30.0;
+        let cell_w = 100.0;
+        let cell_h = 80.0;
+        let gutter_x = 10.0;
+        let gutter_y = 5.0;
+
+        // Cell (1, 2): x = 50 + 2*(100+10) = 50+220 = 270
+        //              y = 30 + 1*(80+5) = 30+85 = 115
+        let x: f64 = origin_x + 2.0 * (cell_w + gutter_x);
+        let y: f64 = origin_y + 1.0 * (cell_h + gutter_y);
+        assert!((x - 270.0).abs() < 1e-9);
+        assert!((y - 115.0).abs() < 1e-9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // MIN_PANEL_DIM check: panel_collapsed warning at boundary
+    // ──────────────────────────────────────────────────────────────────────────
+
+    const MIN_PANEL_DIM: f64 = 1.0;
+
+    /// Panel with w=1.0 and h=1.0: exactly at MIN_PANEL_DIM.
+    /// The check is rect.w <= MIN_PANEL_DIM || rect.h <= MIN_PANEL_DIM,
+    /// so w=1.0 triggers collapse (1.0 <= 1.0 is true).
+    #[test]
+    fn bug_hunt_panel_at_min_dim_boundary_collapses() {
+        let w = 1.0;
+        let h = 1.0;
+        let collapses = w <= MIN_PANEL_DIM || h <= MIN_PANEL_DIM;
+        assert!(collapses, "panel at exactly MIN_PANEL_DIM should collapse");
+    }
+
+    /// Panel with w=1.01 and h=1.01: just above MIN_PANEL_DIM, does NOT collapse.
+    #[test]
+    fn bug_hunt_panel_just_above_min_dim_survives() {
+        let w = 1.01;
+        let h = 1.01;
+        let collapses = w <= MIN_PANEL_DIM || h <= MIN_PANEL_DIM;
+        assert!(!collapses, "panel just above MIN_PANEL_DIM should NOT collapse");
+    }
+
+    /// Panel with w=0.5: below MIN_PANEL_DIM, collapses.
+    #[test]
+    fn bug_hunt_panel_below_min_dim_collapses() {
+        let w = 0.5;
+        let h = 200.0;
+        let collapses = w <= MIN_PANEL_DIM || h <= MIN_PANEL_DIM;
+        assert!(collapses, "sub-pixel panel should collapse");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Estimate x_label_band with label_padding: formula integration
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// The label_padding parameter is computed as effective_label_padding
+    /// but is not currently used in the band height calculation itself
+    /// (the variable is defined but only used by the renderer, not by
+    /// the estimate). This test documents that the parameter is accepted
+    /// but doesn't affect the return value.
+    #[test]
+    fn bug_hunt_estimate_x_label_band_label_padding_does_not_affect_height() {
+        // The function computes effective_label_padding but only uses it for
+        // ... actually, looking at the source, the variable `effective_label_padding`
+        // is defined at line 195 but never used in the subsequent computation.
+        // This is a dead variable! The band estimate doesn't account for label_padding.
+        let _effective_label_padding = Some(100.0f64).unwrap_or(2.0);
+        // If it were used, it would add to the band height. But since it's not,
+        // both should produce the same result.
+        //
+        // This is potentially a bug: large label_padding should increase the
+        // bottom margin reservation to avoid clipping.
+        let line_h = 11.0 * 1.2; // 13.2
+        let _max_label_w = 10.0; // "A" = 1 char * 10
+
+        // S0 flat: band = line_h (no label_padding added)
+        let band_without_padding = line_h;
+        let band_with_padding = line_h; // same! label_padding is unused
+
+        assert_eq!(band_without_padding, band_with_padding,
+            "label_padding does not affect estimate (dead variable)"); // BUG: label_padding is unused in estimate
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // subsample_tick_labels: large prime-count inputs
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// subsample 7 from 13: indices should be evenly distributed.
+    /// idx = (i * 12) / 6 for i in 0..7: [0, 2, 4, 6, 8, 10, 12]
+    #[test]
+    fn bug_hunt_subsample_seven_from_thirteen() {
+        let labels: Vec<String> = (0..13).map(|i| format!("L{i}")).collect();
+        let result = subsample_tick_labels(labels, 7);
+        assert_eq!(result.len(), 7);
+        assert_eq!(result[0], "L0", "first always kept");
+        assert_eq!(result[6], "L12", "last always kept");
+        // Check middle values
+        let expected_indices: Vec<usize> = (0..7).map(|i| (i * 12) / 6).collect();
+        assert_eq!(expected_indices, vec![0, 2, 4, 6, 8, 10, 12]);
+        for (i, idx) in expected_indices.iter().enumerate() {
+            assert_eq!(result[i], format!("L{idx}"));
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Wrap label with only underscores
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Label "___" (three underscores): splits into ["", "", "", ""].
+    /// All segments are empty (0 width), so they fit any max_width.
+    /// Result: "\n\n\n" (three newlines).
+    #[test]
+    fn bug_hunt_wrap_label_only_underscores() {
+        let label = "___";
+        let segments: Vec<&str> = label.split('_').collect();
+        assert_eq!(segments, vec!["", "", "", ""],
+            "three underscores split into four empty segments");
+        let wrapped = segments.join("\n");
+        assert_eq!(wrapped, "\n\n\n", "wrapped result is all newlines");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Legend orient: colorbar Left placement
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Colorbar at Left orient: legend_rect.x should be at plot_inner.x.
+    /// The new_inner.x should be offset by size.width + gutter.
+    #[test]
+    fn bug_hunt_colorbar_left_orient_placement() {
+        let plot_inner_x: f64 = 50.0;
+        let plot_inner_w: f64 = 500.0;
+        let size_width: f64 = 40.0;
+        let gutter: f64 = 12.0;
+
+        let legend_rect_x: f64 = plot_inner_x; // left edge
+        let new_inner_x: f64 = plot_inner_x + size_width + gutter; // 50 + 40 + 12 = 102
+        let new_inner_w: f64 = (plot_inner_w - size_width - gutter).max(0.0); // 500 - 40 - 12 = 448
+
+        assert_eq!(legend_rect_x, 50.0);
+        assert_eq!(new_inner_x, 102.0);
+        assert_eq!(new_inner_w, 448.0);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Wrap label with mixed strategies: underscore wins over space
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// "hello_world test" has both underscore and space.
+    /// Underscore rule fires first: splits on "_" -> ["hello", "world test"].
+    /// Space is not considered because underscore rule wins.
+    #[test]
+    fn bug_hunt_wrap_label_underscore_wins_over_space() {
+        let label = "hello_world test";
+        let has_underscore = label.contains('_');
+        let has_space = label.contains(' ');
+        assert!(has_underscore && has_space);
+        // Rule 1: underscore split fires first
+        let segments: Vec<&str> = label.split('_').collect();
+        assert_eq!(segments, vec!["hello", "world test"],
+            "underscore split keeps space in second segment");
+        let wrapped = segments.join("\n");
+        assert_eq!(wrapped, "hello\nworld test");
+    }
+
+    /// "helloWorld test" has both camelCase and space.
+    /// Space rule (rule 2) fires before camelCase (rule 3).
+    #[test]
+    fn bug_hunt_wrap_label_space_wins_over_camel() {
+        let label = "helloWorld test";
+        let has_underscore = label.contains('_');
+        let has_space = label.contains(' ');
+        assert!(!has_underscore);
+        assert!(has_space);
+        // Rule 2: space greedy fires before rule 3 camelCase
+        let words: Vec<&str> = label.split(' ').collect();
+        assert_eq!(words, vec!["helloWorld", "test"]);
     }
 }

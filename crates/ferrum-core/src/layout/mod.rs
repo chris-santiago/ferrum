@@ -115,6 +115,12 @@ impl std::error::Error for LayoutError {}
 pub struct ThemeInputs {
     // Phase 6 layout fields.
     pub padding: f64,
+    /// Per-side padding overrides. When `Some`, these win over `padding` for
+    /// that side. `configure_padding(top=N)` sets `padding_top = Some(N)`.
+    pub padding_top: Option<f64>,
+    pub padding_right: Option<f64>,
+    pub padding_bottom: Option<f64>,
+    pub padding_left: Option<f64>,
     pub column_padding: f64,
     pub row_padding: f64,
     pub axis_title_padding: f64,
@@ -212,6 +218,10 @@ impl Default for ThemeInputs {
 
         Self {
             padding: 16.0,
+            padding_top: None,
+            padding_right: None,
+            padding_bottom: None,
+            padding_left: None,
             column_padding: 12.0,
             row_padding: 12.0,
             axis_title_padding: 8.0,
@@ -312,7 +322,13 @@ pub fn compute_layout(
 
     // 2. Apply outer padding.
     let viewport_rect = viewport.into_rect();
-    let inner = viewport_rect.shrink(Inset::uniform(theme.padding));
+    let inset = Inset {
+        top:    theme.padding_top.unwrap_or(theme.padding),
+        right:  theme.padding_right.unwrap_or(theme.padding),
+        bottom: theme.padding_bottom.unwrap_or(theme.padding),
+        left:   theme.padding_left.unwrap_or(theme.padding),
+    };
+    let inner = viewport_rect.shrink(inset);
     if inner.w <= 0.0 || inner.h <= 0.0 {
         let dim = viewport.width.min(viewport.height);
         return Err(LayoutError::PaddingExceedsViewport {
@@ -456,6 +472,7 @@ pub fn compute_layout(
             axes.x.label_angle_override,
             metrics,
             estimated_slot_w,
+            axes.x.label_padding,
         )
     } else {
         0.0

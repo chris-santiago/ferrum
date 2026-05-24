@@ -145,6 +145,9 @@ pub struct AxisConfigSpec {
     pub title_padding: Option<f64>,
     /// d3-format string applied to tick labels.
     pub label_format_raw: Option<String>,
+    /// Pixel gap between the end of a tick mark and the baseline of the tick label.
+    /// Overrides the per-orient hardcoded gap in the axis renderer.
+    pub label_padding: Option<f64>,
 }
 
 /// Legend configuration.

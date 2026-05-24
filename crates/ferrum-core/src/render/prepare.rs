@@ -480,6 +480,7 @@ pub fn prepare_render_inputs(
             title_font_size: None,
             title_color: None,
             title_padding: None,
+            label_padding: None,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -497,6 +498,7 @@ pub fn prepare_render_inputs(
             title_font_size: None,
             title_color: None,
             title_padding: None,
+            label_padding: None,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),

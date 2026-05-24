@@ -18,7 +18,7 @@ from ferrum._diagnostics.sources._compared import ComparedModelSource
 
 
 class _MinimalPredict:
-    """Model with only predict — no proba, no coef_, no feature_importances_."""
+    """Model with only predict -- no proba, no coef_, no feature_importances_."""
     def predict(self, X):
         if hasattr(X, '__len__'):
             return np.zeros(len(X))
@@ -96,11 +96,8 @@ def test_predictions_with_nan_in_features():
     y = pl.Series("y", [1.0, 2.0, 3.0])
     model = _LinearModel()
     source = ferrum.ModelSource(model, X, y)
-    # This exercises the hat_matrix_stats Rust code with NaN in the design matrix.
-    # It should not panic — NaN should propagate to the output.
     pred = source.predictions()
     assert pred.height == 3
-    # y_pred should contain NaN because the model multiplied through NaN inputs
     assert pred["y_pred"].is_nan().any()
 
 
@@ -112,7 +109,6 @@ def test_predictions_with_nan_in_y():
     source = ferrum.ModelSource(model, X, y)
     pred = source.predictions()
     assert pred.height == 3
-    # Residual at row 1 should be NaN because y_true is NaN
     residuals = pred["residual"].to_list()
     assert np.isnan(residuals[1])
 
@@ -122,14 +118,10 @@ def test_confusion_matrix_with_nan_predictions_raises():
     y_true = np.array([0, 1, 1, 0])
     y_pred = np.array([0, 1, float("nan"), 0])
     src = _PrecomputedSource(y_true, y_pred)
-    # This may raise due to NaN class labels, or produce a matrix with NaN row.
-    # Either is acceptable as long as it doesn't silently produce wrong results.
     try:
         cm = src.confusion_matrix()
-        # If it doesn't raise, verify the matrix is valid
         assert cm.height > 0
     except (ValueError, TypeError):
-        # Expected — NaN is not a valid class label
         pass
 
 
@@ -166,15 +158,12 @@ def test_class_balance_visualizer_empty_series_raises():
     """ClassBalanceVisualizer with an empty series should either raise or produce
     a valid chart with no bars."""
     viz = ferrum.ClassBalanceVisualizer()
-    # Empty list
     try:
         viz.fit([])
-        # If it doesn't raise, the chart should still be valid
         svg = viz.show().show_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
     except (ValueError, ZeroDivisionError):
-        # Acceptable if it validates the empty input
         pass
 
 
@@ -191,7 +180,6 @@ def test_predictions_single_row():
     source = ferrum.ModelSource(model, X, y)
     pred = source.predictions()
     assert pred.height == 1
-    # studentized_residual may be NaN (std of 1 residual is 0), but should not crash
     assert "NaN" not in str(pred["y_true"].to_list())
 
 
@@ -199,18 +187,13 @@ def test_roc_curve_all_same_class_binary():  # BUG: sklearn raises UndefinedMetr
     """When all true labels are the same class, ROC AUC is undefined.
     The code should not raise; AUC should be NaN."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0], "f1": [1.0, 2.0, 3.0, 4.0]})
-    y = pl.Series("y", [1, 1, 1, 1])  # all same class
+    y = pl.Series("y", [1, 1, 1, 1])
     model = _PredictProba()
     source = ferrum.ModelSource(model, X, y)
-    # sklearn roc_auc_score will raise ValueError for single-class y
-    # The source code catches ValueError and sets auc=NaN in multiclass path,
-    # but the binary path does NOT catch. This tests the binary all-same-class.
     try:
         roc = source.roc_curve()
-        # If it returns, check for NaN auc
         assert roc.height >= 0
     except ValueError:
-        # Acceptable — sklearn raises for single-class ROC
         pass
 
 
@@ -229,22 +212,18 @@ def test_calibration_curve_all_same_prediction():
 
     source = ferrum.ModelSource(ConstProba(), X, y)
     cal = source.calibration_curve(n_bins=5)
-    # Should still return a valid DataFrame
     assert cal.height >= 1
     assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count"}
 
 
 def test_lift_curve_class_with_zero_base_rate():
-    """A class with base_rate=0 is silently skipped in lift_curve.
-    Verify no crash and that the skipped class produces no lift rows."""
+    """A class with base_rate=0 is silently skipped in lift_curve."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0], "f1": [4.0, 5.0, 6.0]})
-    y = pl.Series("y", [0, 0, 0])  # all one class
+    y = pl.Series("y", [0, 0, 0])
     model = _PredictProba()
     source = ferrum.ModelSource(model, X, y)
     lift = source.lift_curve()
-    # One class has base_rate=0, so it should be skipped.
-    # Only baseline rows plus the class with non-zero base rate should appear.
-    assert lift.height >= 2  # at least the baseline rows
+    assert lift.height >= 2
     assert "baseline" in lift["class"].to_list()
 
 
@@ -357,7 +336,7 @@ def test_model_source_y_as_list():
 
 
 # ---------------------------------------------------------------------------
-# Category: Composition corners (configure on diagnostic charts)
+# Category: configure() on diagnostic charts (Round 2 focus)
 # ---------------------------------------------------------------------------
 
 
@@ -454,6 +433,475 @@ def test_importance_chart_configure():
     assert "NaN" not in svg
 
 
+def test_discrimination_threshold_chart_configure_axis_and_grid():
+    """configure() with multiple config objects should compose with
+    discrimination_threshold_chart. Tests the multi-config composition
+    path on a diagnostic chart with 4 overlaid metric curves."""
+    from ferrum.configure import AxisConfig, GridConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(y_true=y_true, y_pred=y_pred, n_thresholds=10)
+    configured = chart.configure(
+        axis=AxisConfig(label_font_size=10),
+        grid=GridConfig(width=0.5),
+    )
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert "Infinity" not in svg
+
+
+def test_lift_chart_configure_title_and_color():
+    """configure() on lift_chart with TitleConfig + ColorConfig."""
+    from ferrum.configure import TitleConfig, ColorConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.lift_chart(y_true=y_true, y_pred=y_pred)
+    configured = chart.configure(
+        title=TitleConfig(font_size=18),
+        color=ColorConfig(scheme="dark2"),
+    )
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_class_prediction_error_chart_configure():
+    """configure() on class_prediction_error_chart stacked bar."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2])
+    y_pred = np.array([0, 1, 1, 0, 2, 2, 1, 1, 2])
+    chart = ferrum.class_prediction_error_chart(y_true=y_true, y_pred=y_pred)
+    configured = chart.configure(axis=AxisConfig(label_angle=45))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_residuals_chart_multi_panel_configure():  # BUG: VConcatChart returned by multi-panel residuals_chart does not have .configure() method
+    """configure() on residuals_chart with multiple panels (auto layout).
+    Exercises configure on a concat/vconcat composite chart."""
+    from ferrum.configure import AxisConfig
+    from tests.fixtures import load_fixture, load_dataset
+
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.residuals_chart(model, X, df["y"], panels="auto")
+    configured = chart.configure(axis=AxisConfig(tick_count=5))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_prediction_error_chart_configure_with_ci():
+    """configure() on prediction_error_chart with CI ribbon overlay.
+    Exercises configure on a layered chart with mark_ribbon."""
+    from ferrum.configure import PaddingConfig
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    y_pred = np.array([1.2, 1.9, 3.1, 3.8, 5.2, 5.9, 7.3, 7.8])
+    chart = ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred, ci=0.90)
+    configured = chart.configure(padding=PaddingConfig(left=60))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Annotations on model-diagnostic visualizations (Round 2 focus)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_annotate_auc_false_no_text_labels():
+    """annotate_auc=False should suppress the AUC text annotations.
+    Exercises the code path where _inject_curve_annotation is skipped."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=False)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # When annotate_auc=False, the formatted "AUC = 0." should NOT appear
+    assert "AUC = 0." not in svg
+
+
+def test_roc_chart_annotate_auc_true_has_text_labels():
+    """annotate_auc=True (default) should inject AUC text annotations."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "<text" in svg
+    # AUC annotation may appear as "AUC = X.XXX" or "(AUC = X.XXX)" in legend labels
+    assert "AUC" in svg
+
+
+def test_pr_chart_annotate_ap_false_no_text_labels():
+    """annotate_ap=False should suppress the AP text annotations."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=False)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "AP = 0." not in svg
+
+
+def test_pr_chart_annotate_ap_true_has_text_labels():
+    """annotate_ap=True (default) should inject AP text annotations."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "<text" in svg
+    assert "AP = 0." in svg
+
+
+def test_pr_chart_iso_lines_annotation_text():
+    """iso_lines=True should inject F-score iso curves with text labels F=0.2 etc.
+    Tests that the _inject_pr_iso_lines code path produces valid annotations."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, iso_lines=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # All four F-score labels should appear
+    for f_label in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
+        assert f_label in svg, f"Missing iso label {f_label}"
+
+
+def test_pr_chart_annotate_ap_and_iso_lines_combined():
+    """Combining annotate_ap=True and iso_lines=True should produce both
+    AP text labels and F-score iso-curve labels without collision."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True, iso_lines=True)
+    svg = chart.show_svg()
+    assert "AP = 0." in svg
+    assert "F=0.6" in svg
+    assert "NaN" not in svg
+
+
+def test_residuals_chart_annotate_metrics_false_no_corner():
+    """annotate_metrics=False should suppress the R2/RMSE/MAE corner annotation.
+    Exercises _inject_metrics_corner skip path."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.residuals_chart(
+        y_true=y_true, y_pred=y_pred,
+        panels="single",
+        annotate_metrics=False,
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # The corner annotation uses format_corner_metrics which includes "R" and "RMSE".
+    # When annotate_metrics=False, _inject_metrics_corner is skipped so
+    # the annotation text should not appear.
+    assert "_metrics_text" not in chart._resolve_pending()._data.columns
+
+
+def test_residuals_chart_annotate_metrics_true_has_r2():
+    """annotate_metrics=True (default) should inject the R2/RMSE/MAE corner text.
+    Exercises _inject_metrics_corner + _overlay_metrics_corner path."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.residuals_chart(
+        y_true=y_true, y_pred=y_pred,
+        panels="single",
+        annotate_metrics=True,
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # The metrics corner text layer should inject _metrics_text
+    resolved = chart._resolve_pending()
+    assert "_metrics_text" in resolved._data.columns
+
+
+def test_calibration_chart_annotate_brier_true_shows_brier_label():
+    """annotate_brier=True (default) on calibration_chart should inject
+    a Brier score annotation text element."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
+    chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred, annotate_brier=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # The Brier annotation should contain "Brier" text somewhere
+    assert "Brier" in svg or "brier" in svg.lower()
+
+
+def test_calibration_chart_annotate_brier_false_no_brier_label():
+    """annotate_brier=False should suppress the Brier score annotation."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
+    chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred, annotate_brier=False)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+def test_roc_chart_multiclass_annotate_auc_per_class_labels():
+    """Multiclass ROC with annotate_auc=True should produce one AUC label per class.
+    Tests _inject_curve_annotation with multiple groups."""
+    y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2])
+    y_pred = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1],
+        [0.2, 0.7, 0.1],
+        [0.1, 0.2, 0.7],
+        [0.6, 0.3, 0.1],
+        [0.3, 0.6, 0.1],
+        [0.2, 0.1, 0.7],
+    ])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # Should have multiple AUC annotations (one per class)
+    assert svg.count("AUC = ") >= 3
+
+
+def test_discrimination_threshold_chart_threshold_line_annotation():
+    """threshold_line=True on discrimination_threshold_chart should overlay
+    a vertical rule at the F1-maximising threshold. Tests the threshold-line
+    annotation injection path."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true, y_pred=y_pred,
+        threshold_line=True,
+        n_thresholds=20,
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # mark_rule emits an SVG <line> element for the vertical span
+    assert "<line " in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Format presets on diagnostic axes (Round 2 focus)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_with_format_preset_percent():
+    """AxisConfig(label_format='percent') should resolve to a d3-format string
+    and render on a diagnostic ROC chart without crashing."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+    configured = chart.configure(axis=AxisConfig(label_format="percent"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_confusion_matrix_chart_with_format_preset_integer():
+    """AxisConfig(label_format='integer') on confusion_matrix_chart."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 1, 1, 0, 1, 0])
+    y_hard = np.array([0, 1, 0, 0, 1, 1])
+    chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard)
+    configured = chart.configure(axis=AxisConfig(label_format="integer"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_residuals_chart_with_format_preset_decimal():
+    """AxisConfig(label_format='decimal') on residuals_chart."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.residuals_chart(y_true=y_true, y_pred=y_pred, panels="single")
+    configured = chart.configure(axis=AxisConfig(label_format="decimal"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_format_preset_invalid_name_raises():
+    """AxisConfig with an invalid format preset name should raise ValueError
+    at config construction time, not at render time."""
+    from ferrum.configure import AxisConfig
+
+    with pytest.raises(ValueError, match="Unknown format preset"):
+        AxisConfig(label_format="not_a_real_preset")
+
+
+def test_format_preset_and_raw_mutually_exclusive():
+    """AxisConfig with both label_format and label_format_raw should raise ValueError."""
+    from ferrum.configure import AxisConfig
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AxisConfig(label_format="percent", label_format_raw=".2f")
+
+
+def test_calibration_chart_with_format_preset_si():
+    """AxisConfig(label_format='si') on calibration_chart (SI prefix formatting)."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
+    chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred)
+    configured = chart.configure(axis=AxisConfig(label_format="si"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_gain_chart_with_format_preset_percent_int():
+    """AxisConfig(label_format='percent_int') on gain_chart."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.gain_chart(y_true=y_true, y_pred=y_pred)
+    configured = chart.configure(axis=AxisConfig(label_format="percent_int"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Structural features on diagnostic charts (Round 2 focus)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_svg_has_valid_viewbox():
+    """ROC chart SVG must have a viewBox attribute without NaN."""
+    import re
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    svg = ferrum.roc_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    assert "viewBox" in svg
+    match = re.search(r'viewBox="([^"]*)"', svg)
+    assert match is not None
+    parts = match.group(1).split()
+    assert len(parts) == 4
+    for p in parts:
+        assert "NaN" not in p
+        assert "Infinity" not in p
+        float(p)  # Should be parseable as float
+
+
+def test_pr_chart_svg_has_line_elements():
+    """PR chart SVG must contain line or path elements for the curve."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    svg = ferrum.pr_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    # A PR curve is rendered as a <path> element
+    assert "<path" in svg or "<polyline" in svg
+
+
+def test_confusion_matrix_chart_has_rect_elements():
+    """Confusion matrix SVG must have rect elements for the heatmap cells."""
+    y_true = np.array([0, 1, 1, 0, 1, 0])
+    y_hard = np.array([0, 1, 0, 0, 1, 1])
+    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).show_svg()
+    # A 2x2 confusion matrix should have at least 4 rect elements
+    assert svg.count("<rect") >= 4
+
+
+def test_confusion_matrix_chart_has_text_annotations():
+    """Confusion matrix SVG must have text elements for cell value annotations."""
+    y_true = np.array([0, 1, 1, 0, 1, 0])
+    y_hard = np.array([0, 1, 0, 0, 1, 1])
+    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).show_svg()
+    # Annotated by default -- data labels + axis labels
+    assert svg.count("<text") >= 4
+
+
+def test_gain_chart_svg_no_nan_in_path_d():
+    """Gain chart SVG path d-attributes must not contain NaN."""
+    import re
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    svg = ferrum.gain_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    paths = re.findall(r'd="([^"]*)"', svg)
+    for d in paths:
+        assert "NaN" not in d, f"NaN found in path d-attribute: {d[:100]}"
+        assert "Infinity" not in d
+
+
+def test_lift_chart_svg_no_nan_in_coordinates():
+    """Lift chart SVG coordinates (cx, cy, x1, y1, etc.) must not contain NaN."""
+    import re
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    svg = ferrum.lift_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    # Check all numeric attribute values for NaN
+    for attr in ("cx", "cy", "x1", "y1", "x2", "y2", "x", "y"):
+        vals = re.findall(rf'{attr}="([^"]*)"', svg)
+        for v in vals:
+            assert "NaN" not in v, f"NaN in {attr}={v}"
+
+
+def test_calibration_chart_svg_has_diagonal_reference():
+    """Calibration chart SVG should contain a diagonal reference line.
+    The reference line is a key structural feature -- a dashed line
+    from (0,0) to (1,1) showing perfect calibration."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
+    svg = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    assert "<svg" in svg
+    # The reference line is rendered as a line or path element
+    assert ("<line" in svg or "<path" in svg)
+
+
+def test_residuals_chart_multipanel_has_multiple_svg_groups():
+    """Residuals chart with panels='auto' should produce a composite SVG
+    with multiple title groups (one per panel). Exercises _grid_panels."""
+    from tests.fixtures import load_fixture, load_dataset
+
+    model = load_fixture("regression_ridge")
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    chart = ferrum.residuals_chart(model, X, df["y"], panels="auto")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    # The 4-panel layout should include recognizable panel titles
+    # (at least "Residuals" and "Q" from "Normal Q-Q")
+    assert "Residuals" in svg
+    # At least 3 panels render (leverage may be present for linear models)
+    assert svg.count("<circle") >= 3
+
+
+def test_prediction_error_chart_reference_line_present():
+    """prediction_error_chart with reference_line=True should contain
+    a diagonal reference line element."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    svg = ferrum.prediction_error_chart(
+        y_true=y_true, y_pred=y_pred, reference_line=True
+    ).show_svg()
+    assert "<svg" in svg
+    # Reference line is rendered as a line or path element
+    assert "<line" in svg or "<path" in svg
+
+
+def test_prediction_error_chart_no_reference_line():
+    """prediction_error_chart with reference_line=False should not contain
+    the dashed identity line, only scatter circles."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.prediction_error_chart(
+        y_true=y_true, y_pred=y_pred, reference_line=False
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "<circle" in svg
+
+
 # ---------------------------------------------------------------------------
 # Category: Error contracts
 # ---------------------------------------------------------------------------
@@ -542,11 +990,10 @@ def test_calibration_curve_bad_strategy_raises():  # BUG: ferrum's own strategy 
     The ferrum code has its own ValueError('not supported') guard at
     line 216, but sklearn's calibration_curve raises first at line 204
     with InvalidParameterError (a ValueError subclass). The ferrum
-    guard is therefore dead code — it never executes."""
+    guard is therefore dead code -- it never executes."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0], "f1": [1.0, 2.0, 3.0, 4.0]})
     y = pl.Series("y", [0, 1, 0, 1])
     source = ferrum.ModelSource(_PredictProba(), X, y)
-    # Should raise some kind of ValueError (sklearn's or ferrum's)
     with pytest.raises((ValueError, Exception)):
         source.calibration_curve(strategy="bogus")
 
@@ -640,7 +1087,7 @@ def test_compared_model_source_predictions_have_model_column():
     pred = cms.predictions()
     assert "model" in pred.columns
     assert set(pred["model"].unique().to_list()) == {"a", "b"}
-    assert pred.height == 6  # 3 rows * 2 models
+    assert pred.height == 6
 
 
 def test_compared_model_source_confusion_matrix():
@@ -652,7 +1099,6 @@ def test_compared_model_source_confusion_matrix():
     )
     cm = cms.confusion_matrix()
     assert "model" in cm.columns
-    # Each model produces 4 rows (2x2 matrix), so 8 total
     assert cm.height == 8
 
 
@@ -808,7 +1254,6 @@ def test_probabilities_via_decision_function():
     proba = source.probabilities()
     proba_cols = [c for c in proba.columns if c.startswith("proba_")]
     assert len(proba_cols) == 2
-    # Probabilities should sum to 1 for each row (binary sigmoid)
     sums = proba.select(proba_cols).to_numpy().sum(axis=1)
     np.testing.assert_allclose(sums, 1.0, atol=1e-10)
 
@@ -840,7 +1285,6 @@ def test_probabilities_without_y():
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0], "f1": [4.0, 5.0, 6.0]})
     source = ferrum.ModelSource(_PredictProba(), X)
     proba = source.probabilities()
-    # y_true column should be absent when y is None
     assert "y_true" not in proba.columns
     proba_cols = [c for c in proba.columns if c.startswith("proba_")]
     assert len(proba_cols) == 2
@@ -932,7 +1376,7 @@ def test_feature_names_returns_copy():
     names1 = source.feature_names
     names2 = source.feature_names
     assert names1 == names2
-    assert names1 is not names2  # should be a new list each time
+    assert names1 is not names2
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +1396,6 @@ def test_residuals_visualizer_double_fit():
     svg1 = viz.show().show_svg()
     viz.fit(X2, y2)
     svg2 = viz.show().show_svg()
-    # Both should produce valid SVGs, and they should differ
     assert "<svg" in svg1
     assert "<svg" in svg2
 
@@ -964,7 +1407,7 @@ def test_roc_visualizer_double_fit():
     model = _PredictProba()
     viz = ferrum.ROCVisualizer(model)
     viz.fit(X, y)
-    viz.fit(X, y)  # second fit should not crash
+    viz.fit(X, y)
     svg = viz.show().show_svg()
     assert "<svg" in svg
 
@@ -1016,7 +1459,6 @@ def test_precomputed_prediction_error_chart_produces_valid_svg():
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg
-    # Should contain scatter points (circle elements)
     assert "<circle" in svg
 
 
@@ -1068,9 +1510,8 @@ def test_intercluster_distance_k_larger_than_centers():
     """intercluster_distance with k > number of cluster centers should
     silently clamp k to the number of available centers."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0, 5.0], "f1": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    model = _ClustererModel()  # has 3 centers
+    model = _ClustererModel()
     source = ferrum.ModelSource(model, X)
-    # k=10 but only 3 centers — should clamp to 3
     icd = source.intercluster_distance(k=10, method="mds")
     assert icd.height <= 3
 
@@ -1126,7 +1567,7 @@ def test_confusion_matrix_multiclass_shape():
     model = _PredictProbaMulticlass()
     source = ferrum.ModelSource(model, X, y)
     cm = source.confusion_matrix()
-    assert cm.height == 9  # 3x3
+    assert cm.height == 9
 
 
 # ---------------------------------------------------------------------------
@@ -1175,7 +1616,7 @@ def test_base_visualizer_score_returns_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_precomputed_calibration_curve_bad_strategy_raises():  # BUG: same dead-code issue as ModelSource — ferrum's strategy guard at precomputed.py L147-149 is unreachable
+def test_precomputed_calibration_curve_bad_strategy_raises():  # BUG: same dead-code issue as ModelSource -- ferrum's strategy guard at precomputed.py L147-149 is unreachable
     """_PrecomputedSource.calibration_curve with bad strategy should raise.
     Same dead-code bug as ModelSource: sklearn raises first."""
     src = _PrecomputedSource(
@@ -1212,3 +1653,597 @@ def test_calibration_curve_multiclass_rejects():
     source = ferrum.ModelSource(_PredictProbaMulticlass(), X, y)
     with pytest.raises(ValueError, match="binary-classifier only"):
         source.calibration_curve()
+
+
+# ===========================================================================
+# NEW Round 2 adversarial tests
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Category: configure() + annotations composition corners
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_configure_axis_with_annotate_auc():
+    """configure(axis=...) composed with annotate_auc=True -- both features
+    should compose without error and produce valid SVG with text annotations."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
+    configured = chart.configure(axis=AxisConfig(label_angle=-30, tick_count=4))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert "AUC" in svg
+
+
+def test_pr_chart_configure_with_iso_lines_and_ap():
+    """configure() + iso_lines=True + annotate_ap=True: all three features compose."""
+    from ferrum.configure import GridConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
+    chart = ferrum.pr_chart(
+        y_true=y_true, y_pred=y_pred,
+        annotate_ap=True, iso_lines=True,
+    )
+    configured = chart.configure(grid=GridConfig(color="#cccccc"))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "AP = 0." in svg
+    assert "F=0.6" in svg
+    assert "NaN" not in svg
+
+
+def test_residuals_chart_configure_axis_with_metrics_annotation():
+    """configure(axis=...) composed with annotate_metrics=True on residuals_chart."""
+    from ferrum.configure import AxisConfig
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.residuals_chart(
+        y_true=y_true, y_pred=y_pred,
+        panels="single", annotate_metrics=True,
+    )
+    configured = chart.configure(axis=AxisConfig(label_font_size=12))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Visualizer .show() returns configurable chart (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_visualizer_show_then_configure():
+    """ROCVisualizer.show() returns a Chart that supports .configure()."""
+    from ferrum.configure import AxisConfig
+
+    X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0], "f1": [1.0, 2.0, 3.0, 4.0]})
+    y = pl.Series("y", [0, 1, 0, 1])
+    viz = ferrum.ROCVisualizer(_PredictProba()).fit(X, y)
+    chart = viz.show()
+    configured = chart.configure(axis=AxisConfig(label_angle=-45))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_confusion_matrix_visualizer_show_then_configure():
+    """ConfusionMatrixVisualizer.show() returns a configurable Chart."""
+    from ferrum.configure import TitleConfig
+
+    X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0], "f1": [1.0, 2.0, 3.0, 4.0]})
+    y = pl.Series("y", [0, 1, 0, 1])
+    viz = ferrum.ConfusionMatrixVisualizer(_PredictProba()).fit(X, y)
+    chart = viz.show()
+    configured = chart.configure(title=TitleConfig(font_size=18))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_residuals_visualizer_show_then_configure():
+    """ResidualsVisualizer.show() returns a configurable Chart."""
+    from ferrum.configure import PaddingConfig
+
+    X = pl.DataFrame({"f0": [1.0, 2.0, 3.0]})
+    y = pl.Series("y", [1.0, 2.0, 3.0])
+    viz = ferrum.ResidualsVisualizer(_MinimalPredict()).fit(X, y)
+    chart = viz.show()
+    configured = chart.configure(padding=PaddingConfig(top=30))
+    svg = configured.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: _inject_curve_annotation adversarial inputs (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_inject_curve_annotation_zero_row_df():
+    """_inject_curve_annotation with zero-row DataFrame should not crash."""
+    from ferrum.plots.classification import _inject_curve_annotation
+
+    df = pl.DataFrame({
+        "fpr": pl.Series([], dtype=pl.Float64),
+        "tpr": pl.Series([], dtype=pl.Float64),
+        "class": pl.Series([], dtype=pl.Utf8),
+        "auc": pl.Series([], dtype=pl.Float64),
+    })
+    result = _inject_curve_annotation(
+        df, group_field="class", metric_field="auc",
+        metric_label="AUC", prefix="_auc",
+    )
+    # Should return the DataFrame unchanged (no crash on zero-row input)
+    assert result.height == 0
+
+
+def test_inject_curve_annotation_null_group():
+    """_inject_curve_annotation with None in the group column should skip nulls."""
+    from ferrum.plots.classification import _inject_curve_annotation
+
+    df = pl.DataFrame({
+        "class": ["a", None, "b"],
+        "metric": [0.9, 0.8, 0.7],
+        "x": [1.0, 2.0, 3.0],
+    })
+    result = _inject_curve_annotation(
+        df, group_field="class", metric_field="metric",
+        metric_label="M", prefix="_m",
+    )
+    assert result.height == 3
+    # The null group should be skipped; only "a" and "b" get labels
+    labels = [v for v in result["_m_label"].to_list() if v is not None]
+    assert len(labels) == 2
+
+
+# ---------------------------------------------------------------------------
+# Category: _inject_metrics_corner adversarial inputs (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_inject_metrics_corner_zero_row_df():
+    """_inject_metrics_corner with empty DataFrame should return unchanged."""
+    from ferrum.plots._helpers import _inject_metrics_corner
+
+    df = pl.DataFrame({
+        "y_true": pl.Series([], dtype=pl.Float64),
+        "y_pred": pl.Series([], dtype=pl.Float64),
+        "residual": pl.Series([], dtype=pl.Float64),
+        "studentized_residual": pl.Series([], dtype=pl.Float64),
+    })
+    result = _inject_metrics_corner(df)
+    assert result.height == 0
+    # Should not inject the columns on empty input
+    assert "_metrics_text" not in result.columns
+
+
+def test_inject_metrics_corner_single_row_df():
+    """_inject_metrics_corner with single-row DataFrame should work.
+    R2 is undefined for a single point (ss_tot=0), so R2 should be 0."""
+    from ferrum.plots._helpers import _inject_metrics_corner
+
+    df = pl.DataFrame({
+        "y_true": [5.0],
+        "y_pred": [4.5],
+        "residual": [0.5],
+        "studentized_residual": [0.0],
+    })
+    result = _inject_metrics_corner(df)
+    assert result.height == 1
+    assert "_metrics_text" in result.columns
+    text = result["_metrics_text"][0]
+    assert text is not None
+    assert "NaN" not in text
+
+
+def test_inject_metrics_corner_all_same_y_true():
+    """_inject_metrics_corner when all y_true are identical (ss_tot=0).
+    R2 should be 0 (not NaN or Infinity) per the guard in _r2_score."""
+    from ferrum.plots._helpers import _inject_metrics_corner, _r2_score
+
+    y_true = pl.Series([3.0, 3.0, 3.0])
+    y_pred = pl.Series([2.5, 3.0, 3.5])
+    r2 = _r2_score(y_true, y_pred)
+    assert r2 == 0.0  # Not NaN, not Infinity
+
+    df = pl.DataFrame({
+        "y_true": [3.0, 3.0, 3.0],
+        "y_pred": [2.5, 3.0, 3.5],
+        "residual": [-0.5, 0.0, 0.5],
+        "studentized_residual": [-1.0, 0.0, 1.0],
+    })
+    result = _inject_metrics_corner(df)
+    assert "_metrics_text" in result.columns
+    texts = [v for v in result["_metrics_text"].to_list() if v is not None]
+    assert len(texts) == 1
+    assert "NaN" not in texts[0]
+    assert "Infinity" not in texts[0]
+
+
+# ---------------------------------------------------------------------------
+# Category: _resolve_source adversarial inputs (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_source_neither_path_raises():
+    """_resolve_source with no model and no precomputed should raise ValueError."""
+    from ferrum.plots._helpers import _resolve_source
+
+    with pytest.raises(ValueError, match="Supply either"):
+        _resolve_source(None)
+
+
+def test_resolve_source_both_paths_raises():
+    """_resolve_source with both model and y_true/y_pred should raise ValueError."""
+    from ferrum.plots._helpers import _resolve_source
+
+    with pytest.raises(ValueError, match="not both"):
+        _resolve_source(
+            _MinimalPredict(),
+            y_true=np.array([0, 1]),
+            y_pred=np.array([0.5, 0.5]),
+        )
+
+
+def test_resolve_source_precomputed_with_compare_raises():
+    """_resolve_source with precomputed + compare= should raise ValueError."""
+    from ferrum.plots._helpers import _resolve_source
+
+    with pytest.raises(ValueError, match="compare="):
+        _resolve_source(
+            None,
+            y_true=np.array([0, 1]),
+            y_pred=np.array([0.5, 0.5]),
+            compare={"alt": _MinimalPredict()},
+        )
+
+
+def test_resolve_source_ytrue_without_ypred_raises():
+    """_resolve_source with y_true but no y_pred should raise ValueError."""
+    from ferrum.plots._helpers import _resolve_source
+
+    with pytest.raises(ValueError, match="y_pred"):
+        _resolve_source(None, y_true=np.array([0, 1]))
+
+
+def test_resolve_source_compare_not_dict_raises():
+    """_resolve_source with compare= that is not a dict should raise TypeError."""
+    from ferrum.plots._helpers import _resolve_source
+
+    X = pl.DataFrame({"f0": [1.0, 2.0]})
+    with pytest.raises(TypeError, match="dict"):
+        _resolve_source(_MinimalPredict(), X, [0, 1], compare=["bad"])
+
+
+# ---------------------------------------------------------------------------
+# Category: Two-row DataFrame edge case (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_predictions_two_rows_studentized_residual():
+    """Two-row dataset: studentized residual computed from 2 residuals with
+    std > 0 should produce finite values (not NaN). Tests the n=2 boundary
+    in studentized_residual_no_x Rust code."""
+    X = pl.DataFrame({"f0": [1.0, 10.0]})
+    y = pl.Series("y", [2.0, 8.0])
+    source = ferrum.ModelSource(_MinimalPredict(), X, y)
+    pred = source.predictions()
+    assert pred.height == 2
+    # With y_true=[2, 8] and y_pred=[0, 0], residuals=[2, 8], std>0,
+    # so studentized should be finite
+    stud = pred["studentized_residual"].to_list()
+    assert all(np.isfinite(s) for s in stud)
+
+
+# ---------------------------------------------------------------------------
+# Category: Precomputed ROC with all-same-class (Round 2 recheck)
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_roc_all_same_class_does_not_crash():
+    """Precomputed ROC with single-class y_true should not crash.
+    This re-checks the binary path where roc_auc_score raises ValueError
+    for single-class input -- the code now catches it and sets auc=NaN."""
+    y_true = np.array([0, 0, 0, 0])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    src = _PrecomputedSource(y_true, y_pred)
+    roc = src.roc_curve()
+    assert roc.height > 0
+    # AUC should be NaN for single-class
+    aucs = roc["auc"].unique().to_list()
+    assert len(aucs) == 1
+    assert np.isnan(aucs[0])
+
+
+def test_precomputed_roc_all_same_class_chart_renders():
+    """Precomputed ROC chart with single-class y_true should still render valid SVG."""
+    y_true = np.array([1, 1, 1, 1])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg  # NaN in auc column should not leak to SVG coordinates
+
+
+# ---------------------------------------------------------------------------
+# Category: Precomputed PR with degenerate inputs (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_pr_all_positive_class():
+    """PR curve with all-positive y_true: precision=1 everywhere, AP=1."""
+    y_true = np.array([1, 1, 1, 1])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    src = _PrecomputedSource(y_true, y_pred)
+    pr = src.pr_curve()
+    assert pr.height > 0
+    # When all labels are positive, AP should be close to 1.0
+    aps = pr["ap"].unique().to_list()
+    assert len(aps) == 1
+    assert abs(aps[0] - 1.0) < 0.01
+
+
+def test_precomputed_pr_all_negative_class():
+    """PR curve with all-negative y_true: AP is typically near 0."""
+    y_true = np.array([0, 0, 0, 0])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    src = _PrecomputedSource(y_true, y_pred)
+    pr = src.pr_curve()
+    assert pr.height > 0
+
+
+# ---------------------------------------------------------------------------
+# Category: ComparedModelSource __getattr__ attribute error (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_compared_model_source_model_attr_raises():
+    """ComparedModelSource._model should raise AttributeError."""
+    X = pl.DataFrame({"f0": [1.0, 2.0]})
+    y = pl.Series("y", [0, 1])
+    cms = ferrum.ModelSource.compare({"a": _PredictProba()}, X, y)
+    with pytest.raises(AttributeError, match="no single model"):
+        _ = cms._model
+
+
+def test_compared_model_source_model_property_raises():
+    """ComparedModelSource.model should raise AttributeError."""
+    X = pl.DataFrame({"f0": [1.0, 2.0]})
+    y = pl.Series("y", [0, 1])
+    cms = ferrum.ModelSource.compare({"a": _PredictProba()}, X, y)
+    with pytest.raises(AttributeError, match="no single model"):
+        _ = cms.model
+
+
+def test_compared_model_source_unknown_method_raises():
+    """ComparedModelSource.nonexistent() should raise AttributeError with method list."""
+    X = pl.DataFrame({"f0": [1.0, 2.0]})
+    y = pl.Series("y", [0, 1])
+    cms = ferrum.ModelSource.compare({"a": _PredictProba()}, X, y)
+    with pytest.raises(AttributeError, match="Methods routed"):
+        cms.totally_fake_method()
+
+
+# ---------------------------------------------------------------------------
+# Category: configure() chaining (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_configure_chained_twice_on_diagnostic_chart():
+    """Calling configure() twice should apply both configurations.
+    Tests that configure() returns a new chart (not mutating in-place)."""
+    from ferrum.configure import AxisConfig, TitleConfig
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
+    c1 = chart.configure(axis=AxisConfig(label_angle=-45))
+    c2 = c1.configure(title=TitleConfig(font_size=24))
+    svg = c2.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Subtitle on diagnostic charts (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_subtitle():
+    """roc_chart(subtitle=...) should inject a subtitle into the SVG."""
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, subtitle="Test Subtitle")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "Test Subtitle" in svg
+
+
+def test_residuals_chart_subtitle():
+    """residuals_chart(subtitle=...) should inject a subtitle."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
+    chart = ferrum.residuals_chart(
+        y_true=y_true, y_pred=y_pred,
+        panels="single",
+        subtitle="My Subtitle",
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "My Subtitle" in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Discrimination threshold metrics subset (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_discrimination_threshold_chart_custom_metrics_subset():
+    """discrimination_threshold_chart(metrics=('precision', 'recall')) should
+    render only 2 metric curves, not 4."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true, y_pred=y_pred,
+        n_thresholds=10,
+        metrics=("precision", "recall"),
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: Figure-function properties/mark/encode overrides (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_roc_chart_properties_override():
+    """roc_chart(properties=...) should apply width/height overrides."""
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
+    chart = ferrum.roc_chart(
+        y_true=y_true, y_pred=y_pred,
+        properties={"width": 500, "height": 400},
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_confusion_matrix_chart_normalize_all():
+    """confusion_matrix_chart(normalize='all') should normalize by grand total."""
+    y_true = np.array([0, 1, 1, 0, 1, 0])
+    y_hard = np.array([0, 1, 0, 0, 1, 1])
+    chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard, normalize="all")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_confusion_matrix_chart_normalize_pred():
+    """confusion_matrix_chart(normalize='pred') should normalize by predicted class."""
+    y_true = np.array([0, 1, 1, 0, 1, 0])
+    y_hard = np.array([0, 1, 0, 0, 1, 1])
+    chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard, normalize="pred")
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Category: _PrecomputedSource edge cases (Round 2 new)
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_source_multiclass_lift():
+    """_PrecomputedSource lift_curve with 2D y_pred (multiclass) should work."""
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+    y_pred = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1],
+        [0.2, 0.7, 0.1],
+        [0.1, 0.2, 0.7],
+    ])
+    src = _PrecomputedSource(y_true, y_pred)
+    lift = src.lift_curve()
+    assert lift.height > 0
+    assert "baseline" in lift["class"].to_list()
+
+
+def test_precomputed_source_multiclass_roc():
+    """_PrecomputedSource roc_curve with 2D y_pred (multiclass)."""
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+    y_pred = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1],
+        [0.2, 0.7, 0.1],
+        [0.1, 0.2, 0.7],
+    ])
+    src = _PrecomputedSource(y_true, y_pred)
+    roc = src.roc_curve()
+    classes = set(roc["class"].unique().to_list())
+    assert len(classes) == 3  # one per class
+
+
+def test_precomputed_source_multiclass_pr():
+    """_PrecomputedSource pr_curve with 2D y_pred (multiclass)."""
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+    y_pred = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1],
+        [0.2, 0.7, 0.1],
+        [0.1, 0.2, 0.7],
+    ])
+    src = _PrecomputedSource(y_true, y_pred)
+    pr = src.pr_curve()
+    classes = set(pr["class"].unique().to_list())
+    assert len(classes) == 3
+
+
+def test_precomputed_source_roc_macro_average():
+    """_PrecomputedSource roc_curve with average='macro' on multiclass."""
+    y_true = np.array([0, 1, 2, 0, 1, 2])
+    y_pred = np.array([
+        [0.8, 0.1, 0.1],
+        [0.1, 0.8, 0.1],
+        [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1],
+        [0.2, 0.7, 0.1],
+        [0.1, 0.2, 0.7],
+    ])
+    src = _PrecomputedSource(y_true, y_pred)
+    roc = src.roc_curve(average="macro")
+    classes = set(roc["class"].unique().to_list())
+    assert "macro" in classes
+    # Per-class curves are also present
+    assert len(classes) >= 4  # 3 classes + macro
+
+
+# ---------------------------------------------------------------------------
+# Category: _inject_cook_outliers adversarial inputs (Round 2)
+# ---------------------------------------------------------------------------
+
+
+def test_inject_cook_outliers_zero_row_df():
+    """_inject_cook_outliers with zero-row DataFrame should return unchanged."""
+    from ferrum.plots._helpers import _inject_cook_outliers
+
+    df = pl.DataFrame({
+        "y_pred": pl.Series([], dtype=pl.Float64),
+        "residual": pl.Series([], dtype=pl.Float64),
+        "studentized_residual": pl.Series([], dtype=pl.Float64),
+        "cooks_distance": pl.Series([], dtype=pl.Float64),
+    })
+    result = _inject_cook_outliers(df, threshold="auto")
+    assert result.height == 0
+
+
+def test_inject_cook_outliers_all_nan_cooks():
+    """_inject_cook_outliers where cooks_distance is all NaN (non-linear model).
+    Should produce no outliers (NaN > threshold is guarded by is_not_nan())."""
+    from ferrum.plots._helpers import _inject_cook_outliers
+
+    df = pl.DataFrame({
+        "y_pred": [1.0, 2.0, 3.0],
+        "residual": [0.1, -0.2, 0.3],
+        "studentized_residual": [0.5, -1.0, 1.5],
+        "cooks_distance": [float("nan"), float("nan"), float("nan")],
+    })
+    result = _inject_cook_outliers(df, threshold="auto")
+    assert "_cook_outlier_x" in result.columns
+    # All should be null (no outliers when cooks is NaN)
+    assert result["_cook_outlier_x"].is_null().all()

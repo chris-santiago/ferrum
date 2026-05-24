@@ -223,20 +223,22 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
     }
 
     // ── Padding overrides ─────────────────────────────────────────────────────
-    // ThemeInputs has a single `padding` scalar (uniform outer padding).
-    // We map the per-side values to a single value using the average when all
-    // four sides are supplied, or the max of any supplied sides otherwise.
-    // This is the best we can do without adding per-side fields to ThemeInputs.
+    // Per-side padding: map each supplied side directly to ThemeInputs.padding_*.
+    // `auto=true` (the Python default) is no longer a guard — it was previously
+    // blocking all padding overrides. The `auto` field is reserved for a future
+    // "auto-expand to fit labels" semantic; it does not disable explicit values.
     if let Some(ref padding) = config.padding {
-        if !padding.auto.unwrap_or(false) {
-            let values: Vec<f64> = [padding.top, padding.right, padding.bottom, padding.left]
-                .into_iter()
-                .flatten()
-                .collect();
-            if !values.is_empty() {
-                let sum: f64 = values.iter().sum();
-                theme.padding = sum / values.len() as f64;
-            }
+        if let Some(top) = padding.top {
+            theme.padding_top = Some(top);
+        }
+        if let Some(right) = padding.right {
+            theme.padding_right = Some(right);
+        }
+        if let Some(bottom) = padding.bottom {
+            theme.padding_bottom = Some(bottom);
+        }
+        if let Some(left) = padding.left {
+            theme.padding_left = Some(left);
         }
     }
 
@@ -459,6 +461,9 @@ fn apply_axis_config_to_axis_input(
     }
     if axis.title_padding.is_none() {
         axis.title_padding = cfg.title_padding;
+    }
+    if axis.label_padding.is_none() {
+        axis.label_padding = cfg.label_padding;
     }
 }
 
@@ -1433,7 +1438,7 @@ mod chart_config_application_tests {
     }
 
     #[test]
-    fn apply_chart_config_padding_average_of_sides() {
+    fn apply_chart_config_padding_per_side() {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             padding: Some(PaddingConfigSpec {
@@ -1446,14 +1451,19 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        // Average of 10, 20, 30, 40 = 25.
-        assert_eq!(theme.padding, 25.0);
+        // Each side is set independently.
+        assert_eq!(theme.padding_top, Some(10.0));
+        assert_eq!(theme.padding_right, Some(20.0));
+        assert_eq!(theme.padding_bottom, Some(30.0));
+        assert_eq!(theme.padding_left, Some(40.0));
+        // Uniform fallback padding is unchanged.
+        assert_eq!(theme.padding, 16.0);
     }
 
     #[test]
-    fn apply_chart_config_padding_auto_skips_override() {
+    fn apply_chart_config_padding_auto_does_not_block_explicit_sides() {
+        // auto=true (the Python default) must NOT block explicit side values.
         let mut theme = ThemeInputs::default();
-        let original_padding = theme.padding;
         let config = ChartConfig {
             padding: Some(PaddingConfigSpec {
                 top: Some(5.0),
@@ -1463,8 +1473,12 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        // auto=true bypasses the override.
-        assert_eq!(theme.padding, original_padding);
+        // The explicit top value must be applied even when auto=true.
+        assert_eq!(theme.padding_top, Some(5.0));
+        // Sides not specified remain None.
+        assert!(theme.padding_right.is_none());
+        assert!(theme.padding_bottom.is_none());
+        assert!(theme.padding_left.is_none());
     }
 
     #[test]
@@ -1678,6 +1692,19 @@ mod chart_config_application_tests {
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         apply_label_format_to_axis(&mut axis);
         assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
+    }
+
+    #[test]
+    fn axis_config_label_padding_propagates_to_axis_input() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["0".to_string(), "50".to_string(), "100".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec { label_padding: Some(6.0), ..Default::default() };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        assert_eq!(axis.label_padding, Some(6.0));
     }
 
     #[test]

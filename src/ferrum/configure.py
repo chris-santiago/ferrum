@@ -56,6 +56,9 @@ class AxisConfig:
         Axis title color.
     title_padding : float, optional
         Padding between the axis title and tick labels.
+    label_padding : float, optional
+        Pixel gap between the tick mark endpoint and the label text baseline.
+        Defaults to 2.0 when not set.
     domain : bool, optional
         Show the axis domain line.
     domain_color : str, optional
@@ -105,6 +108,7 @@ class AxisConfig:
     domain_max: float | None = None
     nice: bool | None = None
     zero: bool | None = None
+    label_padding: float | None = None
 
     def __post_init__(self) -> None:
         if self.label_format is not None and self.label_format_raw is not None:

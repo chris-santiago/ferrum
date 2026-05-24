@@ -21,6 +21,8 @@ chart = (
         x=fm.X("quarter:N", axis=fm.Axis(label_angle=-45)),
         y="revenue:Q",
     )
+    .configure_axis(x=True, y=False, label_padding=6)
+    .configure_padding(bottom=50)
     .labs(title="Quarterly Revenue", x=None, y="Revenue ($k)")
 )
 

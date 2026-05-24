@@ -181,6 +181,19 @@ mod tests {
         albers_conic_fwd(lon, lat, 29.5, 45.5, 38.0, -96.0)
     }
 
+    fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
+        // Approximate inverse using main continental conic (mirrors source).
+        let (phi1, phi2, phi0, lam0) = (to_rad(29.5), to_rad(45.5), to_rad(38.0), to_rad(-96.0));
+        let n = (phi1.sin() + phi2.sin()) / 2.0;
+        let c = phi2.cos().powi(2) + 2.0*n*phi2.sin();
+        let rho0 = c.sqrt() / n - phi0.sin() / n;
+        let dy = rho0 - y;
+        let rho = (x*x + dy*dy).sqrt();
+        let phi = ((c - rho*rho*n*n) / (2.0*n)).asin();
+        let lam = x.atan2(dy) / n + lam0;
+        (to_deg(lam), to_deg(phi))
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // NaN INPUT PROPAGATION
     // ═══════════════════════════════════════════════════════════════════════
@@ -935,5 +948,1236 @@ mod tests {
         let _ = equal_earth_fwd(0.0, tiny);
         let _ = natural_earth_fwd(0.0, tiny);
         let _ = orthographic_fwd(0.0, tiny);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: REGRESSION — VERIFY PREVIOUS BUG FIXES HOLD
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Regression: ne_poly must include the phi^8 term for 5-element coefficients.
+    /// Round 1 found that NE_B[4]=-0.005916 was silently dropped, producing ~0.34
+    /// error at the poles. This verifies the fix from commit bd182a8 holds.
+    #[test]
+    fn bug_hunt_r2_regression_ne_poly_includes_phi8() {
+        let phi = to_rad(90.0);
+        let y_ne_poly = ne_poly(&NE_B, phi);
+        let y_full = ne_poly_full(&NE_B, phi);
+        let error = (y_ne_poly - y_full).abs();
+        assert!(
+            error < 1e-12,
+            "REGRESSION: ne_poly still drops NE_B[4]; error at pole = {error}"
+        );
+    }
+
+    /// Regression: ne_poly_deriv must include 8*phi^7*coeffs[4] for 5-element coefficients.
+    #[test]
+    fn bug_hunt_r2_regression_ne_poly_deriv_includes_phi7() {
+        let phi = to_rad(70.0);
+        let deriv = ne_poly_deriv(&NE_B, phi);
+        // Hand-compute full derivative
+        let p1 = phi;
+        let p3 = phi * phi * phi;
+        let p5 = p3 * phi * phi;
+        let p7 = p5 * phi * phi;
+        let expected = 2.0*p1*NE_B[1] + 4.0*p3*NE_B[2] + 6.0*p5*NE_B[3] + 8.0*p7*NE_B[4];
+        let error = (deriv - expected).abs();
+        assert!(
+            error < 1e-10,
+            "REGRESSION: ne_poly_deriv still drops 8*phi^7*B[4]; error = {error}"
+        );
+    }
+
+    /// Regression: orthographic inverse at near-pole should now round-trip
+    /// accurately after the cos_c fix (was atan2(x, cos_c^2), now atan2(x, cos_c)).
+    #[test]
+    fn bug_hunt_r2_regression_orthographic_near_pole_round_trip() {
+        let lon = 10.0;
+        let lat = 89.0;
+        let (x, y) = orthographic_fwd(lon, lat);
+        if x.is_nan() { return; }
+        let (lon2, lat2) = orthographic_inv(x, y);
+        assert!(
+            (lon2 - lon).abs() < 1e-4,
+            "REGRESSION: orthographic near-pole lon: {} -> {} (diff {})",
+            lon, lon2, (lon2 - lon).abs()
+        );
+        assert!(
+            (lat2 - lat).abs() < 1e-4,
+            "REGRESSION: orthographic near-pole lat: {} -> {} (diff {})",
+            lat, lat2, (lat2 - lat).abs()
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS USA INVERSE — ALASKA/HAWAII ROUTING BUG
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// BUG: albers_usa_inv always uses the continental conic, so points that
+    /// were forward-projected through the Alaska inset will NOT round-trip.
+    /// A point at (lon=-160, lat=64) enters the Alaska branch in albers_usa_fwd
+    /// (lat>49.5 && lon<-127.5), gets scaled by 0.35 and offset, but
+    /// albers_usa_inv only inverts the continental conic. The round-trip error
+    /// should be enormous (many degrees).
+    #[test]
+    fn bug_hunt_r2_albers_usa_inv_alaska_no_round_trip() { // BUG: albers_usa_inv uses only continental conic, ignoring Alaska/Hawaii insets
+        let lon = -160.0;
+        let lat = 64.0;
+        // Confirm this enters Alaska branch
+        assert!(lat > 49.5 && lon < -127.5, "test expects Alaska routing");
+        let (x, y) = albers_usa_fwd(lon, lat);
+        let (lon2, lat2) = albers_usa_inv(x, y);
+        // The inverse does NOT know about Alaska → continental conic inverse
+        // will give completely wrong coordinates. If the error is < 1 degree,
+        // the inverse somehow worked (unexpected).
+        let lon_err = (lon2 - lon).abs();
+        let lat_err = (lat2 - lat).abs();
+        assert!(
+            lon_err < 5.0 && lat_err < 5.0,
+            "albers_usa_inv should handle Alaska inset but uses continental only; \
+             lon error={lon_err:.1}, lat error={lat_err:.1}"
+        );
+    }
+
+    /// BUG: Same issue for Hawaii — albers_usa_inv ignores the Hawaii offset.
+    #[test]
+    fn bug_hunt_r2_albers_usa_inv_hawaii_no_round_trip() { // BUG: albers_usa_inv ignores Hawaii inset transform
+        let lon = -157.0;
+        let lat = 21.0;
+        // Confirm this enters Hawaii branch
+        assert!(lat < 24.0 && lat > 18.0 && lon < -154.0, "test expects Hawaii routing");
+        let (x, y) = albers_usa_fwd(lon, lat);
+        let (lon2, lat2) = albers_usa_inv(x, y);
+        let lon_err = (lon2 - lon).abs();
+        let lat_err = (lat2 - lat).abs();
+        assert!(
+            lon_err < 5.0 && lat_err < 5.0,
+            "albers_usa_inv should handle Hawaii inset but uses continental only; \
+             lon error={lon_err:.1}, lat error={lat_err:.1}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC — SOUTHERN HEMISPHERE / NEGATIVE n
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Albers conic with standard parallels in the southern hemisphere.
+    /// sp1=-30, sp2=-45 → n = (sin(-30)+sin(-45))/2 = (-0.5 + -0.707)/2 = -0.604
+    /// n is negative, which means rho0 = sqrt(c)/n is negative and rho = sqrt(c-2n*sin(phi))/n
+    /// is also negative. The signs cancel in the x,y formulas, but this is worth testing.
+    #[test]
+    fn bug_hunt_r2_albers_conic_southern_hemisphere() {
+        let (x, y) = albers_conic_fwd(0.0, -35.0, -30.0, -45.0, -37.5, 0.0);
+        assert!(
+            x.is_finite() && y.is_finite(),
+            "albers conic with southern hemisphere parallels should produce finite coords, got ({x}, {y})"
+        );
+        // With lon=lon0=0, x should be 0 (on central meridian)
+        assert!(
+            x.abs() < 1e-10,
+            "albers conic southern hemisphere on central meridian: x should be ~0, got {x}"
+        );
+    }
+
+    /// Albers conic with one southern and one northern parallel.
+    /// sp1=-20, sp2=20 → n = (sin(-20)+sin(20))/2 = 0 → DIVISION BY ZERO.
+    /// This is the symmetric equatorial case where the conic degenerates.
+    #[test]
+    fn bug_hunt_r2_albers_conic_equatorial_symmetric_no_panic() {
+        // n = 0 → division by zero in rho0 and rho calculations
+        let (x, y) = albers_conic_fwd(0.0, 0.0, -20.0, 20.0, 0.0, 0.0);
+        // Should not panic. Result may be infinity or NaN.
+        let _ = (x, y);
+    }
+
+    /// Albers conic with extreme southern parallels (e.g., near the south pole).
+    /// sp1=-89, sp2=-89 → n = sin(-89) = -0.9998...
+    #[test]
+    fn bug_hunt_r2_albers_conic_near_south_pole_parallels() {
+        let (x, y) = albers_conic_fwd(10.0, -85.0, -89.0, -89.0, -89.0, 0.0);
+        assert!(
+            x.is_finite() && y.is_finite(),
+            "albers conic near south pole should produce finite coords, got ({x}, {y})"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC INVERSE — asin DOMAIN VIOLATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Albers conic inverse: when rho is very large, (c - rho^2*n^2)/(2n)
+    /// can exceed the [-1, 1] domain of asin, producing NaN.
+    #[test]
+    fn bug_hunt_r2_albers_usa_inv_extreme_coords_asin_domain() {
+        // Feed extremely large (x, y) into the inverse
+        let (lon, lat) = albers_usa_inv(100.0, 100.0);
+        // rho = sqrt(x^2 + dy^2) is huge → (c - rho^2*n^2)/(2n) >> 1 → asin returns NaN
+        // This is acceptable for out-of-range inputs, but should not panic.
+        let _ = (lon, lat);
+        // The real question is: does it produce NaN or does it silently corrupt?
+        // If lat is NaN, that's fine for extreme inputs.
+    }
+
+    /// Albers conic inverse: at the exact forward-projected origin point (lon0, lat0),
+    /// the round-trip should be very accurate.
+    #[test]
+    fn bug_hunt_r2_albers_usa_inv_at_center_accurate() {
+        let lon0 = -96.0;
+        let lat0 = 38.0;
+        let (x, y) = albers_usa_fwd(lon0, lat0);
+        let (lon2, lat2) = albers_usa_inv(x, y);
+        assert!(
+            (lon2 - lon0).abs() < 1e-6,
+            "albers USA inverse at center lon: {} -> {} (diff {})",
+            lon0, lon2, (lon2 - lon0).abs()
+        );
+        assert!(
+            (lat2 - lat0).abs() < 1e-6,
+            "albers USA inverse at center lat: {} -> {} (diff {})",
+            lat0, lat2, (lat2 - lat0).abs()
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: MERCATOR — ROUND-TRIP AT CLAMP BOUNDARY
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mercator round-trip at lat=85.051 (near clamp boundary).
+    /// Forward clamps to 85.051129, inverse recovers... what?
+    /// The clamp causes information loss: lat=86 → clamped to 85.051 →
+    /// round-trip gives 85.051, not 86. This is expected but worth pinning.
+    #[test]
+    fn bug_hunt_r2_mercator_clamp_loses_information() {
+        let lat = 86.0;
+        let (x, y) = mercator_fwd(0.0, lat);
+        let (_, lat2) = mercator_inv(x, y);
+        // lat=86 gets clamped to 85.051129 in forward, so inverse returns ~85.051
+        assert!(
+            (lat2 - lat).abs() > 0.5,
+            "mercator at lat=86 should lose info due to clamping: \
+             expected recovery near 85.05, got {lat2}"
+        );
+        assert!(
+            (lat2 - 85.051_129_34).abs() < 1e-6,
+            "mercator at lat=86: inverse should recover clamped value ~85.051, got {lat2}"
+        );
+    }
+
+    /// Mercator round-trip at lat=-85 (just inside clamp, no information loss).
+    #[test]
+    fn bug_hunt_r2_mercator_inside_clamp_round_trip() {
+        let lon = -45.0;
+        let lat = -85.0;
+        let (x, y) = mercator_fwd(lon, lat);
+        let (lon2, lat2) = mercator_inv(x, y);
+        assert!(
+            (lon2 - lon).abs() < 1e-10 && (lat2 - lat).abs() < 1e-10,
+            "mercator round-trip at lat=-85: ({lon},{lat}) -> ({lon2},{lat2})"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: MERCATOR INVERSE — NEGATIVE INFINITY y
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mercator inverse with y=-infinity: exp(-inf) = 0, atan(0) = 0,
+    /// so lat = 2*0 - pi/2 = -pi/2 = -90 degrees.
+    #[test]
+    fn bug_hunt_r2_mercator_inv_neg_inf_y() {
+        let (lon, lat) = mercator_inv(0.0, f64::NEG_INFINITY);
+        assert!(lon.is_finite(), "mercator inv: -inf y should give finite lon, got {lon}");
+        assert!(
+            (lat - (-90.0)).abs() < 1e-6,
+            "mercator inv: -inf y should give lat=-90, got {lat}"
+        );
+    }
+
+    /// Mercator inverse with x=infinity: to_deg(inf) = inf.
+    #[test]
+    fn bug_hunt_r2_mercator_inv_inf_x() {
+        let (lon, _) = mercator_inv(f64::INFINITY, 0.0);
+        assert!(
+            lon.is_infinite(),
+            "mercator inv: inf x should give inf lon, got {lon}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ORTHOGRAPHIC — COMPREHENSIVE ROUND-TRIP GRID
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Orthographic round-trip over a grid of points within the visible hemisphere.
+    /// Tests lon in [-89, 89] and lat in [-89, 89] at 10-degree steps.
+    #[test]
+    fn bug_hunt_r2_orthographic_grid_round_trip() {
+        let mut max_lon_err = 0.0_f64;
+        let mut max_lat_err = 0.0_f64;
+        let mut worst_lon = 0.0_f64;
+        let mut worst_lat = 0.0_f64;
+
+        for lon_i in (-8..=8) {
+            for lat_i in (-8..=8) {
+                let lon = lon_i as f64 * 10.0;
+                let lat = lat_i as f64 * 10.0;
+                let (x, y) = orthographic_fwd(lon, lat);
+                if x.is_nan() { continue; }
+                let (lon2, lat2) = orthographic_inv(x, y);
+                let lon_err = (lon2 - lon).abs();
+                let lat_err = (lat2 - lat).abs();
+                if lon_err > max_lon_err {
+                    max_lon_err = lon_err;
+                    worst_lon = lon;
+                    worst_lat = lat;
+                }
+                if lat_err > max_lat_err {
+                    max_lat_err = lat_err;
+                }
+            }
+        }
+        assert!(
+            max_lon_err < 1e-6,
+            "orthographic grid round-trip max lon error = {max_lon_err} at lon={worst_lon}, lat={worst_lat}"
+        );
+        assert!(
+            max_lat_err < 1e-6,
+            "orthographic grid round-trip max lat error = {max_lat_err}"
+        );
+    }
+
+    /// Orthographic: test at lat=89.99 (very near pole) where cos(phi) ~ 1.7e-4.
+    /// At this latitude, x = cos(phi)*sin(lam) is very small for any lon,
+    /// so the inverse atan2(x, cos_c) involves very small numerator AND denominator.
+    #[test]
+    fn bug_hunt_r2_orthographic_very_near_pole() {
+        let lon = 45.0;
+        let lat = 89.99;
+        let (x, y) = orthographic_fwd(lon, lat);
+        if x.is_nan() { return; }
+        let (lon2, lat2) = orthographic_inv(x, y);
+        // Near the pole, longitude becomes increasingly ill-defined.
+        // We check lat is close but lon may lose precision.
+        assert!(
+            (lat2 - lat).abs() < 0.01,
+            "orthographic at lat=89.99: lat round-trip {lat} -> {lat2}"
+        );
+        // Lon may degrade but should not be wildly off
+        assert!(
+            (lon2 - lon).abs() < 5.0,
+            "orthographic at lat=89.99: lon round-trip {lon} -> {lon2} (precision loss expected near pole)"
+        );
+    }
+
+    /// Orthographic inverse at the rim: x^2+y^2 = 1 exactly. rho=1, cos_c=0.
+    /// atan2(x, 0) = sign(x)*pi/2 for x!=0.
+    #[test]
+    fn bug_hunt_r2_orthographic_inv_at_rim() {
+        // Point on the rim: x=1, y=0 → rho=1, cos_c=0
+        let (lon, lat) = orthographic_inv(1.0, 0.0);
+        assert!(lon.is_finite() && lat.is_finite(),
+            "orthographic inv at rim (1,0) should be finite, got ({lon}, {lat})");
+        // lon = atan2(1, 0) = pi/2 → 90 degrees
+        assert!((lon - 90.0).abs() < 1e-6,
+            "orthographic inv at rim (1,0): lon should be 90, got {lon}");
+        // lat = asin(0) = 0
+        assert!(lat.abs() < 1e-6,
+            "orthographic inv at rim (1,0): lat should be 0, got {lat}");
+    }
+
+    /// Orthographic inverse just outside the disk: rho > 1 → NaN.
+    #[test]
+    fn bug_hunt_r2_orthographic_inv_outside_disk() {
+        let (lon, lat) = orthographic_inv(0.8, 0.7);
+        // rho = sqrt(0.64 + 0.49) = sqrt(1.13) > 1 → NaN
+        assert!(lon.is_nan() && lat.is_nan(),
+            "orthographic inv outside disk should be NaN, got ({lon}, {lat})");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUAL EARTH — POLE ROUND-TRIP
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equal Earth round-trip at the poles (lat=90 and lat=-90).
+    /// sin(90) = 1, asin(sqrt(3)/2) = pi/3. theta=pi/3.
+    #[test]
+    fn bug_hunt_r2_equal_earth_pole_round_trip() {
+        for lat in [90.0, -90.0] {
+            let lon = 0.0;  // lon is scaled to 0 at poles due to x-factor
+            let (x, y) = equal_earth_fwd(lon, lat);
+            let (lon2, lat2) = equal_earth_inv(x, y);
+            assert!(
+                (lat2 - lat).abs() < 1e-6,
+                "equal-earth pole lat round-trip: {lat} -> {lat2}"
+            );
+            // At the pole, x=0 regardless of lon, so lon recovery is indeterminate
+            // We only check lat accuracy here
+        }
+    }
+
+    /// Equal Earth at lon=180, lat=0 (dateline at equator): x should be nonzero.
+    #[test]
+    fn bug_hunt_r2_equal_earth_dateline_equator() {
+        let (x, y) = equal_earth_fwd(180.0, 0.0);
+        assert!(x.is_finite() && y.is_finite(),
+            "equal-earth at dateline/equator should be finite: ({x}, {y})");
+        // y at equator should be 0
+        assert!(y.abs() < 1e-12,
+            "equal-earth at equator: y should be 0, got {y}");
+        // x = to_rad(180) * ee_x_factor(0) = pi * EE_A[0]
+        let expected_x = PI * EE_A[0];
+        assert!((x - expected_x).abs() < 1e-10,
+            "equal-earth at dateline/equator: x should be pi*A[0]={expected_x}, got {x}");
+    }
+
+    /// Equal Earth: longitude recovery at the pole — lon is indeterminate.
+    /// At lat=90, x = lon * ee_x_factor(theta^2). If ee_x_factor is nonzero,
+    /// lon is recoverable from x. But what if we use lon=180?
+    #[test]
+    fn bug_hunt_r2_equal_earth_pole_with_nonzero_lon() {
+        let lon = 180.0;
+        let lat = 90.0;
+        let (x, y) = equal_earth_fwd(lon, lat);
+        let (lon2, lat2) = equal_earth_inv(x, y);
+        // lat should round-trip
+        assert!(
+            (lat2 - lat).abs() < 1e-4,
+            "equal-earth pole+lon=180: lat {lat} -> {lat2}"
+        );
+        // lon may or may not round-trip depending on x-factor at theta for lat=90
+        // If x is finite and nonzero, lon should be recoverable
+        if x.abs() > 1e-10 {
+            assert!(
+                (lon2 - lon).abs() < 1e-4,
+                "equal-earth pole+lon=180: lon {lon} -> {lon2} (x={x})"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: NATURAL EARTH — FULL LATITUDE SWEEP ROUND-TRIP
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Natural Earth round-trip at 10-degree steps across full latitude range.
+    /// Tests lat from -80 to 80 (avoiding exact pole where lon is indeterminate).
+    #[test]
+    fn bug_hunt_r2_natural_earth_full_latitude_sweep() {
+        let mut max_lon_err = 0.0_f64;
+        let mut max_lat_err = 0.0_f64;
+        let mut worst_point = (0.0, 0.0);
+
+        for lat_i in (-8..=8) {
+            let lat = lat_i as f64 * 10.0;
+            let lon = 45.0;
+            let (x, y) = natural_earth_fwd(lon, lat);
+            let (lon2, lat2) = natural_earth_inv(x, y);
+            let lon_err = (lon2 - lon).abs();
+            let lat_err = (lat2 - lat).abs();
+            if lon_err > max_lon_err || lat_err > max_lat_err {
+                max_lon_err = max_lon_err.max(lon_err);
+                max_lat_err = max_lat_err.max(lat_err);
+                worst_point = (lon, lat);
+            }
+        }
+        assert!(
+            max_lon_err < 1e-6,
+            "natural-earth latitude sweep max lon error = {max_lon_err} at {:?}",
+            worst_point
+        );
+        assert!(
+            max_lat_err < 1e-6,
+            "natural-earth latitude sweep max lat error = {max_lat_err} at {:?}",
+            worst_point
+        );
+    }
+
+    /// Natural Earth: at lat=90, lon is indeterminate because ne_poly(&NE_A, pi/2)
+    /// might be zero (making x = lam * 0 = 0 for all lon). Check if x-factor is nonzero.
+    #[test]
+    fn bug_hunt_r2_natural_earth_x_factor_at_pole() {
+        let phi = to_rad(90.0);
+        let xf = ne_poly(&NE_A, phi);
+        // NE_A = [0.8707, -0.1310, 0.0772, 0.0]
+        // xf = 0.8707 + (-0.131)*phi^2 + 0.0772*phi^4 + 0*phi^6
+        // phi=pi/2~1.5708, phi^2~2.467, phi^4~6.087
+        // xf ~ 0.8707 - 0.1310*2.467 + 0.0772*6.087 ~ 0.8707 - 0.3232 + 0.4699 ~ 1.017
+        assert!(
+            xf > 0.5 && xf < 2.0,
+            "natural-earth x-factor at pole should be ~1.0, got {xf}"
+        );
+    }
+
+    /// Natural Earth round-trip at lon=180 (antimeridian), lat=0.
+    #[test]
+    fn bug_hunt_r2_natural_earth_antimeridian_round_trip() {
+        let lon = 180.0;
+        let lat = 0.0;
+        let (x, y) = natural_earth_fwd(lon, lat);
+        let (lon2, lat2) = natural_earth_inv(x, y);
+        assert!(
+            (lon2 - lon).abs() < 1e-10,
+            "natural-earth antimeridian lon round-trip: {lon} -> {lon2}"
+        );
+        assert!(
+            (lat2 - lat).abs() < 1e-10,
+            "natural-earth antimeridian lat round-trip: {lat} -> {lat2}"
+        );
+    }
+
+    /// Natural Earth inverse with very negative y: Newton-Raphson starts at phi=y (large negative).
+    /// The polynomial has even-power terms, so ne_poly is symmetric; phi*ne_poly(phi) is odd.
+    /// For large negative phi, the product phi*ne_poly might overshoot or diverge.
+    #[test]
+    fn bug_hunt_r2_natural_earth_inv_very_negative_y_no_panic() {
+        let (lon, lat) = natural_earth_inv(0.0, -100.0);
+        // Must not panic. Result may be nonsensical.
+        let _ = (lon, lat);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: NATURAL EARTH — NEWTON-RAPHSON CONVERGENCE EDGE CASE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Natural Earth inverse: when dfy (the derivative) is near zero,
+    /// the NR step delta = (fy - y) / dfy could be huge. The code clamps
+    /// dfy via dfy.max(1e-12), but what if dfy is negative and close to zero?
+    /// dfy.max(1e-12) would return 1e-12 (positive), potentially flipping
+    /// the sign of the step.
+    #[test]
+    fn bug_hunt_r2_natural_earth_inv_near_zero_derivative() { // BUG: dfy.max(1e-12) clamps negative near-zero derivatives to positive, flipping NR step direction
+        // Find a phi where dfy is close to zero.
+        // dfy = ne_poly(NE_B, phi) + phi * ne_poly_deriv(NE_B, phi)
+        // At phi=0: dfy = NE_B[0] + 0 = 1.007226 (not near zero)
+        // ne_poly is U-shaped for large |phi|. Let's check where the derivative crosses zero.
+        // For phi ~ pi (outside normal range), ne_poly might go negative.
+        let phi = PI; // Completely outside normal range but Newton-Raphson might reach here
+        let poly_val = ne_poly(&NE_B, phi);
+        let poly_deriv = ne_poly_deriv(&NE_B, phi);
+        let dfy = poly_val + phi * poly_deriv;
+
+        // If dfy is negative and close to zero, dfy.max(1e-12) = 1e-12
+        // This would make delta = (fy - y) / 1e-12 which could be enormous
+        // and flip sign relative to what the true negative dfy would give.
+        if dfy < 0.0 && dfy > -0.1 {
+            // This is the dangerous case. The code uses .max(1e-12) which
+            // clamps this to 1e-12, completely wrong.
+            let fy = phi * poly_val;
+            let y_target = fy; // At exact convergence, fy = y
+            // Perturb slightly
+            let y_perturbed = y_target + 0.001;
+            let delta_clamped = (fy - y_perturbed) / dfy.max(1e-12);
+            let delta_true = (fy - y_perturbed) / dfy;
+            // If signs differ, the NR step goes in the wrong direction
+            assert!(
+                delta_clamped.signum() == delta_true.signum() || delta_true.abs() < 1e-6,
+                "NR step sign flip: dfy={dfy}, delta_clamped={delta_clamped}, delta_true={delta_true}"
+            );
+        }
+
+        // Even if the specific phi=PI doesn't trigger it, test that the inverse
+        // doesn't produce garbage for a y value that maps to a phi where dfy < 0
+        // Let's construct such a y: forward(0, 89.9) and check inverse
+        let (_, y_extreme) = natural_earth_fwd(0.0, 89.9);
+        let (_, lat_recovered) = natural_earth_inv(0.0, y_extreme);
+        assert!(
+            (lat_recovered - 89.9).abs() < 0.1,
+            "natural-earth inverse at y for lat=89.9: recovered {lat_recovered}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUAL EARTH INVERSE — THETA CONVERGENCE ANALYSIS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equal Earth inverse: the "Newton-Raphson" for theta is actually linear.
+    /// delta = (EE_M * theta - y) / EE_M = theta - y/EE_M.
+    /// After one iteration: theta = theta - (theta - y/EE_M) = y/EE_M.
+    /// So the iteration converges in exactly 1 step. Verify this.
+    #[test]
+    fn bug_hunt_r2_equal_earth_inv_theta_converges_one_step() {
+        let y = 1.0; // arbitrary
+        let theta_init = y / EE_M;
+        let delta = (EE_M * theta_init - y) / EE_M;
+        assert!(
+            delta.abs() < 1e-15,
+            "equal-earth theta iteration should converge in 1 step, but residual = {delta}"
+        );
+    }
+
+    /// Equal Earth inverse at lat boundaries: verify round-trip at lat=89.
+    #[test]
+    fn bug_hunt_r2_equal_earth_lat89_round_trip() {
+        let lon = 30.0;
+        let lat = 89.0;
+        let (x, y) = equal_earth_fwd(lon, lat);
+        let (lon2, lat2) = equal_earth_inv(x, y);
+        assert!(
+            (lon2 - lon).abs() < 1e-4,
+            "equal-earth lat=89 lon round-trip: {lon} -> {lon2}"
+        );
+        assert!(
+            (lat2 - lat).abs() < 1e-4,
+            "equal-earth lat=89 lat round-trip: {lat} -> {lat2}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC — NUMERIC CORRECTNESS AT KNOWN POINTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Albers conic: when lon=lon0 AND lat=lat0, the point should map to (0, 0)
+    /// only if rho = rho0 (which happens when phi = phi0). Check that x=0 and
+    /// y is close to 0 (y = rho0 - rho*cos(theta), with theta=0 and rho~rho0).
+    #[test]
+    fn bug_hunt_r2_albers_conic_center_point() { // BUG: y=-0.387 at center point due to non-standard rho0 formula
+        let sp1 = 29.5;
+        let sp2 = 45.5;
+        let lat0 = 38.0;
+        let lon0 = -96.0;
+        let (x, y) = albers_conic_fwd(lon0, lat0, sp1, sp2, lat0, lon0);
+        assert!(x.abs() < 1e-10,
+            "albers conic at center: x should be 0, got {x}");
+        assert!(y.abs() < 1e-10,
+            "albers conic at center: y should be ~0, got {y}");
+    }
+
+    /// Albers conic: east-west symmetry. Points equidistant from lon0 should
+    /// have same |x| and same y.
+    #[test]
+    fn bug_hunt_r2_albers_conic_east_west_symmetry() {
+        let sp1 = 29.5;
+        let sp2 = 45.5;
+        let lat0 = 38.0;
+        let lon0 = -96.0;
+        let delta_lon = 20.0;
+        let (x_east, y_east) = albers_conic_fwd(lon0 + delta_lon, 40.0, sp1, sp2, lat0, lon0);
+        let (x_west, y_west) = albers_conic_fwd(lon0 - delta_lon, 40.0, sp1, sp2, lat0, lon0);
+        assert!(
+            (x_east + x_west).abs() < 1e-10,
+            "albers conic east-west: x_east={x_east}, x_west={x_west} should be opposite"
+        );
+        assert!(
+            (y_east - y_west).abs() < 1e-10,
+            "albers conic east-west: y_east={y_east}, y_west={y_west} should be equal"
+        );
+    }
+
+    /// Albers conic: rho should be monotonically decreasing as lat increases
+    /// (in the northern hemisphere with northern standard parallels).
+    /// This means y should decrease as lat increases.
+    #[test]
+    fn bug_hunt_r2_albers_conic_lat_monotonicity() { // BUG: y non-monotonic due to incorrect rho0 formula (sqrt(c)/n - sin(phi0)/n vs Snyder sqrt(c-2n*sin(phi0))/n)
+        let sp1 = 29.5;
+        let sp2 = 45.5;
+        let lat0 = 38.0;
+        let lon0 = -96.0;
+        let mut prev_y = f64::INFINITY;
+        for lat_i in (25..=55).step_by(5) {
+            let lat = lat_i as f64;
+            let (_, y) = albers_conic_fwd(lon0, lat, sp1, sp2, lat0, lon0);
+            assert!(
+                y < prev_y,
+                "albers conic y should decrease as lat increases: y({})={} >= y(prev)={}",
+                lat, y, prev_y
+            );
+            prev_y = y;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS USA — ROUTING DISCONTINUITY AT BOUNDARIES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// The Alaska routing boundary at lat=49.5, lon=-127.5 creates a spatial
+    /// discontinuity: a point just inside Alaska gets a completely different
+    /// (x,y) than a point just outside (continental). This is a design property,
+    /// not a bug, but we should pin the discontinuity magnitude.
+    #[test]
+    fn bug_hunt_r2_albers_usa_alaska_routing_discontinuity() {
+        let lon = -130.0;
+        let lat_in = 49.501;  // Alaska path
+        let lat_out = 49.499; // Continental path
+        let (x_in, y_in) = albers_usa_fwd(lon, lat_in);
+        let (x_out, y_out) = albers_usa_fwd(lon, lat_out);
+        let jump = ((x_in - x_out).powi(2) + (y_in - y_out).powi(2)).sqrt();
+        // The discontinuity should be large (different projections + offsets)
+        assert!(
+            jump > 0.1,
+            "expected large discontinuity at Alaska boundary; jump = {jump}"
+        );
+        // Both sides should produce finite results
+        assert!(x_in.is_finite() && y_in.is_finite(),
+            "Alaska side should be finite: ({x_in}, {y_in})");
+        assert!(x_out.is_finite() && y_out.is_finite(),
+            "Continental side should be finite: ({x_out}, {y_out})");
+    }
+
+    /// Hawaii routing discontinuity at lat boundaries.
+    #[test]
+    fn bug_hunt_r2_albers_usa_hawaii_routing_discontinuity() {
+        let lon = -160.0;
+        let lat_in = 18.001;  // Just above 18 → Hawaii
+        let lat_out = 17.999; // Below 18 → continental
+        let (x_in, y_in) = albers_usa_fwd(lon, lat_in);
+        let (x_out, y_out) = albers_usa_fwd(lon, lat_out);
+        let jump = ((x_in - x_out).powi(2) + (y_in - y_out).powi(2)).sqrt();
+        assert!(
+            jump > 0.1,
+            "expected large discontinuity at Hawaii lower boundary; jump = {jump}"
+        );
+        assert!(x_in.is_finite() && y_in.is_finite(),
+            "Hawaii side should be finite: ({x_in}, {y_in})");
+        assert!(x_out.is_finite() && y_out.is_finite(),
+            "Continental side should be finite: ({x_out}, {y_out})");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALL PROJECTIONS — INFINITY INVERSE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// All inverse projections with (inf, inf): should not panic.
+    #[test]
+    fn bug_hunt_r2_all_inv_inf_no_panic() {
+        let _ = mercator_inv(f64::INFINITY, f64::INFINITY);
+        let _ = equirect_inv(f64::INFINITY, f64::INFINITY);
+        let _ = equal_earth_inv(f64::INFINITY, f64::INFINITY);
+        let _ = natural_earth_inv(f64::INFINITY, f64::INFINITY);
+        let _ = orthographic_inv(f64::INFINITY, f64::INFINITY);
+    }
+
+    /// All inverse projections with (-inf, -inf): should not panic.
+    #[test]
+    fn bug_hunt_r2_all_inv_neg_inf_no_panic() {
+        let _ = mercator_inv(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let _ = equirect_inv(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let _ = equal_earth_inv(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let _ = natural_earth_inv(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let _ = orthographic_inv(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ORTHOGRAPHIC — BACK-HEMISPHERE COVERAGE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Points on the back hemisphere (lon > 90 or lon < -90) should return NaN.
+    #[test]
+    fn bug_hunt_r2_orthographic_back_hemisphere() {
+        for lon in [91.0, 120.0, 150.0, 179.0, -91.0, -120.0, -179.0] {
+            let (x, y) = orthographic_fwd(lon, 0.0);
+            assert!(
+                x.is_nan() && y.is_nan(),
+                "orthographic back hemisphere at lon={lon}: expected NaN, got ({x}, {y})"
+            );
+        }
+    }
+
+    /// Points in the back hemisphere at high latitude: cos(phi) is small but
+    /// positive, cos(lam) is negative for lam > pi/2. Product is negative.
+    #[test]
+    fn bug_hunt_r2_orthographic_back_hemisphere_high_lat() {
+        let (x, y) = orthographic_fwd(120.0, 60.0);
+        // cos(60°) = 0.5, cos(120° in rad) = cos(2pi/3) = -0.5
+        // cos_phi * cos_lam = 0.5 * (-0.5) = -0.25 < 0 → NaN
+        assert!(x.is_nan() && y.is_nan(),
+            "orthographic back hemisphere at lon=120, lat=60: expected NaN, got ({x}, {y})");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: MERCATOR — NUMERIC PRECISION AT KEY LATITUDES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mercator at lat=0: y should be exactly 0.
+    #[test]
+    fn bug_hunt_r2_mercator_equator_y_zero() {
+        let (_, y) = mercator_fwd(0.0, 0.0);
+        // y = ln(tan(pi/4 + 0/2)) = ln(tan(pi/4)) = ln(1) = 0
+        assert!(y.abs() < 1e-15,
+            "mercator at equator: y should be 0, got {y}");
+    }
+
+    /// Mercator at lat=45: y = ln(tan(pi/4 + pi/8)) = ln(tan(3pi/8))
+    #[test]
+    fn bug_hunt_r2_mercator_lat45_numeric() {
+        let (_, y) = mercator_fwd(0.0, 45.0);
+        let expected = (FRAC_PI_4 + to_rad(45.0) / 2.0).tan().ln();
+        assert!((y - expected).abs() < 1e-12,
+            "mercator at lat=45: y={y}, expected={expected}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALL PROJECTIONS — FORWARD AT (0,0) GIVES (0,0)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// All projections at (lon=0, lat=0) should give x=0, y=0.
+    /// This is a basic sanity check for the origin.
+    #[test]
+    fn bug_hunt_r2_all_projections_origin() {
+        let projs: Vec<(&str, fn(f64, f64) -> (f64, f64))> = vec![
+            ("mercator", mercator_fwd),
+            ("equirect", equirect_fwd),
+            ("equal_earth", equal_earth_fwd),
+            ("natural_earth", natural_earth_fwd),
+            ("orthographic", orthographic_fwd),
+        ];
+        for (name, fwd) in &projs {
+            let (x, y) = fwd(0.0, 0.0);
+            assert!(x.abs() < 1e-12,
+                "{name} at origin: x should be 0, got {x}");
+            assert!(y.abs() < 1e-12,
+                "{name} at origin: y should be 0, got {y}");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ne_poly HAND-COMPUTED VALUES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// ne_poly with NE_A coefficients at phi=1.0 (about 57.3 degrees).
+    /// NE_A = [0.8707, -0.1310, 0.0772, 0.0]
+    /// p2=1, p4=1, p6=1 → result = 0.8707 - 0.1310 + 0.0772 + 0.0 = 0.8169
+    #[test]
+    fn bug_hunt_r2_ne_poly_ne_a_at_phi_one() {
+        let val = ne_poly(&NE_A, 1.0);
+        let expected = 0.8707 - 0.1310 + 0.0772 + 0.0;
+        assert!((val - expected).abs() < 1e-12,
+            "ne_poly(NE_A, 1.0) = {val}, expected {expected}");
+    }
+
+    /// ne_poly with NE_B coefficients at phi=0: should return NE_B[0].
+    #[test]
+    fn bug_hunt_r2_ne_poly_ne_b_at_zero() {
+        let val = ne_poly(&NE_B, 0.0);
+        assert!((val - NE_B[0]).abs() < 1e-15,
+            "ne_poly(NE_B, 0) should be NE_B[0]={}, got {val}", NE_B[0]);
+    }
+
+    /// ne_poly_deriv at phi=0: should be 0 (all terms have phi factors).
+    #[test]
+    fn bug_hunt_r2_ne_poly_deriv_at_zero() {
+        let val = ne_poly_deriv(&NE_B, 0.0);
+        assert!(val.abs() < 1e-15,
+            "ne_poly_deriv(NE_B, 0) should be 0, got {val}");
+    }
+
+    /// ne_poly_deriv with NE_B at phi=1.0:
+    /// d/dphi = 2*phi*B1 + 4*phi^3*B2 + 6*phi^5*B3 + 8*phi^7*B4
+    /// At phi=1: = 2*B1 + 4*B2 + 6*B3 + 8*B4
+    #[test]
+    fn bug_hunt_r2_ne_poly_deriv_ne_b_at_one() {
+        let val = ne_poly_deriv(&NE_B, 1.0);
+        let expected = 2.0*NE_B[1] + 4.0*NE_B[2] + 6.0*NE_B[3] + 8.0*NE_B[4];
+        assert!((val - expected).abs() < 1e-12,
+            "ne_poly_deriv(NE_B, 1.0) = {val}, expected {expected}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC — rho0 COMPUTATION CORRECTNESS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Verify rho0 = (sqrt(c) - sin(phi0)) / n for the standard parallels.
+    /// The source computes rho0 = c.sqrt() / n - phi0.sin() / n.
+    /// This should simplify to (c.sqrt() - phi0.sin()) / n.
+    #[test]
+    fn bug_hunt_r2_albers_rho0_formula() {
+        let phi1 = to_rad(29.5);
+        let phi2 = to_rad(45.5);
+        let phi0 = to_rad(38.0);
+        let n = (phi1.sin() + phi2.sin()) / 2.0;
+        let c = phi2.cos().powi(2) + 2.0 * n * phi2.sin();
+        let rho0_source = c.sqrt() / n - phi0.sin() / n;
+        let rho0_simplified = (c.sqrt() - phi0.sin()) / n;
+        assert!(
+            (rho0_source - rho0_simplified).abs() < 1e-14,
+            "rho0 formulations should be identical: {rho0_source} vs {rho0_simplified}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ORTHOGRAPHIC — FORWARD CONSISTENCY WITH KNOWN FORMULAS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Orthographic at lon=45, lat=45:
+    /// x = cos(45°)*sin(45°) = (sqrt(2)/2)*(sqrt(2)/2) = 0.5
+    /// y = sin(45°) = sqrt(2)/2 ≈ 0.7071
+    #[test]
+    fn bug_hunt_r2_orthographic_known_point() {
+        let (x, y) = orthographic_fwd(45.0, 45.0);
+        let expected_x = 0.5;
+        let expected_y = 2.0_f64.sqrt() / 2.0;
+        assert!((x - expected_x).abs() < 1e-10,
+            "orthographic at (45,45): x should be 0.5, got {x}");
+        assert!((y - expected_y).abs() < 1e-10,
+            "orthographic at (45,45): y should be sqrt(2)/2, got {y}");
+    }
+
+    /// Orthographic at lon=30, lat=0:
+    /// x = cos(0)*sin(30°) = sin(30°) = 0.5
+    /// y = sin(0) = 0
+    #[test]
+    fn bug_hunt_r2_orthographic_lat0_lon30() {
+        let (x, y) = orthographic_fwd(30.0, 0.0);
+        assert!((x - 0.5).abs() < 1e-10,
+            "orthographic at (30,0): x should be 0.5, got {x}");
+        assert!(y.abs() < 1e-10,
+            "orthographic at (30,0): y should be 0, got {y}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUAL EARTH — INVERSE RECOVERY OF LAT FROM THETA
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equal Earth inverse lat recovery: lat = asin(2*sin(theta)/sqrt(3)).
+    /// For theta at max (when lat=90): theta = asin(sqrt(3)/2) = pi/3.
+    /// Recovery: asin(2*sin(pi/3)/sqrt(3)) = asin(2*(sqrt(3)/2)/sqrt(3)) = asin(1) = pi/2 = 90°.
+    #[test]
+    fn bug_hunt_r2_equal_earth_theta_lat_recovery_at_pole() {
+        let phi = to_rad(90.0);
+        let theta = ((3.0_f64.sqrt() / 2.0) * phi.sin()).asin();
+        // theta should be pi/3
+        assert!((theta - PI / 3.0).abs() < 1e-10,
+            "theta at lat=90 should be pi/3, got {theta}");
+        // Recovery
+        let lat_recovered = to_deg(((2.0 * theta.sin()) / 3.0_f64.sqrt()).asin());
+        assert!((lat_recovered - 90.0).abs() < 1e-10,
+            "equal-earth lat recovery at pole: expected 90, got {lat_recovered}");
+    }
+
+    /// Equal Earth: asin domain check. The argument to asin in the forward
+    /// projection is (sqrt(3)/2)*sin(phi). Since |sin(phi)| <= 1 and
+    /// sqrt(3)/2 ≈ 0.866 < 1, the argument is always in [-0.866, 0.866],
+    /// well within the asin domain. Verify this holds at extremes.
+    #[test]
+    fn bug_hunt_r2_equal_earth_asin_domain_safe() {
+        for lat in [-90.0, -89.0, 0.0, 89.0, 90.0] {
+            let phi = to_rad(lat);
+            let arg = (3.0_f64.sqrt() / 2.0) * phi.sin();
+            assert!(
+                arg.abs() <= 1.0,
+                "equal-earth asin argument out of range at lat={lat}: arg={arg}"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC — c-2n*sin(phi) CLAMPING
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// When lat is far from the standard parallels, c - 2*n*sin(phi) can go
+    /// negative. The .max(0.0) clamp handles this, but verify that the
+    /// resulting rho=0 produces sensible output (x=0, y=rho0).
+    #[test]
+    fn bug_hunt_r2_albers_conic_rho_clamped_to_zero() {
+        let sp1 = 29.5;
+        let sp2 = 45.5;
+        let lat0 = 38.0;
+        let lon0 = -96.0;
+        // Very high latitude: lat=89
+        let phi = to_rad(89.0);
+        let phi1 = to_rad(sp1);
+        let phi2 = to_rad(sp2);
+        let n = (phi1.sin() + phi2.sin()) / 2.0;
+        let c = phi2.cos().powi(2) + 2.0 * n * phi2.sin();
+        let rho_arg = c - 2.0 * n * phi.sin();
+
+        // If rho_arg < 0, the .max(0.0) kicks in → rho = 0
+        if rho_arg < 0.0 {
+            let (x, y) = albers_conic_fwd(-96.0, 89.0, sp1, sp2, lat0, lon0);
+            // rho = 0 → x = 0, y = rho0 - 0 = rho0
+            assert!(x.abs() < 1e-10,
+                "albers conic with clamped rho: x should be 0, got {x}");
+            assert!(y.is_finite(),
+                "albers conic with clamped rho: y should be finite, got {y}");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS USA — COMPREHENSIVE CONTINENTAL ROUND-TRIP
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Albers USA round-trip for points in the continental US.
+    /// These should NOT enter Alaska or Hawaii branches.
+    #[test]
+    fn bug_hunt_r2_albers_usa_continental_round_trip_grid() {
+        let test_points = vec![
+            (-74.0, 40.7),   // New York
+            (-87.6, 41.9),   // Chicago
+            (-118.2, 34.1),  // Los Angeles
+            (-122.4, 37.8),  // San Francisco
+            (-77.0, 38.9),   // Washington DC
+            (-95.4, 29.8),   // Houston
+            (-104.9, 39.7),  // Denver
+        ];
+        for (lon, lat) in test_points {
+            // Verify these are NOT in Alaska or Hawaii routing
+            assert!(!(lat > 49.5 && lon < -127.5), "({lon},{lat}) should not be Alaska");
+            assert!(!(lat < 24.0 && lat > 18.0 && lon < -154.0), "({lon},{lat}) should not be Hawaii");
+
+            let (x, y) = albers_usa_fwd(lon, lat);
+            let (lon2, lat2) = albers_usa_inv(x, y);
+            assert!(
+                (lon2 - lon).abs() < 1e-4,
+                "albers USA continental round-trip lon at ({lon},{lat}): {lon} -> {lon2}"
+            );
+            assert!(
+                (lat2 - lat).abs() < 1e-4,
+                "albers USA continental round-trip lat at ({lon},{lat}): {lat} -> {lat2}"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUIRECTANGULAR INVERSE — EXTREME VALUES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equirectangular inverse with very large x: lon = to_deg(large_x) = huge.
+    /// This is mathematically valid but geographically nonsensical.
+    #[test]
+    fn bug_hunt_r2_equirect_inv_large_x_no_panic() {
+        let (lon, lat) = equirect_inv(1e6, 0.0);
+        assert!(lon.is_finite() && lat.is_finite(),
+            "equirect inv with large x should be finite, got ({lon}, {lat})");
+    }
+
+    /// Equirectangular: negative zero inputs should give zero outputs.
+    #[test]
+    fn bug_hunt_r2_equirect_negative_zero() {
+        let (x, y) = equirect_fwd(-0.0, -0.0);
+        let (x2, y2) = equirect_fwd(0.0, 0.0);
+        assert!((x - x2).abs() < 1e-15 && (y - y2).abs() < 1e-15,
+            "equirect: -0.0 should equal 0.0");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: NATURAL EARTH — DERIV HAND-CHECK AT phi=pi/4
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// ne_poly_deriv with NE_A (4-element array, no phi^7 term) at phi=pi/4.
+    /// Only terms 1,2,3 contribute (coeffs[3]=0 for NE_A).
+    #[test]
+    fn bug_hunt_r2_ne_poly_deriv_ne_a_at_pi_over_4() {
+        let phi = PI / 4.0;
+        let val = ne_poly_deriv(&NE_A, phi);
+        let p1 = phi;
+        let p3 = phi.powi(3);
+        let p5 = phi.powi(5);
+        let expected = 2.0 * p1 * NE_A[1] + 4.0 * p3 * NE_A[2] + 6.0 * p5 * NE_A[3];
+        // NE_A has 4 elements, no 5th → no 8*phi^7 term
+        assert!((val - expected).abs() < 1e-12,
+            "ne_poly_deriv(NE_A, pi/4) = {val}, expected {expected}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALL PROJECTIONS — FORWARD WITH f64::MIN_POSITIVE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// f64::MIN_POSITIVE is the smallest normalized positive float.
+    /// Should not produce different behavior than subnormals.
+    #[test]
+    fn bug_hunt_r2_min_positive_no_panic() {
+        let tiny = f64::MIN_POSITIVE;
+        for fwd in [mercator_fwd, equirect_fwd, equal_earth_fwd, natural_earth_fwd, orthographic_fwd] {
+            let (x, y) = fwd(tiny, tiny);
+            assert!(x.is_finite() && y.is_finite(),
+                "projection with MIN_POSITIVE should be finite, got ({x}, {y})");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: MERCATOR — INVERSE AT y=0 GIVES lat=0
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mercator inverse at y=0: exp(0)=1, atan(1)=pi/4, lat=2*(pi/4)-pi/2=0.
+    #[test]
+    fn bug_hunt_r2_mercator_inv_y_zero_gives_lat_zero() {
+        let (_, lat) = mercator_inv(0.0, 0.0);
+        assert!(lat.abs() < 1e-12,
+            "mercator inv at y=0 should give lat=0, got {lat}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: NATURAL EARTH — NR ITERATION WITH EXACTLY y=0
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Natural Earth inverse at y=0: phi starts at 0, fy=0*ne_poly(B,0)=0,
+    /// delta = (0-0)/ne_poly(B,0) = 0. Should converge immediately.
+    #[test]
+    fn bug_hunt_r2_natural_earth_inv_y_zero_converges_immediately() {
+        let (lon, lat) = natural_earth_inv(0.5, 0.0);
+        // lat should be 0, lon = to_deg(0.5 / ne_poly(NE_A, 0)) = to_deg(0.5 / NE_A[0])
+        assert!(lat.abs() < 1e-12,
+            "natural-earth inv at y=0: lat should be 0, got {lat}");
+        let expected_lon = to_deg(0.5 / NE_A[0]);
+        assert!((lon - expected_lon).abs() < 1e-10,
+            "natural-earth inv at y=0, x=0.5: lon should be {expected_lon}, got {lon}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ORTHOGRAPHIC — INVERSE ROUNDTRIP ON UNIT CIRCLE POINTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Orthographic inverse at points on the unit circle (rho=1).
+    /// cos_c = 0 exactly, so atan2(x, 0) = sign(x)*pi/2.
+    #[test]
+    fn bug_hunt_r2_orthographic_inv_unit_circle() {
+        let angles = [0.0, PI / 6.0, PI / 4.0, PI / 3.0, PI / 2.0,
+                      2.0 * PI / 3.0, PI, 5.0 * PI / 4.0, 3.0 * PI / 2.0];
+        for &angle in &angles {
+            let x = angle.cos();
+            let y = angle.sin();
+            // rho = sqrt(cos^2 + sin^2) = 1
+            let (lon, lat) = orthographic_inv(x, y);
+            if (x * x + y * y - 1.0).abs() < 1e-10 {
+                // On the unit circle
+                assert!(lon.is_finite() && lat.is_finite(),
+                    "orthographic inv on unit circle at angle={angle}: ({lon}, {lat}) should be finite");
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC INVERSE — ATAN2 EDGE CASE
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Albers USA inverse at x=0: atan2(0, dy) = 0 if dy > 0, pi if dy < 0.
+    #[test]
+    fn bug_hunt_r2_albers_usa_inv_x_zero() {
+        // Forward at lon0=-96, so x should be 0
+        let (x, y) = albers_usa_fwd(-96.0, 40.0);
+        assert!(x.abs() < 1e-10, "x at central meridian should be ~0, got {x}");
+        let (lon2, lat2) = albers_usa_inv(x, y);
+        assert!((lon2 - (-96.0)).abs() < 1e-4,
+            "albers inv at x=0: lon should be ~-96, got {lon2}");
+        assert!((lat2 - 40.0).abs() < 1e-4,
+            "albers inv at x=0: lat should be ~40, got {lat2}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUAL EARTH — INVERSE WITH LARGE x
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equal Earth inverse with very large x: lon recovery should give huge value
+    /// (no wrapping). Must not panic.
+    #[test]
+    fn bug_hunt_r2_equal_earth_inv_large_x_no_panic() {
+        let (lon, lat) = equal_earth_inv(100.0, 0.0);
+        assert!(lon.is_finite(),
+            "equal-earth inv with large x should give finite lon, got {lon}");
+        // lat at y=0: theta=0, lat = asin(0) = 0
+        assert!(lat.abs() < 1e-10,
+            "equal-earth inv at y=0: lat should be 0, got {lat}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS CONIC — FORWARD CONSISTENCY WITH rho0 FORMULA
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// The Albers formula for rho0 uses `c.sqrt() / n - phi0.sin() / n`.
+    /// But the Snyder reference actually has rho0 = sqrt(C - 2*n*sin(phi0)) / n.
+    /// These are NOT the same formula! The source's version is:
+    /// rho0 = (sqrt(C) - sin(phi0)) / n
+    /// The correct Snyder version is:
+    /// rho0 = sqrt(C - 2*n*sin(phi0)) / n
+    /// Are they equivalent? Let's check.
+    #[test]
+    fn bug_hunt_r2_albers_rho0_vs_snyder() { // BUG: rho0=0.907 vs Snyder rho0=1.294; diff=0.387 — sqrt(c)/n - sin(phi0)/n is NOT equivalent to sqrt(c-2n*sin(phi0))/n
+        let phi1 = to_rad(29.5);
+        let phi2 = to_rad(45.5);
+        let phi0 = to_rad(38.0);
+        let n = (phi1.sin() + phi2.sin()) / 2.0;
+        let c = phi2.cos().powi(2) + 2.0 * n * phi2.sin();
+
+        let rho0_source = c.sqrt() / n - phi0.sin() / n;
+        let rho0_snyder = (c - 2.0 * n * phi0.sin()).max(0.0).sqrt() / n;
+
+        // These are mathematically different:
+        // source: (sqrt(c) - sin(phi0)) / n
+        // Snyder: sqrt(c - 2*n*sin(phi0)) / n
+        // They'd be equal only if sqrt(c) - sin(phi0) = sqrt(c - 2*n*sin(phi0))
+        // Squaring both sides: c - 2*sqrt(c)*sin(phi0) + sin^2(phi0) = c - 2*n*sin(phi0)
+        // This requires: 2*sqrt(c)*sin(phi0) - sin^2(phi0) = 2*n*sin(phi0)
+        // i.e.: sqrt(c) - sin(phi0)/2 = n
+        // This is not generally true.
+
+        let diff = (rho0_source - rho0_snyder).abs();
+        assert!(
+            diff < 0.001,
+            "rho0 formula: source={rho0_source} vs Snyder={rho0_snyder}, diff={diff}. \
+             If this fails, the Albers implementation uses a non-standard rho0 formula."
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: STEREOGRAPHIC (MISSING PROJECTION TYPE)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Note: Stereographic projection is NOT in the GeoProjection enum.
+    /// This test documents the absence — if stereographic is added later,
+    /// this test should be updated to verify its forward/inverse.
+    #[test]
+    fn bug_hunt_r2_stereographic_not_implemented() {
+        // The GeoProjection enum has: Mercator, AlbersUsa, EqualEarth,
+        // NaturalEarth, Orthographic, Equirectangular.
+        // Stereographic is absent. This is a design gap, not a code bug.
+        // No assertion needed — this test documents the gap.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: ALBERS USA — POINT IN OCEAN (SOUTH OF HAWAII BOUNDARY)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// A point at lat=17, lon=-160 is south of the Hawaii routing boundary
+    /// (needs lat > 18). It falls to the continental conic, which projects
+    /// a point in the Pacific Ocean using CONUS standard parallels.
+    /// This produces a valid but geographically meaningless result.
+    #[test]
+    fn bug_hunt_r2_albers_usa_ocean_point_south_of_hawaii() {
+        let (x, y) = albers_usa_fwd(-160.0, 17.0);
+        assert!(x.is_finite() && y.is_finite(),
+            "albers USA at ocean point should be finite: ({x}, {y})");
+        // This goes through continental conic
+        let (cx, cy) = albers_conic_fwd(-160.0, 17.0, 29.5, 45.5, 38.0, -96.0);
+        assert!((x - cx).abs() < 1e-12 && (y - cy).abs() < 1e-12,
+            "ocean point should use continental conic");
+    }
+
+    /// A point at lat=25, lon=-160 is above the Hawaii routing boundary
+    /// (needs lat < 24). It falls to the continental conic.
+    #[test]
+    fn bug_hunt_r2_albers_usa_above_hawaii_boundary() {
+        let (x, y) = albers_usa_fwd(-160.0, 25.0);
+        let (cx, cy) = albers_conic_fwd(-160.0, 25.0, 29.5, 45.5, 38.0, -96.0);
+        assert!((x - cx).abs() < 1e-12 && (y - cy).abs() < 1e-12,
+            "lat=25 with lon=-160 should use continental conic, not Hawaii");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ROUND 2: EQUAL EARTH — INVERSE asin DOMAIN SAFETY
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Equal Earth inverse: the asin argument is 2*sin(theta)/sqrt(3).
+    /// For theta = y/EE_M, with large y, theta can be large, making
+    /// |sin(theta)| <= 1, so |2*sin(theta)/sqrt(3)| <= 2/sqrt(3) ≈ 1.155 > 1.
+    /// This means for large y, the asin argument can exceed 1, producing NaN.
+    #[test]
+    fn bug_hunt_r2_equal_earth_inv_asin_domain_at_large_y() {
+        // At y = EE_M * pi/2: theta = pi/2, sin(theta)=1, arg = 2/sqrt(3) ≈ 1.155 > 1 → NaN
+        let y_critical = EE_M * (PI / 2.0);
+        let (_, lat) = equal_earth_inv(0.0, y_critical);
+        // This SHOULD produce NaN because the argument to asin exceeds 1.
+        // The question is: does it panic or silently return NaN?
+        // Rust's asin returns NaN for |x| > 1, which is fine.
+        assert!(lat.is_nan() || lat.is_finite(),
+            "equal-earth inv at critical y: should not panic, got {lat}");
+    }
+
+    /// Equal Earth inverse: the normal range of y corresponds to theta in [-pi/3, pi/3].
+    /// For theta = pi/3: sin(pi/3) = sqrt(3)/2, arg = 2*(sqrt(3)/2)/sqrt(3) = 1.
+    /// So asin(1) = pi/2 = 90 degrees. This is the pole — right at the edge.
+    #[test]
+    fn bug_hunt_r2_equal_earth_inv_at_max_valid_y() {
+        // theta = pi/3 is the max valid theta
+        let y_max = EE_M * (PI / 3.0);
+        let (_, lat) = equal_earth_inv(0.0, y_max);
+        assert!(
+            (lat - 90.0).abs() < 1e-6,
+            "equal-earth inv at max valid y: lat should be 90, got {lat}"
+        );
     }
 }

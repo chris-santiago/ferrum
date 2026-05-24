@@ -3,6 +3,12 @@
 Focus areas: configure() propagation through composition, structural feature
 interactions with composed/faceted charts, null/NaN/empty/extreme inputs,
 type boundaries, spec round-trips, and contract pins.
+
+Round 2 focus: configure cascade through deeply nested compositions,
+structural features (SecondaryY/BreakAxis/Inset) in faceted/composed charts,
+annotation propagation in HConcat/VConcat/LayerChart, format presets in
+faceted charts, per-axis configure (axis_x/axis_y/axis_y2), and configure
+field wiring edge cases.
 """
 
 from __future__ import annotations
@@ -58,6 +64,11 @@ def _assert_valid_svg(svg: str) -> None:
     assert svg.startswith("<svg") or svg.startswith("<?xml"), f"Bad SVG start: {svg[:80]!r}"
     assert "NaN" not in svg, "SVG contains 'NaN'"
     assert "Infinity" not in svg, "SVG contains 'Infinity'"
+
+
+# ===========================================================================
+# ROUND 1 TESTS (kept for regression coverage)
+# ===========================================================================
 
 
 # ---------------------------------------------------------------------------
@@ -1981,3 +1992,1665 @@ def test_faceted_chart_with_structural():
     )
     svg = chart.show_svg()
     _assert_valid_svg(svg)
+
+
+# ===========================================================================
+# ROUND 2 TESTS -- NEW EDGE CASES
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 33. Configure cascade through deeply nested compositions
+# ---------------------------------------------------------------------------
+
+
+def test_configure_cascade_through_hconcat_inside_vconcat():
+    """Configure on sub-charts survives deeply nested ((c1|c2) & c3) rendering.
+
+    Targets: Each sub-chart's _resolve_chart_config is called independently in
+    show_svg() because HConcat/VConcat call show_svg() on each child. The
+    configure should be present on c1 and c3 but not c2.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-45)
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    c3 = Chart(df).mark_line().encode(x="x", y="y").configure(
+        grid=GridConfig(color="#ccc", width=2.0)
+    )
+    nested = (c1 | c2) & c3
+    svg = nested.show_svg()
+    _assert_valid_svg(svg)
+    # Verify that the nested composition has the right structure
+    assert isinstance(nested, VConcatChart)
+    assert isinstance(nested.charts[0], HConcatChart)
+
+
+def test_configure_survives_theme_propagation_on_nested_composition():
+    """Applying .theme() on a composition containing configured sub-charts
+    should preserve the configure layers on each sub-chart.
+
+    Targets _rebuild_with_charts -> _clone() on Chart: _clone must copy
+    _configure list from the original chart.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(
+        padding=PaddingConfig(top=20, left=30)
+    )
+    hc = c1 | c2
+    # Apply theme to the composition
+    themed = hc.theme(fr.themes.dark)
+    # After theme propagation, each chart should still have its configure
+    assert len(themed.charts[0]._configure) == 1
+    assert len(themed.charts[1]._configure) == 1
+    svg = themed.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_survives_properties_propagation():
+    """Applying .properties() on a composition containing configured sub-charts
+    should preserve configure layers.
+
+    Targets _rebuild_with_charts -> Chart.properties which calls _clone.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(tick_count=5)
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    vc = c1 & c2
+    updated = vc.properties(width=800)
+    # c1 should still have its configure after properties
+    assert len(updated.charts[0]._configure) == 1
+    assert updated.charts[0]._width == 800
+    svg = updated.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_cascade_three_levels_of_layer_add():
+    """Three charts added via + should accumulate all configure layers.
+
+    Targets __add__ lines 4167-4168: rhs._configure accumulation across
+    multiple + operations.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
+        grid=GridConfig(color="#ccc")
+    )
+    c3 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        padding=PaddingConfig(top=10)
+    )
+    combined = c1 + c2 + c3
+    # All three configure layers should be present
+    assert len(combined._configure) == 3
+    merged = combined._resolve_chart_config()
+    assert "axis" in merged
+    assert "grid" in merged
+    assert "padding" in merged
+    svg = combined.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_on_layerchart_survives_rebuild():
+    """LayerChart._rebuild_with_charts preserves configure on member charts.
+
+    Targets LayerChart._rebuild_with_charts lines 1326-1331: it re-creates
+    a LayerChart from fn(c) for each chart, so configure on the charts must
+    survive fn(c) = c.theme(...) or c.properties(...).
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-45)
+    )
+    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
+        legend=LegendConfig(orient="top")
+    )
+    lc = LayerChart(c1, c2)
+    rebuilt = lc.theme(fr.themes.dark)
+    assert isinstance(rebuilt, LayerChart)
+    assert len(rebuilt.charts[0]._configure) == 1
+    assert len(rebuilt.charts[1]._configure) == 1
+    svg = rebuilt.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_on_concat_chart_survives_rebuild():
+    """ConcatChart._rebuild_with_charts preserves configure on member charts.
+
+    Targets ConcatChart._rebuild_with_charts line 1460-1466.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        grid=GridConfig(color="#eee", width=1.0)
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    cc = ConcatChart(c1, c2, columns=2)
+    rebuilt = cc.theme(fr.themes.dark)
+    assert isinstance(rebuilt, ConcatChart)
+    assert len(rebuilt.charts[0]._configure) == 1
+    assert len(rebuilt.charts[1]._configure) == 1
+    svg = rebuilt.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 34. Annotation propagation through composition
+# ---------------------------------------------------------------------------
+
+
+def test_annotations_in_hconcat_sub_charts_render():
+    """Annotations on sub-charts within HConcat should appear in the composed SVG.
+
+    Targets: Each sub-chart in HConcat calls its own show_svg() which
+    goes through _render_inputs -> _resolve_chart_config -> annotations.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Left Panel")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y") + text(2.0, 5.0, "Right Panel")
+    combined = c1 | c2
+    svg = combined.show_svg()
+    _assert_valid_svg(svg)
+    assert "Left Panel" in svg
+    assert "Right Panel" in svg
+
+
+def test_annotations_in_vconcat_sub_charts_render():
+    """Annotations on sub-charts within VConcat should appear in the composed SVG.
+
+    Targets: Each sub-chart in VConcat calls its own show_svg() which
+    goes through _render_inputs -> _resolve_chart_config -> annotations.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Top Panel")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y") + text(2.0, 5.0, "Bottom Panel")
+    combined = c1 & c2
+    svg = combined.show_svg()
+    _assert_valid_svg(svg)
+    assert "Top Panel" in svg
+    assert "Bottom Panel" in svg
+
+
+def test_annotations_accumulate_across_three_layers():
+    """Three layers added via + should accumulate all annotation layers.
+
+    Targets __add__ lines 4169-4170: rhs._annotations accumulation.
+    """
+    from ferrum.annotation.primitives import text, line, rect
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(1.0, 4.0, "A")
+    c2 = Chart(df).mark_line().encode(x="x", y="y") + line(1.0, 4.0, 3.0, 6.0)
+    c3 = Chart(df).mark_point().encode(x="x", y="y") + rect(1.0, 4.0, 2.0, 5.0, fill="#eee")
+    combined = c1 + c2 + c3
+    assert len(combined._annotations) == 3
+    svg = combined.show_svg()
+    _assert_valid_svg(svg)
+    assert "A" in svg
+
+
+def test_annotations_survive_theme_on_composition():
+    """Annotations on sub-charts survive .theme() on a composition.
+
+    Targets _rebuild_with_charts -> Chart._clone which copies _annotations.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Annotated")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    hc = c1 | c2
+    themed = hc.theme(fr.themes.dark)
+    assert len(themed.charts[0]._annotations) == 1
+    svg = themed.show_svg()
+    _assert_valid_svg(svg)
+    assert "Annotated" in svg
+
+
+def test_annotations_survive_properties_on_composition():
+    """Annotations on sub-charts survive .properties() on a composition.
+
+    Targets _rebuild_with_charts -> Chart.properties which calls _clone.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Persists")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    vc = c1 & c2
+    updated = vc.properties(width=900)
+    assert len(updated.charts[0]._annotations) == 1
+    svg = updated.show_svg()
+    _assert_valid_svg(svg)
+    assert "Persists" in svg
+
+
+def test_annotation_in_layer_chart_renders():
+    """Annotations on charts within a LayerChart appear in the rendered SVG.
+
+    Targets LayerChart._build_merged which calls + operator internally,
+    and the + operator's annotation merge path.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Layer1")
+    c2 = Chart(df).mark_line().encode(x="x", y="y") + text(1.0, 4.0, "Layer2")
+    lc = LayerChart(c1, c2)
+    svg = lc.show_svg()
+    _assert_valid_svg(svg)
+    # Both annotations should be present
+    assert "Layer1" in svg
+    assert "Layer2" in svg
+
+
+# ---------------------------------------------------------------------------
+# 35. Format presets in configure and faceted charts
+# ---------------------------------------------------------------------------
+
+
+def test_format_preset_currency_resolves_in_configure_axis():
+    """AxisConfig(label_format='currency') should resolve to d3-format string.
+
+    Targets configure.py AxisConfig.to_dict lines 120-131: label_format
+    is resolved via resolve_format before serialization.
+    """
+    cfg = AxisConfig(label_format="currency")
+    d = cfg.to_dict()
+    assert "label_format" in d
+    assert d["label_format"] == "$,.0f"  # resolved from preset name
+
+
+def test_format_preset_percent_resolves():
+    """AxisConfig(label_format='percent') should resolve to '.1%'."""
+    cfg = AxisConfig(label_format="percent")
+    d = cfg.to_dict()
+    assert d["label_format"] == ".1%"
+
+
+def test_format_preset_unknown_raises_on_construction():
+    """AxisConfig(label_format='bogus') should raise ValueError immediately.
+
+    Targets configure.py AxisConfig.__post_init__ line 115-118: resolve_format
+    is called at construction time for validation.
+    """
+    with pytest.raises(ValueError, match="Unknown format preset"):
+        AxisConfig(label_format="bogus_preset")
+
+
+def test_format_preset_mutually_exclusive_with_raw():
+    """AxisConfig with both label_format and label_format_raw should raise.
+
+    Targets configure.py AxisConfig.__post_init__ lines 110-114.
+    """
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AxisConfig(label_format="currency", label_format_raw=",.2f")
+
+
+def test_format_preset_in_faceted_chart_renders():
+    """A faceted chart with label_format preset should render valid SVG.
+
+    Targets the full pipeline: configure_axis -> AxisConfig -> to_dict ->
+    _resolve_chart_config -> render_svg with format preset resolved.
+    """
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "x": pa.array([1000, 2000, 3000, 4000, 5000, 6000], type=pa.int64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "grp": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
+    df = pl.from_arrow(tbl)
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(col="grp")
+        .configure_axis(label_format="currency")
+    )
+    svg = chart.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_format_preset_raw_in_faceted_chart():
+    """label_format_raw should pass through unchanged to the renderer.
+
+    Targets configure.py AxisConfig.to_dict: label_format_raw is not
+    resolved via resolve_format, just passed as-is.
+    """
+    cfg = AxisConfig(label_format_raw=",.2f")
+    d = cfg.to_dict()
+    assert "label_format_raw" in d
+    assert d["label_format_raw"] == ",.2f"
+    assert "label_format" not in d  # should not be set
+
+
+def test_all_numeric_format_presets_resolve():
+    """All known numeric format presets should resolve without error.
+
+    Targets format_presets.py NUMERIC_PRESETS dict.
+    """
+    from ferrum.format_presets import NUMERIC_PRESETS, resolve_format
+
+    for name, expected in NUMERIC_PRESETS.items():
+        result = resolve_format(name)
+        assert result == expected, f"Preset {name!r}: expected {expected!r}, got {result!r}"
+
+
+def test_all_time_format_presets_resolve():
+    """All known time format presets should resolve without error.
+
+    Targets format_presets.py TIME_PRESETS dict.
+    """
+    from ferrum.format_presets import TIME_PRESETS, resolve_format
+
+    for name, expected in TIME_PRESETS.items():
+        result = resolve_format(name)
+        assert result == expected, f"Preset {name!r}: expected {expected!r}, got {result!r}"
+
+
+def test_is_time_preset_classification():
+    """is_time_preset correctly classifies time vs numeric presets.
+
+    Targets format_presets.py is_time_preset function.
+    """
+    from ferrum.format_presets import is_time_preset
+
+    assert is_time_preset("date_iso") is True
+    assert is_time_preset("year") is True
+    assert is_time_preset("percent") is False
+    assert is_time_preset("currency") is False
+    assert is_time_preset("nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# 36. Per-axis configure (axis_x, axis_y, axis_y2)
+# ---------------------------------------------------------------------------
+
+
+def test_configure_axis_x_only_produces_axis_x_in_config():
+    """configure(axis_x=...) should produce axis_x in the merged config, not axis.
+
+    Targets chart.py configure() lines 4760-4764: axis_x parameter.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis_x=AxisConfig(label_angle=-90)
+    )
+    merged = c._resolve_chart_config()
+    assert "axis_x" in merged
+    assert merged["axis_x"]["label_angle"] == -90
+    # axis (generic) should not be set
+    assert "axis" not in merged
+
+
+def test_configure_axis_y_only_produces_axis_y_in_config():
+    """configure(axis_y=...) should produce axis_y in the merged config."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis_y=AxisConfig(tick_count=10)
+    )
+    merged = c._resolve_chart_config()
+    assert "axis_y" in merged
+    assert merged["axis_y"]["tick_count"] == 10
+
+
+def test_configure_axis_and_axis_x_coexist():
+    """configure(axis=..., axis_x=...) should produce both in config.
+
+    Targets _resolve_chart_config dict merge: axis and axis_x are separate keys.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30),
+        axis_x=AxisConfig(tick_count=5),
+    )
+    merged = c._resolve_chart_config()
+    assert "axis" in merged
+    assert "axis_x" in merged
+    assert merged["axis"]["label_angle"] == -30
+    assert merged["axis_x"]["tick_count"] == 5
+
+
+def test_configure_axis_y2_produces_axis_y2_in_config():
+    """configure(axis_y2=...) should produce axis_y2 in the merged config.
+
+    Targets chart.py configure() line 4764: axis_y2 parameter.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis_y2=AxisConfig(label_angle=45, title_color="red")
+    )
+    merged = c._resolve_chart_config()
+    assert "axis_y2" in merged
+    assert merged["axis_y2"]["label_angle"] == 45
+    assert merged["axis_y2"]["title_color"] == "red"
+
+
+def test_per_axis_configure_in_hconcat_renders():
+    """Per-axis configure on charts within HConcat should render valid SVG.
+
+    Targets: sub-chart rendering goes through _resolve_chart_config which
+    emits both axis and axis_x as separate keys.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis_x=AxisConfig(label_angle=-45),
+        axis_y=AxisConfig(tick_count=5),
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    svg = (c1 | c2).show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 37. Structural features in deeply nested compositions
+# ---------------------------------------------------------------------------
+
+
+def test_structural_in_vconcat_sub_chart_renders():
+    """A chart with BreakAxis inside a VConcat renders valid SVG.
+
+    Targets: sub-chart's show_svg calls _resolve_chart_config which
+    serializes structural features, then passes them to render_svg.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 50.0, 6.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(15, 45))
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    svg = (c1 & c2).show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_structural_survives_theme_on_composition():
+    """Structural features on sub-charts survive .theme() on the composition.
+
+    Targets _rebuild_with_charts -> Chart._clone which copies _structural.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
+    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    hc = c1 | c2
+    themed = hc.theme(fr.themes.dark)
+    assert len(themed.charts[0]._structural) == 1
+    assert isinstance(themed.charts[0]._structural[0], SecondaryY)
+    svg = themed.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_structural_survives_properties_on_composition():
+    """Structural features survive .properties() on a composition.
+
+    Targets _rebuild_with_charts -> Chart.properties which calls _clone.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
+    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="blue")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    vc = c1 & c2
+    updated = vc.properties(width=800)
+    assert len(updated.charts[0]._structural) == 1
+    svg = updated.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_inset_in_hconcat_sub_chart_renders():
+    """A chart with an Inset inside HConcat renders valid SVG.
+
+    Targets: sub-chart rendering calls _serialize_structural for Inset
+    which recursively renders the inset chart's show_svg().
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + Inset(
+        chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45)
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    svg = (c1 | c2).show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_secondary_y_in_layer_chart_renders():
+    """SecondaryY on a chart within a LayerChart renders valid SVG.
+
+    Targets LayerChart._build_merged: the merged chart should contain
+    both the layer structure and the structural features.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
+    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
+    c2 = Chart(df).mark_line().encode(x="x", y="y")
+    lc = LayerChart(c1, c2)
+    svg = lc.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 38. Configure with color range/domain/scheme in composition
+# ---------------------------------------------------------------------------
+
+
+def test_configure_color_range_renders():
+    """ColorConfig with explicit range renders valid SVG.
+
+    Targets configure.py ColorConfig.to_dict: range field serialization.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
+    )
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", color="c")
+        .configure(color=ColorConfig(range=["#ff0000", "#00ff00", "#0000ff"]))
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_color_domain_renders(): # BUG: ColorConfig domain with string values fails: Rust expects f64 but Python sends strings
+    """ColorConfig with explicit string domain fails at render time.
+
+    Targets configure.py ColorConfig.to_dict: domain field serialization.
+    The Rust side deserializes domain as Vec<f64>, so passing string
+    category names as domain values causes a deserialization error:
+    'invalid type: string "a", expected f64'.
+
+    This is a real bug: ColorConfig.domain accepts arbitrary lists but the
+    Rust binding only supports numeric domains. Either the Python side
+    should validate or the Rust side should accept string domains for
+    categorical color scales.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
+    )
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", color="c")
+        .configure(color=ColorConfig(domain=["a", "b", "c"], range=["red", "green", "blue"]))
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_color_in_hconcat_renders():
+    """ColorConfig on charts within HConcat should render valid SVG."""
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
+    )
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", color="c")
+        .configure(color=ColorConfig(scheme="tableau10"))
+    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    svg = (c1 | c2).show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 39. Grid band_colors through configure
+# ---------------------------------------------------------------------------
+
+
+def test_configure_grid_band_colors_renders():
+    """GridConfig with band_colors renders valid SVG.
+
+    Targets configure.py GridConfig.to_dict: band_colors field, and
+    the Rust side build_grid which consumes it.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(grid=GridConfig(y=True, band_colors=["#f0f0f0", "#ffffff"]))
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_configure_grid_band_colors_serialization():
+    """GridConfig.to_dict includes band_colors when set.
+
+    Targets configure.py GridConfig.to_dict via _to_dict_omit_none.
+    """
+    cfg = GridConfig(band_colors=["#eee", "#fff"])
+    d = cfg.to_dict()
+    assert "band_colors" in d
+    assert d["band_colors"] == ["#eee", "#fff"]
+
+
+# ---------------------------------------------------------------------------
+# 40. PaddingConfig edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_padding_auto_default_true():
+    """PaddingConfig defaults to auto=True.
+
+    Targets configure.py PaddingConfig default: auto=True.
+    """
+    cfg = PaddingConfig()
+    assert cfg.auto is True
+    d = cfg.to_dict()
+    # auto=True should be in the dict since it's not None
+    assert d["auto"] is True
+
+
+def test_padding_explicit_sides_renders():
+    """PaddingConfig with all four sides set renders valid SVG.
+
+    Targets configure.py PaddingConfig.to_dict: all four side fields.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(padding=PaddingConfig(top=50, right=30, bottom=50, left=30, auto=False))
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 41. TitleConfig and LegendConfig validation
+# ---------------------------------------------------------------------------
+
+
+def test_title_config_invalid_anchor_raises():
+    """TitleConfig with an invalid anchor raises ValueError.
+
+    Targets configure.py TitleConfig.__post_init__ lines 216-220.
+    """
+    with pytest.raises(ValueError, match="anchor"):
+        TitleConfig(anchor="center")
+
+
+def test_title_config_valid_anchors_accepted():
+    """TitleConfig with valid anchor values should not raise."""
+    for anchor in ("start", "middle", "end"):
+        cfg = TitleConfig(anchor=anchor)
+        assert cfg.anchor == anchor
+
+
+def test_legend_config_invalid_orient_raises():
+    """LegendConfig with an invalid orient raises ValueError.
+
+    Targets configure.py LegendConfig.__post_init__ lines 173-178.
+    """
+    with pytest.raises(ValueError, match="orient"):
+        LegendConfig(orient="center")
+
+
+def test_legend_config_valid_orients_accepted():
+    """LegendConfig with valid orient values should not raise."""
+    for orient in ("right", "left", "top", "bottom", "none"):
+        cfg = LegendConfig(orient=orient)
+        assert cfg.orient == orient
+
+
+# ---------------------------------------------------------------------------
+# 42. Configure + annotations + structural combined
+# ---------------------------------------------------------------------------
+
+
+def test_chart_with_all_three_config_domains_renders():
+    """A chart with configure + annotation + structural should render correctly.
+
+    Targets _resolve_chart_config which merges all three domains into the
+    chart_config dict passed to render_svg.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
+    )
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis=AxisConfig(label_angle=-45))
+        + text(2.0, 5.0, "Peak")
+        + SecondaryY("z", color="red")
+    )
+    assert len(c._configure) == 1
+    assert len(c._annotations) == 1
+    assert len(c._structural) == 1
+    merged = c._resolve_chart_config()
+    assert "axis" in merged
+    assert "annotations" in merged
+    assert "structural" in merged
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+    assert "Peak" in svg
+
+
+def test_chart_with_all_domains_in_hconcat():
+    """Each sub-chart in HConcat can have independent configure+annotation+structural.
+
+    Tests that _resolve_chart_config works independently per sub-chart.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
+    )
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis=AxisConfig(label_angle=-30))
+        + text(2.0, 5.0, "Chart1")
+        + SecondaryY("z")
+    )
+    c2 = (
+        Chart(df)
+        .mark_bar()
+        .encode(x="x", y="y")
+        .configure(grid=GridConfig(color="#ddd"))
+        + text(2.0, 5.0, "Chart2")
+    )
+    svg = (c1 | c2).show_svg()
+    _assert_valid_svg(svg)
+    assert "Chart1" in svg
+    assert "Chart2" in svg
+
+
+# ---------------------------------------------------------------------------
+# 43. RepeatChart with configure on template
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_chart_with_configure_on_template_renders():
+    """RepeatChart template with configure() should propagate to all cells.
+
+    Targets RepeatChart.show_svg -> expand -> _resolve_template -> _clone
+    which copies _configure from the template.
+    """
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    template = (
+        Chart(df)
+        .encode(x=fr.Repeat.column, y=fr.Repeat.row)
+        .mark_point()
+        .configure(axis=AxisConfig(label_angle=-45))
+    )
+    rc = RepeatChart(template, row=["a", "b"], column=["a", "b"])
+    cells = rc.expand()
+    # Each cell should inherit the template's configure
+    for _, _, chart in cells:
+        assert len(chart._configure) >= 1
+    svg = rc.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_repeat_chart_with_annotation_on_template_renders():
+    """RepeatChart template with annotations should propagate to all cells.
+
+    Targets RepeatChart._resolve_template -> _clone which copies _annotations.
+    """
+    from ferrum.annotation.primitives import text
+
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    template = (
+        Chart(df)
+        .encode(x=fr.Repeat.column, y=fr.Repeat.row)
+        .mark_point()
+        + text(2.0, 5.0, "Cell")
+    )
+    rc = RepeatChart(template, row=["a", "b"], column=["a", "b"])
+    cells = rc.expand()
+    for _, _, chart in cells:
+        assert len(chart._annotations) >= 1
+    svg = rc.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 44. JointChart with configure on center
+# ---------------------------------------------------------------------------
+
+
+def test_joint_chart_with_configure_on_center_renders():
+    """JointChart with configure() on center chart should render valid SVG.
+
+    Targets JointChart.show_svg: center chart's show_svg calls
+    _resolve_chart_config which includes the configure.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [6.0, 7.0, 8.0, 9.0, 10.0]})
+    center = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    top = Chart(df).mark_point().encode(x="x", y="y")
+    right = Chart(df).mark_point().encode(x="x", y="y")
+    joint = JointChart(center, top=top, right=right)
+    svg = joint.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_joint_chart_rebuild_preserves_configure():
+    """JointChart._rebuild_with_charts preserves configure on center/marginals.
+
+    Targets JointChart._rebuild_with_charts which calls fn(self.center) etc.
+    The fn (e.g., .theme()) must preserve _configure.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    center = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-45)
+    )
+    top = Chart(df).mark_point().encode(x="x", y="y").configure(
+        grid=GridConfig(color="#eee")
+    )
+    joint = JointChart(center, top=top)
+    themed = joint.theme(fr.themes.dark)
+    assert len(themed.center._configure) == 1
+    assert len(themed.top._configure) == 1
+    svg = themed.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 45. ClusterMapChart with configure
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_map_with_configure_on_heatmap_renders():
+    """ClusterMapChart with configure() on heatmap renders valid SVG.
+
+    Targets ClusterMapChart.show_svg: heatmap.show_svg calls
+    _resolve_chart_config with the configure.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    hm = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    cm = ClusterMapChart(hm)
+    svg = cm.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_cluster_map_rebuild_preserves_configure():
+    """ClusterMapChart._rebuild_with_charts preserves configure on heatmap."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    hm = Chart(df).mark_point().encode(x="x", y="y").configure(
+        padding=PaddingConfig(top=20)
+    )
+    cm = ClusterMapChart(hm, dendrogram_ratio=0.2)
+    themed = cm.theme(fr.themes.dark)
+    assert len(themed.heatmap._configure) == 1
+    svg = themed.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 46. ConcatChart with configure
+# ---------------------------------------------------------------------------
+
+
+def test_concat_chart_with_configure_and_resolve_renders():
+    """ConcatChart with both resolve and configure renders valid SVG.
+
+    Tests both shared scale computation and configure propagation together.
+    """
+    df1 = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    df2 = pl.DataFrame({"x": [10.0, 20.0, 30.0], "y": [40.0, 50.0, 60.0]})
+    c1 = Chart(df1).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    )
+    c2 = Chart(df2).mark_point().encode(x="x", y="y").configure(
+        grid=GridConfig(y=True)
+    )
+    cc = ConcatChart(c1, c2, resolve={"x": "shared"})
+    svg = cc.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 47. AxisConfig field wiring edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_axis_config_domain_min_max_in_config():
+    """AxisConfig.domain_min and domain_max should appear in the config dict.
+
+    Targets configure.py AxisConfig.to_dict via _to_dict_omit_none:
+    domain_min/domain_max are numeric fields that should be serialized.
+    """
+    cfg = AxisConfig(domain_min=0.0, domain_max=100.0)
+    d = cfg.to_dict()
+    assert d["domain_min"] == 0.0
+    assert d["domain_max"] == 100.0
+
+
+def test_axis_config_domain_min_max_renders():
+    """AxisConfig with domain_min/domain_max renders valid SVG.
+
+    Tests the full pipeline from AxisConfig -> _resolve_chart_config ->
+    render_svg.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(domain_min=0.0, domain_max=10.0)
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_axis_config_nice_and_zero_in_config():
+    """AxisConfig.nice and .zero should be serialized in the config dict."""
+    cfg = AxisConfig(nice=True, zero=True)
+    d = cfg.to_dict()
+    assert d["nice"] is True
+    assert d["zero"] is True
+
+
+def test_axis_config_grid_fields_in_config():
+    """AxisConfig grid-related fields should appear in the config dict.
+
+    Targets configure.py AxisConfig: grid, grid_color, grid_dash, grid_width.
+    """
+    cfg = AxisConfig(grid=True, grid_color="#ccc", grid_dash=[5.0, 3.0], grid_width=0.5)
+    d = cfg.to_dict()
+    assert d["grid"] is True
+    assert d["grid_color"] == "#ccc"
+    assert d["grid_dash"] == [5.0, 3.0]
+    assert d["grid_width"] == 0.5
+
+
+def test_axis_config_domain_line_fields():
+    """AxisConfig domain line fields should appear in the config dict.
+
+    Targets configure.py AxisConfig: domain, domain_color, domain_width.
+    """
+    cfg = AxisConfig(domain=True, domain_color="#000", domain_width=2.0)
+    d = cfg.to_dict()
+    assert d["domain"] is True
+    assert d["domain_color"] == "#000"
+    assert d["domain_width"] == 2.0
+
+
+def test_axis_config_title_fields():
+    """AxisConfig title fields should appear in the config dict.
+
+    Targets configure.py AxisConfig: title_font_size, title_color, title_padding.
+    """
+    cfg = AxisConfig(title_font_size=14.0, title_color="#333", title_padding=10.0)
+    d = cfg.to_dict()
+    assert d["title_font_size"] == 14.0
+    assert d["title_color"] == "#333"
+    assert d["title_padding"] == 10.0
+
+
+def test_axis_config_label_overlap_in_config():
+    """AxisConfig.label_overlap should appear in the config dict."""
+    cfg = AxisConfig(label_overlap="parity")
+    d = cfg.to_dict()
+    assert d["label_overlap"] == "parity"
+
+
+def test_axis_config_tick_values_in_config():
+    """AxisConfig.tick_values should appear in the config dict."""
+    cfg = AxisConfig(tick_values=[0, 25, 50, 75, 100])
+    d = cfg.to_dict()
+    assert d["tick_values"] == [0, 25, 50, 75, 100]
+
+
+def test_axis_config_tick_values_renders():
+    """AxisConfig with tick_values renders valid SVG.
+
+    Tests the full pipeline with explicit tick values.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(tick_values=[1.0, 2.0, 3.0])
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 48. LegendConfig field edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_legend_config_all_fields_serialized():
+    """LegendConfig.to_dict includes all set fields."""
+    cfg = LegendConfig(
+        orient="bottom",
+        direction="horizontal",
+        columns=2,
+        title_font_size=14.0,
+        label_font_size=12.0,
+        symbol_size=100.0,
+        symbol_type="square",
+        gradient_length=200.0,
+        offset=10.0,
+        padding=5.0,
+    )
+    d = cfg.to_dict()
+    assert d["orient"] == "bottom"
+    assert d["direction"] == "horizontal"
+    assert d["columns"] == 2
+    assert d["gradient_length"] == 200.0
+    assert d["symbol_type"] == "square"
+    assert d["offset"] == 10.0
+    assert d["padding"] == 5.0
+
+
+# ---------------------------------------------------------------------------
+# 49. TitleConfig field edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_title_config_all_fields_serialized():
+    """TitleConfig.to_dict includes all set fields."""
+    cfg = TitleConfig(
+        font_size=20.0,
+        font_weight="bold",
+        anchor="start",
+        color="#333",
+        offset=15.0,
+        subtitle_font_size=12.0,
+        subtitle_color="#666",
+    )
+    d = cfg.to_dict()
+    assert d["font_size"] == 20.0
+    assert d["font_weight"] == "bold"
+    assert d["anchor"] == "start"
+    assert d["color"] == "#333"
+    assert d["offset"] == 15.0
+    assert d["subtitle_font_size"] == 12.0
+    assert d["subtitle_color"] == "#666"
+
+
+# ---------------------------------------------------------------------------
+# 50. ColorConfig field edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_color_config_sequential_diverging_schemes():
+    """ColorConfig with sequential and diverging schemes serializes correctly."""
+    cfg = ColorConfig(
+        sequential_scheme="viridis",
+        diverging_scheme="rdbu",
+    )
+    d = cfg.to_dict()
+    assert d["sequential_scheme"] == "viridis"
+    assert d["diverging_scheme"] == "rdbu"
+    # scheme (categorical) should not be set
+    assert "scheme" not in d
+
+
+# ---------------------------------------------------------------------------
+# 51. Overrides survive through composition
+# ---------------------------------------------------------------------------
+
+
+def test_overrides_survive_theme_on_composition():
+    """Override dicts on sub-charts survive .theme() on a composition.
+
+    Targets _rebuild_with_charts -> Chart._clone which copies _overrides.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    c1 = Chart(df).mark_point().encode(x="x", y="y").override(custom_key="val1")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    hc = c1 | c2
+    themed = hc.theme(fr.themes.dark)
+    assert themed.charts[0]._overrides.get("custom_key") == "val1"
+
+
+# ---------------------------------------------------------------------------
+# 52. BreakAxis all break_styles render
+# ---------------------------------------------------------------------------
+
+
+def test_break_axis_all_styles_render():
+    """Every valid break_style should render valid SVG.
+
+    Tests slash, zigzag, wave, gap.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 50.0, 6.0]})
+    for style in ("slash", "zigzag", "wave", "gap"):
+        c = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(
+            axis="y", gap=(15, 45), break_style=style
+        )
+        svg = c.show_svg()
+        _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 53. Inset connect_to renders
+# ---------------------------------------------------------------------------
+
+
+def test_inset_with_connect_to_renders():
+    """Inset with connect_to draws connector lines in the SVG.
+
+    Targets _render.py _serialize_structural: connect_to serialization.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    c = Chart(df).mark_point().encode(x="x", y="y") + Inset(
+        chart=inset_chart,
+        bounds=(0.6, 0.1, 0.95, 0.45),
+        connect_to=(2.0, 5.0),
+        connect_style="lines",
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_inset_with_connect_style_bracket_renders():
+    """Inset with connect_style='bracket' renders valid SVG."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    c = Chart(df).mark_point().encode(x="x", y="y") + Inset(
+        chart=inset_chart,
+        bounds=(0.6, 0.1, 0.95, 0.45),
+        connect_to=(2.0, 5.0),
+        connect_style="bracket",
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+def test_inset_with_connect_style_none_renders():
+    """Inset with connect_style='none' renders valid SVG."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    c = Chart(df).mark_point().encode(x="x", y="y") + Inset(
+        chart=inset_chart,
+        bounds=(0.6, 0.1, 0.95, 0.45),
+        connect_style="none",
+    )
+    svg = c.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 54. Inset serialization edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_inset_border_dash_serialized():
+    """Inset border_dash should appear in the serialized dict.
+
+    Targets _render.py _serialize_structural: border_dash.
+    """
+    from ferrum._render import _RenderMixin
+
+    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    inset = Inset(
+        chart=inset_chart,
+        bounds=(0.1, 0.1, 0.5, 0.5),
+        border_dash=[5.0, 3.0],
+    )
+    d = _RenderMixin._serialize_structural(inset)
+    assert d["type"] == "inset"
+    assert d["border_dash"] == [5.0, 3.0]
+
+
+def test_inset_shadow_and_background_serialized():
+    """Inset shadow and background fields should appear in the serialized dict."""
+    from ferrum._render import _RenderMixin
+
+    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    inset_chart = Chart(df).mark_point().encode(x="x", y="y")
+    inset = Inset(
+        chart=inset_chart,
+        bounds=(0.1, 0.1, 0.5, 0.5),
+        shadow=True,
+        background="#f0f0f0",
+    )
+    d = _RenderMixin._serialize_structural(inset)
+    assert d["shadow"] is True
+    assert d["background"] == "#f0f0f0"
+
+
+# ---------------------------------------------------------------------------
+# 55. SecondaryY serialization edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_secondary_y_serialization_all_fields():
+    """SecondaryY serialization includes color and opacity when set.
+
+    Targets _render.py _serialize_structural: SecondaryY branch.
+    """
+    from ferrum._render import _RenderMixin
+
+    feat = SecondaryY("z", mark="bar", color="red", opacity=0.5)
+    d = _RenderMixin._serialize_structural(feat)
+    assert d["type"] == "secondary_y"
+    assert d["field"] == "z"
+    assert d["mark"] == "bar"
+    assert d["color"] == "red"
+    assert d["opacity"] == 0.5
+
+
+def test_secondary_y_minimal_serialization():
+    """SecondaryY with only field should omit color and opacity.
+
+    Targets _render.py _serialize_structural: color/opacity are only
+    set when not None.
+    """
+    from ferrum._render import _RenderMixin
+
+    feat = SecondaryY("z")
+    d = _RenderMixin._serialize_structural(feat)
+    assert d["type"] == "secondary_y"
+    assert d["field"] == "z"
+    assert d["mark"] == "line"  # default
+    assert "color" not in d
+    assert "opacity" not in d
+
+
+# ---------------------------------------------------------------------------
+# 56. Unknown structural type raises TypeError
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_structural_unknown_type_raises():
+    """_serialize_structural with unknown type raises TypeError.
+
+    Targets _render.py _serialize_structural last else branch.
+    """
+    from ferrum._render import _RenderMixin
+
+    class FakeStructural:
+        pass
+
+    with pytest.raises(TypeError, match="Unknown structural"):
+        _RenderMixin._serialize_structural(FakeStructural())
+
+
+# ---------------------------------------------------------------------------
+# 57. Deeply nested offset_node group
+# ---------------------------------------------------------------------------
+
+
+def test_offset_node_deeply_nested_group():
+    """_offset_node should recurse through nested groups.
+
+    Targets composition._offset_node: group recursion at multiple levels.
+    """
+    node = {
+        "type": "group",
+        "children": [
+            {
+                "type": "group",
+                "children": [
+                    {"type": "circle", "cx": 5, "cy": 10},
+                ],
+            },
+        ],
+    }
+    _offset_node(node, 100.0, 200.0)
+    inner = node["children"][0]["children"][0]
+    assert inner["cx"] == 105
+    assert inner["cy"] == 210
+
+
+# ---------------------------------------------------------------------------
+# 58. _merge_packed_data with truncated data
+# ---------------------------------------------------------------------------
+
+
+def test_merge_packed_data_truncated_header():
+    """_merge_packed_data with a buffer shorter than 20 bytes should not crash.
+
+    Targets composition._merge_packed_data while loop condition: pos + 20 <= len(packed).
+    """
+    # Less than 20 bytes: header cannot be parsed, should silently skip.
+    result = _merge_packed_data([b"\x00" * 10], [0])
+    assert result == b""
+
+
+def test_merge_packed_data_unknown_kind_stops_parsing():
+    """_merge_packed_data with unknown kind in header should stop parsing that child.
+
+    Targets composition._merge_packed_data line 1951: kind not in _INSTANCE_SIZES.
+    """
+    import struct
+
+    # Create a 20-byte header with kind=99 (unknown)
+    header = struct.pack("<5I", 0, 0, 99, 0, 0)
+    result = _merge_packed_data([header], [0])
+    assert result == b""
+
+
+# ---------------------------------------------------------------------------
+# 59. RepeatChart validation edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_chart_no_axes_raises():
+    """RepeatChart with no row, column, or layer raises ValueError.
+
+    Targets RepeatChart.__init__ lines 638-639.
+    """
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError, match="at least one"):
+        RepeatChart(template)
+
+
+def test_repeat_chart_diagonal_without_row_raises():
+    """RepeatChart with diagonal but no row raises ValueError.
+
+    Targets RepeatChart.__init__ lines 634-635.
+    """
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    diag = Chart(df).mark_line().encode(x="a", y="a")
+    with pytest.raises(ValueError, match="diagonal"):
+        RepeatChart(template, column=["a", "b"], diagonal=diag)
+
+
+def test_repeat_chart_corner_without_both_axes_raises():
+    """RepeatChart with corner=True but only column raises ValueError.
+
+    Targets RepeatChart.__init__ lines 637-638.
+    """
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError, match="corner"):
+        RepeatChart(template, column=["a", "b"], corner=True)
+
+
+def test_repeat_chart_invalid_columns_raises():
+    """RepeatChart with columns=0 raises ValueError.
+
+    Targets RepeatChart.__init__ lines 641-642.
+    """
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError, match="columns"):
+        RepeatChart(template, column=["a", "b"], columns=0)
+
+
+def test_repeat_chart_invalid_resolve_non_dict_raises():
+    """RepeatChart with resolve=<non-dict> raises ValueError.
+
+    Targets RepeatChart.__init__ lines 643-653.
+    """
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError, match="resolve"):
+        RepeatChart(template, column=["a", "b"], resolve="shared")
+
+
+def test_repeat_chart_invalid_resolve_mode_raises():
+    """RepeatChart with resolve mode not shared/independent raises ValueError."""
+    df = pl.DataFrame({"a": [1.0], "b": [2.0]})
+    template = Chart(df).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError, match="resolve"):
+        RepeatChart(template, column=["a", "b"], resolve={"x": "union"})
+
+
+# ---------------------------------------------------------------------------
+# 60. RepeatChart share_scale
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_chart_share_scale_merges_resolve():
+    """RepeatChart.share_scale merges into existing resolve.
+
+    Targets RepeatChart.share_scale lines 872-906.
+    """
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point()
+    rc = RepeatChart(
+        template, row=["a", "b"], column=["a", "b"], resolve={"x": "shared"}
+    )
+    updated = rc.share_scale(y="shared")
+    assert updated.resolve == {"x": "shared", "y": "shared"}
+
+
+def test_repeat_chart_share_scale_invalid_mode_raises():
+    """RepeatChart.share_scale with invalid mode raises ValueError."""
+    df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+    template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point()
+    rc = RepeatChart(template, row=["a", "b"], column=["a", "b"])
+    with pytest.raises(ValueError, match="shared.*independent|independent.*shared"):
+        rc.share_scale(x="together")
+
+
+# ---------------------------------------------------------------------------
+# 61. Configure to_dict omits None correctly
+# ---------------------------------------------------------------------------
+
+
+def test_configure_to_dict_empty_config_is_empty():
+    """Configure with all-None fields should produce an empty dict.
+
+    Targets configure.py Configure.to_dict: all fields are None.
+    """
+    cfg = Configure()
+    d = cfg.to_dict()
+    assert d == {}
+
+
+def test_axis_config_to_dict_defaults_only():
+    """AxisConfig with only defaults (x=True, y=True) should include them.
+
+    Targets configure.py _to_dict_omit_none: x/y are True by default,
+    so they should be in the dict (they are not None).
+    """
+    cfg = AxisConfig()
+    d = cfg.to_dict()
+    assert d["x"] is True
+    assert d["y"] is True
+    # None fields should be omitted
+    assert "label_angle" not in d
+    assert "tick_count" not in d
+    assert "label_format" not in d
+
+
+# ---------------------------------------------------------------------------
+# 62. Faceted chart with format preset renders
+# ---------------------------------------------------------------------------
+
+
+def test_faceted_chart_with_configure_axis_format_preset_renders():
+    """A faceted chart with configure_axis(label_format='percent') renders.
+
+    This is the full end-to-end path: format preset resolves in Python,
+    d3-format string passes through _resolve_chart_config into render_svg,
+    and the Rust side applies it to axis tick labels.
+    """
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "x": pa.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], type=pa.float64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "grp": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
+    df = pl.from_arrow(tbl)
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(col="grp")
+        .configure_axis(label_format="percent")
+    )
+    svg = chart.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 63. Faceted chart with grid config
+# ---------------------------------------------------------------------------
+
+
+def test_faceted_chart_with_grid_config_renders():
+    """A faceted chart with configure_grid renders valid SVG.
+
+    Tests that grid config is forwarded to each facet panel.
+    """
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "x": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "grp": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
+    df = pl.from_arrow(tbl)
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(col="grp")
+        .configure_grid(y=True, color="#ddd")
+    )
+    svg = chart.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 64. Faceted chart with padding config
+# ---------------------------------------------------------------------------
+
+
+def test_faceted_chart_with_padding_config_renders():
+    """A faceted chart with configure_padding renders valid SVG.
+
+    Tests that padding config is forwarded to the faceted renderer.
+    """
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "x": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6], type=pa.int64()),
+            "grp": pa.array(["A", "A", "B", "B", "C", "C"], type=pa.string()),
+        }
+    )
+    df = pl.from_arrow(tbl)
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(col="grp")
+        .configure_padding(top=30, left=40)
+    )
+    svg = chart.show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 65. Composition with single-value categorical data
+# ---------------------------------------------------------------------------
+
+
+def test_hconcat_single_category_color():
+    """HConcat with a single category in color encoding renders valid SVG.
+
+    Tests that ordinal scale with domain of length 1 does not crash.
+    """
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["only", "only", "only"]}
+    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y", color="c")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y")
+    svg = (c1 | c2).show_svg()
+    _assert_valid_svg(svg)
+
+
+# ---------------------------------------------------------------------------
+# 66. CoordPolar spec serialization
+# ---------------------------------------------------------------------------
+
+
+def test_coord_polar_all_params_serialize():
+    """CoordPolar with all params serializes all fields correctly.
+
+    Targets coord.py CoordPolar.to_spec_dict.
+    """
+    polar = fr.CoordPolar(
+        theta="y",
+        start=1.57,
+        direction=-1,
+        inner_radius=30.0,
+        outer_radius=100.0,
+        pad_angle=0.02,
+    )
+    d = polar.to_spec_dict()
+    assert d["kind"] == "polar"
+    assert d["theta"] == "y"
+    assert d["start_angle"] == 1.57
+    assert d["direction"] == "counter_clockwise"
+    assert d["inner_radius"] == 30.0
+    assert d["outer_radius"] == 100.0
+    assert d["pad_angle"] == 0.02
+
+
+def test_coord_polar_defaults_serialize():
+    """CoordPolar defaults serialize correctly."""
+    polar = fr.CoordPolar()
+    d = polar.to_spec_dict()
+    assert d["kind"] == "polar"
+    assert d["theta"] == "x"
+    assert d["start_angle"] == 0.0
+    assert d["direction"] == "clockwise"
+    assert d["inner_radius"] == 0.0
+    assert "outer_radius" not in d  # None -> not included
+    assert d["pad_angle"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 67. CoordFixed serialization
+# ---------------------------------------------------------------------------
+
+
+def test_coord_fixed_with_limits_serializes():
+    """CoordFixed with xlim and ylim serializes all fields."""
+    fixed = fr.CoordFixed(ratio=2.0, xlim=(0, 10), ylim=(0, 20), expand=False, clip=False)
+    d = fixed.to_spec_dict()
+    assert d["kind"] == "fixed"
+    assert d["ratio"] == 2.0
+    assert d["x_domain"] == [0, 10]
+    assert d["y_domain"] == [0, 20]
+    assert d["expand"] is False
+    assert d["clip"] is False
+
+
+# ---------------------------------------------------------------------------
+# 68. CoordCartesian without limits serializes
+# ---------------------------------------------------------------------------
+
+
+def test_coord_cartesian_defaults_serializes():
+    """CoordCartesian with defaults serializes correctly."""
+    cart = fr.CoordCartesian()
+    d = cart.to_spec_dict()
+    assert d["kind"] == "cartesian"
+    assert d["expand"] is True
+    assert d["clip"] is True
+    assert "x_domain" not in d
+    assert "y_domain" not in d

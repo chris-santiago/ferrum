@@ -1461,3 +1461,1697 @@ mod tests {
         assert_eq!(cooks.len(), 3, "output length should match y arrays, not h_diag");
     }
 }
+
+// =============================================================================
+// Round 2 — Bug-hunt tests added 2026-05-24
+//
+// Focus areas:
+//   - Verify previous bug fixes hold (B18/B19/B20/B21 from commit bd182a8)
+//   - Kendall tau with ties, NaN, identical arrays, all-tied
+//   - Regression with perfectly collinear data / perfect fit
+//   - Variance/covariance with NaN in columns
+//   - Shapiro n=4 boundary (inner loop starts)
+//   - Studentized with perfect fit (zero residuals)
+//   - Cook's with n == p_eff (exact boundary)
+//   - Covariance rank2d with n=1
+//   - rankdata with all-equal values
+//   - Silhouette with negative-label indices and 3+ clusters
+//   - PCA with constant columns and single row
+// =============================================================================
+
+#[cfg(test)]
+mod round2_tests {
+    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() < tol
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Inlined implementations (verbatim from transform/stats.rs post-bd182a8)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn studentized_residual_vec(
+        y_true: &[f64],
+        y_pred: &[f64],
+        h_diag: Option<&[f64]>,
+    ) -> Vec<f64> {
+        let n = y_true.len();
+        let r: Vec<f64> = y_true.iter().zip(y_pred).map(|(t, p)| t - p).collect();
+        match h_diag {
+            None => {
+                let sigma = if n > 1 {
+                    let mean = r.iter().sum::<f64>() / n as f64;
+                    let var = r.iter().map(|ri| (ri - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+                    var.sqrt()
+                } else {
+                    1.0
+                };
+                if sigma > 0.0 {
+                    r.iter().map(|ri| ri / sigma).collect()
+                } else {
+                    vec![0.0; n]
+                }
+            }
+            Some(h) => {
+                let sse: f64 = r.iter().map(|ri| ri * ri).sum();
+                let p_eff = h.iter().sum::<f64>().round() as usize;
+                let sigma_sq = sse / (n.saturating_sub(p_eff).max(1)) as f64;
+                let sigma = sigma_sq.sqrt();
+                if sigma <= 0.0 {
+                    return vec![0.0; n];
+                }
+                r.iter()
+                    .zip(h)
+                    .map(|(ri, hi)| ri / (sigma * (1.0 - hi).max(1e-12).sqrt()))
+                    .collect()
+            }
+        }
+    }
+
+    fn cooks_distance_vec(y_true: &[f64], y_pred: &[f64], h_diag: &[f64]) -> Vec<f64> {
+        let n = y_true.len();
+        let r: Vec<f64> = y_true.iter().zip(y_pred).map(|(t, p)| t - p).collect();
+        let p_eff = h_diag.iter().sum::<f64>().round() as usize;
+        if n <= p_eff {
+            return vec![0.0; n];
+        }
+        if p_eff == 0 {
+            return vec![0.0; n];
+        }
+        let sse: f64 = r.iter().map(|ri| ri * ri).sum();
+        let sigma_sq = sse / (n - p_eff).max(1) as f64;
+        if sigma_sq <= 0.0 {
+            return vec![0.0; n];
+        }
+        r.iter()
+            .zip(h_diag)
+            .map(|(ri, hi)| {
+                let hi_clamped = hi.max(0.0);
+                let one_minus_h_sq = (1.0 - hi_clamped).powi(2);
+                let denom = if one_minus_h_sq > 0.0 { one_minus_h_sq } else { 1e-24 };
+                (ri * ri / (p_eff as f64 * sigma_sq)) * (hi_clamped / denom)
+            })
+            .collect()
+    }
+
+    fn rankdata_average_vec(arr: &[f64]) -> Vec<f64> {
+        let n = arr.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| arr[a].partial_cmp(&arr[b]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ranks = vec![0.0; n];
+        for (rank_idx, &orig_idx) in order.iter().enumerate() {
+            ranks[orig_idx] = (rank_idx + 1) as f64;
+        }
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && arr[order[j]] == arr[order[i]] {
+                j += 1;
+            }
+            if j - i > 1 {
+                let mean_rank = (ranks[order[i]] + ranks[order[j - 1]]) / 2.0;
+                for k in i..j {
+                    ranks[order[k]] = mean_rank;
+                }
+            }
+            i = j;
+        }
+        ranks
+    }
+
+    fn variance_rank_vec(x_flat: &[f64], n: usize, p: usize) -> Vec<f64> {
+        if n == 0 {
+            return vec![0.0; p];
+        }
+        let mut result = vec![0.0; p];
+        for j in 0..p {
+            let mean: f64 = (0..n).map(|i| x_flat[i * p + j]).sum::<f64>() / n as f64;
+            let var: f64 = (0..n).map(|i| (x_flat[i * p + j] - mean).powi(2)).sum::<f64>() / n as f64;
+            result[j] = var;
+        }
+        result
+    }
+
+    fn covariance_rank_vec(x_flat: &[f64], n: usize, p: usize, y: &[f64]) -> Vec<f64> {
+        if n < 2 {
+            return vec![0.0; p];
+        }
+        let y_mean = y.iter().sum::<f64>() / n as f64;
+        let ym: Vec<f64> = y.iter().map(|yi| yi - y_mean).collect();
+        let mut result = vec![0.0; p];
+        for j in 0..p {
+            let x_mean: f64 = (0..n).map(|i| x_flat[i * p + j]).sum::<f64>() / n as f64;
+            let cov: f64 = (0..n).map(|i| (x_flat[i * p + j] - x_mean) * ym[i]).sum::<f64>()
+                / (n - 1) as f64;
+            result[j] = cov.abs();
+        }
+        result
+    }
+
+    fn phi_inv(p: f64) -> f64 {
+        if p <= 0.0 { return -8.0; }
+        if p >= 1.0 { return 8.0; }
+        let a = [
+            -3.96968302866538e01, 2.20946098424520e02, -2.75928510446969e02,
+            1.38357751867269e02, -3.06647980661472e01, 2.50662827745924e00,
+        ];
+        let b = [
+            -5.44760987982241e01, 1.61585836858041e02, -1.55698979859887e02,
+            6.68013118877197e01, -1.32806815528857e01,
+        ];
+        let c = [
+            -7.78489400243029e-03, -3.22396458041137e-01, -2.40075827716184e00,
+            -2.54973253934373e00, 4.37466414146497e00, 2.93816398269878e00,
+        ];
+        let d = [
+            7.78469570904146e-03, 3.22467129070040e-01,
+            2.44513413714300e00, 3.75440866190742e00,
+        ];
+        let plow = 0.02425;
+        let phigh = 1.0 - plow;
+        if p < plow {
+            let q = (-2.0 * p.ln()).sqrt();
+            return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])
+                / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0);
+        }
+        if p <= phigh {
+            let q = p - 0.5;
+            let r = q * q;
+            return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5]) * q
+                / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0);
+        }
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])
+            / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
+    }
+
+    fn shapiro_w_scalar(x: &[f64]) -> f64 {
+        let n = x.len();
+        if n < 3 { return f64::NAN; }
+        let mut sorted = x.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let m: Vec<f64> = (1..=n)
+            .map(|k| phi_inv((k as f64 - 0.375) / (n as f64 + 0.25)))
+            .collect();
+        let m_norm_sq: f64 = m.iter().map(|v| v * v).sum();
+        let u = 1.0 / (n as f64).sqrt();
+
+        let a_n = -2.706056 * u.powi(5) + 4.434685 * u.powi(4) - 2.071190 * u.powi(3)
+            - 0.147981 * u.powi(2) + 0.221157 * u + m[n - 1] / m_norm_sq.sqrt();
+        let a_nm1 = -3.582633 * u.powi(5) + 5.682633 * u.powi(4) - 1.752460 * u.powi(3)
+            - 0.293762 * u.powi(2) + 0.042981 * u + m[n - 2] / m_norm_sq.sqrt();
+
+        let eps = (m_norm_sq - 2.0 * m[n - 1].powi(2) - 2.0 * m[n - 2].powi(2))
+            / (1.0 - 2.0 * a_n.powi(2) - 2.0 * a_nm1.powi(2));
+
+        let mut a = vec![0.0; n];
+        a[n - 1] = a_n;
+        a[n - 2] = a_nm1;
+        a[0] = -a_n;
+        a[1] = -a_nm1;
+        if n > 4 {
+            let eps_sqrt = eps.max(0.0).sqrt();
+            for i in 2..n - 2 {
+                a[i] = if eps_sqrt > 0.0 { m[i] / eps_sqrt } else { 0.0 };
+            }
+        }
+
+        let numer: f64 = a.iter().zip(sorted.iter()).map(|(ai, xi)| ai * xi).sum::<f64>().powi(2);
+        let mean = sorted.iter().sum::<f64>() / n as f64;
+        let denom: f64 = sorted.iter().map(|xi| (xi - mean).powi(2)).sum();
+        if denom <= 0.0 { return 1.0; }
+        (numer / denom).clamp(0.0, 1.0)
+    }
+
+    fn silhouette_samples_vec(
+        flat: &[f64],
+        n: usize,
+        feat: usize,
+        labels: &[i64],
+    ) -> Vec<f64> {
+        if n == 0 {
+            return vec![];
+        }
+        let mut dist = vec![0.0; n * n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let mut d2 = 0.0;
+                for f in 0..feat {
+                    let diff = flat[i * feat + f] - flat[j * feat + f];
+                    d2 += diff * diff;
+                }
+                let d = d2.sqrt();
+                dist[i * n + j] = d;
+                dist[j * n + i] = d;
+            }
+        }
+        let mut unique_labels: Vec<i64> = labels.to_vec();
+        unique_labels.sort();
+        unique_labels.dedup();
+        let n_clusters = unique_labels.len();
+        if n_clusters < 2 {
+            return vec![0.0; n];
+        }
+        let label_to_idx: std::collections::HashMap<i64, usize> = unique_labels
+            .iter()
+            .enumerate()
+            .map(|(idx, &lab)| (lab, idx))
+            .collect();
+        let mut cluster_members: Vec<Vec<usize>> = vec![vec![]; n_clusters];
+        for (i, &lab) in labels.iter().enumerate() {
+            cluster_members[label_to_idx[&lab]].push(i);
+        }
+        let mut silhouette = vec![0.0; n];
+        for i in 0..n {
+            let ci = label_to_idx[&labels[i]];
+            let cluster_size = cluster_members[ci].len();
+            let a_i = if cluster_size <= 1 {
+                0.0
+            } else {
+                let sum: f64 = cluster_members[ci].iter()
+                    .filter(|&&j| j != i)
+                    .map(|&j| dist[i * n + j])
+                    .sum();
+                sum / (cluster_size - 1) as f64
+            };
+            let mut b_i = f64::INFINITY;
+            for (c_idx, members) in cluster_members.iter().enumerate() {
+                if c_idx == ci || members.is_empty() {
+                    continue;
+                }
+                let sum: f64 = members.iter().map(|&j| dist[i * n + j]).sum();
+                let mean_d = sum / members.len() as f64;
+                if mean_d < b_i {
+                    b_i = mean_d;
+                }
+            }
+            let denom = a_i.max(b_i);
+            silhouette[i] = if denom > 0.0 {
+                (b_i - a_i) / denom
+            } else {
+                0.0
+            };
+        }
+        silhouette
+    }
+
+    // Inlined Kendall tau-b (from diagnostics.rs)
+    #[derive(Debug)]
+    struct KendallResult {
+        tau: f64,
+        n_concordant: u64,
+        n_discordant: u64,
+        n_tied_x: u64,
+        n_tied_y: u64,
+        n_tied_both: u64,
+    }
+
+    fn sort_by_key_count_ties(x: &[f64], idx: &mut [usize]) -> u64 {
+        idx.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ties: u64 = 0;
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i + 1;
+            while j < idx.len() && x[idx[j]] == x[idx[i]] {
+                j += 1;
+            }
+            let run = (j - i) as u64;
+            if run > 1 {
+                ties += run * (run - 1) / 2;
+            }
+            i = j;
+        }
+        ties
+    }
+
+    fn count_inversions(y: &[f64], idx: &mut [usize]) -> u64 {
+        let mut buf = vec![0usize; idx.len()];
+        merge_sort(y, idx, &mut buf, 0, idx.len())
+    }
+
+    fn merge_sort(y: &[f64], idx: &mut [usize], buf: &mut [usize], lo: usize, hi: usize) -> u64 {
+        if hi - lo <= 1 {
+            return 0;
+        }
+        let mid = (lo + hi) / 2;
+        let l = merge_sort(y, idx, buf, lo, mid);
+        let r = merge_sort(y, idx, buf, mid, hi);
+        let m = merge(y, idx, buf, lo, mid, hi);
+        l + r + m
+    }
+
+    fn merge(y: &[f64], idx: &mut [usize], buf: &mut [usize], lo: usize, mid: usize, hi: usize) -> u64 {
+        let mut i = lo;
+        let mut j = mid;
+        let mut k = lo;
+        let mut inv: u64 = 0;
+        while i < mid && j < hi {
+            if y[idx[i]] <= y[idx[j]] {
+                buf[k] = idx[i];
+                i += 1;
+            } else {
+                buf[k] = idx[j];
+                inv += (mid - i) as u64;
+                j += 1;
+            }
+            k += 1;
+        }
+        while i < mid {
+            buf[k] = idx[i];
+            i += 1;
+            k += 1;
+        }
+        while j < hi {
+            buf[k] = idx[j];
+            j += 1;
+            k += 1;
+        }
+        idx[lo..hi].copy_from_slice(&buf[lo..hi]);
+        inv
+    }
+
+    fn count_y_ties_after_sort(y: &[f64], idx: &[usize]) -> u64 {
+        let mut ties: u64 = 0;
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i + 1;
+            while j < idx.len() && y[idx[j]] == y[idx[i]] {
+                j += 1;
+            }
+            let run = (j - i) as u64;
+            if run > 1 {
+                ties += run * (run - 1) / 2;
+            }
+            i = j;
+        }
+        ties
+    }
+
+    fn count_xy_ties(x: &[f64], y: &[f64], idx: &[usize]) -> u64 {
+        let mut ties: u64 = 0;
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i + 1;
+            while j < idx.len() && x[idx[j]] == x[idx[i]] && y[idx[j]] == y[idx[i]] {
+                j += 1;
+            }
+            let run = (j - i) as u64;
+            if run > 1 {
+                ties += run * (run - 1) / 2;
+            }
+            i = j;
+        }
+        ties
+    }
+
+    fn kendall_tau_b(x: &[f64], y: &[f64]) -> KendallResult {
+        assert_eq!(x.len(), y.len(), "x and y must be the same length");
+        let n = x.len() as u64;
+        if n < 2 {
+            return KendallResult {
+                tau: f64::NAN,
+                n_concordant: 0,
+                n_discordant: 0,
+                n_tied_x: 0,
+                n_tied_y: 0,
+                n_tied_both: 0,
+            };
+        }
+        let n0 = n * (n - 1) / 2;
+        let mut idx: Vec<usize> = (0..x.len()).collect();
+        let n_tied_x = sort_by_key_count_ties(x, &mut idx);
+        {
+            let mut i = 0;
+            while i < idx.len() {
+                let mut j = i + 1;
+                while j < idx.len() && x[idx[j]] == x[idx[i]] {
+                    j += 1;
+                }
+                idx[i..j].sort_by(|&a, &b| {
+                    y[a].partial_cmp(&y[b]).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                i = j;
+            }
+        }
+        let n_tied_both = count_xy_ties(x, y, &idx);
+        let n_discordant = count_inversions(y, &mut idx);
+        let n_tied_y = count_y_ties_after_sort(y, &idx);
+        let n_concordant = (n0 as i128
+            - n_discordant as i128
+            - n_tied_x as i128
+            - n_tied_y as i128
+            + n_tied_both as i128)
+            .max(0) as u64;
+        let denom = (((n0 - n_tied_x) as f64) * ((n0 - n_tied_y) as f64)).sqrt();
+        let tau = if denom > 0.0 {
+            (n_concordant as f64 - n_discordant as f64) / denom
+        } else {
+            f64::NAN
+        };
+        KendallResult {
+            tau,
+            n_concordant,
+            n_discordant,
+            n_tied_x,
+            n_tied_y,
+            n_tied_both,
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 1: Verify previous bug fixes (B18, B19, B20, B21)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// B18 regression: negative leverage should produce non-negative Cook's D.
+    /// Fix: hi_clamped = hi.max(0.0).
+    #[test]
+    fn bug_hunt_r2_b18_negative_leverage_fixed() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.1, 1.9, 3.2, 3.8, 5.1];
+        let h = [-0.5, 0.5, 0.5, 0.5, 0.5]; // p_eff=2, h[0]=-0.5
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c >= 0.0,
+                "B18 regression: Cook's D[{i}] must be >= 0, got {c}"
+            );
+        }
+    }
+
+    /// B19 regression: p_eff=0 should return zeros, not NaN from division by zero.
+    #[test]
+    fn bug_hunt_r2_b19_peff_zero_fixed() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.1, 1.9, 3.2, 3.8, 5.1];
+        let h = [0.0, 0.0, 0.0, 0.0, 0.0]; // sum=0, p_eff=0
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c == 0.0,
+                "B19 regression: Cook's D[{i}] with p_eff=0 must be 0.0, got {c}"
+            );
+        }
+    }
+
+    /// B20 regression: Shapiro W should never exceed 1.0 after clamp fix.
+    #[test]
+    fn bug_hunt_r2_b20_shapiro_clamped() {
+        // The original bug was n=3, skewed data producing W > 1.0.
+        // Test several n=3 skewed inputs.
+        let inputs: Vec<Vec<f64>> = vec![
+            vec![1.0, 100.0, 200.0],
+            vec![0.001, 0.002, 1000.0],
+            vec![-100.0, 0.0, 0.001],
+            vec![1.0, 1.0, 100.0],
+        ];
+        for (idx, x) in inputs.iter().enumerate() {
+            let w = shapiro_w_scalar(x);
+            assert!(
+                w <= 1.0,
+                "B20 regression: shapiro W (input {idx}) must be <= 1.0, got {w}"
+            );
+            assert!(
+                w >= 0.0,
+                "B20 regression: shapiro W (input {idx}) must be >= 0.0, got {w}"
+            );
+        }
+    }
+
+    /// B21 regression: variance_rank_vec with n=0 should return zeros, not NaN.
+    #[test]
+    fn bug_hunt_r2_b21_variance_rank_n_zero_fixed() {
+        let v = variance_rank_vec(&[], 0, 3);
+        assert_eq!(v.len(), 3);
+        for (i, &vi) in v.iter().enumerate() {
+            assert!(
+                vi == 0.0,
+                "B21 regression: variance_rank[{i}] with n=0 must be 0.0, got {vi}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 2: Kendall tau with ties
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Kendall tau with all values tied in both x and y: tau should be NaN
+    /// because denom = sqrt((n0-T_x)*(n0-T_y)) = sqrt(0*0) = 0.
+    #[test]
+    fn bug_hunt_r2_kendall_all_tied_both() {
+        let x = [5.0, 5.0, 5.0, 5.0];
+        let y = [3.0, 3.0, 3.0, 3.0];
+        let r = kendall_tau_b(&x, &y);
+        // n0 = 6, T_x = 6, T_y = 6 → denom = sqrt(0*0) = 0 → NaN
+        assert!(
+            r.tau.is_nan(),
+            "all-tied tau should be NaN, got {}", r.tau
+        );
+        assert_eq!(r.n_tied_x, 6, "n_tied_x for 4 elements all tied should be C(4,2)=6");
+        assert_eq!(r.n_tied_y, 6, "n_tied_y for 4 elements all tied should be C(4,2)=6");
+        assert_eq!(r.n_tied_both, 6, "n_tied_both should be 6");
+    }
+
+    /// Kendall tau with tied x but distinct y: tau should be finite.
+    /// x = [1,1,2,2], y = [1,2,3,4].
+    /// Pairs: (0,1): x-tied, skip. (0,2): C. (0,3): C. (1,2): C. (1,3): C. (2,3): x-tied, skip.
+    /// n0=6, T_x=2, T_y=0, T_both=0, D=0.
+    /// C = 6 - 0 - 2 - 0 + 0 = 4. tau = (4-0)/sqrt(4*6) = 4/sqrt(24).
+    #[test]
+    fn bug_hunt_r2_kendall_tied_x_distinct_y() {
+        let x = [1.0, 1.0, 2.0, 2.0];
+        let y = [1.0, 2.0, 3.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(r.tau.is_finite(), "tau with tied x should be finite, got {}", r.tau);
+        assert_eq!(r.n_tied_x, 2);
+        assert_eq!(r.n_tied_y, 0);
+        // Hand-computed: tau = 4 / sqrt(4*6) = 4/sqrt(24) ~= 0.8165
+        let expected = 4.0 / (24.0_f64).sqrt();
+        assert!(
+            approx_eq(r.tau, expected, 1e-10),
+            "tau should be {expected}, got {}", r.tau
+        );
+    }
+
+    /// Kendall tau with heavy ties in both x and y: verify tie counting.
+    /// x = [1,1,1,2,2,2], y = [1,1,2,1,2,2]
+    #[test]
+    fn bug_hunt_r2_kendall_heavy_ties() {
+        let x = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let y = [1.0, 1.0, 2.0, 1.0, 2.0, 2.0];
+        let r = kendall_tau_b(&x, &y);
+        // n0 = 15 (C(6,2))
+        // T_x = C(3,2) + C(3,2) = 3 + 3 = 6
+        // T_y: values are [1,1,2,1,2,2] → three 1s and three 2s → C(3,2)*2 = 6
+        assert_eq!(r.n_tied_x, 6, "n_tied_x should be 6, got {}", r.n_tied_x);
+        assert_eq!(r.n_tied_y, 6, "n_tied_y should be 6, got {}", r.n_tied_y);
+        assert!(r.tau.is_finite(), "tau with heavy ties should be finite, got {}", r.tau);
+        assert!(
+            r.tau >= -1.0 && r.tau <= 1.0,
+            "tau must be in [-1,1], got {}", r.tau
+        );
+    }
+
+    /// Kendall tau with identical x and y arrays: tau should be 1.0.
+    #[test]
+    fn bug_hunt_r2_kendall_identical_arrays() {
+        let x = [3.0, 1.0, 4.0, 1.0, 5.0];
+        let y = [3.0, 1.0, 4.0, 1.0, 5.0];
+        let r = kendall_tau_b(&x, &y);
+        // When x == y, concordant = all non-tied pairs, discordant = 0
+        // T_x = T_y, T_both = T_x. tau = C / sqrt((n0-T_x)(n0-T_y)) = C/C = 1.0
+        assert!(
+            approx_eq(r.tau, 1.0, 1e-10),
+            "identical arrays tau should be 1.0, got {}", r.tau
+        );
+    }
+
+    /// Kendall tau with NaN in x: NaN breaks ordering; should not panic.
+    /// NaN == NaN is false, so NaN values won't be detected as ties.
+    /// partial_cmp returns Equal for NaN, so sorting behavior is implementation-defined.
+    #[test]
+    fn bug_hunt_r2_kendall_nan_in_x() {
+        let x = [1.0, f64::NAN, 3.0, 2.0, f64::NAN];
+        let y = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let r = kendall_tau_b(&x, &y);
+        // Contract: no panic. tau may be NaN or finite.
+        let _ = r; // just verify no panic
+    }
+
+    /// Kendall tau with NaN in y: similar to NaN in x.
+    #[test]
+    fn bug_hunt_r2_kendall_nan_in_y() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [f64::NAN, 2.0, f64::NAN, 4.0, 5.0];
+        let r = kendall_tau_b(&x, &y);
+        let _ = r; // no panic
+    }
+
+    /// Kendall tau with Infinity: should have defined ordering.
+    /// +Inf > everything, -Inf < everything.
+    #[test]
+    fn bug_hunt_r2_kendall_infinity() {
+        let x = [f64::NEG_INFINITY, 0.0, 1.0, f64::INFINITY];
+        let y = [f64::NEG_INFINITY, 0.0, 1.0, f64::INFINITY];
+        let r = kendall_tau_b(&x, &y);
+        // Identical monotonic sequences → tau = 1.0
+        assert!(
+            approx_eq(r.tau, 1.0, 1e-10),
+            "identical monotonic with Inf: tau should be 1.0, got {}", r.tau
+        );
+    }
+
+    /// Kendall tau with n=2: the minimal valid case.
+    /// x=[1,2], y=[2,1] → 1 pair, discordant → tau = -1.0.
+    #[test]
+    fn bug_hunt_r2_kendall_n2() {
+        let x = [1.0, 2.0];
+        let y = [2.0, 1.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(
+            approx_eq(r.tau, -1.0, 1e-10),
+            "n=2 discordant pair: tau should be -1.0, got {}", r.tau
+        );
+        assert_eq!(r.n_concordant, 0);
+        assert_eq!(r.n_discordant, 1);
+    }
+
+    /// Kendall tau with single tied pair in both x and y.
+    /// x=[1,1], y=[2,2] → 1 pair, tied in both → n0=1, T_x=1, T_y=1, T_both=1.
+    /// denom = sqrt((1-1)*(1-1)) = 0 → tau = NaN.
+    #[test]
+    fn bug_hunt_r2_kendall_n2_all_tied() {
+        let x = [1.0, 1.0];
+        let y = [2.0, 2.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(r.tau.is_nan(), "n=2 all-tied: tau should be NaN, got {}", r.tau);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 3: Perfectly collinear / perfect fit edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Perfect fit: all residuals are 0. Studentized residuals should all be 0.
+    #[test]
+    fn bug_hunt_r2_studentized_perfect_fit_no_hat() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.0, 2.0, 3.0, 4.0, 5.0]; // perfect fit
+        let stud = studentized_residual_vec(&yt, &yp, None);
+        // All residuals = 0 → mean = 0, var = 0, sigma = 0 → fallback to vec![0.0; n]
+        for (i, &s) in stud.iter().enumerate() {
+            assert!(
+                s == 0.0,
+                "perfect fit stud[{i}] should be 0.0, got {s}"
+            );
+        }
+    }
+
+    /// Perfect fit with hat diagonal: sigma_sq = 0 → fallback to vec![0.0; n].
+    #[test]
+    fn bug_hunt_r2_studentized_perfect_fit_with_hat() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let h = [0.4, 0.2, 0.1, 0.2, 0.1]; // p_eff=1
+        let stud = studentized_residual_vec(&yt, &yp, Some(&h));
+        // sse = 0, sigma_sq = 0 → sigma = 0 → sigma <= 0 → return vec![0.0; n]
+        for (i, &s) in stud.iter().enumerate() {
+            assert!(
+                s == 0.0,
+                "perfect fit with hat stud[{i}] should be 0.0, got {s}"
+            );
+        }
+    }
+
+    /// Perfect fit: Cook's distance should be all zeros (sigma_sq = 0 guard).
+    #[test]
+    fn bug_hunt_r2_cooks_perfect_fit() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let h = [0.2, 0.2, 0.2, 0.2, 0.2]; // p_eff=1
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c == 0.0,
+                "perfect fit Cook's D[{i}] should be 0.0, got {c}"
+            );
+        }
+    }
+
+    /// n == p_eff exactly: the guard `n <= p_eff` triggers (n=3, p_eff=3).
+    /// Cook's D should return all zeros.
+    #[test]
+    fn bug_hunt_r2_cooks_n_equals_peff() {
+        let yt = [1.0, 2.0, 3.0];
+        let yp = [1.5, 2.5, 2.5];
+        let h = [1.0, 1.0, 1.0]; // sum=3 → p_eff=3, n=3 → n <= p_eff → zeros
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c == 0.0,
+                "n == p_eff: Cook's D[{i}] should be 0.0, got {c}"
+            );
+        }
+    }
+
+    /// n < p_eff: similar to above but p_eff > n. Early return with zeros.
+    #[test]
+    fn bug_hunt_r2_cooks_n_less_than_peff() {
+        let yt = [1.0, 2.0];
+        let yp = [1.5, 2.5];
+        let h = [2.0, 2.0]; // sum=4 → p_eff=4, n=2 → n <= p_eff → zeros
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c == 0.0,
+                "n < p_eff: Cook's D[{i}] should be 0.0, got {c}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 4: Variance/covariance with NaN in columns
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Variance_rank with NaN in one column: NaN poisons mean → NaN var.
+    /// The function does not filter NaN, so the result is NaN for that column.
+    #[test]
+    fn bug_hunt_r2_variance_rank_nan_in_column() {
+        let flat = [
+            1.0, f64::NAN,
+            2.0, 2.0,
+            3.0, 3.0,
+        ]; // n=3, p=2
+        let v = variance_rank_vec(&flat, 3, 2);
+        assert_eq!(v.len(), 2);
+        // Column 0: [1,2,3] → var = 2/3 (finite)
+        assert!(v[0].is_finite(), "non-NaN column variance should be finite, got {}", v[0]);
+        // Column 1: [NaN, 2, 3] → mean = NaN, var = NaN
+        assert!(
+            v[1].is_nan(),
+            "NaN column variance should be NaN, got {}", v[1]
+        );
+    }
+
+    /// Covariance_rank with NaN in x column: NaN propagates to covariance.
+    #[test]
+    fn bug_hunt_r2_covariance_rank_nan_in_x() {
+        let flat = [
+            f64::NAN, 1.0,
+            2.0, 2.0,
+            3.0, 3.0,
+        ]; // n=3, p=2
+        let y = [1.0, 2.0, 3.0];
+        let result = covariance_rank_vec(&flat, 3, 2, &y);
+        assert_eq!(result.len(), 2);
+        // Column 0 has NaN → x_mean is NaN → cov is NaN → abs(NaN) = NaN
+        assert!(
+            result[0].is_nan(),
+            "NaN x column cov should be NaN, got {}", result[0]
+        );
+        // Column 1 is clean
+        assert!(
+            result[1].is_finite(),
+            "clean column cov should be finite, got {}", result[1]
+        );
+    }
+
+    /// Covariance_rank with NaN in y: NaN propagates to y_mean → all covs are NaN.
+    #[test]
+    fn bug_hunt_r2_covariance_rank_nan_in_y() {
+        let flat = [1.0, 2.0, 3.0]; // n=3, p=1
+        let y = [1.0, f64::NAN, 3.0];
+        let result = covariance_rank_vec(&flat, 3, 1, &y);
+        // y_mean = NaN → ym = [NaN,NaN,NaN] → all covs = NaN → abs(NaN) = NaN
+        assert!(
+            result[0].is_nan(),
+            "NaN y should make all covs NaN, got {}", result[0]
+        );
+    }
+
+    /// Variance_rank with Infinity in a column: mean might be Inf, var could be NaN.
+    #[test]
+    fn bug_hunt_r2_variance_rank_infinity_in_column() {
+        let flat = [
+            1.0, f64::INFINITY,
+            2.0, 1.0,
+            3.0, 2.0,
+        ]; // n=3, p=2
+        let v = variance_rank_vec(&flat, 3, 2);
+        // Column 0: normal
+        assert!(v[0].is_finite(), "normal column var should be finite, got {}", v[0]);
+        // Column 1: [Inf, 1, 2] → mean = Inf, (Inf - Inf)^2 = NaN
+        // So var should be NaN
+        assert!(
+            v[1].is_nan(),
+            "Inf column variance should be NaN (Inf-Inf=NaN), got {}", v[1]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 5: Shapiro n=4 boundary (inner loop starts at n>4)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// n=4 is the exact boundary where `if n > 4` is FALSE. The inner loop
+    /// for computing a[2..n-2] is skipped entirely. With n=4, a[2] and a[3]
+    /// are a_nm1 and a_n respectively, and a[0]/a[1] are their negatives.
+    /// Wait: a[n-1]=a_n, a[n-2]=a_nm1, a[0]=-a_n, a[1]=-a_nm1.
+    /// For n=4: a[3]=a_n, a[2]=a_nm1, a[0]=-a_n, a[1]=-a_nm1.
+    /// The loop `for i in 2..n-2` = `for i in 2..2` = empty. So all 4
+    /// coefficients are set. This should work correctly.
+    #[test]
+    fn bug_hunt_r2_shapiro_n4_boundary() {
+        let x = [1.0, 2.0, 3.0, 4.0];
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w.is_finite() && w >= 0.0 && w <= 1.0,
+            "n=4 Shapiro W should be in [0,1], got {w}"
+        );
+        // Linear data should have high W (close to 1)
+        assert!(w > 0.9, "linear n=4 data should have W > 0.9, got {w}");
+    }
+
+    /// n=5 is where the inner loop first executes (2..3 = one iteration).
+    /// Test that a[2] is correctly computed.
+    #[test]
+    fn bug_hunt_r2_shapiro_n5_first_inner_loop() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w.is_finite() && w >= 0.0 && w <= 1.0,
+            "n=5 Shapiro W should be in [0,1], got {w}"
+        );
+    }
+
+    /// n=3 with all identical values: denom = 0 → W = 1.0 (via denom <= 0 guard).
+    #[test]
+    fn bug_hunt_r2_shapiro_all_identical() {
+        let x = [5.0, 5.0, 5.0];
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w == 1.0,
+            "all-identical values: W should be 1.0, got {w}"
+        );
+    }
+
+    /// n=100: test that the polynomial coefficients don't produce W outside [0,1].
+    #[test]
+    fn bug_hunt_r2_shapiro_n100_various_distributions() {
+        // Uniform-ish
+        let uniform: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let w = shapiro_w_scalar(&uniform);
+        assert!(
+            w >= 0.0 && w <= 1.0,
+            "n=100 uniform W should be in [0,1], got {w}"
+        );
+
+        // Exponential-ish (heavy right tail)
+        let exponential: Vec<f64> = (0..100).map(|i| (i as f64 * 0.05).exp()).collect();
+        let w = shapiro_w_scalar(&exponential);
+        assert!(
+            w >= 0.0 && w <= 1.0,
+            "n=100 exponential W should be in [0,1], got {w}"
+        );
+        assert!(
+            w < 0.95,
+            "exponential data should have lower W than 0.95, got {w}"
+        );
+    }
+
+    /// Shapiro with n=4 and negative eps: the guard `eps.max(0.0)` prevents NaN.
+    /// For n=4, the inner loop doesn't run, so eps doesn't matter. But for n=5+
+    /// with carefully chosen data, eps can be negative. Use skewed n=5 data.
+    #[test]
+    fn bug_hunt_r2_shapiro_n5_skewed_negative_eps() {
+        // Very skewed data where a_n^2 + a_nm1^2 might exceed 0.5
+        let x = [0.0, 0.0001, 0.0002, 0.0003, 10000.0];
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w.is_finite() && w >= 0.0 && w <= 1.0,
+            "skewed n=5 W should be in [0,1], got {w}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 6: Studentized residual single-element (n=1)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// n=1 without hat: sigma defaults to 1.0 (n <= 1 branch), so stud = r / 1.0.
+    #[test]
+    fn bug_hunt_r2_studentized_n1_no_hat() {
+        let yt = [5.0];
+        let yp = [3.0]; // residual = 2.0
+        let stud = studentized_residual_vec(&yt, &yp, None);
+        assert_eq!(stud.len(), 1);
+        assert!(
+            approx_eq(stud[0], 2.0, 1e-10),
+            "n=1 stud should be 2.0 (residual/1.0), got {}", stud[0]
+        );
+    }
+
+    /// n=1 with hat: sse = r^2, p_eff = round(h[0]), and if p_eff >= 1 then
+    /// n.saturating_sub(1).max(1) = max(0,1) = 1. sigma_sq = r^2 / 1 = r^2.
+    /// sigma = |r|. stud = r / (|r| * sqrt(max(1-h, 1e-12))).
+    #[test]
+    fn bug_hunt_r2_studentized_n1_with_hat() {
+        let yt = [5.0];
+        let yp = [3.0]; // r = 2.0
+        let h = [0.8]; // p_eff = round(0.8) = 1
+        let stud = studentized_residual_vec(&yt, &yp, Some(&h));
+        assert_eq!(stud.len(), 1);
+        // p_eff = 1, n = 1. n.saturating_sub(1).max(1) = max(0,1) = 1.
+        // sse = 4, sigma_sq = 4/1 = 4, sigma = 2.
+        // stud = 2 / (2 * sqrt(max(0.2, 1e-12))) = 1/sqrt(0.2) = sqrt(5)
+        let expected = 1.0 / (0.2_f64).sqrt();
+        assert!(
+            approx_eq(stud[0], expected, 1e-10),
+            "n=1 with hat stud should be {expected}, got {}", stud[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 7: rankdata with all-equal values
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// All values equal: all elements should get the average rank = (n+1)/2.
+    #[test]
+    fn bug_hunt_r2_rankdata_all_equal() {
+        let x = [7.0, 7.0, 7.0, 7.0, 7.0];
+        let r = rankdata_average_vec(&x);
+        let expected = 3.0; // (1+2+3+4+5)/5 = 3.0
+        for (i, &ri) in r.iter().enumerate() {
+            assert!(
+                approx_eq(ri, expected, 1e-12),
+                "all-equal rank[{i}] should be {expected}, got {ri}"
+            );
+        }
+    }
+
+    /// Single element: rank should be 1.0.
+    #[test]
+    fn bug_hunt_r2_rankdata_single() {
+        let x = [42.0];
+        let r = rankdata_average_vec(&x);
+        assert_eq!(r.len(), 1);
+        assert!(approx_eq(r[0], 1.0, 1e-12), "single element rank should be 1.0, got {}", r[0]);
+    }
+
+    /// rankdata with negative zero: -0.0 == 0.0 in IEEE 754, so they should
+    /// be treated as tied.
+    #[test]
+    fn bug_hunt_r2_rankdata_negative_zero() {
+        let x = [0.0, -0.0, 1.0];
+        let r = rankdata_average_vec(&x);
+        // 0.0 and -0.0 are equal, so they get average rank = (1+2)/2 = 1.5
+        assert!(
+            approx_eq(r[0], 1.5, 1e-12),
+            "0.0 should tie with -0.0: rank should be 1.5, got {}", r[0]
+        );
+        assert!(
+            approx_eq(r[1], 1.5, 1e-12),
+            "-0.0 should tie with 0.0: rank should be 1.5, got {}", r[1]
+        );
+        assert!(approx_eq(r[2], 3.0, 1e-12), "1.0 rank should be 3.0, got {}", r[2]);
+    }
+
+    /// rankdata with subnormal floats: these are very close to zero but distinct.
+    #[test]
+    fn bug_hunt_r2_rankdata_subnormals() {
+        let x = [f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0, 0.0];
+        let r = rankdata_average_vec(&x);
+        // 0 < MIN_POSITIVE/2 < MIN_POSITIVE (subnormal < normal)
+        assert!(
+            approx_eq(r[2], 1.0, 1e-12),
+            "0.0 should be rank 1, got {}", r[2]
+        );
+        assert!(
+            approx_eq(r[1], 2.0, 1e-12),
+            "MIN_POSITIVE/2 should be rank 2, got {}", r[1]
+        );
+        assert!(
+            approx_eq(r[0], 3.0, 1e-12),
+            "MIN_POSITIVE should be rank 3, got {}", r[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 8: Silhouette with 3+ clusters and edge configurations
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Three clusters: verify silhouette in [-1, 1] and semantic correctness.
+    /// Cluster 0 at origin, cluster 1 at (10,0), cluster 2 at (0,10).
+    #[test]
+    fn bug_hunt_r2_silhouette_three_clusters() {
+        let flat = [
+            0.0, 0.0,   // cluster 0
+            0.1, 0.0,   // cluster 0
+            10.0, 0.0,  // cluster 1
+            10.1, 0.0,  // cluster 1
+            0.0, 10.0,  // cluster 2
+            0.1, 10.0,  // cluster 2
+        ];
+        let labels = [0i64, 0, 1, 1, 2, 2];
+        let sv = silhouette_samples_vec(&flat, 6, 2, &labels);
+        for (i, &s) in sv.iter().enumerate() {
+            assert!(
+                s >= -1.0 && s <= 1.0 && s.is_finite(),
+                "3-cluster silhouette[{i}] should be in [-1,1], got {s}"
+            );
+            // Well-separated clusters should have high silhouette
+            assert!(
+                s > 0.5,
+                "well-separated 3-cluster point {i} should have s > 0.5, got {s}"
+            );
+        }
+    }
+
+    /// Silhouette with negative label values: label indices are arbitrary i64s.
+    #[test]
+    fn bug_hunt_r2_silhouette_negative_labels() {
+        let flat = [
+            0.0, 0.0,
+            0.1, 0.0,
+            10.0, 10.0,
+            10.1, 10.0,
+        ];
+        let labels = [-1i64, -1, -2, -2];
+        let sv = silhouette_samples_vec(&flat, 4, 2, &labels);
+        for (i, &s) in sv.iter().enumerate() {
+            assert!(
+                s.is_finite() && s >= -1.0 && s <= 1.0,
+                "negative-label silhouette[{i}] should be in [-1,1], got {s}"
+            );
+        }
+    }
+
+    /// Silhouette with one point misclassified: point close to the other cluster
+    /// should have negative silhouette.
+    #[test]
+    fn bug_hunt_r2_silhouette_misclassified_point() {
+        let flat = [
+            0.0, 0.0,   // cluster 0 center
+            100.0, 100.0, // cluster 0 but close to cluster 1
+            99.0, 99.0,  // cluster 1
+            100.0, 100.0, // cluster 1 center
+        ];
+        let labels = [0i64, 0, 1, 1];
+        let sv = silhouette_samples_vec(&flat, 4, 2, &labels);
+        // Point 1 (100,100) is in cluster 0 but is identical to a cluster 1 point.
+        // a(1) = dist(1, 0) = dist((100,100),(0,0)) = 141.42
+        // b(1) = mean dist to cluster 1 = (dist(1,2) + dist(1,3))/2
+        //      = (dist((100,100),(99,99)) + dist((100,100),(100,100)))/2
+        //      = (sqrt(2) + 0)/2 = 0.707
+        // s(1) = (0.707 - 141.42) / max(141.42, 0.707) = very negative
+        assert!(
+            sv[1] < 0.0,
+            "misclassified point should have negative silhouette, got {}", sv[1]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 9: Cook's distance with fractional h_diag summing near .5
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Rust f64::round() uses "round half away from zero": 0.5→1, 1.5→2.
+    /// sum=0.5 → p_eff=1 (NOT 0), sum=0.49 → p_eff=0 (early return zeros).
+    /// This test verifies the rounding boundary behavior.
+    #[test]
+    fn bug_hunt_r2_cooks_peff_rounding_boundary() {
+        let yt = [1.0, 2.0, 3.0, 4.0];
+        let yp = [1.5, 2.5, 2.5, 3.5]; // residuals: [-0.5, -0.5, 0.5, 0.5]
+
+        // Sum = 0.49 → rounds to 0 → p_eff=0 → early return zeros
+        let h_below = [0.1225, 0.1225, 0.1225, 0.1225]; // sum = 0.49
+        let cooks_below = cooks_distance_vec(&yt, &yp, &h_below);
+        for &c in &cooks_below {
+            assert!(
+                c == 0.0,
+                "sum=0.49 rounds to p_eff=0, Cook's D should be 0, got {c}"
+            );
+        }
+
+        // Sum = 0.50 → rounds to 1 (round half away from zero) → normal computation
+        let h_half = [0.125, 0.125, 0.125, 0.125]; // sum = 0.5
+        let cooks_half = cooks_distance_vec(&yt, &yp, &h_half);
+        let has_nonzero = cooks_half.iter().any(|&c| c > 0.0);
+        assert!(
+            has_nonzero,
+            "sum=0.5 rounds to p_eff=1, should have non-zero Cook's D"
+        );
+        for (i, &c) in cooks_half.iter().enumerate() {
+            assert!(
+                c.is_finite() && c >= 0.0,
+                "Cook's D[{i}] should be finite and non-negative, got {c}"
+            );
+        }
+
+        // Sum = 0.51 → rounds to 1 → normal computation (same as 0.5)
+        let h_just_above = [0.1275, 0.1275, 0.1275, 0.1275]; // sum = 0.51
+        let cooks_above = cooks_distance_vec(&yt, &yp, &h_just_above);
+        let has_nonzero_above = cooks_above.iter().any(|&c| c > 0.0);
+        assert!(
+            has_nonzero_above,
+            "sum=0.51 rounds to p_eff=1, should have non-zero Cook's D"
+        );
+        for (i, &c) in cooks_above.iter().enumerate() {
+            assert!(
+                c.is_finite() && c >= 0.0,
+                "Cook's D[{i}] should be finite and non-negative, got {c}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 10: Covariance rank with n=1 and n=2 (boundary for division)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// n=1 triggers the `n < 2` guard → returns zeros.
+    #[test]
+    fn bug_hunt_r2_covariance_rank_n1() {
+        let flat = [42.0]; // n=1, p=1
+        let y = [7.0];
+        let result = covariance_rank_vec(&flat, 1, 1, &y);
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0] == 0.0,
+            "n=1 cov should be 0.0, got {}", result[0]
+        );
+    }
+
+    /// n=2: the minimum case that doesn't trigger the guard.
+    /// x=[0, 10], y=[0, 20]. x_mean=5, y_mean=10.
+    /// cov = ((0-5)(0-10) + (10-5)(20-10)) / (2-1) = (50 + 50) / 1 = 100.
+    #[test]
+    fn bug_hunt_r2_covariance_rank_n2_hand_computed() {
+        let flat = [0.0, 10.0]; // n=2, p=1
+        let y = [0.0, 20.0];
+        let result = covariance_rank_vec(&flat, 2, 1, &y);
+        assert!(
+            approx_eq(result[0], 100.0, 1e-10),
+            "n=2 cov should be 100.0, got {}", result[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 11: Kendall tau joint tie counting correctness
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Verify joint tie counting: when pairs are tied in both x and y.
+    /// x=[1,1,1], y=[2,2,2] → all C(3,2)=3 pairs are tied in both.
+    #[test]
+    fn bug_hunt_r2_kendall_all_joint_ties() {
+        let x = [1.0, 1.0, 1.0];
+        let y = [2.0, 2.0, 2.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_tied_x, 3, "n_tied_x should be C(3,2)=3, got {}", r.n_tied_x);
+        assert_eq!(r.n_tied_y, 3, "n_tied_y should be C(3,2)=3, got {}", r.n_tied_y);
+        assert_eq!(r.n_tied_both, 3, "n_tied_both should be 3, got {}", r.n_tied_both);
+        assert!(r.tau.is_nan(), "all joint ties: tau should be NaN, got {}", r.tau);
+    }
+
+    /// Verify that joint ties are a subset of x-ties and y-ties.
+    /// x=[1,1,2,2], y=[3,3,4,4].
+    /// T_x = 1 + 1 = 2 (two groups of 2).
+    /// T_y = 1 + 1 = 2.
+    /// T_both = 1 + 1 = 2 (pairs (0,1) and (2,3) are tied in both).
+    #[test]
+    fn bug_hunt_r2_kendall_joint_ties_subset() {
+        let x = [1.0, 1.0, 2.0, 2.0];
+        let y = [3.0, 3.0, 4.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_tied_x, 2);
+        assert_eq!(r.n_tied_y, 2);
+        assert_eq!(r.n_tied_both, 2);
+        // All non-joint-tied pairs are concordant: (0,2), (0,3), (1,2), (1,3) = 4
+        // C = 6 - 0 - 2 - 2 + 2 = 4
+        assert_eq!(r.n_concordant, 4, "concordant should be 4, got {}", r.n_concordant);
+        assert_eq!(r.n_discordant, 0);
+        // tau = (4 - 0) / sqrt((6-2)*(6-2)) = 4/4 = 1.0
+        assert!(
+            approx_eq(r.tau, 1.0, 1e-10),
+            "tau should be 1.0, got {}", r.tau
+        );
+    }
+
+    /// Kendall tau with mixed concordant and discordant:
+    /// x=[1,2,3,4], y=[1,3,2,4]. Pairs: (0,1)C, (0,2)C, (0,3)C, (1,2)D, (1,3)C, (2,3)C.
+    /// C=5, D=1. tau = (5-1)/6 = 4/6 = 2/3.
+    #[test]
+    fn bug_hunt_r2_kendall_mixed_hand_computed() {
+        let x = [1.0, 2.0, 3.0, 4.0];
+        let y = [1.0, 3.0, 2.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_concordant, 5);
+        assert_eq!(r.n_discordant, 1);
+        let expected = 4.0 / 6.0;
+        assert!(
+            approx_eq(r.tau, expected, 1e-10),
+            "tau should be {expected}, got {}", r.tau
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 12: Studentized residual with NaN propagation through sigma
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// All NaN residuals without hat: mean = NaN, var = NaN, sigma = NaN.
+    /// sigma > 0.0 is false for NaN → fallback to vec![0.0; n].
+    #[test]
+    fn bug_hunt_r2_studentized_all_nan_residuals() {
+        let yt = [f64::NAN, f64::NAN, f64::NAN];
+        let yp = [1.0, 2.0, 3.0];
+        let stud = studentized_residual_vec(&yt, &yp, None);
+        assert_eq!(stud.len(), 3);
+        // NaN sigma → sigma > 0.0 is false → vec![0.0; n]
+        for (i, &s) in stud.iter().enumerate() {
+            assert!(
+                s == 0.0,
+                "all-NaN residuals: stud[{i}] should be 0.0 (NaN sigma fallback), got {s}"
+            );
+        }
+    }
+
+    /// NaN in hat diagonal where h.iter().sum() = NaN → NaN.round() = 0 on
+    /// many platforms (platform-defined behavior!). If p_eff resolves to 0,
+    /// the sigma path uses n.saturating_sub(0) = n.
+    #[test]
+    fn bug_hunt_r2_studentized_nan_hat_peff_behavior() {
+        let yt = [1.0, 2.0, 3.0, 4.0];
+        let yp = [1.0, 2.0, 3.0, 4.0]; // zero residuals
+        let h = [0.5, f64::NAN, 0.0, 0.0];
+        let stud = studentized_residual_vec(&yt, &yp, Some(&h));
+        // sse = 0, so sigma = 0, so early return vec![0.0; n]
+        for (i, &s) in stud.iter().enumerate() {
+            assert!(
+                s == 0.0,
+                "zero residuals + NaN hat: stud[{i}] should be 0.0, got {s}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 13: Large-scale rankdata correctness
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// 1000-element array with known structure: verify rank sum invariant
+    /// and that ranks are correct for a descending sequence.
+    #[test]
+    fn bug_hunt_r2_rankdata_large_descending() {
+        let n = 1000;
+        let x: Vec<f64> = (0..n).rev().map(|i| i as f64).collect();
+        let r = rankdata_average_vec(&x);
+        assert_eq!(r.len(), n);
+        // Sum should be n*(n+1)/2
+        let sum: f64 = r.iter().sum();
+        let expected_sum = n as f64 * (n as f64 + 1.0) / 2.0;
+        assert!(
+            approx_eq(sum, expected_sum, 1e-6),
+            "rank sum should be {expected_sum}, got {sum}"
+        );
+        // First element (value 999) should have rank 1000
+        assert!(
+            approx_eq(r[0], 1000.0, 1e-12),
+            "x[0]=999 should have rank 1000, got {}", r[0]
+        );
+        // Last element (value 0) should have rank 1
+        assert!(
+            approx_eq(r[n - 1], 1.0, 1e-12),
+            "x[999]=0 should have rank 1, got {}", r[n - 1]
+        );
+    }
+
+    /// Large array with many ties: verify rank sum invariant holds.
+    #[test]
+    fn bug_hunt_r2_rankdata_large_many_ties() {
+        let n = 1000;
+        // Only 10 distinct values, so lots of ties
+        let x: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
+        let r = rankdata_average_vec(&x);
+        let sum: f64 = r.iter().sum();
+        let expected_sum = n as f64 * (n as f64 + 1.0) / 2.0;
+        assert!(
+            approx_eq(sum, expected_sum, 1e-6),
+            "rank sum with ties should be {expected_sum}, got {sum}"
+        );
+        // Each group of 100 identical values should have the same rank
+        // Value 0 appears at indices 0,10,20,...,990. In sorted order, they
+        // occupy positions 1..100, so average rank = 50.5.
+        assert!(
+            approx_eq(r[0], 50.5, 1e-10),
+            "value 0 should have rank 50.5, got {}", r[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 14: Cook's distance numerical precision
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Cook's D with leverage very close to 1 but not exactly 1.
+    /// (1 - 0.9999)^2 = 1e-8, which is still > 0, so standard path.
+    #[test]
+    fn bug_hunt_r2_cooks_leverage_near_one() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.5, 1.5, 3.5, 3.5, 5.5];
+        let h = [0.9999, 0.0001, 0.0, 0.0, 0.0]; // p_eff=1
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        assert!(
+            cooks[0].is_finite() && cooks[0] > 0.0,
+            "leverage near 1 should give large but finite Cook's D, got {}", cooks[0]
+        );
+        // Very high leverage → very high Cook's D
+        assert!(
+            cooks[0] > cooks[1],
+            "high-leverage point should have larger Cook's D: {} vs {}", cooks[0], cooks[1]
+        );
+    }
+
+    /// Cook's D: verify non-negativity for a variety of inputs using a brute force scan.
+    #[test]
+    fn bug_hunt_r2_cooks_nonnegative_brute_force() {
+        let test_cases: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> = vec![
+            // Normal
+            (vec![1.0, 2.0, 3.0, 4.0], vec![1.1, 2.1, 2.9, 3.9], vec![0.3, 0.2, 0.2, 0.3]),
+            // Large residuals
+            (vec![0.0, 0.0, 100.0, 100.0], vec![50.0, 50.0, 50.0, 50.0], vec![0.25, 0.25, 0.25, 0.25]),
+            // Unequal leverage
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![0.8, 0.05, 0.05, 0.05, 0.05]),
+        ];
+        for (idx, (yt, yp, h)) in test_cases.iter().enumerate() {
+            let cooks = cooks_distance_vec(yt, yp, h);
+            for (j, &c) in cooks.iter().enumerate() {
+                assert!(
+                    c >= 0.0 && c.is_finite(),
+                    "test case {idx}, Cook's D[{j}] must be finite and non-negative, got {c}"
+                );
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 15: Kendall tau symmetry and antisymmetry properties
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// tau(x, y) == tau(y, x) for any x, y (symmetry).
+    #[test]
+    fn bug_hunt_r2_kendall_symmetry() {
+        let x = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
+        let y = [2.0, 7.0, 1.0, 8.0, 2.0, 8.0, 1.0, 8.0];
+        let r_xy = kendall_tau_b(&x, &y);
+        let r_yx = kendall_tau_b(&y, &x);
+        assert!(
+            approx_eq(r_xy.tau, r_yx.tau, 1e-10),
+            "tau(x,y) should equal tau(y,x): {} vs {}", r_xy.tau, r_yx.tau
+        );
+    }
+
+    /// tau(x, -y) == -tau(x, y) for any x, y (antisymmetry under negation).
+    #[test]
+    fn bug_hunt_r2_kendall_antisymmetry() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 3.0, 1.0, 5.0, 4.0];
+        let y_neg: Vec<f64> = y.iter().map(|&v| -v).collect();
+        let r = kendall_tau_b(&x, &y);
+        let r_neg = kendall_tau_b(&x, &y_neg);
+        assert!(
+            approx_eq(r.tau, -r_neg.tau, 1e-10),
+            "tau(x,y) should be -tau(x,-y): {} vs {}", r.tau, -r_neg.tau
+        );
+    }
+
+    /// tau must always be in [-1, 1] for finite, non-degenerate inputs.
+    #[test]
+    fn bug_hunt_r2_kendall_bounds() {
+        let test_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+            (vec![1.0, 2.0, 2.0, 3.0, 3.0], vec![5.0, 4.0, 4.0, 3.0, 3.0]),
+            (vec![1.0, 1.0, 1.0, 2.0, 2.0, 3.0], vec![3.0, 2.0, 1.0, 3.0, 2.0, 1.0]),
+            ((0..20).map(|i| (i % 5) as f64).collect(), (0..20).map(|i| (i % 7) as f64).collect()),
+        ];
+        for (idx, (x, y)) in test_cases.iter().enumerate() {
+            let r = kendall_tau_b(x, y);
+            if r.tau.is_finite() {
+                assert!(
+                    r.tau >= -1.0 && r.tau <= 1.0,
+                    "test case {idx}: tau must be in [-1,1], got {}", r.tau
+                );
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 16: Variance rank with Inf propagation in multi-column
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Two Inf values in a column: mean = Inf, var involves (Inf - Inf)^2 = NaN.
+    #[test]
+    fn bug_hunt_r2_variance_rank_two_inf() {
+        let flat = [
+            f64::INFINITY, 1.0,
+            f64::INFINITY, 2.0,
+        ]; // n=2, p=2
+        let v = variance_rank_vec(&flat, 2, 2);
+        // col 0: [Inf, Inf] → mean = Inf, (Inf-Inf)^2 = NaN → var = NaN
+        assert!(
+            v[0].is_nan(),
+            "two-Inf column variance should be NaN, got {}", v[0]
+        );
+        // col 1: [1, 2] → normal
+        assert!(
+            v[1].is_finite(),
+            "normal column variance should be finite, got {}", v[1]
+        );
+    }
+
+    /// Mixed Inf and -Inf: mean = NaN (Inf + -Inf = NaN), var = NaN.
+    #[test]
+    fn bug_hunt_r2_variance_rank_mixed_inf() {
+        let flat = [f64::INFINITY, f64::NEG_INFINITY]; // n=2, p=1
+        let v = variance_rank_vec(&flat, 2, 1);
+        assert!(
+            v[0].is_nan(),
+            "Inf + -Inf mean produces NaN → var should be NaN, got {}", v[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 17: Studentized residual with very large p_eff
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// When p_eff > n due to large hat values, n.saturating_sub(p_eff) = 0,
+    /// .max(1) = 1, so sigma_sq = sse / 1. This shouldn't panic or produce NaN.
+    #[test]
+    fn bug_hunt_r2_studentized_peff_much_larger_than_n() {
+        let yt = [1.0, 2.0, 3.0];
+        let yp = [1.5, 2.5, 2.5]; // residuals: [-0.5, -0.5, 0.5]
+        let h = [100.0, 100.0, 100.0]; // sum = 300, p_eff = 300, n = 3
+        let stud = studentized_residual_vec(&yt, &yp, Some(&h));
+        // p_eff = 300. n.saturating_sub(300) = 0. max(1) = 1.
+        // sse = 0.75. sigma_sq = 0.75/1 = 0.75. sigma = sqrt(0.75).
+        // Each hi = 100 → (1 - 100).max(1e-12) = 1e-12.
+        // stud = r / (sigma * sqrt(1e-12)) = very large values
+        assert_eq!(stud.len(), 3);
+        for &s in &stud {
+            assert!(
+                s.is_finite(),
+                "p_eff >> n: studentized should still be finite, got {s}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 18: Covariance rank with perfectly anti-correlated data
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Negative cov should be returned as positive (abs value).
+    #[test]
+    fn bug_hunt_r2_covariance_rank_anticorrelated() {
+        let flat = [1.0, 2.0, 3.0, 4.0, 5.0]; // n=5, p=1
+        let y = [10.0, 8.0, 6.0, 4.0, 2.0]; // perfectly anti-correlated
+        let result = covariance_rank_vec(&flat, 5, 1, &y);
+        assert!(
+            result[0] > 0.0,
+            "anti-correlated cov should be positive (abs), got {}", result[0]
+        );
+        // Hand-compute: x_mean=3, y_mean=6.
+        // cov = ((1-3)(10-6) + (2-3)(8-6) + (3-3)(6-6) + (4-3)(4-6) + (5-3)(2-6)) / 4
+        //     = (-8 + -2 + 0 + -2 + -8) / 4 = -20/4 = -5
+        // abs(-5) = 5
+        assert!(
+            approx_eq(result[0], 5.0, 1e-10),
+            "anti-correlated abs(cov) should be 5.0, got {}", result[0]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 19: Shapiro with repeated values (ties break the assumption
+    // that sorted data is strictly monotonic)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Many repeated values: denom might be small but nonzero.
+    #[test]
+    fn bug_hunt_r2_shapiro_many_repeats() {
+        let mut x = vec![0.0; 50];
+        x.extend(vec![1.0; 50]);
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w.is_finite() && w >= 0.0 && w <= 1.0,
+            "binary data W should be in [0,1], got {w}"
+        );
+        // Two-valued data is very non-normal → low W
+        assert!(
+            w < 0.8,
+            "binary data should have low W (non-normal), got {w}"
+        );
+    }
+
+    /// Shapiro with one outlier: should still be in [0,1].
+    #[test]
+    fn bug_hunt_r2_shapiro_one_extreme_outlier() {
+        let mut x: Vec<f64> = (0..20).map(|i| i as f64 * 0.1).collect();
+        x[19] = 1e10; // extreme outlier
+        let w = shapiro_w_scalar(&x);
+        assert!(
+            w.is_finite() && w >= 0.0 && w <= 1.0,
+            "one-outlier data W should be in [0,1], got {w}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 20: Silhouette with Inf distances
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Infinity in feature space: distance computations produce Inf.
+    /// Should not panic; silhouette scores may be NaN.
+    #[test]
+    fn bug_hunt_r2_silhouette_infinity_features() {
+        let flat = [
+            0.0, 0.0,
+            f64::INFINITY, 0.0,
+            10.0, 10.0,
+            11.0, 10.0,
+        ];
+        let labels = [0i64, 0, 1, 1];
+        let sv = silhouette_samples_vec(&flat, 4, 2, &labels);
+        assert_eq!(sv.len(), 4);
+        // No panic is the contract. Some scores may be NaN from Inf distances.
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 21: Cook's distance with single observation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// n=1 with p_eff=1: n <= p_eff → early return zeros.
+    #[test]
+    fn bug_hunt_r2_cooks_n1() {
+        let yt = [5.0];
+        let yp = [3.0];
+        let h = [1.0]; // p_eff = 1, n = 1 → n <= p_eff → zeros
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        assert_eq!(cooks.len(), 1);
+        assert!(cooks[0] == 0.0, "n=1, p_eff=1: Cook's D should be 0, got {}", cooks[0]);
+    }
+
+    /// n=1 with p_eff=0: early return zeros (p_eff == 0 guard).
+    #[test]
+    fn bug_hunt_r2_cooks_n1_peff0() {
+        let yt = [5.0];
+        let yp = [3.0];
+        let h = [0.0]; // p_eff = 0
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        assert_eq!(cooks.len(), 1);
+        assert!(cooks[0] == 0.0, "n=1, p_eff=0: Cook's D should be 0, got {}", cooks[0]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 22: Kendall tau with large n and known answer
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// n=100 monotonic: tau = 1.0. Tests merge sort correctness at scale.
+    #[test]
+    fn bug_hunt_r2_kendall_large_monotonic() {
+        let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let r = kendall_tau_b(&x, &y);
+        assert!(
+            approx_eq(r.tau, 1.0, 1e-10),
+            "monotonic n=100: tau should be 1.0, got {}", r.tau
+        );
+        assert_eq!(r.n_concordant, 100 * 99 / 2);
+        assert_eq!(r.n_discordant, 0);
+    }
+
+    /// n=100 anti-monotonic: tau = -1.0.
+    #[test]
+    fn bug_hunt_r2_kendall_large_anti_monotonic() {
+        let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..100).rev().map(|i| i as f64).collect();
+        let r = kendall_tau_b(&x, &y);
+        assert!(
+            approx_eq(r.tau, -1.0, 1e-10),
+            "anti-monotonic n=100: tau should be -1.0, got {}", r.tau
+        );
+        assert_eq!(r.n_concordant, 0);
+        assert_eq!(r.n_discordant, 100 * 99 / 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 23: NaN.round() platform behavior in p_eff
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// When h_diag contains NaN, h.iter().sum() = NaN.
+    /// NaN.round() behavior is platform-defined. On most platforms it returns 0.
+    /// But `NaN as usize` is 0 on Rust (by IEEE 754 → integer saturation rules).
+    /// Verify that Cook's D handles this gracefully.
+    #[test]
+    fn bug_hunt_r2_cooks_nan_hdiag_peff() {
+        let yt = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let yp = [1.1, 1.9, 3.2, 3.8, 5.1];
+        let h = [0.2, f64::NAN, 0.2, 0.2, 0.2];
+        let cooks = cooks_distance_vec(&yt, &yp, &h);
+        assert_eq!(cooks.len(), 5);
+        // NaN sum → NaN.round() → `as usize` → 0 on Rust.
+        // p_eff = 0 → early return vec![0.0; n]
+        for (i, &c) in cooks.iter().enumerate() {
+            assert!(
+                c.is_finite(),
+                "NaN in h_diag: Cook's D[{i}] should be finite, got {c}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 24: Variance rank with single column having constant value
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// All values identical in a column: variance should be exactly 0.
+    #[test]
+    fn bug_hunt_r2_variance_rank_constant_column() {
+        let flat = [42.0, 42.0, 42.0, 42.0, 42.0]; // n=5, p=1
+        let v = variance_rank_vec(&flat, 5, 1);
+        assert!(
+            v[0] == 0.0,
+            "constant column variance should be exactly 0.0, got {}", v[0]
+        );
+    }
+
+    /// Two columns, one constant, one varying: varying column should have higher variance.
+    #[test]
+    fn bug_hunt_r2_variance_rank_constant_vs_varying() {
+        let flat = [
+            1.0, 5.0,
+            2.0, 5.0,
+            3.0, 5.0,
+            4.0, 5.0,
+            5.0, 5.0,
+        ]; // n=5, p=2
+        let v = variance_rank_vec(&flat, 5, 2);
+        assert!(v[0] > 0.0, "varying column should have positive variance");
+        assert!(v[1] == 0.0, "constant column should have zero variance");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Section 25: Kendall tau pair count invariants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// For any input, the identity C + D + T_x_only + T_y_only + T_both = n0
+    /// must hold, where T_x_only = T_x - T_both, T_y_only = T_y - T_both.
+    /// Equivalently: C + D + T_x + T_y - T_both = n0.
+    #[test]
+    fn bug_hunt_r2_kendall_pair_count_invariant() {
+        let test_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5.0, 3.0, 1.0, 4.0, 2.0]),
+            (vec![1.0, 1.0, 2.0, 2.0, 3.0], vec![3.0, 1.0, 2.0, 2.0, 1.0]),
+            (vec![5.0, 5.0, 5.0], vec![1.0, 2.0, 3.0]),
+            (vec![1.0, 2.0, 3.0], vec![1.0, 1.0, 1.0]),
+        ];
+        for (idx, (x, y)) in test_cases.iter().enumerate() {
+            let r = kendall_tau_b(x, y);
+            let n = x.len() as u64;
+            let n0 = n * (n - 1) / 2;
+            let sum = r.n_concordant as i128 + r.n_discordant as i128
+                + r.n_tied_x as i128 + r.n_tied_y as i128
+                - r.n_tied_both as i128;
+            assert_eq!(
+                sum, n0 as i128,
+                "test case {idx}: C+D+T_x+T_y-T_both ({sum}) should equal n0 ({n0})"
+            );
+        }
+    }
+}
