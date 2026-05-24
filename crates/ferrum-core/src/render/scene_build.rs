@@ -276,7 +276,7 @@ pub fn build_scene(
 
         // Structural features: secondary Y axis, axis breaks, insets.
         // Only applied to the first panel (non-faceted charts).
-        let (structural_axes, structural_marks, structural_annotations) =
+        let (structural_axes, structural_marks, structural_annotations, break_results) =
             if panel_idx == 0 && !chart_config.structural.is_empty() {
                 build_structural_nodes(
                     &chart_config.structural,
@@ -287,8 +287,27 @@ pub fn build_scene(
                     &rendering_spec_for_panel,
                 )
             } else {
-                (Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
+
+        // Remap mark pixel coordinates through any broken scales so that marks
+        // inside a gap are hidden and marks outside the gap are repositioned
+        // to their compressed pixel positions.
+        for (axis, break_result) in &break_results {
+            let (data_domain, pixel_range) = if axis == "y" {
+                (scales.y.data_domain(), scales.y.pixel_range())
+            } else {
+                (scales.x.data_domain(), scales.x.pixel_range())
+            };
+            if let Some((d_lo, d_hi)) = data_domain {
+                let (px_lo, px_hi) = pixel_range;
+                for batch in &mut mark_batches {
+                    remap_mark_batch_through_break(
+                        &mut batch.nodes, axis, d_lo, d_hi, px_lo, px_hi, break_result,
+                    );
+                }
+            }
+        }
 
         let final_axes: Vec<SceneNode> = {
             let mut v = axes_nodes;
@@ -749,8 +768,19 @@ fn build_polar_axes(
 
 /// Process structural feature specs (secondary Y axis, axis breaks, insets).
 ///
-/// Returns three node vecs: `(extra_axes, extra_mark_batches, extra_annotations)`.
-/// The caller extends the panel's `axes`, `marks`, and `annotations` with these.
+/// Returns four values:
+/// - `extra_axes` — additional axis scene nodes
+/// - `extra_mark_batches` — additional mark batches (e.g. secondary Y marks)
+/// - `extra_annotations` — additional annotation nodes (break indicators, insets)
+/// - `break_results` — `(axis, BreakResult)` pairs for each BreakAxis spec, used
+///   by the caller to remap primary mark pixel coordinates through the broken scale
+type StructuralOutput = (
+    Vec<SceneNode>,
+    Vec<ferrum_scene::MarkBatch>,
+    Vec<SceneNode>,
+    Vec<(String, break_axis::BreakResult)>,
+);
+
 fn build_structural_nodes(
     structural: &[StructuralSpec],
     batch: &RecordBatch,
@@ -758,10 +788,11 @@ fn build_structural_nodes(
     plot_area: &crate::layout::Rect,
     theme: &crate::layout::ThemeInputs,
     spec: &crate::spec::chart::ChartSpec,
-) -> (Vec<SceneNode>, Vec<ferrum_scene::MarkBatch>, Vec<SceneNode>) {
+) -> StructuralOutput {
     let mut extra_axes: Vec<SceneNode> = Vec::new();
     let mut extra_mark_batches: Vec<ferrum_scene::MarkBatch> = Vec::new();
     let mut extra_annotations: Vec<SceneNode> = Vec::new();
+    let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
 
     for item in structural {
         match item {
@@ -840,16 +871,208 @@ fn build_structural_nodes(
                     theme,
                 );
                 extra_annotations.extend(indicator_nodes);
+
+                // Stash the break result so the caller can remap primary marks.
+                break_results.push((spec_brk.axis.clone(), break_result));
             }
 
             StructuralSpec::Inset(spec_inset) => {
-                let inset_nodes = inset::build_inset_nodes(spec_inset, plot_area);
+                // `connect_to` is specified in data-space by the Python API.
+                // Resolve [x, y] through the primary scales to pixel coordinates
+                // before passing to build_inset_nodes (which treats them as pixels).
+                let resolved_inset;
+                let inset_to_build = if let Some([dx, dy]) = spec_inset.connect_to {
+                    let px_x = scales.x.to_pixel_f64(dx)
+                        .unwrap_or_else(|| {
+                            // Fallback for ordinal / out-of-domain: linear interpolation.
+                            if let Some((lo, hi)) = scales.x.data_domain() {
+                                let frac = if (hi - lo).abs() < f64::EPSILON { 0.5 }
+                                           else { (dx - lo) / (hi - lo) };
+                                plot_area.x + frac * plot_area.w
+                            } else {
+                                plot_area.x + plot_area.w * 0.5
+                            }
+                        });
+                    let px_y = scales.y.to_pixel_f64(dy)
+                        .unwrap_or_else(|| {
+                            if let Some((lo, hi)) = scales.y.data_domain() {
+                                let frac = if (hi - lo).abs() < f64::EPSILON { 0.5 }
+                                           else { (dy - lo) / (hi - lo) };
+                                plot_area.y + frac * plot_area.h
+                            } else {
+                                plot_area.y + plot_area.h * 0.5
+                            }
+                        });
+                    resolved_inset = super::chart_config::InsetSpec {
+                        connect_to: Some([px_x, px_y]),
+                        ..spec_inset.clone()
+                    };
+                    &resolved_inset
+                } else {
+                    spec_inset
+                };
+                let inset_nodes = inset::build_inset_nodes(inset_to_build, plot_area);
                 extra_annotations.extend(inset_nodes);
             }
         }
     }
 
-    (extra_axes, extra_mark_batches, extra_annotations)
+    (extra_axes, extra_mark_batches, extra_annotations, break_results)
+}
+
+// ── Break-axis mark remapping ────────────────────────────────────────────────
+
+/// Coordinate used to hide marks that fall inside a break gap.
+/// Using a large off-screen value instead of NaN avoids panics in the SVG serializer.
+const BREAK_HIDDEN: f64 = -99999.0;
+
+/// Remap the pixel coordinates of all nodes in a mark batch through a broken scale.
+///
+/// Marks whose data-space position falls inside a gap are hidden by moving them
+/// far outside the viewport (rather than removed, to preserve data_indices alignment).
+/// All other marks are repositioned to their compressed pixel coordinates.
+///
+/// `axis` — `"x"` or `"y"`, selects which coordinate axis is remapped.
+/// `d_lo`/`d_hi` — data domain of the unbroken scale.
+/// `px_lo`/`px_hi` — pixel range of the unbroken scale.
+/// `break_result` — piecewise mapping from `apply_break_to_scale`.
+fn remap_mark_batch_through_break(
+    nodes: &mut [SceneNode],
+    axis: &str,
+    d_lo: f64,
+    d_hi: f64,
+    px_lo: f64,
+    px_hi: f64,
+    break_result: &break_axis::BreakResult,
+) {
+    for node in nodes.iter_mut() {
+        remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
+    }
+}
+
+/// Remap a single node's coordinates along the broken axis. Recurses into Group children.
+fn remap_node(
+    node: &mut SceneNode,
+    axis: &str,
+    d_lo: f64,
+    d_hi: f64,
+    px_lo: f64,
+    px_hi: f64,
+    br: &break_axis::BreakResult,
+) {
+    match node {
+        SceneNode::Circle { cx, cy, .. } => {
+            let coord = if axis == "y" { cy } else { cx };
+            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br)
+                .unwrap_or(BREAK_HIDDEN);
+        }
+        SceneNode::Rect { x, y, w, h, .. } => {
+            if axis == "y" {
+                // Remap both the top and bottom edges; derive new y and height.
+                let top = remap_coord(*y, d_lo, d_hi, px_lo, px_hi, br);
+                let bottom = remap_coord(*y + *h, d_lo, d_hi, px_lo, px_hi, br);
+                match (top, bottom) {
+                    (Some(t), Some(b)) => {
+                        *y = t.min(b);
+                        *h = (b - t).abs();
+                    }
+                    _ => { *h = 0.0; } // rect intersects the gap — collapse it
+                }
+            } else {
+                let left = remap_coord(*x, d_lo, d_hi, px_lo, px_hi, br);
+                let right = remap_coord(*x + *w, d_lo, d_hi, px_lo, px_hi, br);
+                match (left, right) {
+                    (Some(l), Some(r)) => {
+                        *x = l.min(r);
+                        *w = (r - l).abs();
+                    }
+                    _ => { *w = 0.0; }
+                }
+            }
+        }
+        SceneNode::Line { x1, y1, x2, y2, .. } => {
+            if axis == "y" {
+                *y1 = remap_coord(*y1, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+                *y2 = remap_coord(*y2, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+            } else {
+                *x1 = remap_coord(*x1, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+                *x2 = remap_coord(*x2, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+            }
+        }
+        SceneNode::Path { commands, .. } => {
+            for cmd in commands.iter_mut() {
+                remap_path_cmd(cmd, axis, d_lo, d_hi, px_lo, px_hi, br);
+            }
+        }
+        SceneNode::Text { x, y, .. } => {
+            let coord = if axis == "y" { y } else { x };
+            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br)
+                .unwrap_or(BREAK_HIDDEN);
+        }
+        SceneNode::Group { children, .. } => {
+            for child in children.iter_mut() {
+                remap_node(child, axis, d_lo, d_hi, px_lo, px_hi, br);
+            }
+        }
+        // Polyline, Polygon, Image, Raw, Arc — leave untouched.
+        _ => {}
+    }
+}
+
+/// Remap a single PathCmd coordinate along the broken axis.
+fn remap_path_cmd(
+    cmd: &mut ferrum_scene::PathCmd,
+    axis: &str,
+    d_lo: f64,
+    d_hi: f64,
+    px_lo: f64,
+    px_hi: f64,
+    br: &break_axis::BreakResult,
+) {
+    use ferrum_scene::PathCmd;
+    let remap = |v: &mut f64| {
+        *v = remap_coord(*v, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+    };
+    match cmd {
+        PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
+            if axis == "y" { remap(y); } else { remap(x); }
+        }
+        PathCmd::QuadTo { cx, cy, x, y } => {
+            if axis == "y" { remap(cy); remap(y); } else { remap(cx); remap(x); }
+        }
+        PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+            if axis == "y" { remap(c1y); remap(c2y); remap(y); }
+            else { remap(c1x); remap(c2x); remap(x); }
+        }
+        PathCmd::ArcTo { x, y, .. } => {
+            if axis == "y" { remap(y); } else { remap(x); }
+        }
+        PathCmd::HLineTo { x } => { if axis != "y" { remap(x); } }
+        PathCmd::VLineTo { y } => { if axis == "y" { remap(y); } }
+        PathCmd::Close => {}
+    }
+}
+
+/// Reverse-map a pixel coordinate to data-space, then forward-map through the
+/// broken scale.  Returns `None` when the data value falls in a gap.
+///
+/// The reverse-map uses the unbroken (primary) scale's linear interpolation:
+/// `data = d_lo + (px - px_lo) / (px_hi - px_lo) * (d_hi - d_lo)`.
+/// This is correct for all continuous scale types when the underlying scale is
+/// linear in pixel space (which is the case — all ferrum scales produce a linear
+/// pixel mapping; the non-linearity lives in the data transform, not the range).
+fn remap_coord(
+    px: f64,
+    d_lo: f64,
+    d_hi: f64,
+    px_lo: f64,
+    px_hi: f64,
+    br: &break_axis::BreakResult,
+) -> Option<f64> {
+    let span = px_hi - px_lo;
+    if span.abs() < f64::EPSILON { return Some(px); }
+    let data_val = d_lo + (px - px_lo) / span * (d_hi - d_lo);
+    break_axis::broken_scale_map(data_val, br)
 }
 
 #[cfg(test)]

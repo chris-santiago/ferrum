@@ -185,7 +185,7 @@ fn default_span_opacity() -> f64 { 0.2 }
 fn default_label_position() -> String { "center".to_string() }
 fn default_direction() -> String { "up".to_string() }
 fn default_tip_length() -> f64 { 6.0 }
-fn default_arrow_str() -> String { "true".to_string() }
+fn default_arrow_str() -> String { "curved".to_string() }
 fn default_callout_padding() -> f64 { 4.0 }
 fn default_background_str() -> String { "#ffffff".to_string() }
 fn default_border_color_str() -> String { "#333333".to_string() }
@@ -630,8 +630,9 @@ fn emit_callout(
         corner_radius: border_radius,
     });
 
-    // Leader line.
-    if arrow == "true" || arrow == "yes" {
+    // Leader line: draw for any style except "none".
+    // Documented values: "curved", "straight", "none". Legacy "true"/"yes" also draw.
+    if arrow != "none" {
         out.push(SceneNode::Line {
             x1: data_x,
             y1: data_y,
