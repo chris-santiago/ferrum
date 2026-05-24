@@ -84,11 +84,13 @@ pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect) -> Vec<SceneNode> {
     //
     // SVG supports nested <svg> natively. We strip the outer <svg ...> wrapper
     // from the pre-rendered string and wrap it in a positioned <svg> element
-    // with the correct x/y/width/height so it clips to the inset bounds.
+    // with x/y/width/height plus the original viewBox so the content scales
+    // to fit the inset bounds (without viewBox it just clips at 1:1).
     let inner_content = strip_svg_wrapper(&spec.svg);
+    let viewbox = extract_viewbox(&spec.svg);
     let svg_raw = format!(
-        "<svg x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" overflow=\"hidden\">{}</svg>",
-        px_left, px_top, px_w, px_h, inner_content
+        "<svg x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" viewBox=\"{}\" overflow=\"hidden\">{}</svg>",
+        px_left, px_top, px_w, px_h, viewbox, inner_content
     );
     nodes.push(SceneNode::Raw { svg: svg_raw });
 
@@ -179,6 +181,19 @@ fn strip_svg_wrapper(svg: &str) -> &str {
     } else {
         ""
     }
+}
+
+/// Extract the `viewBox` attribute value from the outer `<svg>` tag.
+/// Returns `"0 0 640 480"` as fallback if not found (ferrum default).
+fn extract_viewbox(svg: &str) -> String {
+    let s = svg.trim();
+    if let Some(start) = s.find("viewBox=\"") {
+        let after = &s[start + 9..];
+        if let Some(end) = after.find('"') {
+            return after[..end].to_string();
+        }
+    }
+    "0 0 640 480".to_string()
 }
 
 fn build_connector_stroke() -> ferrum_scene::StrokeStyle {
