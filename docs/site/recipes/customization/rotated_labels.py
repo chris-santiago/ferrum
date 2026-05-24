@@ -7,26 +7,21 @@ import polars as pl
 import ferrum as fm
 
 df = pl.DataFrame({
-    "department": [
-        "Engineering",
-        "Product Management",
-        "Sales & Marketing",
-        "Customer Success",
-        "Research & Development",
+    "quarter": [
+        "Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024",
+        "Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025",
     ],
-    "headcount": [42, 18, 31, 24, 15],
+    "revenue": [125, 138, 112, 161, 183, 172, 195, 210],
 })
 
 chart = (
     fm.Chart(df)
     .mark_bar()
     .encode(
-        x=fm.X("department:N", sort="-y"),
-        y="headcount:Q",
+        x=fm.X("quarter:N", axis=fm.Axis(label_angle=-45)),
+        y="revenue:Q",
     )
-    .configure_axis(x=True, y=False, label_angle=-40)
-    .configure_padding(bottom=80)
-    .labs(title="Department Headcount", x=None, y="Headcount")
+    .labs(title="Quarterly Revenue", x=None, y="Revenue ($k)")
 )
 
 # chart.save("rotated_labels.svg")

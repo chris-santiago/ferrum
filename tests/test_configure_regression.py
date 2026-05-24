@@ -277,3 +277,41 @@ class TestConfigureCascadePrecedence:
         assert svg_theme != svg_override, (
             "Adding configure_grid on top of a themed chart must change the output"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug 6 — Annotation text had empty font-family (resvg skipped rendering)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotationTextFontFamily:
+    def test_annotation_text_has_font_family_in_svg(self):
+        """Regression: annotation text must emit a non-empty font-family."""
+        import ferrum.annotation as ann
+
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
+        chart = fm.Chart(df).mark_point().encode(x="x", y="y") + ann.text(
+            2.0, 20.0, "Hello"
+        )
+        svg = chart.show_svg()
+        assert "Hello" in svg
+        assert 'font-family=""' not in svg, "font-family must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# Bug 7 — Inset bounds with NormCoord not JSON-serializable
+# ---------------------------------------------------------------------------
+
+
+class TestInsetNormCoordSerialization:
+    def test_inset_with_norm_bounds_renders(self):
+        """Regression: Inset bounds using NormCoord must serialize correctly."""
+        from ferrum.annotation.coords import norm
+
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
+        inset_chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+        chart = fm.Chart(df).mark_point().encode(x="x", y="y") + fm.Inset(
+            chart=inset_chart, bounds=(norm(0.6), norm(0.1), norm(0.95), norm(0.45))
+        )
+        svg = chart.show_svg()
+        assert svg.startswith("<svg")
