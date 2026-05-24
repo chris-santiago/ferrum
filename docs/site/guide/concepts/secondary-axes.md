@@ -54,10 +54,10 @@ fm.SecondaryY(
 |---|---|---|---|
 | `field` | `str` | required | Data field mapped to the secondary y axis |
 | `mark` | `str` | `"line"` | Mark type: `"line"`, `"point"`, `"bar"`, etc. |
-| `axis` | `Axis \| None` | `None` | Per-axis config applied to the right-side y2 axis |
-| `color` | `str \| None` | `None` | Mark color |
-| `opacity` | `float \| None` | `None` | Mark opacity |
-| `scale` | `Scale \| None` | `None` | Scale config for the secondary y axis |
+| `axis` | `Axis | None` | `None` | Per-axis config applied to the right-side y2 axis |
+| `color` | `str | None` | `None` | Mark color |
+| `opacity` | `float | None` | `None` | Mark opacity |
+| `scale` | `Scale | None` | `None` | Scale config for the secondary y axis |
 
 ---
 

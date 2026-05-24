@@ -49,29 +49,29 @@ AxisConfig(
 |---|---|---|---|
 | `x` | `bool` | `True` | Apply this config to the x axis |
 | `y` | `bool` | `True` | Apply this config to the y axis |
-| `label_angle` | `float \| None` | `None` | Tick label rotation in degrees |
-| `label_font_size` | `float \| None` | `None` | Tick label font size |
-| `label_color` | `str \| None` | `None` | Tick label color |
-| `label_format` | `str \| None` | `None` | Named format preset; see [Format Presets](format-presets.md) |
-| `label_format_raw` | `str \| None` | `None` | Raw d3-format or strftime string |
-| `label_overlap` | `str \| None` | `None` | Overlap strategy: `"parity"`, `"greedy"`, `"rotate"`, or `"hide"` |
-| `tick_count` | `int \| None` | `None` | Suggested number of ticks |
-| `tick_size` | `float \| None` | `None` | Tick mark length in pixels |
-| `tick_values` | `list \| None` | `None` | Explicit tick positions |
-| `title_font_size` | `float \| None` | `None` | Axis title font size |
-| `title_color` | `str \| None` | `None` | Axis title color |
-| `title_padding` | `float \| None` | `None` | Gap between title and tick labels |
-| `domain` | `bool \| None` | `None` | Show axis line |
-| `domain_color` | `str \| None` | `None` | Axis line color |
-| `domain_width` | `float \| None` | `None` | Axis line width |
-| `grid` | `bool \| None` | `None` | Show grid lines |
-| `grid_color` | `str \| None` | `None` | Grid line color |
-| `grid_dash` | `list[float] \| None` | `None` | Grid dash pattern, e.g. `[4, 4]` |
-| `grid_width` | `float \| None` | `None` | Grid line width |
-| `domain_min` | `float \| None` | `None` | Minimum of the scale domain |
-| `domain_max` | `float \| None` | `None` | Maximum of the scale domain |
-| `nice` | `bool \| None` | `None` | Round domain to nice values |
-| `zero` | `bool \| None` | `None` | Include zero in the domain |
+| `label_angle` | `float | None` | `None` | Tick label rotation in degrees |
+| `label_font_size` | `float | None` | `None` | Tick label font size |
+| `label_color` | `str | None` | `None` | Tick label color |
+| `label_format` | `str | None` | `None` | Named format preset; see [Format Presets](format-presets.md) |
+| `label_format_raw` | `str | None` | `None` | Raw d3-format or strftime string |
+| `label_overlap` | `str | None` | `None` | Overlap strategy: `"parity"`, `"greedy"`, `"rotate"`, or `"hide"` |
+| `tick_count` | `int | None` | `None` | Suggested number of ticks |
+| `tick_size` | `float | None` | `None` | Tick mark length in pixels |
+| `tick_values` | `list | None` | `None` | Explicit tick positions |
+| `title_font_size` | `float | None` | `None` | Axis title font size |
+| `title_color` | `str | None` | `None` | Axis title color |
+| `title_padding` | `float | None` | `None` | Gap between title and tick labels |
+| `domain` | `bool | None` | `None` | Show axis line |
+| `domain_color` | `str | None` | `None` | Axis line color |
+| `domain_width` | `float | None` | `None` | Axis line width |
+| `grid` | `bool | None` | `None` | Show grid lines |
+| `grid_color` | `str | None` | `None` | Grid line color |
+| `grid_dash` | `list[float] | None` | `None` | Grid dash pattern, e.g. `[4, 4]` |
+| `grid_width` | `float | None` | `None` | Grid line width |
+| `domain_min` | `float | None` | `None` | Minimum of the scale domain |
+| `domain_max` | `float | None` | `None` | Maximum of the scale domain |
+| `nice` | `bool | None` | `None` | Round domain to nice values |
+| `zero` | `bool | None` | `None` | Include zero in the domain |
 
 ### Notes
 
@@ -125,16 +125,16 @@ LegendConfig(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `orient` | `str \| None` | `None` | Legend position: `"right"`, `"left"`, `"top"`, `"bottom"`, or `"none"` |
-| `direction` | `str \| None` | `None` | Item layout: `"vertical"` or `"horizontal"` |
-| `columns` | `int \| None` | `None` | Columns in multi-column layout |
-| `title_font_size` | `float \| None` | `None` | Legend title font size |
-| `label_font_size` | `float \| None` | `None` | Legend label font size |
-| `symbol_size` | `float \| None` | `None` | Symbol area (in square pixels) |
-| `symbol_type` | `str \| None` | `None` | Symbol shape |
-| `gradient_length` | `float \| None` | `None` | Continuous gradient legend length |
-| `offset` | `float \| None` | `None` | Offset from the plot area edge |
-| `padding` | `float \| None` | `None` | Internal padding between items |
+| `orient` | `str | None` | `None` | Legend position: `"right"`, `"left"`, `"top"`, `"bottom"`, or `"none"` |
+| `direction` | `str | None` | `None` | Item layout: `"vertical"` or `"horizontal"` |
+| `columns` | `int | None` | `None` | Columns in multi-column layout |
+| `title_font_size` | `float | None` | `None` | Legend title font size |
+| `label_font_size` | `float | None` | `None` | Legend label font size |
+| `symbol_size` | `float | None` | `None` | Symbol area (in square pixels) |
+| `symbol_type` | `str | None` | `None` | Symbol shape |
+| `gradient_length` | `float | None` | `None` | Continuous gradient legend length |
+| `offset` | `float | None` | `None` | Offset from the plot area edge |
+| `padding` | `float | None` | `None` | Internal padding between items |
 
 ### Notes
 
@@ -171,13 +171,13 @@ TitleConfig(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `font_size` | `float \| None` | `None` | Title font size |
-| `font_weight` | `str \| None` | `None` | Title weight, e.g. `"bold"` or `"600"` |
-| `anchor` | `str \| None` | `None` | Horizontal alignment: `"start"`, `"middle"`, or `"end"` |
-| `color` | `str \| None` | `None` | Title color |
-| `offset` | `float \| None` | `None` | Pixel offset from the plot area |
-| `subtitle_font_size` | `float \| None` | `None` | Subtitle font size |
-| `subtitle_color` | `str \| None` | `None` | Subtitle color |
+| `font_size` | `float | None` | `None` | Title font size |
+| `font_weight` | `str | None` | `None` | Title weight, e.g. `"bold"` or `"600"` |
+| `anchor` | `str | None` | `None` | Horizontal alignment: `"start"`, `"middle"`, or `"end"` |
+| `color` | `str | None` | `None` | Title color |
+| `offset` | `float | None` | `None` | Pixel offset from the plot area |
+| `subtitle_font_size` | `float | None` | `None` | Subtitle font size |
+| `subtitle_color` | `str | None` | `None` | Subtitle color |
 
 ### Notes
 
@@ -216,13 +216,13 @@ GridConfig(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `x` | `bool \| None` | `None` | Show vertical grid lines (along x axis) |
-| `y` | `bool \| None` | `None` | Show horizontal grid lines (along y axis) |
-| `color` | `str \| None` | `None` | Grid line color |
-| `width` | `float \| None` | `None` | Grid line width |
-| `dash` | `list[float] \| None` | `None` | Dash pattern, e.g. `[4, 4]` |
-| `opacity` | `float \| None` | `None` | Grid line opacity |
-| `band_colors` | `list[str] \| None` | `None` | Alternating fill colors between grid lines |
+| `x` | `bool | None` | `None` | Show vertical grid lines (along x axis) |
+| `y` | `bool | None` | `None` | Show horizontal grid lines (along y axis) |
+| `color` | `str | None` | `None` | Grid line color |
+| `width` | `float | None` | `None` | Grid line width |
+| `dash` | `list[float] | None` | `None` | Dash pattern, e.g. `[4, 4]` |
+| `opacity` | `float | None` | `None` | Grid line opacity |
+| `band_colors` | `list[str] | None` | `None` | Alternating fill colors between grid lines |
 
 ### Notes
 
@@ -259,10 +259,10 @@ PaddingConfig(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `top` | `float \| None` | `None` | Top margin in pixels |
-| `right` | `float \| None` | `None` | Right margin in pixels |
-| `bottom` | `float \| None` | `None` | Bottom margin in pixels |
-| `left` | `float \| None` | `None` | Left margin in pixels |
+| `top` | `float | None` | `None` | Top margin in pixels |
+| `right` | `float | None` | `None` | Right margin in pixels |
+| `bottom` | `float | None` | `None` | Bottom margin in pixels |
+| `left` | `float | None` | `None` | Left margin in pixels |
 | `auto` | `bool` | `True` | Auto-expand margins to fit labels and annotations |
 
 ### Notes
@@ -299,11 +299,11 @@ ColorConfig(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `scheme` | `str \| None` | `None` | Named categorical color scheme |
-| `sequential_scheme` | `str \| None` | `None` | Named sequential ramp |
-| `diverging_scheme` | `str \| None` | `None` | Named diverging ramp |
-| `domain` | `list \| None` | `None` | Explicit scale domain values |
-| `range` | `list[str] \| None` | `None` | Explicit list of color strings |
+| `scheme` | `str | None` | `None` | Named categorical color scheme |
+| `sequential_scheme` | `str | None` | `None` | Named sequential ramp |
+| `diverging_scheme` | `str | None` | `None` | Named diverging ramp |
+| `domain` | `list | None` | `None` | Explicit scale domain values |
+| `range` | `list[str] | None` | `None` | Explicit list of color strings |
 
 ### Notes
 

@@ -74,7 +74,7 @@ fm.BreakAxis(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `axis` | `str` | required | Which axis to break: `"x"` or `"y"` |
-| `gap` | `tuple \| list` | required | A `(start, end)` pair or a list of pairs |
+| `gap` | `tuple | list` | required | A `(start, end)` pair or a list of pairs |
 | `break_size` | `float` | `12` | Visual size of the break indicator in pixels |
 | `break_style` | `str` | `"slash"` | Break indicator: `"slash"`, `"zigzag"`, `"wave"`, or `"gap"` |
 

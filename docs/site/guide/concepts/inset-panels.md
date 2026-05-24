@@ -72,10 +72,10 @@ fm.Inset(
 | `bounds` | `tuple` | required | `(left, top, right, bottom)` in `norm`, `px`, or data coords |
 | `border` | `bool` | `True` | Draw a border around the inset |
 | `border_color` | `str` | `"#999"` | Border color |
-| `border_dash` | `list[float] \| None` | `None` | Border dash pattern |
-| `background` | `str \| None` | `"#fff"` | Inset background; `None` for transparent |
+| `border_dash` | `list[float] | None` | `None` | Border dash pattern |
+| `background` | `str | None` | `"#fff"` | Inset background; `None` for transparent |
 | `shadow` | `bool` | `False` | Apply a drop shadow |
-| `connect_to` | `tuple \| None` | `None` | Data coords `(x, y)` of the source region |
+| `connect_to` | `tuple | None` | `None` | Data coords `(x, y)` of the source region |
 | `connect_style` | `str` | `"lines"` | Connector style: `"bracket"`, `"lines"`, or `"none"` |
 
 ### Validation
