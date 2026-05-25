@@ -319,12 +319,18 @@ mod tests {
     /// auto-domain inference.
     fn image_spec(x_domain: (f64, f64), y_domain: (f64, f64)) -> ChartSpec {
         let x_scale = ScaleSpec::Linear {
-            domain: Some(vec![x_domain.0, x_domain.1]),
-            range: None, nice: false, zero: false, clamp: false, padding: None,
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![x_domain.0, x_domain.1]),
+                range: None, clamp: false, padding: None,
+            },
+            nice: false, zero: false,
         };
         let y_scale = ScaleSpec::Linear {
-            domain: Some(vec![y_domain.0, y_domain.1]),
-            range: None, nice: false, zero: false, clamp: false, padding: None,
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![y_domain.0, y_domain.1]),
+                range: None, clamp: false, padding: None,
+            },
+            nice: false, zero: false,
         };
         ChartSpec {
             data: DataRef::default(),
@@ -357,12 +363,18 @@ mod tests {
     /// Build an image-mark ChartSpec with x/y/url encodings for URL-tile tests.
     fn url_tile_spec(x_domain: (f64, f64), y_domain: (f64, f64)) -> ChartSpec {
         let x_scale = ScaleSpec::Linear {
-            domain: Some(vec![x_domain.0, x_domain.1]),
-            range: None, nice: false, zero: false, clamp: false, padding: None,
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![x_domain.0, x_domain.1]),
+                range: None, clamp: false, padding: None,
+            },
+            nice: false, zero: false,
         };
         let y_scale = ScaleSpec::Linear {
-            domain: Some(vec![y_domain.0, y_domain.1]),
-            range: None, nice: false, zero: false, clamp: false, padding: None,
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![y_domain.0, y_domain.1]),
+                range: None, clamp: false, padding: None,
+            },
+            nice: false, zero: false,
         };
         ChartSpec {
             data: DataRef::default(),

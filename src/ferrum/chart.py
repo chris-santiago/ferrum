@@ -6,6 +6,7 @@ spec is deep-copied on each call so chains compose without aliasing surprises.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from dataclasses import dataclass
@@ -316,32 +317,12 @@ class Chart(_RenderMixin):
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
-        new._data = self._data
-        new._mark = self._mark
-        new._mark_kwargs = dict(self._mark_kwargs)
-        new._encoding = dict(self._encoding)
-        new._transforms = list(self._transforms)
-        new._facet = self._facet
-        new._coord = self._coord
-        new._theme = self._theme
-        new._layers = None if self._layers is None else list(self._layers)
-        new._width = self._width
-        new._height = self._height
-        new._title = self._title
-        new._description = self._description
-        new._pending_stat_mark = self._pending_stat_mark
-        new._position = self._position
-        new._axis_x = self._axis_x
-        new._axis_y = self._axis_y
-        new._composite_kind = self._composite_kind
-        new._selections = list(self._selections)
-        new._conditionals = list(self._conditionals)
-        new._render_config = self._render_config
-        new._configure = list(self._configure)
-        new._annotations = list(self._annotations)
-        new._structural = list(self._structural)
-        new._overrides = dict(self._overrides)
-        new._annotation_primitive = self._annotation_primitive
+        for slot in self.__slots__:
+            val = getattr(self, slot)
+            if isinstance(val, (list, dict)):
+                setattr(new, slot, copy.copy(val))
+            else:
+                setattr(new, slot, val)
         return new
 
     def _resolve_pending(self) -> "Chart":

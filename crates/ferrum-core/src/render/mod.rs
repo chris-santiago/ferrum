@@ -558,26 +558,35 @@ pub(crate) fn apply_color_config_to_color_scale(
     }
 }
 
-pub fn render_svg(
+/// Output of the shared prepare-and-layout pipeline, consumed by both
+/// `render_svg` and `render_scene_json`.
+struct PipelineOutput {
+    prep: prepare::PreparedInputs,
+    layout: crate::layout::LayoutResult,
+    effective_theme: ThemeInputs,
+    warnings: Vec<RenderWarning>,
+}
+
+/// Shared pipeline executed by both `render_svg` and `render_scene_json`.
+///
+/// Performs in order:
+///   1. `prepare_render_inputs` — transforms, scale resolution, axis inputs.
+///   2. ChartConfig axis overrides (level 3 > level 2 per-encoding).
+///   3. Color domain/range overrides (level 3).
+///   4. Effective-theme construction: per-encoding legend overrides → ChartConfig overrides.
+///   5. Secondary-Y right-padding reservation (fixes missing block in render_scene_json).
+///   6. Legend-title resolution.
+///   7. `compute_layout`.
+///
+/// The viewport must already have been validated (both dimensions > 0) and
+/// overridden with `RenderConfig.width` / `RenderConfig.height` by the caller.
+fn prepare_and_layout(
     spec: &ChartSpec,
     batch: &RecordBatch,
     theme: &ThemeInputs,
     viewport: Viewport,
-    config: &config::RenderConfig,
     chart_config: &ChartConfig,
-) -> Result<RenderOutput<String>, RenderError> {
-    if viewport.width <= 0.0 || viewport.height <= 0.0 {
-        return Err(RenderError::InvalidViewport {
-            width: viewport.width,
-            height: viewport.height,
-        });
-    }
-
-    let viewport = Viewport {
-        width: config.width.unwrap_or(viewport.width),
-        height: config.height.unwrap_or(viewport.height),
-    };
-
+) -> Result<PipelineOutput, RenderError> {
     let mut prep = prepare::prepare_render_inputs(spec, batch, theme)?;
     let mut warnings = prep.warnings.clone();
 
@@ -615,6 +624,8 @@ pub fn render_svg(
     apply_chart_config(&mut effective_theme, chart_config);
 
     // Reserve right-side padding for secondary Y axis labels when present.
+    // This block runs for both SVG and scene-JSON paths to ensure layout
+    // accounts for the secondary-axis labels in interactive renders.
     for structural in &chart_config.structural {
         if let chart_config::StructuralSpec::SecondaryY(y2_spec) = structural {
             use crate::layout::TextMetrics;
@@ -639,8 +650,6 @@ pub fn render_svg(
         }
     }
 
-    let theme_ref = &effective_theme;
-
     // D13: legend title override (replaces the default field-name title when Some).
     let effective_legend_title = prep
         .legend_title_override
@@ -653,7 +662,7 @@ pub fn render_svg(
     let metrics = font::FontdueMetrics::new();
     let layout = compute_layout(
         spec,
-        theme_ref,
+        &effective_theme,
         viewport,
         &prep.axes,
         &prep.facet_groups,
@@ -668,8 +677,34 @@ pub fn render_svg(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
+    Ok(PipelineOutput { prep, layout, effective_theme, warnings })
+}
+
+pub fn render_svg(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    config: &config::RenderConfig,
+    chart_config: &ChartConfig,
+) -> Result<RenderOutput<String>, RenderError> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(RenderError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+
+    let viewport = Viewport {
+        width: config.width.unwrap_or(viewport.width),
+        height: config.height.unwrap_or(viewport.height),
+    };
+
+    let PipelineOutput { prep, layout, effective_theme, mut warnings } =
+        prepare_and_layout(spec, batch, theme, viewport, chart_config)?;
+
     let scene = scene_build::build_scene(
-        spec, &prep, &layout, theme_ref, config, &mut warnings, chart_config,
+        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config,
     )?;
     let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
 
@@ -711,61 +746,11 @@ pub fn render_scene_json(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let mut prep = prepare::prepare_render_inputs(spec, batch, theme)?;
-    let mut warnings = prep.warnings.clone();
-
-    // Apply ChartConfig axis overrides (level 3) — same logic as render_svg.
-    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref());
-    apply_label_format_to_axis(&mut prep.axes.x);
-    apply_label_format_to_axis(&mut prep.axes.y);
-    if let Some(ref cfg) = chart_config.color {
-        apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg);
-    }
-
-    // Build effective_theme with the same layered override logic as render_svg.
-    let mut effective_theme = theme.clone();
-    if let Some(orient) = prep.legend_orient_override {
-        effective_theme.legend_orient = orient;
-    }
-    if let Some(fs) = prep.legend_title_font_size_override {
-        effective_theme.legend_title_font_size = fs;
-    }
-    if let Some(cols) = prep.legend_columns_override {
-        effective_theme.legend_columns = Some(cols);
-    }
-    apply_chart_config(&mut effective_theme, chart_config);
-    let theme_ref = &effective_theme;
-
-    let effective_legend_title = prep
-        .legend_title_override
-        .clone()
-        .or_else(|| prep.legend_title.clone());
-
-    let mut legend_overrides = legend_overrides_from_prep(&prep);
-    apply_chart_config_to_legend_overrides(&mut legend_overrides, chart_config);
-    let metrics = font::FontdueMetrics::new();
-    let layout = compute_layout(
-        spec,
-        theme_ref,
-        viewport,
-        &prep.axes,
-        &prep.facet_groups,
-        &prep.legend_entries,
-        effective_legend_title,
-        prep.colorbar.as_ref(),
-        &metrics,
-        &legend_overrides,
-    )
-    .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
-    for w in &layout.warnings {
-        warnings.push(RenderWarning::Layout(w.clone()));
-    }
+    let PipelineOutput { prep, layout, effective_theme, mut warnings } =
+        prepare_and_layout(spec, batch, theme, viewport, chart_config)?;
 
     let mut scene = scene_build::build_scene(
-        spec, &prep, &layout, theme_ref, config, &mut warnings, chart_config,
+        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config,
     )?;
 
     // Extract large homogeneous mark batches as raw packed bytes, clearing
