@@ -290,9 +290,7 @@ class TestAnnotationTextFontFamily:
         import ferrum.annotation as ann
 
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
-        chart = fm.Chart(df).mark_point().encode(x="x", y="y") + ann.text(
-            2.0, 20.0, "Hello"
-        )
+        chart = fm.Chart(df).mark_point().encode(x="x", y="y") + ann.text(2.0, 20.0, "Hello")
         svg = chart.show_svg()
         assert "Hello" in svg
         assert 'font-family=""' not in svg, "font-family must not be empty"
@@ -315,3 +313,198 @@ class TestInsetNormCoordSerialization:
         )
         svg = chart.show_svg()
         assert svg.startswith("<svg")
+
+
+# ---------------------------------------------------------------------------
+# Bug 8: BreakAxis remap_node on axis text nodes hid x-axis labels
+# (commit c4bab99 — removed remap_node call on axes_nodes in scene_build.rs)
+# ---------------------------------------------------------------------------
+
+
+def _text_nodes(svg: str) -> list[str]:
+    """Return the visible text content of all <text> elements in the SVG."""
+    import re
+
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+
+class TestBreakAxisAxisLabelsPreserved:
+    """Regression: x-axis labels must remain visible when a y-axis break is applied.
+
+    Before the fix, remap_node was called on ALL axis text nodes, including
+    x-axis tick labels whose y-coordinates fall below the plot area.  Those
+    out-of-range y-values were clamped to the data domain edge, then mapped
+    through the break, pushing the labels to the sentinel coordinate -99999
+    (invisible).  The fix removes the remap_node call on axes_nodes entirely
+    so axis labels are positioned by the normal axis layout pass, not the
+    broken scale.
+    """
+
+    def test_y_break_preserves_x_category_labels(self):
+        """Categorical x-axis tick labels must appear in SVG with a y-axis break."""
+        df = pl.DataFrame({"category": ["A", "B", "C"], "value": [10.0, 500.0, 20.0]})
+        chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
+            axis="y", gap=(100, 400)
+        )
+        svg = chart.show_svg()
+        texts = _text_nodes(svg)
+        for label in ("A", "B", "C"):
+            assert label in texts, (
+                f"x-axis category label {label!r} must appear in the SVG when a "
+                "y-axis BreakAxis is applied — before the fix, remap_node moved "
+                "these labels to sentinel y=-99999, hiding them"
+            )
+
+    def test_y_break_preserves_x_axis_title(self):
+        """X-axis title must remain visible when a y-axis break is applied."""
+        df = pl.DataFrame({"category": ["A", "B", "C"], "value": [10.0, 500.0, 20.0]})
+        chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
+            axis="y", gap=(100, 400)
+        )
+        svg = chart.show_svg()
+        texts = _text_nodes(svg)
+        assert "category" in texts, (
+            "x-axis title 'category' must appear in the SVG when a y-axis BreakAxis "
+            "is applied — the remap_node bug also displaced the axis title node"
+        )
+
+    def test_x_break_preserves_y_axis_title(self):
+        """Y-axis title must remain visible when an x-axis break is applied."""
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "value": [10.0, 500.0, 20.0]})
+        chart = fm.Chart(df).mark_bar().encode(x="x", y="value") + fm.BreakAxis(
+            axis="x", gap=(1.5, 2.5)
+        )
+        svg = chart.show_svg()
+        texts = _text_nodes(svg)
+        assert "value" in texts, (
+            "y-axis title 'value' must appear in the SVG when an x-axis BreakAxis "
+            "is applied — axis text nodes outside the broken axis must not be remapped"
+        )
+
+    def test_y_break_labels_not_at_sentinel(self):
+        """X-axis labels must not be positioned at the sentinel coordinate y=-99999."""
+        import re
+
+        df = pl.DataFrame({"category": ["A", "B", "C", "D"], "value": [10.0, 500.0, 20.0, 480.0]})
+        chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
+            axis="y", gap=(100, 400)
+        )
+        svg = chart.show_svg()
+        # Any text element whose y-coordinate is -99999 is invisible (hidden sentinel).
+        displaced = re.findall(r'<text[^>]*y="-99999[^"]*"[^>]*>([^<]+)</text>', svg)
+        assert not displaced, (
+            f"No axis text label should be positioned at y=-99999 (hidden sentinel); "
+            f"found: {displaced}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug 9: SecondaryY right-margin not reserved — y2 axis labels clipped
+# (commit c4bab99 — compute_layout now reserves padding_right for y2 labels)
+# ---------------------------------------------------------------------------
+
+
+class TestSecondaryYRightMarginReserved:
+    """Regression: y2 axis labels must not be clipped by the SVG viewport.
+
+    Before the fix, compute_layout used right: 0.0, so secondary Y axis
+    labels positioned at x = plot_right + tick_size + 2 extended past the
+    SVG viewport boundary and were truncated.  The fix estimates the y2 label
+    width via FontdueMetrics and sets padding_right to accommodate them.
+    """
+
+    def test_y2_labels_present_in_svg(self):
+        """SecondaryY tick label text must appear in the rendered SVG."""
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "sales": [100.0, 140.0, 180.0, 220.0, 260.0],
+                "growth_rate": [0.438, -0.191, 0.285, 0.123, -0.072],
+            }
+        )
+        chart = fm.Chart(df).mark_bar().encode(x="x", y="sales") + fm.SecondaryY(
+            field="growth_rate", mark="line"
+        )
+        svg = chart.show_svg()
+        texts = _text_nodes(svg)
+        # The secondary axis tick labels are derived from growth_rate values.
+        # At least one negative-valued label must appear (proving y2 is rendered).
+        negative_labels = [t for t in texts if t.startswith("-")]
+        assert negative_labels, (
+            "SecondaryY chart must contain negative-value tick labels from the "
+            "secondary axis — before the fix, all y2 labels were clipped by the "
+            "SVG viewport"
+        )
+
+    def test_y2_label_x_positions_within_viewbox(self):
+        """Secondary Y axis label x-start positions must lie inside the SVG viewBox."""
+        import re
+
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "sales": [100.0, 140.0, 180.0, 220.0, 260.0],
+                "growth_rate": [0.438, -0.191, 0.285, 0.123, -0.072],
+            }
+        )
+        chart = fm.Chart(df).mark_bar().encode(x="x", y="sales") + fm.SecondaryY(
+            field="growth_rate", mark="line"
+        )
+        svg = chart.show_svg()
+
+        vb_match = re.search(r'viewBox="0 0 ([0-9.]+)', svg)
+        assert vb_match, "SVG must have a numeric viewBox width"
+        vb_width = float(vb_match.group(1))
+
+        # Secondary Y labels use text-anchor="start" and are positioned at the
+        # right edge of the plot area.
+        y2_labels = re.findall(
+            r'<text x="([0-9.]+)" y="[^"]+"[^>]*text-anchor="start"[^>]*>([^<]+)</text>',
+            svg,
+        )
+        assert y2_labels, (
+            "SecondaryY chart must contain text-anchor='start' labels for the secondary axis"
+        )
+        for x_str, text in y2_labels:
+            x_pos = float(x_str)
+            assert x_pos < vb_width, (
+                f"y2 label {text!r} at x={x_pos} is outside the SVG viewBox "
+                f"(width={vb_width}) — padding_right must be reserved to prevent clipping"
+            )
+
+    def test_secondaryy_narrows_plot_area_vs_no_secondary(self):
+        """Plot right edge must be narrower when SecondaryY is present.
+
+        The right-margin reservation shifts the plot area left to make room for
+        y2 labels.  The rightmost x-axis tick label must therefore be at a lower
+        x-coordinate than the same chart rendered without SecondaryY.
+        """
+        import re
+
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "sales": [100.0, 140.0, 180.0, 220.0, 260.0],
+                "growth_rate": [0.438, -0.191, 0.285, 0.123, -0.072],
+            }
+        )
+        base = fm.Chart(df).mark_bar().encode(x="x", y="sales")
+        svg_without = base.show_svg()
+        svg_with = (base + fm.SecondaryY(field="growth_rate", mark="line")).show_svg()
+
+        def rightmost_x_tick(svg: str) -> float:
+            # x-axis tick for "5" (the max x value) uses text-anchor="middle"
+            m = re.search(
+                r'<text x="([0-9.]+)" y="[^"]+"[^>]*text-anchor="middle"[^>]*>5</text>',
+                svg,
+            )
+            assert m, "Could not find x-axis tick label '5'"
+            return float(m.group(1))
+
+        x_without = rightmost_x_tick(svg_without)
+        x_with = rightmost_x_tick(svg_with)
+        assert x_with < x_without, (
+            f"The plot right edge (rightmost x-tick at x={x_with:.1f}) must be narrower "
+            f"than the chart without SecondaryY (x={x_without:.1f}) — "
+            "padding_right must be reserved when a secondary Y axis is present"
+        )
