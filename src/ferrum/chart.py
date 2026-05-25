@@ -2208,77 +2208,78 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
     # ---- Spec output ----
 
-    def to_spec(self):
-        """Build the Rust ``ChartSpec`` for this chart.
+    def _resolve_polar_remapping(self, resolved, enc: dict) -> dict:
+        """Remap theta/radius channel keys to x/y for CoordPolar charts.
 
-        Resolves any pending statistical-mark desugar, converts Python encoding
-        channel objects to ``EncodingSpec`` instances, and constructs the
-        ``ChartSpec`` PyO3 object that the Rust renderer consumes.
+        Rust's encoding layer only knows x/y; the spec-side coord conversion in
+        scene_build.rs handles the polar→Cartesian pixel transformation.  When
+        CoordPolar is set, theta (the angular variable) maps to whichever
+        Cartesian axis the coord declares, and radius maps to the other.
+
+        Parameters
+        ----------
+        resolved :
+            The resolved ``Chart`` whose ``_coord`` and ``_mark`` are inspected.
+        enc :
+            Shallow copy of the encoding dict (already alias-remapped).  Modified
+            in place and returned.
 
         Returns
         -------
-        ChartSpec
-            The fully-resolved ``ferrum._core.ChartSpec`` for this chart.
-
-        Examples
-        --------
-        >>> import ferrum as fm
-        >>> import polars as pl
-        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
-        >>> spec = fm.Chart(df).mark_point().encode(x="x", y="y").to_spec()
-        >>> spec.mark
-        'point'
+        dict
+            The remapped encoding dict.
         """
-        # Resolve any pending statistical mark desugar (mark called before encode).
-        resolved = self._resolve_pending()
-        from ferrum import ChartSpec, EncodingSpec
-        from ferrum.repeat import _RepeatPlaceholder
-
-        # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
-        enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
-        mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
-        enc, mk = _apply_channel_aliases(enc, mk)
-
-        # --- Aggregate field remap: map original field → output_col for encoding ---
-        # _PendingAggregate sentinels carry the original field name but Aggregate
-        # transforms emit the output under a new column name (e.g. "mean_val").
-        # Build a remap dict now so the EncodingSpec loop below uses the correct
-        # post-aggregation field name. Key: original_field, Value: output_col.
-        _agg_field_remap: dict[str, str] = {}
-        if resolved._transforms:
-            for _t in resolved._transforms:
-                # Use "is not None" so count() (field="") is included.
-                if isinstance(_t, _PendingAggregate) and _t.field is not None:
-                    _agg_field_remap[_t.field] = _t.output_col
-
-        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
-        # When CoordPolar is set, the spec-side declares theta (angular variable)
-        # and optionally radius (radial variable).  Rust's encoding layer only
-        # knows x/y; the spec-side coord conversion in scene_build.rs handles
-        # the polar→Cartesian pixel transformation.
         from ferrum.coord import CoordPolar
 
-        if isinstance(resolved._coord, CoordPolar):
-            theta_ch = resolved._coord.theta  # "x" or "y"
-            radius_ch = "y" if theta_ch == "x" else "x"
-            if "theta" in enc:
-                enc[theta_ch] = enc.pop("theta")
-            if "radius" in enc:
-                enc[radius_ch] = enc.pop("radius")
-            # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
-            # only one axis is encoded.  The arc builder ignores the dummy scale.
-            if resolved._mark == "arc":
-                if theta_ch == "x" and "y" not in enc and "x" in enc:
-                    enc["y"] = enc["x"]
-                elif theta_ch == "y" and "x" not in enc and "y" in enc:
-                    enc["x"] = enc["y"]
+        if not isinstance(resolved._coord, CoordPolar):
+            return enc
 
-        # Safety net: any channel not in honored/silent/polar/facet sets would
-        # fall through to this warning. After all 18 channels are wired this
-        # should never fire, but we keep it as a guard against future channels
-        # being added to the encoding registry without a handler.
+        theta_ch = resolved._coord.theta  # "x" or "y"
+        radius_ch = "y" if theta_ch == "x" else "x"
+        if "theta" in enc:
+            enc[theta_ch] = enc.pop("theta")
+        if "radius" in enc:
+            enc[radius_ch] = enc.pop("radius")
+        # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
+        # only one axis is encoded.  The arc builder ignores the dummy scale.
+        if resolved._mark == "arc":
+            if theta_ch == "x" and "y" not in enc and "x" in enc:
+                enc["y"] = enc["x"]
+            elif theta_ch == "y" and "x" not in enc and "y" in enc:
+                enc["x"] = enc["y"]
+        return enc
+
+    def _build_encoding_specs(self, resolved, enc: dict, agg_field_remap: dict) -> dict:
+        """Build ``EncodingSpec`` entries for each honored channel.
+
+        Iterates over ``_RENDERER_HONORED_CHANNELS``, converts each present
+        channel to an ``EncodingSpec``, handles multi-field tooltip serialization,
+        applies the bar-chart y-zero-anchor injection, and warns on unrecognized
+        channels.
+
+        Parameters
+        ----------
+        resolved :
+            The resolved ``Chart`` whose ``_mark`` is inspected for bar-chart
+            zero-anchor injection.
+        enc :
+            Encoding dict after alias remapping and polar remapping.
+        agg_field_remap :
+            Map from original field name → output column name for any
+            ``_PendingAggregate`` transforms already present.
+
+        Returns
+        -------
+        dict
+            Partial ``kw`` dict containing only encoding-related keys:
+            channel names mapped to ``EncodingSpec`` instances, plus
+            ``"tooltip_fields"`` when applicable.
+        """
+        from ferrum import EncodingSpec
         from ferrum._warn import warn_once
+        from ferrum.repeat import _RepeatPlaceholder
 
+        # Safety net: warn on channels outside all known sets.
         _all_known = (
             frozenset(_RENDERER_HONORED_CHANNELS)
             | _SILENT_CHANNELS
@@ -2300,104 +2301,184 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     "Stored on EncodingSpec for forward-compatibility."
                 ),
             )
+
         # Build full EncodingSpec instances per channel so honored kwargs
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
         # Phase 7 + 8a's ChartSpec(...) accepts EncodingSpec instances or strings.
-        kw = {"mark": resolved._mark or "point", "data": "default"}
+        kw: dict = {}
         for axis in _RENDERER_HONORED_CHANNELS:
-            if axis in enc:
-                ch = enc[axis]
-                if ch.field is None:
-                    # Multi-field Tooltip(*fields) — serialize as tooltip_fields JSON list.
-                    if axis == "tooltip" and hasattr(ch, "_field_list") and ch._field_list:
-                        tf_list = []
-                        for f in ch._field_list:
-                            if isinstance(f, str):
-                                tf_list.append({"field": f})
-                            elif hasattr(f, "field") and f.field:
-                                entry: dict = {"field": f.field}
-                                d_f = f.to_encoding_spec_dict()
-                                if d_f.get("format"):
-                                    entry["format"] = d_f["format"]
-                                if d_f.get("title"):
-                                    entry["title"] = d_f["title"]
-                                tf_list.append(entry)
-                        if tf_list:
-                            kw["tooltip_fields"] = json.dumps(tf_list)
-                        continue
-                    # Aggregate shorthands like count() have field=None but the
-                    # transform emits an output column (e.g. "count_all").  If there
-                    # is a remap entry for "" (the sentinel for no-source-field), fall
-                    # through to the EncodingSpec-building code below so the encoding
-                    # points at the correct output column.
-                    if "" not in _agg_field_remap:
-                        continue
-                # Phase 9: skip channels whose field is an unresolved Repeat
-                # placeholder. RepeatChart.expand() materializes concrete charts
-                # before render; the bare template's spec just omits placeholder
-                # channels (they're not meaningful standalone).
-                if isinstance(ch.field, _RepeatPlaceholder):
+            if axis not in enc:
+                continue
+            ch = enc[axis]
+            if ch.field is None:
+                # Multi-field Tooltip(*fields) — serialize as tooltip_fields JSON list.
+                if axis == "tooltip" and hasattr(ch, "_field_list") and ch._field_list:
+                    tf_list = []
+                    for f in ch._field_list:
+                        if isinstance(f, str):
+                            tf_list.append({"field": f})
+                        elif hasattr(f, "field") and f.field:
+                            entry: dict = {"field": f.field}
+                            d_f = f.to_encoding_spec_dict()
+                            if d_f.get("format"):
+                                entry["format"] = d_f["format"]
+                            if d_f.get("title"):
+                                entry["title"] = d_f["title"]
+                            tf_list.append(entry)
+                    if tf_list:
+                        kw["tooltip_fields"] = json.dumps(tf_list)
                     continue
-                d = ch.to_encoding_spec_dict()
-                # Bar y-axis zero-anchor (gallery defaults A3): inject
-                # scale.zero=True on the y-encoding so bar charts always
-                # start at zero unless the caller explicitly sets domain or
-                # zero on their Y() channel.  The injected scale must carry
-                # `type` because Rust's ScaleSpec is a tagged enum.
-                if axis == "y" and resolved._mark == "bar":
-                    scale = d.get("scale") or {}
-                    if "domain" not in scale and "zero" not in scale:
-                        d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
-                # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
-                # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
-                field = d.pop("field")
-                # Remap aggregate fields: if this channel's field was aggregated by a
-                # _PendingAggregate transform, point the encoding at the output column.
-                # Use "" as the lookup key for count() (field=None) since _PendingAggregate
-                # stores field="" for count-style aggregates with no source column.
-                _remap_key = field if field is not None else ""
-                field = _agg_field_remap.get(_remap_key, field)
-                kw[axis] = EncodingSpec(field, **d)
-        # Resolve _PendingAggregate sentinels emitted by to_implicit_transforms().
-        # Any Aggregate shorthand like encode(y="mean(val):Q") defers groupby
-        # assignment until now, when all sibling encoding fields are visible.
-        # Infer groupby from non-aggregate encoding fields (mirrors Altair behaviour).
-        effective_transforms = list(resolved._transforms) if resolved._transforms else []
-        if any(isinstance(t, _PendingAggregate) for t in effective_transforms):
-            from ferrum import Aggregate, AggregateOp
-            from ferrum.repeat import _RepeatPlaceholder as _RPH
+                # Aggregate shorthands like count() have field=None but the
+                # transform emits an output column (e.g. "count_all").  If there
+                # is a remap entry for "" (the sentinel for no-source-field), fall
+                # through to the EncodingSpec-building code below so the encoding
+                # points at the correct output column.
+                if "" not in agg_field_remap:
+                    continue
+            # Phase 9: skip channels whose field is an unresolved Repeat
+            # placeholder. RepeatChart.expand() materializes concrete charts
+            # before render; the bare template's spec just omits placeholder
+            # channels (they're not meaningful standalone).
+            if isinstance(ch.field, _RepeatPlaceholder):
+                continue
+            d = ch.to_encoding_spec_dict()
+            # Bar y-axis zero-anchor (gallery defaults A3): inject
+            # scale.zero=True on the y-encoding so bar charts always
+            # start at zero unless the caller explicitly sets domain or
+            # zero on their Y() channel.  The injected scale must carry
+            # `type` because Rust's ScaleSpec is a tagged enum.
+            if axis == "y" and resolved._mark == "bar":
+                scale = d.get("scale") or {}
+                if "domain" not in scale and "zero" not in scale:
+                    d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
+            # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
+            # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
+            field = d.pop("field")
+            # Remap aggregate fields: if this channel's field was aggregated by a
+            # _PendingAggregate transform, point the encoding at the output column.
+            # Use "" as the lookup key for count() (field=None) since _PendingAggregate
+            # stores field="" for count-style aggregates with no source column.
+            _remap_key = field if field is not None else ""
+            field = agg_field_remap.get(_remap_key, field)
+            kw[axis] = EncodingSpec(field, **d)
+        return kw
 
-            # Collect fields from channels that carry no aggregate.
-            non_agg_fields: list[str] = []
-            for _ch in resolved._encoding.values():
-                if not isinstance(_ch, ChannelBase):
-                    continue
-                if _ch._kwargs.get("aggregate"):
-                    continue
-                f = _ch.field
-                if f is None or isinstance(f, _RPH):
-                    continue
-                if f not in non_agg_fields:
-                    non_agg_fields.append(f)
-            # Include facet fields (row/col grouping dimensions).
-            if resolved._facet is not None:
-                for _ff in (resolved._facet.col, resolved._facet.row, resolved._facet.field):
-                    if _ff and _ff not in non_agg_fields:
-                        non_agg_fields.append(_ff)
-            # Replace sentinels with concrete Aggregate objects.
-            resolved_transforms: list = []
-            for t in effective_transforms:
-                if isinstance(t, _PendingAggregate):
-                    resolved_transforms.append(
-                        Aggregate(
-                            [AggregateOp(t.field, t.agg, t.output_col)],
-                            groupby=non_agg_fields,
-                        )
+    def _resolve_pending_aggregates(self, resolved, effective_transforms: list) -> list:
+        """Resolve ``_PendingAggregate`` sentinels to concrete ``Aggregate`` objects.
+
+        Any Aggregate shorthand like ``encode(y="mean(val):Q")`` defers groupby
+        assignment until all sibling encoding fields are visible.  This method
+        infers groupby from non-aggregate encoding fields (mirrors Altair behaviour)
+        and replaces each sentinel with a concrete ``Aggregate`` transform.
+
+        Parameters
+        ----------
+        resolved :
+            The resolved ``Chart`` whose ``_encoding`` and ``_facet`` are used
+            to collect non-aggregate groupby fields.
+        effective_transforms :
+            The current list of transforms, which may contain
+            ``_PendingAggregate`` sentinels.
+
+        Returns
+        -------
+        list
+            A new list with all ``_PendingAggregate`` sentinels replaced by
+            concrete ``Aggregate`` instances.  If no sentinels are present,
+            the input list is returned unchanged.
+        """
+        if not any(isinstance(t, _PendingAggregate) for t in effective_transforms):
+            return effective_transforms
+
+        from ferrum import Aggregate, AggregateOp
+        from ferrum.repeat import _RepeatPlaceholder as _RPH
+
+        # Collect fields from channels that carry no aggregate.
+        non_agg_fields: list[str] = []
+        for _ch in resolved._encoding.values():
+            if not isinstance(_ch, ChannelBase):
+                continue
+            if _ch._kwargs.get("aggregate"):
+                continue
+            f = _ch.field
+            if f is None or isinstance(f, _RPH):
+                continue
+            if f not in non_agg_fields:
+                non_agg_fields.append(f)
+        # Include facet fields (row/col grouping dimensions).
+        if resolved._facet is not None:
+            for _ff in (resolved._facet.col, resolved._facet.row, resolved._facet.field):
+                if _ff and _ff not in non_agg_fields:
+                    non_agg_fields.append(_ff)
+        # Replace sentinels with concrete Aggregate objects.
+        resolved_transforms: list = []
+        for t in effective_transforms:
+            if isinstance(t, _PendingAggregate):
+                resolved_transforms.append(
+                    Aggregate(
+                        [AggregateOp(t.field, t.agg, t.output_col)],
+                        groupby=non_agg_fields,
                     )
-                else:
-                    resolved_transforms.append(t)
-            effective_transforms = resolved_transforms
+                )
+            else:
+                resolved_transforms.append(t)
+        return resolved_transforms
 
+    def to_spec(self):
+        """Build the Rust ``ChartSpec`` for this chart.
+
+        Resolves any pending statistical-mark desugar, converts Python encoding
+        channel objects to ``EncodingSpec`` instances, and constructs the
+        ``ChartSpec`` PyO3 object that the Rust renderer consumes.
+
+        Returns
+        -------
+        ChartSpec
+            The fully-resolved ``ferrum._core.ChartSpec`` for this chart.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> spec = fm.Chart(df).mark_point().encode(x="x", y="y").to_spec()
+        >>> spec.mark
+        'point'
+        """
+        from ferrum import ChartSpec
+
+        # Resolve any pending statistical mark desugar (mark called before encode).
+        resolved = self._resolve_pending()
+
+        # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
+        enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
+        mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
+        enc, mk = _apply_channel_aliases(enc, mk)
+
+        # --- Aggregate field remap: map original field → output_col for encoding ---
+        # _PendingAggregate sentinels carry the original field name but Aggregate
+        # transforms emit the output under a new column name (e.g. "mean_val").
+        # Build a remap dict now so the EncodingSpec loop below uses the correct
+        # post-aggregation field name. Key: original_field, Value: output_col.
+        agg_field_remap: dict[str, str] = {}
+        if resolved._transforms:
+            for _t in resolved._transforms:
+                # Use "is not None" so count() (field="") is included.
+                if isinstance(_t, _PendingAggregate) and _t.field is not None:
+                    agg_field_remap[_t.field] = _t.output_col
+
+        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
+        enc = self._resolve_polar_remapping(resolved, enc)
+
+        # --- Build EncodingSpec entries for each honored channel ---
+        kw: dict = {"mark": resolved._mark or "point", "data": "default"}
+        kw.update(self._build_encoding_specs(resolved, enc, agg_field_remap))
+
+        # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
+        effective_transforms = list(resolved._transforms) if resolved._transforms else []
+        effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
+
+        # --- Transform serialization ---
         if effective_transforms:
             # If any transform is a _NamedTransform or a plain dict (Phase 12
             # data transforms), serialize everything via JSON so Rust receives
@@ -2409,6 +2490,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 kw["transforms_json"] = json.dumps(xform_json)
             else:
                 kw["transforms"] = effective_transforms
+
+        # --- Remaining chart-level properties ---
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
         if resolved._coord is not None:
@@ -2432,6 +2515,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             kw["axis_y"] = resolved._axis_y
         if resolved._description:
             kw["chart_description"] = resolved._description
+
+        # --- Conditional / selection injection ---
         if resolved._selections:
             kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
             # Auto-inject selection fields into tooltip so cross-panel linked
@@ -2460,6 +2545,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     kw["tooltip_fields"] = json.dumps(tf_list)
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
+
         return ChartSpec(**kw)
 
     def _inject_auto_tooltips(self, kw: dict) -> dict:
