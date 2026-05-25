@@ -39,6 +39,7 @@ def cargo_test(session: nox.Session) -> None:
         "DYLD_LIBRARY_PATH": lib_dir,
         "RUSTFLAGS": f"-L {lib_dir}",
         "PYO3_PYTHON": python_exe,
+        "PYTHONHOME": base_prefix,
     }
     session.run(
         "cargo",

@@ -6,6 +6,51 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.12.0
+
+*2026-05-24*
+
+### Added
+
+- Declarative configuration surface: `configure_axis`, `configure_legend`, `configure_title`, `configure_grid`, `configure_padding`, `configure_color`, and unified `configure()` methods on `Chart` and all composition types
+- Annotation rendering module with coordinate resolution (text, arrow, rect, line, span, bracket, callout, image)
+- Structural feature rendering: `SecondaryY`, `BreakAxis`, `Inset` with full composition support
+- ChartConfig domain fields wired into render pipeline
+- `label_padding` theme key, per-side padding support
+
+### Fixed
+
+- Break-axis x-label disappearance and y2 right-margin clipping
+- Inset viewBox scaling and span fill_opacity
+- Format-presets revenue chart uses nominal encoding for monthly bars
+- Break-axis remaps same-axis ticks, SecondaryY bar marks with nominal x
+- Inset recipe PNG referenced wrong image
+- ColorConfigSpec.domain accepts string and float values
+- Annotation text font-family rendering
+- 10 bug-hunt R3 bugs (26 failing tests) and 21 bug-hunt bugs across coercion, composition, figures, interactive, scale, projection, render, and layout
+- 31 bug-hunt bugs from configure field wiring
+
+### Changed
+
+- **Major internal refactoring (no API changes):**
+  - `chart.py` split from 5,779 to 2,794 lines via `StatisticalMarksMixin` (15 methods) and `DiagnosticMarksMixin` (26 methods)
+  - `configure_*` methods unified into `ConfigureMixin`, eliminating ~635 lines of duplication between `Chart` and `_ChartLike`
+  - `Chart._clone` auto-generated from `__slots__` (prevents silent data loss)
+  - `to_spec()` decomposed into 3 focused helpers
+  - Rust `ThemeInputs` decomposed from 42 flat fields into 9 sub-structs
+  - Rust `PreparedInputs` legend overrides grouped into `LegendPreparedOverrides` sub-struct
+  - Rust `render_svg`/`render_scene_json` deduplicated via shared `prepare_and_layout` pipeline (fixes missing secondary-Y padding in interactive renders)
+  - Rust `scale_resolve.rs` (2,205 lines) split into 6 sub-modules
+  - Rust `ScaleSpec` common fields factored into `ContinuousScaleCommon`
+  - Rust `Encoding::inherit_*` duplication eliminated
+- Added `cargo_test` nox session with correct macOS DYLD paths
+
+### Other
+
+- Cohesion/complexity audit report and refactor plan
+- Docs: customization guide, 7 concept pages, 12 recipes, 16 golden SVGs
+- Regression tests for break-axis labels, y2 right-margin, font-family, and auditor-found bugs
+
 ## 0.11.2
 
 *2026-05-23*
