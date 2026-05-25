@@ -48,47 +48,6 @@ chart = (
 The inset occupies the top-right 40% x 45% of the plot area. Scales, ticks, and marks
 inside the inset are computed independently from the parent.
 
-**Recipe: scatter with zoomed cluster detail**
-
-```python
-import polars as pl
-import ferrum as fm
-import random
-
-random.seed(42)
-xs = [random.gauss(3.0, 1.5) for _ in range(90)] + [random.gauss(2.0, 0.15) for _ in range(10)]
-ys = [random.gauss(3.0, 1.2) for _ in range(90)] + [random.gauss(3.0, 0.12) for _ in range(10)]
-
-df = pl.DataFrame({"x": xs, "y": ys})
-cluster_df = df.filter(
-    pl.col("x").is_between(1.6, 2.4) & pl.col("y").is_between(2.6, 3.4)
-)
-
-zoom = (
-    fm.Chart(cluster_df)
-    .mark_point(size=80, opacity=0.9)
-    .encode(x="x:Q", y="y:Q")
-    .configure_axis(label_font_size=9, tick_count=4)
-    .configure_padding(top=6, right=6, bottom=6, left=6, auto=False)
-)
-
-chart = (
-    fm.Chart(df)
-    .mark_point(size=40, opacity=0.5)
-    .encode(x="x:Q", y="y:Q")
-    .labs(title="Scatter with Cluster Detail")
-    + fm.Inset(
-        chart=zoom,
-        bounds=(fm.norm(0.6), fm.norm(0.0), fm.norm(1.0), fm.norm(0.42)),
-        connect_to=(2.0, 3.0),
-        connect_style="lines",
-        shadow=True,
-    )
-)
-```
-
-![Scatter with zoomed inset panel over the dense cluster](../../assets/concepts/inset_detail_zoom.png)
-
 ---
 
 ## Constructor reference
