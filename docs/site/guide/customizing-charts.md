@@ -35,7 +35,7 @@ chart = (
     .mark_bar()
     .encode(
         x="month:N",
-        y=fm.Y("revenue:Q", axis=fm.Axis(format="$,.0f")),  # level 2: per-channel
+        y=fm.Y("revenue:Q", axis=fm.Axis(label_format="$,.0f")),  # level 2: per-channel
     )
     .configure_axis(label_angle=-30)                          # level 3: all axes
     .theme(fm.themes.minimal)                                 # level 4: per-chart theme
@@ -44,7 +44,7 @@ chart = (
 
 ![Configuration cascade example: bar chart with per-channel formatting, axis config, and minimal theme](../assets/concepts/customizing_cascade.png)
 
-The per-channel `Axis(format=...)` on `y` wins over anything `configure_axis` sets for the
+The per-channel `Axis(label_format=...)` on `y` wins over anything `configure_axis` sets for the
 y axis. The theme's grid and padding preferences apply where neither level 2 nor 3 set a
 value. Rust defaults fill the rest.
 

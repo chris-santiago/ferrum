@@ -132,7 +132,7 @@ chart.configure_axis(label_format="currency")
 
 ```python
 chart.encode(
-    y=fm.Y("revenue:Q", axis=fm.Axis(format="$,.0f")),
+    y=fm.Y("revenue:Q", axis=fm.Axis(label_format="$,.0f")),
 )
 ```
 

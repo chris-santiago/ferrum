@@ -613,6 +613,22 @@ pub fn render_svg(
     }
     // ChartConfig overrides (configure > theme).
     apply_chart_config(&mut effective_theme, chart_config);
+
+    // Reserve right-side padding for secondary Y axis labels when present.
+    if chart_config.structural.iter().any(|s| matches!(s, chart_config::StructuralSpec::SecondaryY(_))) {
+        use crate::layout::TextMetrics;
+        let m = font::FontdueMetrics::new();
+        let y2_label_width = prep.axes.y.tick_labels.iter()
+            .map(|s| m.measure_width(s, effective_theme.label_font_size))
+            .fold(0.0_f64, f64::max)
+            .max(30.0);
+        let needed = y2_label_width + effective_theme.tick_size + 6.0;
+        let current = effective_theme.padding_right.unwrap_or(effective_theme.padding);
+        if current < needed {
+            effective_theme.padding_right = Some(needed);
+        }
+    }
+
     let theme_ref = &effective_theme;
 
     // D13: legend title override (replaces the default field-name title when Some).

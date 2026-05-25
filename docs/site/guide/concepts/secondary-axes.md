@@ -106,7 +106,7 @@ Use the `axis` parameter on `SecondaryY` to configure the y2 axis directly:
     color="#e74c3c",
     axis=fm.Axis(
         title="Month-over-Month Growth",
-        format=".1%",
+        label_format=".1%",
         title_color="#e74c3c",
     ),
 )

@@ -318,11 +318,8 @@ pub fn build_scene(
                         &mut batch.nodes, axis, d_lo, d_hi, px_lo, px_hi, break_result,
                     );
                 }
-                // Remap axis tick marks and labels through the broken scale.
-                for node in axes_nodes.iter_mut() {
-                    remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
-                }
-                // Remap grid lines through the broken scale.
+                // Grid lines within the plot area are remapped so they
+                // align with the compressed scale segments.
                 for node in grid_nodes.iter_mut() {
                     remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
                 }
