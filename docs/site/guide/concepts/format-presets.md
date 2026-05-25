@@ -150,16 +150,15 @@ import ferrum as fm
 import polars as pl
 
 df = pl.DataFrame({
-    "date": ["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"],
+    "date": ["Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026"],
     "revenue": [125000, 138500, 112000, 161000],
-}).with_columns(pl.col("date").str.to_date())
+})
 
 chart = (
     fm.Chart(df)
     .mark_bar()
-    .encode(x="date:T", y="revenue:Q")
+    .encode(x="date:N", y="revenue:Q")
     .configure(
-        axis_x=fm.AxisConfig(label_format="month_year"),
         axis_y=fm.AxisConfig(label_format="currency"),
     )
 )
