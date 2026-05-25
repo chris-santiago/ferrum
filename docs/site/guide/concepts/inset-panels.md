@@ -87,7 +87,7 @@ chart = (
 )
 ```
 
-![Scatter with zoomed inset panel over the dense cluster](../../assets/recipes/dashboard_inset.png)
+![Scatter with zoomed inset panel over the dense cluster](../../assets/concepts/inset_detail_zoom.png)
 
 ---
 
