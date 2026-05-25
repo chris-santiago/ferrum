@@ -1,0 +1,119 @@
+"""Structural feature dataclasses for advanced chart layout options."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+_VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
+_VALID_CONNECT_STYLES = frozenset({"bracket", "lines", "none"})
+
+
+@dataclass(frozen=True)
+class SecondaryY:
+    """A secondary y-axis encoding overlaid on a chart.
+
+    Parameters
+    ----------
+    field : str
+        Data field to encode on the secondary y axis.
+    mark : str, default "line"
+        Mark type for the secondary series.
+    axis : Axis, optional
+        Per-axis configuration for the secondary y axis.
+    color : str, optional
+        Color for the secondary mark.
+    opacity : float, optional
+        Opacity for the secondary mark.
+    scale : Scale, optional
+        Scale configuration for the secondary y axis.
+    """
+
+    field: str
+    mark: str = "line"
+    axis: Any = None  # Axis instance or None
+    color: str | None = None
+    opacity: float | None = None
+    scale: Any = None  # Scale instance or None
+
+
+@dataclass(frozen=True)
+class BreakAxis:
+    """An axis break that omits a region of the scale to skip outlier values.
+
+    Parameters
+    ----------
+    axis : str
+        Which axis to break: ``"x"`` or ``"y"``.
+    gap : tuple or list
+        A single ``(start, end)`` break region or a list of ``(start, end)``
+        tuples for multiple breaks.
+    break_size : float, default 12
+        Visual size of the break indicator in pixels.
+    break_style : str, default "slash"
+        Break indicator style: ``"slash"``, ``"zigzag"``, ``"wave"``, or ``"gap"``.
+    """
+
+    axis: str
+    gap: tuple | list
+    break_size: float = 12
+    break_style: str = "slash"
+
+    def __post_init__(self) -> None:
+        if self.axis not in ("x", "y"):
+            raise ValueError(f"BreakAxis.axis must be 'x' or 'y'; got {self.axis!r}.")
+        if self.break_style not in _VALID_BREAK_STYLES:
+            raise ValueError(
+                f"BreakAxis.break_style must be one of {sorted(_VALID_BREAK_STYLES)!r}; "
+                f"got {self.break_style!r}."
+            )
+
+
+@dataclass(frozen=True)
+class Inset:
+    """An inset chart embedded within a parent chart's plot area.
+
+    Parameters
+    ----------
+    chart : Chart
+        The chart to embed as an inset.
+    bounds : tuple
+        ``(left, top, right, bottom)`` boundary coordinates for the inset
+        within the parent plot area.  Each coordinate may be a ``float``
+        (data-space), :class:`~ferrum.annotation.coords.PixelCoord`, or
+        :class:`~ferrum.annotation.coords.NormCoord`.
+    border : bool, default True
+        Draw a border around the inset.
+    border_color : str, default "#999"
+        Border color.
+    border_dash : list[float], optional
+        Border dash pattern.
+    background : str or None, default "#fff"
+        Inset background color; ``None`` for transparent.
+    shadow : bool, default False
+        Apply a drop shadow to the inset.
+    connect_to : tuple, optional
+        Data coordinates ``(x, y)`` of the source region in the parent chart
+        that this inset zooms into.  Draws a connector from the parent region
+        to the inset when provided.
+    connect_style : str, default "lines"
+        Connector style: ``"bracket"``, ``"lines"``, or ``"none"``.
+    """
+
+    chart: Any  # Chart instance
+    bounds: tuple
+    border: bool = True
+    border_color: str = "#999"
+    border_dash: list[float] | None = None
+    background: str | None = "#fff"
+    shadow: bool = False
+    connect_to: tuple | None = None
+    connect_style: str = "lines"
+
+    def __post_init__(self) -> None:
+        if self.connect_style not in _VALID_CONNECT_STYLES:
+            raise ValueError(
+                f"Inset.connect_style must be one of {sorted(_VALID_CONNECT_STYLES)!r}; "
+                f"got {self.connect_style!r}."
+            )

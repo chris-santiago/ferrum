@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
+use palette::Srgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +44,24 @@ pub struct AxisInput {
     /// `layout_y_axis` — tick strings are already pre-formatted before this
     /// struct is built. Reserved for future granularity hints.
     pub tick_format_type: Option<String>,
+    /// Explicit tick values override from `configure_axis(tick_values=[...])`.
+    /// When set, tick labels are replaced with formatted versions of these values.
+    pub tick_values_override: Option<Vec<f64>>,
+    /// d3-format string from `configure_axis(label_format_raw="...")`.
+    /// Applied to tick labels after the tick_values_override is applied.
+    pub label_format_override: Option<String>,
+    /// Axis title font size from `configure_axis(title_font_size=...)`.
+    /// Overrides `theme.title_font_size` for this axis only.
+    pub title_font_size: Option<f64>,
+    /// Axis title color from `configure_axis(title_color="...")`.
+    /// Overrides `theme.title_color` for this axis only.
+    pub title_color: Option<Srgba<u8>>,
+    /// Padding between axis title and tick labels from `configure_axis(title_padding=...)`.
+    /// Overrides `theme.axis_title_padding` for this axis only.
+    pub title_padding: Option<f64>,
+    /// Pixel gap between the end of a tick mark and the tick label baseline.
+    /// Overrides the renderer's hardcoded per-orient gaps.
+    pub label_padding: Option<f64>,
 }
 
 impl AxisInput {
@@ -65,6 +84,12 @@ impl AxisInput {
             show_grid: true,
             tick_format: None,
             tick_format_type: None,
+            tick_values_override: None,
+            label_format_override: None,
+            title_font_size: None,
+            title_color: None,
+            title_padding: None,
+            label_padding: None,
         }
     }
 }
@@ -102,6 +127,18 @@ pub struct AxisLayout {
     /// D7: whether to render gridlines from this axis. Default `true`.
     #[serde(default = "default_true")]
     pub show_grid: bool,
+    /// Per-axis title font size override from `configure_axis(title_font_size=...)`.
+    /// `None` means use the theme default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_font_size: Option<f64>,
+    /// Per-axis title color override from `configure_axis(title_color="...")`.
+    /// Stored as [R, G, B, A]. `None` means use the theme default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_color_rgba: Option<[u8; 4]>,
+    /// Pixel gap between tick mark end and label baseline from
+    /// `configure_axis(label_padding=...)`. `None` means use the renderer default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_padding: Option<f64>,
 }
 
 fn default_true() -> bool { true }
@@ -150,12 +187,18 @@ pub(crate) fn estimate_x_label_band(
     label_angle_override: Option<f64>,
     metrics: &dyn TextMetrics,
     estimated_slot_w: f64,
+    label_padding: Option<f64>,
 ) -> f64 {
+    // When label_padding is explicitly set, it replaces the hardcoded 2.0 gap
+    // in build_axis. The delta from the default (2.0) is added to the margin
+    // estimate. When label_padding is None the existing margin values are
+    // unchanged (backward-compatible with all existing goldens).
+    let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
     let line_h = metrics.line_height(label_font_size);
 
     // Empty label set: fall back to current behavior.
     if labels.is_empty() {
-        return line_h;
+        return line_h + padding_delta;
     }
 
     let max_label_w = labels
@@ -171,14 +214,14 @@ pub(crate) fn estimate_x_label_band(
         let cos_abs = rad.cos().abs();
         // At -90° (or 90°), sin≈1, cos≈0 → margin = max_label_w + small pad.
         // For intermediate angles: label extends downward by w*sin + line_h*cos.
-        return max_label_w * sin_abs + line_h * cos_abs;
+        return max_label_w * sin_abs + line_h * cos_abs + padding_delta;
     }
 
     let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
 
     // S0 — flat: if widest label fits, no extra margin needed.
     if max_label_w <= threshold {
-        return line_h;
+        return line_h + padding_delta;
     }
 
     // S1 — wrapping: attempt to wrap all labels and count max lines.
@@ -199,7 +242,7 @@ pub(crate) fn estimate_x_label_band(
                     .map(|w| w.split('\n').count())
                     .max()
                     .unwrap_or(1);
-                return max_lines as f64 * line_h;
+                return max_lines as f64 * line_h + padding_delta;
             }
         }
     }
@@ -211,12 +254,12 @@ pub(crate) fn estimate_x_label_band(
         if max_label_w * cos_factor <= estimated_slot_w {
             let sin_abs = angle.to_radians().sin().abs();
             let cos_abs = angle.to_radians().cos().abs();
-            return max_label_w * sin_abs + line_h * cos_abs;
+            return max_label_w * sin_abs + line_h * cos_abs + padding_delta;
         }
     }
 
     // S4/S5 fallback: vertical labels (-90°). Height = full label width + 2px pad.
-    max_label_w + 2.0
+    max_label_w + 2.0 + padding_delta
 }
 
 /// Returns the pixel width of the widest tick label on the y-axis. Used by the
@@ -243,7 +286,9 @@ pub fn compute_y_title_width(
     metrics: &dyn TextMetrics,
 ) -> f64 {
     if input.title.is_some() {
-        metrics.line_height(title_font_size) + axis_title_padding
+        let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+        metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
     }
@@ -284,12 +329,15 @@ pub fn layout_y_axis(
         h: panel_area.h,
     };
 
+    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+
     let title = input.title.as_ref().map(|text| {
         let label_band = compute_y_label_band_width(input, label_font_size, metrics);
-        let title_h = metrics.line_height(title_font_size);
+        let title_h = metrics.line_height(effective_title_font_size);
         AxisTitleLayout {
             text: text.clone(),
-            anchor_x: panel_area.x - label_band - axis_title_padding - title_h / 2.0,
+            anchor_x: panel_area.x - label_band - effective_title_padding - title_h / 2.0,
             anchor_y: panel_area.y + panel_area.h / 2.0,
             angle: -90.0,
         }
@@ -305,6 +353,9 @@ pub fn layout_y_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
+        title_font_size: input.title_font_size,
+        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
+        label_padding: input.label_padding,
     }
 }
 
@@ -730,13 +781,16 @@ pub fn layout_x_axis(
         h: 1.0,
     };
 
+    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+
     let title = input.title.as_ref().map(|text| {
-        let title_h = metrics.line_height(title_font_size);
+        let title_h = metrics.line_height(effective_title_font_size);
         let label_h = metrics.line_height(label_font_size);
         AxisTitleLayout {
             text: text.clone(),
             anchor_x: panel_area.x + panel_area.w / 2.0,
-            anchor_y: panel_area.y + panel_area.h + label_h + axis_title_padding + title_h / 2.0,
+            anchor_y: panel_area.y + panel_area.h + label_h + effective_title_padding + title_h / 2.0,
             angle: 0.0,
         }
     });
@@ -751,6 +805,9 @@ pub fn layout_x_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
+        title_font_size: input.title_font_size,
+        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
+        label_padding: input.label_padding,
     }, warning)
 }
 
@@ -782,6 +839,9 @@ mod tests {
             show_ticks: true,
             show_domain: true,
             show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -800,6 +860,9 @@ mod tests {
             show_ticks: true,
             show_domain: true,
             show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));
@@ -1467,7 +1530,7 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None);
         assert!(
             (band - line_h).abs() < 1e-9,
             "flat labels should return line_height={line_h}, got {band}"
@@ -1488,7 +1551,7 @@ mod tests {
         ];
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None);
         let expected = 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
@@ -1511,7 +1574,7 @@ mod tests {
         ];
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None);
         let angle_rad = (-45.0_f64).to_radians();
         let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
         assert!(
@@ -1527,7 +1590,7 @@ mod tests {
         // "ABCDEFGHIJ" = 10 * 10 = 100px.
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None);
         let angle_rad = (-90.0_f64).to_radians();
         let line_h = m.line_height(11.0);
         let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
@@ -1545,7 +1608,7 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None);
         let angle_rad = (-45.0_f64).to_radians();
         let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
         assert!(
@@ -1558,7 +1621,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0);
+        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None);
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -1574,7 +1637,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None);
         // Expected: fallback path: 1e18 + 2.0
         assert!(
             (band - (1e18 + 2.0)).abs() < 1.0,

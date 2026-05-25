@@ -5,6 +5,69 @@ from __future__ import annotations
 from typing import Any
 
 
+def _expand_hex(color: str) -> str:
+    """Expand CSS shorthand hex colors to their full-length equivalents.
+
+    The Rust color parser accepts ``#rrggbb`` and ``#rrggbbaa`` but not the
+    CSS shorthand forms ``#rgb`` (3-char) or ``#rgba`` (4-char).  This helper
+    doubles each hex digit so the Rust layer never sees a shorthand string.
+
+    Non-hex values (named colors, ``none``, ``transparent``, ``theme:*``) are
+    returned unchanged.
+
+    Parameters
+    ----------
+    color : str
+        A color string, possibly in CSS shorthand hex form.
+
+    Returns
+    -------
+    str
+        The expanded color string, or the original if no expansion is needed.
+
+    Examples
+    --------
+    >>> _expand_hex("#fff")
+    '#ffffff'
+    >>> _expand_hex("#abc")
+    '#aabbcc'
+    >>> _expand_hex("#abcd")
+    '#aabbccdd'
+    >>> _expand_hex("#aabbcc")
+    '#aabbcc'
+    >>> _expand_hex("red")
+    'red'
+    """
+    if not color.startswith("#"):
+        return color
+    tail = color[1:]
+    if len(tail) == 3:
+        r, g, b = tail
+        return f"#{r}{r}{g}{g}{b}{b}"
+    if len(tail) == 4:
+        r, g, b, a = tail
+        return f"#{r}{r}{g}{g}{b}{b}{a}{a}"
+    return color
+
+
+# Color-typed keys that must be expanded before reaching the Rust renderer.
+_COLOR_KEYS: frozenset[str] = frozenset(
+    {
+        "background",
+        "background_color",
+        "mark_color",
+        "font_color",
+        "title_color",
+        "label_color",
+        "grid_color",
+        "axis_line_color",
+        "tick_color",
+        "strip_background_color",
+        "reference_line_color",
+    }
+)
+
+
 class Theme:
     """Immutable theme value class for chart styling.
 
@@ -220,8 +283,10 @@ area_opacity, opacity : optional
         Resolves spec-defined fallbacks (e.g. ``title_color`` falls back to
         ``font_color`` if unset) and normalises the public Python alias
         ``background`` to the Rust binding's canonical ``background_color``
-        key. Rust sees a fully-resolved dict; no Option fallback chains in
-        the binding.
+        key.  CSS shorthand hex colors (``#rgb`` / ``#rgba``) are expanded to
+        their full-length equivalents (``#rrggbb`` / ``#rrggbbaa``) so the
+        Rust color parser never receives a shorthand string.  Rust sees a
+        fully-resolved dict; no Option fallback chains in the binding.
         """
         d = dict(self._props)
         # Apply fallback chains BEFORE the background rename so a future
@@ -234,6 +299,11 @@ area_opacity, opacity : optional
         # background regardless of which key was used at construction.
         if "background" in d:
             d["background_color"] = d.pop("background")
+        # Expand CSS shorthand hex colors (#rgb → #rrggbb, #rgba → #rrggbbaa)
+        # for all color-typed keys before handing the dict to Rust.
+        for key in _COLOR_KEYS:
+            if key in d and isinstance(d[key], str):
+                d[key] = _expand_hex(d[key])
         return d
 
     def __eq__(self, other: object) -> bool:

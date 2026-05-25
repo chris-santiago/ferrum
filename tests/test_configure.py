@@ -1,0 +1,296 @@
+"""Tests for ferrum.configure — config dataclasses and the Configure container."""
+
+from __future__ import annotations
+
+import pytest
+
+from ferrum.configure import (
+    AxisConfig,
+    ColorConfig,
+    Configure,
+    GridConfig,
+    LegendConfig,
+    PaddingConfig,
+    TitleConfig,
+)
+
+
+# ---------------------------------------------------------------------------
+# AxisConfig
+# ---------------------------------------------------------------------------
+
+
+class TestAxisConfig:
+    def test_default_construction(self):
+        cfg = AxisConfig()
+        assert cfg.x is True
+        assert cfg.y is True
+        assert cfg.label_angle is None
+
+    def test_frozen(self):
+        cfg = AxisConfig(label_angle=45)
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.label_angle = 0  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = AxisConfig(label_angle=-30, label_font_size=10)
+        d = cfg.to_dict()
+        assert d["label_angle"] == -30
+        assert d["label_font_size"] == 10
+        assert "label_color" not in d
+
+    def test_to_dict_includes_non_none_booleans(self):
+        cfg = AxisConfig(x=True, y=False, grid=False)
+        d = cfg.to_dict()
+        assert d["x"] is True
+        assert d["y"] is False
+        assert d["grid"] is False
+
+    def test_label_format_and_raw_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            AxisConfig(label_format="percent", label_format_raw=".1%")
+
+    def test_label_format_alone_is_valid(self):
+        cfg = AxisConfig(label_format="percent")
+        assert cfg.label_format == "percent"
+        assert cfg.label_format_raw is None
+
+    def test_label_format_raw_alone_is_valid(self):
+        cfg = AxisConfig(label_format_raw=".2f")
+        assert cfg.label_format_raw == ".2f"
+        assert cfg.label_format is None
+
+    def test_full_round_trip(self):
+        cfg = AxisConfig(
+            label_angle=-45,
+            tick_count=5,
+            grid_color="#eee",
+            domain_min=0.0,
+            domain_max=100.0,
+            nice=True,
+            zero=False,
+        )
+        d = cfg.to_dict()
+        assert d["label_angle"] == -45
+        assert d["tick_count"] == 5
+        assert d["grid_color"] == "#eee"
+        assert d["domain_min"] == 0.0
+        assert d["domain_max"] == 100.0
+        assert d["nice"] is True
+        assert d["zero"] is False
+
+
+# ---------------------------------------------------------------------------
+# LegendConfig
+# ---------------------------------------------------------------------------
+
+
+class TestLegendConfig:
+    def test_default_construction(self):
+        cfg = LegendConfig()
+        assert cfg.orient is None
+        assert cfg.columns is None
+
+    def test_frozen(self):
+        cfg = LegendConfig(orient="top")
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.orient = "left"  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = LegendConfig(orient="top", columns=2)
+        d = cfg.to_dict()
+        assert d["orient"] == "top"
+        assert d["columns"] == 2
+        assert "label_font_size" not in d
+
+    @pytest.mark.parametrize("orient", ["right", "left", "top", "bottom", "none"])
+    def test_valid_orients(self, orient):
+        cfg = LegendConfig(orient=orient)
+        assert cfg.orient == orient
+
+    def test_invalid_orient_raises(self):
+        with pytest.raises(ValueError, match="orient"):
+            LegendConfig(orient="center")
+
+    def test_orient_none_is_valid(self):
+        # orient=None means "not set" — different from orient="none"
+        cfg = LegendConfig(orient=None)
+        assert cfg.orient is None
+
+
+# ---------------------------------------------------------------------------
+# TitleConfig
+# ---------------------------------------------------------------------------
+
+
+class TestTitleConfig:
+    def test_default_construction(self):
+        cfg = TitleConfig()
+        assert cfg.anchor is None
+        assert cfg.font_size is None
+
+    def test_frozen(self):
+        cfg = TitleConfig(anchor="middle")
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.anchor = "end"  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = TitleConfig(font_size=18, anchor="start")
+        d = cfg.to_dict()
+        assert d["font_size"] == 18
+        assert d["anchor"] == "start"
+        assert "color" not in d
+
+    @pytest.mark.parametrize("anchor", ["start", "middle", "end"])
+    def test_valid_anchors(self, anchor):
+        cfg = TitleConfig(anchor=anchor)
+        assert cfg.anchor == anchor
+
+    def test_invalid_anchor_raises(self):
+        with pytest.raises(ValueError, match="anchor"):
+            TitleConfig(anchor="left")
+
+    def test_anchor_none_is_valid(self):
+        cfg = TitleConfig(anchor=None)
+        assert cfg.anchor is None
+
+
+# ---------------------------------------------------------------------------
+# GridConfig
+# ---------------------------------------------------------------------------
+
+
+class TestGridConfig:
+    def test_default_construction(self):
+        cfg = GridConfig()
+        assert cfg.x is None
+        assert cfg.color is None
+
+    def test_frozen(self):
+        cfg = GridConfig(color="#eee")
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.color = "#fff"  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = GridConfig(x=True, color="#ddd", width=0.5)
+        d = cfg.to_dict()
+        assert d["x"] is True
+        assert d["color"] == "#ddd"
+        assert d["width"] == 0.5
+        assert "y" not in d
+        assert "dash" not in d
+
+
+# ---------------------------------------------------------------------------
+# PaddingConfig
+# ---------------------------------------------------------------------------
+
+
+class TestPaddingConfig:
+    def test_default_construction(self):
+        cfg = PaddingConfig()
+        assert cfg.auto is True
+        assert cfg.top is None
+
+    def test_frozen(self):
+        cfg = PaddingConfig(top=10)
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.top = 20  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = PaddingConfig(top=10, left=5, auto=False)
+        d = cfg.to_dict()
+        assert d["top"] == 10
+        assert d["left"] == 5
+        assert d["auto"] is False
+        assert "right" not in d
+        assert "bottom" not in d
+
+
+# ---------------------------------------------------------------------------
+# ColorConfig
+# ---------------------------------------------------------------------------
+
+
+class TestColorConfig:
+    def test_default_construction(self):
+        cfg = ColorConfig()
+        assert cfg.scheme is None
+        assert cfg.domain is None
+
+    def test_frozen(self):
+        cfg = ColorConfig(scheme="tableau10")
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.scheme = "viridis"  # type: ignore[misc]
+
+    def test_to_dict_omits_none(self):
+        cfg = ColorConfig(scheme="tableau10", domain=["a", "b"])
+        d = cfg.to_dict()
+        assert d["scheme"] == "tableau10"
+        assert d["domain"] == ["a", "b"]
+        assert "sequential_scheme" not in d
+
+
+# ---------------------------------------------------------------------------
+# Configure container
+# ---------------------------------------------------------------------------
+
+
+class TestConfigure:
+    def test_empty_construction(self):
+        cfg = Configure()
+        assert cfg.axis is None
+        assert cfg.legend is None
+
+    def test_frozen(self):
+        cfg = Configure(axis=AxisConfig(label_angle=45))
+        with pytest.raises((TypeError, AttributeError)):
+            cfg.axis = None  # type: ignore[misc]
+
+    def test_to_dict_omits_none_fields(self):
+        cfg = Configure(
+            axis=AxisConfig(label_angle=30),
+            legend=LegendConfig(orient="top"),
+        )
+        d = cfg.to_dict()
+        assert "axis" in d
+        assert "legend" in d
+        assert "title" not in d
+        assert "grid" not in d
+
+    def test_to_dict_recurses_into_sub_configs(self):
+        cfg = Configure(
+            axis=AxisConfig(label_angle=30, grid_color="#eee"),
+            title=TitleConfig(font_size=16),
+        )
+        d = cfg.to_dict()
+        assert d["axis"]["label_angle"] == 30
+        assert d["axis"]["grid_color"] == "#eee"
+        assert d["title"]["font_size"] == 16
+
+    def test_accepts_axis_x_y_y2(self):
+        cfg = Configure(
+            axis_x=AxisConfig(label_angle=0),
+            axis_y=AxisConfig(label_angle=-30),
+            axis_y2=AxisConfig(tick_count=5),
+        )
+        d = cfg.to_dict()
+        assert "axis_x" in d
+        assert "axis_y" in d
+        assert "axis_y2" in d
+
+    def test_accepts_all_config_types(self):
+        cfg = Configure(
+            axis=AxisConfig(),
+            axis_x=AxisConfig(),
+            axis_y=AxisConfig(),
+            axis_y2=AxisConfig(),
+            legend=LegendConfig(),
+            title=TitleConfig(),
+            grid=GridConfig(),
+            padding=PaddingConfig(),
+            color=ColorConfig(),
+        )
+        # All set, no error raised
+        assert cfg.axis is not None
+        assert cfg.color is not None

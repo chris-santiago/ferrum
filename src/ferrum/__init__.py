@@ -214,6 +214,21 @@ import ferrum.plots as plots
 import ferrum.color as color
 import ferrum.config as config
 
+from ferrum.configure import (
+    AxisConfig,
+    LegendConfig,
+    TitleConfig,
+    GridConfig,
+    PaddingConfig,
+    ColorConfig,
+    Configure,
+)
+from ferrum.format_presets import resolve_format
+from ferrum.structural import SecondaryY, BreakAxis, Inset
+from ferrum.annotation.coords import px, norm, PixelCoord, NormCoord
+import ferrum.annotation as annotation
+from ferrum.annotation import Annotate
+
 import ferrum.encoding as encoding
 from ferrum.encoding import (
     X,
@@ -608,4 +623,22 @@ __all__ = [
     # Phase 12 — color and config modules
     "color",
     "config",
+    # Declarative config surface
+    "AxisConfig",
+    "LegendConfig",
+    "TitleConfig",
+    "GridConfig",
+    "PaddingConfig",
+    "ColorConfig",
+    "Configure",
+    "resolve_format",
+    "SecondaryY",
+    "BreakAxis",
+    "Inset",
+    "px",
+    "norm",
+    "PixelCoord",
+    "NormCoord",
+    "annotation",
+    "Annotate",
 ]

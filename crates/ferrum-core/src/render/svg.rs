@@ -415,15 +415,19 @@ pub fn fmt_f(x: f64) -> String {
     let x = if x == 0.0 { 0.0 } else { x };
     let s = format!("{x:.*}", FLOAT_PRECISION);
     let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if trimmed.is_empty() || trimmed == "-" { "0".to_string() } else { trimmed }
+    // After trimming, check for bare "-" or "-0" — both represent negative zero,
+    // which is semantically wrong in SVG coordinates.
+    if trimmed.is_empty() || trimmed == "-" || trimmed == "-0" { "0".to_string() } else { trimmed }
 }
 
 pub fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    // Strip null bytes first: \x00 is invalid in XML and would produce malformed output.
+    s.replace('\0', "").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 pub fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    // Strip null bytes first: \x00 is invalid in XML and would produce malformed output.
+    s.replace('\0', "").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(test)]

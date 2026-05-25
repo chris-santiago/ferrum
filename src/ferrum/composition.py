@@ -15,6 +15,18 @@ def _embed_chart_spec(c) -> Optional[dict]:
     return _json.loads(c.to_spec().to_json())
 
 
+def _copy_configure_layers(src: "_ChartLike", dst: "_ChartLike") -> None:
+    """Copy ``_configure_layers`` from *src* to *dst* if present.
+
+    Used by ``theme()``, ``properties()``, and ``share_scale()`` after
+    ``_rebuild_with_charts`` to ensure composition-level configure
+    settings survive rebuild operations.
+    """
+    config = getattr(src, "_configure_layers", None)
+    if config:
+        dst._configure_layers = list(config)
+
+
 class _ChartLike:
     """Common rendering plumbing shared by every composition wrapper.
 
@@ -22,6 +34,12 @@ class _ChartLike:
     :meth:`theme`, :meth:`properties`, and :meth:`__repr__`.  This base
     centralizes the save / show / Jupyter-display / PNG-stub boilerplate
     that previously drifted across five copies (K2 / K3 / K11 / K15).
+
+    **Composition-level configure** (``configure_axis``, ``configure_grid``,
+    etc.) is accumulated in ``_configure_layers`` and injected into each
+    child chart at render time.  Child-level config always wins over
+    composition-level config because the composition layers are prepended
+    (earlier entries in ``_configure`` are overridden by later ones).
     """
 
     def show_svg(self) -> str:  # pragma: no cover - abstract
@@ -200,7 +218,9 @@ class _ChartLike:
                 out = inject_scale(out, ch, sd)
             return out
 
-        return self._rebuild_with_charts(_apply)
+        result = self._rebuild_with_charts(_apply)
+        _copy_configure_layers(self, result)
+        return result
 
     def theme(self, t):
         """Apply a theme to every sub-chart and return a new composition.
@@ -216,7 +236,9 @@ class _ChartLike:
             A new instance of the same composition class with *t* applied
             to each sub-chart.
         """
-        return self._rebuild_with_charts(lambda c: c.theme(t))
+        result = self._rebuild_with_charts(lambda c: c.theme(t))
+        _copy_configure_layers(self, result)
+        return result
 
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to every sub-chart.
@@ -233,7 +255,326 @@ class _ChartLike:
             A new instance of the same composition class with updated
             sub-chart properties.
         """
-        return self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+        result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+        _copy_configure_layers(self, result)
+        return result
+
+    # ---- Declarative configuration surface ----
+
+    def _inject_parent_config(self, chart):
+        """Prepend composition-level configure layers onto a child chart.
+
+        For ``Chart`` children, composition-level layers are prepended to the
+        chart's ``_configure`` list so that per-chart layers (which appear
+        later) override them — ``_resolve_chart_config`` processes
+        ``_configure`` in order with later entries winning.
+
+        For nested composition children (``_ChartLike`` subclasses), the
+        layers are merged into the child's ``_configure_layers`` so they
+        propagate further down at render time.
+        """
+        config = getattr(self, "_configure_layers", None)
+        if not config:
+            return chart
+        if isinstance(chart, _ChartLike):
+            # Nested composition: merge into child's own _configure_layers.
+            new = copy.copy(chart)
+            existing = getattr(chart, "_configure_layers", [])
+            new._configure_layers = list(config) + list(existing)
+            return new
+        # Plain Chart: prepend to _configure list.
+        new = chart._clone()
+        new._configure = list(config) + list(new._configure)
+        return new
+
+    def configure_axis(
+        self,
+        *,
+        x: bool = True,
+        y: bool = True,
+        label_angle: "float | None" = None,
+        label_font_size: "float | None" = None,
+        label_color: "str | None" = None,
+        label_format: "str | None" = None,
+        label_format_raw: "str | None" = None,
+        label_overlap: "str | None" = None,
+        tick_count: "int | None" = None,
+        tick_size: "float | None" = None,
+        tick_values: "list | None" = None,
+        title_font_size: "float | None" = None,
+        title_color: "str | None" = None,
+        title_padding: "float | None" = None,
+        label_padding: "float | None" = None,
+        domain: "bool | None" = None,
+        domain_color: "str | None" = None,
+        domain_width: "float | None" = None,
+        grid: "bool | None" = None,
+        grid_color: "str | None" = None,
+        grid_dash: "list[float] | None" = None,
+        grid_width: "float | None" = None,
+        domain_min: "float | None" = None,
+        domain_max: "float | None" = None,
+        nice: "bool | None" = None,
+        zero: "bool | None" = None,
+    ) -> "_ChartLike":
+        """Apply composition-level axis configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_axis`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import AxisConfig, Configure
+
+        cfg = AxisConfig(
+            x=x,
+            y=y,
+            label_angle=label_angle,
+            label_font_size=label_font_size,
+            label_color=label_color,
+            label_format=label_format,
+            label_format_raw=label_format_raw,
+            label_overlap=label_overlap,
+            tick_count=tick_count,
+            tick_size=tick_size,
+            tick_values=tick_values,
+            title_font_size=title_font_size,
+            title_color=title_color,
+            title_padding=title_padding,
+            label_padding=label_padding,
+            domain=domain,
+            domain_color=domain_color,
+            domain_width=domain_width,
+            grid=grid,
+            grid_color=grid_color,
+            grid_dash=grid_dash,
+            grid_width=grid_width,
+            domain_min=domain_min,
+            domain_max=domain_max,
+            nice=nice,
+            zero=zero,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [Configure(axis=cfg)]
+        return new
+
+    def configure_legend(
+        self,
+        *,
+        orient: "str | None" = None,
+        direction: "str | None" = None,
+        columns: "int | None" = None,
+        title_font_size: "float | None" = None,
+        label_font_size: "float | None" = None,
+        symbol_size: "float | None" = None,
+        symbol_type: "str | None" = None,
+        gradient_length: "float | None" = None,
+        offset: "float | None" = None,
+        padding: "float | None" = None,
+    ) -> "_ChartLike":
+        """Apply composition-level legend configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_legend`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import LegendConfig, Configure
+
+        cfg = LegendConfig(
+            orient=orient,
+            direction=direction,
+            columns=columns,
+            title_font_size=title_font_size,
+            label_font_size=label_font_size,
+            symbol_size=symbol_size,
+            symbol_type=symbol_type,
+            gradient_length=gradient_length,
+            offset=offset,
+            padding=padding,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [
+            Configure(legend=cfg)
+        ]
+        return new
+
+    def configure_title(
+        self,
+        *,
+        font_size: "float | None" = None,
+        font_weight: "str | None" = None,
+        anchor: "str | None" = None,
+        color: "str | None" = None,
+        offset: "float | None" = None,
+        subtitle_font_size: "float | None" = None,
+        subtitle_color: "str | None" = None,
+    ) -> "_ChartLike":
+        """Apply composition-level title configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_title`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import TitleConfig, Configure
+
+        cfg = TitleConfig(
+            font_size=font_size,
+            font_weight=font_weight,
+            anchor=anchor,
+            color=color,
+            offset=offset,
+            subtitle_font_size=subtitle_font_size,
+            subtitle_color=subtitle_color,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [
+            Configure(title=cfg)
+        ]
+        return new
+
+    def configure_grid(
+        self,
+        *,
+        x: "bool | None" = None,
+        y: "bool | None" = None,
+        color: "str | None" = None,
+        width: "float | None" = None,
+        dash: "list[float] | None" = None,
+        opacity: "float | None" = None,
+        band_colors: "list[str] | None" = None,
+    ) -> "_ChartLike":
+        """Apply composition-level grid configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_grid`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import GridConfig, Configure
+
+        cfg = GridConfig(
+            x=x,
+            y=y,
+            color=color,
+            width=width,
+            dash=dash,
+            opacity=opacity,
+            band_colors=band_colors,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [Configure(grid=cfg)]
+        return new
+
+    def configure_padding(
+        self,
+        *,
+        top: "float | None" = None,
+        right: "float | None" = None,
+        bottom: "float | None" = None,
+        left: "float | None" = None,
+        auto: bool = True,
+    ) -> "_ChartLike":
+        """Apply composition-level padding configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_padding`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import PaddingConfig, Configure
+
+        cfg = PaddingConfig(top=top, right=right, bottom=bottom, left=left, auto=auto)
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [
+            Configure(padding=cfg)
+        ]
+        return new
+
+    def configure_color(
+        self,
+        *,
+        scheme: "str | None" = None,
+        sequential_scheme: "str | None" = None,
+        diverging_scheme: "str | None" = None,
+        domain: "list | None" = None,
+        range: "list[str] | None" = None,
+    ) -> "_ChartLike":
+        """Apply composition-level color scale configuration.
+
+        The config is propagated to every sub-chart at render time.
+        Per-chart ``configure_color`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import ColorConfig, Configure
+
+        cfg = ColorConfig(
+            scheme=scheme,
+            sequential_scheme=sequential_scheme,
+            diverging_scheme=diverging_scheme,
+            domain=domain,
+            range=range,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [
+            Configure(color=cfg)
+        ]
+        return new
+
+    def configure(
+        self,
+        *,
+        axis: "AxisConfig | None" = None,
+        axis_x: "AxisConfig | None" = None,
+        axis_y: "AxisConfig | None" = None,
+        axis_y2: "AxisConfig | None" = None,
+        legend: "LegendConfig | None" = None,
+        title: "TitleConfig | None" = None,
+        grid: "GridConfig | None" = None,
+        padding: "PaddingConfig | None" = None,
+        color: "ColorConfig | None" = None,
+    ) -> "_ChartLike":
+        """Append a :class:`~ferrum.configure.Configure` layer to the composition.
+
+        Accepts typed config objects for each domain.  All parameters are
+        keyword-only and default to ``None`` (no change for that domain).
+        The config is propagated to every sub-chart at render time;
+        per-chart ``configure`` calls override these settings.
+
+        Returns
+        -------
+        _ChartLike
+        """
+        from ferrum.configure import Configure
+
+        cfg = Configure(
+            axis=axis,
+            axis_x=axis_x,
+            axis_y=axis_y,
+            axis_y2=axis_y2,
+            legend=legend,
+            title=title,
+            grid=grid,
+            padding=padding,
+            color=color,
+        )
+        new = copy.copy(self)
+        new._configure_layers = list(getattr(self, "_configure_layers", [])) + [cfg]
+        return new
 
     def _rebuild_with_charts(self, fn):  # pragma: no cover - abstract
         """Return a new composition with each member chart transformed by *fn*.
@@ -256,6 +597,25 @@ class _CompositeBase(_ChartLike):
     def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
         self.charts = list(charts)
         self.spacing = spacing
+
+    def __copy__(self):
+        """Shallow copy that duplicates mutable list attributes."""
+        new = object.__new__(type(self))
+        # Copy __dict__ for dynamic attributes (e.g. _configure_layers).
+        if hasattr(self, "__dict__"):
+            new.__dict__.update(self.__dict__)
+        # Copy slot attributes from the full MRO.
+        for cls in type(self).__mro__:
+            for slot in getattr(cls, "__slots__", ()):
+                if slot == "__dict__":
+                    continue
+                try:
+                    setattr(new, slot, getattr(self, slot))
+                except AttributeError:
+                    pass
+        # Ensure the mutable charts list is a fresh copy.
+        new.charts = list(self.charts)
+        return new
 
     def __or__(self, other):
         return HConcatChart([self, other])
@@ -289,7 +649,8 @@ class HConcatChart(_CompositeBase):
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes horizontally."""
-        return _merge_child_scenes(self.charts, self.spacing, layout="horizontal")
+        charts = [self._inject_parent_config(c) for c in self.charts]
+        return _merge_child_scenes(charts, self.spacing, layout="horizontal")
 
     def show_svg(self) -> str:
         """Render the horizontally concatenated charts to an SVG string.
@@ -301,7 +662,8 @@ class HConcatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_horizontal
 
-        svgs = [c.show_svg() for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self.charts]
+        svgs = [c.show_svg() for c in charts]
         return compose_svg_horizontal(svgs, spacing=self.spacing, align="top")
 
     def __repr__(self) -> str:
@@ -331,7 +693,8 @@ class VConcatChart(_CompositeBase):
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes vertically."""
-        return _merge_child_scenes(self.charts, self.spacing, layout="vertical")
+        charts = [self._inject_parent_config(c) for c in self.charts]
+        return _merge_child_scenes(charts, self.spacing, layout="vertical")
 
     def show_svg(self) -> str:
         """Render the vertically concatenated charts to an SVG string.
@@ -343,7 +706,8 @@ class VConcatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_vertical
 
-        svgs = [c.show_svg() for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self.charts]
+        svgs = [c.show_svg() for c in charts]
         return compose_svg_vertical(svgs, spacing=self.spacing, align="left")
 
     def __repr__(self) -> str:
@@ -458,13 +822,15 @@ class JointChart(_ChartLike):
         JointChart
             A new instance with updated center-chart properties.
         """
-        return JointChart(
+        result = JointChart(
             self.center.properties(**kwargs),
             top=self.top,
             right=self.right,
             ratio=self.ratio,
             spacing=self.spacing,
         )
+        _copy_configure_layers(self, result)
+        return result
 
     def _rebuild_with_charts(self, fn):
         return JointChart(
@@ -485,24 +851,28 @@ class JointChart(_ChartLike):
         """
         from ferrum._interactive import _render_scene
 
-        has_top = self.top is not None
-        has_right = self.right is not None
+        center = self._inject_parent_config(self.center)
+        top = self._inject_parent_config(self.top) if self.top is not None else None
+        right = self._inject_parent_config(self.right) if self.right is not None else None
+
+        has_top = top is not None
+        has_right = right is not None
 
         # No marginals: render center directly.
         if not has_top and not has_right:
-            return _render_scene(self.center)
+            return _render_scene(center)
 
         # Build grid cells matching the SVG path layout.
         cells: list[tuple[int, int, object]] = []
         if has_top and has_right:
             # Full 2x2 grid: top at (0,0), center at (1,0), right at (1,1).
-            cells = [(0, 0, self.top), (1, 0, self.center), (1, 1, self.right)]
+            cells = [(0, 0, top), (1, 0, center), (1, 1, right)]
         elif has_top:
             # Vertical stack: top at (0,0), center at (1,0).
-            cells = [(0, 0, self.top), (1, 0, self.center)]
+            cells = [(0, 0, top), (1, 0, center)]
         else:
             # Horizontal stack: center at (0,0), right at (0,1).
-            cells = [(0, 0, self.center), (0, 1, self.right)]
+            cells = [(0, 0, center), (0, 1, right)]
 
         return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
@@ -523,11 +893,14 @@ class JointChart(_ChartLike):
         # data axis is redundant against the centre cell and the marginal-
         # only axis (count/density on a thin strip) is illegible at marginal
         # size.
-        top_chart = self.top.axis(show=False) if self.top is not None else None
-        right_chart = self.right.axis(show=False) if self.right is not None else None
+        center = self._inject_parent_config(self.center)
+        top = self._inject_parent_config(self.top) if self.top is not None else None
+        right = self._inject_parent_config(self.right) if self.right is not None else None
+        top_chart = top.axis(show=False) if top is not None else None
+        right_chart = right.axis(show=False) if right is not None else None
         top_svg = top_chart.show_svg() if top_chart is not None else None
         right_svg = right_chart.show_svg() if right_chart is not None else None
-        cells = [top_svg, None, self.center.show_svg(), right_svg]
+        cells = [top_svg, None, center.show_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         return compose_svg_grid(
@@ -893,7 +1266,7 @@ class RepeatChart(_ChartLike):
                 raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
         merged = dict(self.resolve or {})
         merged.update(channels)
-        return RepeatChart(
+        result = RepeatChart(
             self.template,
             row=self.row,
             column=self.column,
@@ -904,10 +1277,12 @@ class RepeatChart(_ChartLike):
             columns=self.columns,
             resolve=merged or None,
         )
+        _copy_configure_layers(self, result)
+        return result
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by expanding cells and merging scenes."""
-        cells = self.expand()
+        cells = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
 
         if self.corner and self.row is not None and self.column is not None:
             # Corner mode: cells must be placed at their true (row, col) grid
@@ -944,7 +1319,7 @@ class RepeatChart(_ChartLike):
         """
         from ferrum._core import compose_svg_grid
 
-        cells = self.expand()
+        cells = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
         if self.row is not None and self.column is not None:
             n_rows = len(self.row)
             n_cols = len(self.column)
@@ -1096,13 +1471,15 @@ class ClusterMapChart(_ChartLike):
         ClusterMapChart
             A new instance with updated heatmap-chart properties.
         """
-        return ClusterMapChart(
+        result = ClusterMapChart(
             self.heatmap.properties(**kwargs),
             row_dendrogram=self.row_dendrogram,
             col_dendrogram=self.col_dendrogram,
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
+        _copy_configure_layers(self, result)
+        return result
 
     def _rebuild_with_charts(self, fn):
         return ClusterMapChart(
@@ -1121,30 +1498,41 @@ class ClusterMapChart(_ChartLike):
           - row_dendrogram at (row=1, col=0) -- left of heatmap
           - heatmap        at (row=1, col=1) -- main content
         """
-        has_row = self.row_dendrogram is not None
-        has_col = self.col_dendrogram is not None
+        heatmap = self._inject_parent_config(self.heatmap)
+        row_dendro = (
+            self._inject_parent_config(self.row_dendrogram)
+            if self.row_dendrogram is not None
+            else None
+        )
+        col_dendro = (
+            self._inject_parent_config(self.col_dendrogram)
+            if self.col_dendrogram is not None
+            else None
+        )
+        has_row = row_dendro is not None
+        has_col = col_dendro is not None
 
         # No dendrograms: render heatmap directly.
         if not has_row and not has_col:
             from ferrum._interactive import _render_scene
 
-            return _render_scene(self.heatmap)
+            return _render_scene(heatmap)
 
         # Build grid cells matching the SVG path layout.
         cells: list[tuple[int, int, object]] = []
         if has_row and has_col:
             # Full 2x2: col_dendro at (0,1), row_dendro at (1,0), heatmap at (1,1).
             cells = [
-                (0, 1, self.col_dendrogram),
-                (1, 0, self.row_dendrogram),
-                (1, 1, self.heatmap),
+                (0, 1, col_dendro),
+                (1, 0, row_dendro),
+                (1, 1, heatmap),
             ]
         elif has_row:
             # Horizontal: row_dendro at (0,0), heatmap at (0,1).
-            cells = [(0, 0, self.row_dendrogram), (0, 1, self.heatmap)]
+            cells = [(0, 0, row_dendro), (0, 1, heatmap)]
         else:
             # Vertical: col_dendro at (0,0), heatmap at (1,0).
-            cells = [(0, 0, self.col_dendrogram), (1, 0, self.heatmap)]
+            cells = [(0, 0, col_dendro), (1, 0, heatmap)]
 
         return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
@@ -1158,6 +1546,7 @@ class ClusterMapChart(_ChartLike):
         """
         from ferrum._core import compose_svg_grid
 
+        heatmap = self._inject_parent_config(self.heatmap)
         d = self.dendrogram_ratio
         h = 1.0 - d
         # Pre-resize each component so the heatmap fills (h × h) of the grid
@@ -1166,8 +1555,8 @@ class ClusterMapChart(_ChartLike):
         # but we still pre-resize because the dendrogram tree topology depends
         # on the panel viewport at SVG-emit time — letting the compositor
         # rescale after-the-fact would distort branch positions.
-        hm_w = self.heatmap._width or 600.0
-        hm_h = self.heatmap._height or 400.0
+        hm_w = heatmap._width or 600.0
+        hm_h = heatmap._height or 400.0
         dendro_w = hm_w * d / h
         dendro_h = hm_h * d / h
         # Dendrograms have no meaningful axes (only the tree structure
@@ -1175,18 +1564,18 @@ class ClusterMapChart(_ChartLike):
         # dendrogram chart at construction time, so spec-level suppression
         # is in effect here — no post-render SVG mangling needed.
         col_dendro = (
-            self.col_dendrogram.properties(width=hm_w, height=dendro_h)
+            self._inject_parent_config(self.col_dendrogram).properties(width=hm_w, height=dendro_h)
             if self.col_dendrogram is not None
             else None
         )
         row_dendro = (
-            self.row_dendrogram.properties(width=dendro_w, height=hm_h)
+            self._inject_parent_config(self.row_dendrogram).properties(width=dendro_w, height=hm_h)
             if self.row_dendrogram is not None
             else None
         )
         col_svg = col_dendro.show_svg() if col_dendro is not None else None
         row_svg = row_dendro.show_svg() if row_dendro is not None else None
-        cells = [None, col_svg, row_svg, self.heatmap.show_svg()]
+        cells = [None, col_svg, row_svg, heatmap.show_svg()]
         return compose_svg_grid(
             cells,
             rows=2,
@@ -1275,6 +1664,18 @@ class LayerChart(_ChartLike):
         self._resolve = resolve
         self._title = title
 
+    def __copy__(self):
+        """Shallow copy that duplicates the mutable _charts list."""
+        new = object.__new__(type(self))
+        new._charts = list(self._charts)
+        new._resolve = self._resolve
+        new._title = self._title
+        # Copy __dict__ (holds dynamic attrs like _configure_layers from the
+        # parent _ChartLike which doesn't define __slots__).
+        if hasattr(self, "__dict__"):
+            new.__dict__.update(self.__dict__)
+        return new
+
     @property
     def charts(self) -> list:
         """List of Chart : All member charts in layer order (bottom to top)."""
@@ -1305,7 +1706,8 @@ class LayerChart(_ChartLike):
     def _build_merged(self):
         """Merge member charts into a single multi-layer Chart via ``+``.
 
-        Applies ``resolve=`` scale sharing and ``title=`` when set.
+        Applies ``resolve=`` scale sharing, ``title=``, and composition-level
+        configure layers when set.
         """
         result = self._charts[0]
         for chart in self._charts[1:]:
@@ -1321,6 +1723,8 @@ class LayerChart(_ChartLike):
                         result = inject_scale(result, channel, sd)
         if self._title is not None:
             result = result.properties(title=self._title)
+        # Prepend composition-level configure layers so per-chart config wins.
+        result = self._inject_parent_config(result)
         return result
 
     def _rebuild_with_charts(self, fn):
@@ -1404,7 +1808,7 @@ class ConcatChart(_CompositeBase):
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes in a grid."""
-        render_charts = self._resolved_charts()
+        render_charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         n_cols = self._columns if self._columns is not None else len(render_charts)
         n_cols = min(n_cols, len(render_charts))
         return _merge_child_scenes_grid(render_charts, self.spacing, columns=n_cols)
@@ -1424,8 +1828,8 @@ class ConcatChart(_CompositeBase):
         n_cols = min(n_cols, n_cells)
         n_rows = (n_cells + n_cols - 1) // n_cols
 
-        # Apply resolve (shared scales) before rendering
-        render_charts = self._resolved_charts()
+        # Apply resolve (shared scales) and composition-level config before rendering
+        render_charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
 
         grid: list = [None] * (n_rows * n_cols)
         for idx, chart in enumerate(render_charts):

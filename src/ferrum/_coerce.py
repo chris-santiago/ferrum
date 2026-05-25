@@ -85,7 +85,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 data = data.with_columns(casts)
             return data.to_arrow()
         if isinstance(data, pl.LazyFrame):
-            return data.collect().to_arrow()
+            return to_arrow_table(data.collect())
     except ImportError:
         pass
 
@@ -114,10 +114,12 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 needs_cast = True
             new_cols.append(col)
         if needs_cast:
-            return pa.table({data.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
+            return pa.table(
+                new_cols, names=[data.schema.field(i).name for i in range(len(data.schema))]
+            )
         return data
     if isinstance(data, pa.RecordBatch):
-        return pa.Table.from_batches([data])
+        return to_arrow_table(pa.Table.from_batches([data]))
 
     # Direct conversions: dict, list, numpy
     if isinstance(data, dict):

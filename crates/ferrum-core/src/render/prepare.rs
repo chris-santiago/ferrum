@@ -475,6 +475,12 @@ pub fn prepare_render_inputs(
             show_grid: x_axis_grid,
             tick_format: None, // already applied above
             tick_format_type: None,
+            tick_values_override: None,
+            label_format_override: None,
+            title_font_size: None,
+            title_color: None,
+            title_padding: None,
+            label_padding: None,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -487,6 +493,12 @@ pub fn prepare_render_inputs(
             show_grid: y_axis_grid,
             tick_format: None,
             tick_format_type: None,
+            tick_values_override: None,
+            label_format_override: None,
+            title_font_size: None,
+            title_color: None,
+            title_padding: None,
+            label_padding: None,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -893,11 +905,26 @@ struct ParsedFmt {
     precision: Option<usize>,
     /// Format type char, or `'\0'` for "auto/default".
     fmt_type: char,
+    /// Optional literal prefix to prepend to the formatted output (e.g. `'$'`).
+    prefix: Option<char>,
 }
 
 /// Parse a D3-subset format string into a `ParsedFmt`.
+///
+/// Supported d3-format features:
+/// - `$` prefix → prepend "$" to output
+/// - `,` → thousands separator
+/// - `.N` → decimal precision
+/// - Type chars: `f`, `e`, `%`, `d`, `s`, `g`
 fn parse_d3_fmt(fmt: &str) -> ParsedFmt {
     let mut s = fmt;
+    // Strip optional `$` currency prefix (d3 fill/symbol character).
+    let prefix = if let Some(rest) = s.strip_prefix('$') {
+        s = rest;
+        Some('$')
+    } else {
+        None
+    };
     let thousands = if let Some(rest) = s.strip_prefix(',') {
         s = rest;
         true
@@ -912,7 +939,7 @@ fn parse_d3_fmt(fmt: &str) -> ParsedFmt {
         (None, s)
     };
     let fmt_type = s.chars().next().unwrap_or('\0');
-    ParsedFmt { thousands, precision, fmt_type }
+    ParsedFmt { thousands, precision, fmt_type, prefix }
 }
 
 /// Apply thousands-separator grouping to an unsigned integer digit string.
@@ -967,7 +994,7 @@ fn format_si(v: f64, precision: usize) -> String {
 /// Apply a `ParsedFmt` spec to a single f64 value.
 fn apply_fmt_to_value(v: f64, spec: &ParsedFmt) -> String {
     use crate::render::format::format_numeric;
-    match spec.fmt_type {
+    let body = match spec.fmt_type {
         'f' => {
             let prec = spec.precision.unwrap_or(2);
             if spec.thousands { format_grouped(v, prec) } else { format!("{v:.*}", prec) }
@@ -1009,6 +1036,10 @@ fn apply_fmt_to_value(v: f64, spec: &ParsedFmt) -> String {
             }
         }
         _ => format_numeric(v),
+    };
+    match spec.prefix {
+        Some(p) => format!("{p}{body}"),
+        None => body,
     }
 }
 
@@ -1020,7 +1051,7 @@ fn apply_fmt_to_value(v: f64, spec: &ParsedFmt) -> String {
 /// using a D3-subset parser. When `format_type` is `"time"`, we treat the label as
 /// an epoch-ms integer. Labels that fail to parse are left unchanged (ordinal
 /// labels, already-formatted time strings, etc.).
-fn apply_tick_format(
+pub(crate) fn apply_tick_format(
     labels: Vec<String>,
     format: Option<&str>,
     format_type: Option<&str>,
@@ -1066,43 +1097,55 @@ mod tick_format_tests {
     fn parse_dotf() {
         assert_eq!(
             parse_d3_fmt(".2f"),
-            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 'f' }
+            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 'f', prefix: None }
         );
     }
     #[test]
     fn parse_pct() {
         assert_eq!(
             parse_d3_fmt(".1%"),
-            ParsedFmt { thousands: false, precision: Some(1), fmt_type: '%' }
+            ParsedFmt { thousands: false, precision: Some(1), fmt_type: '%', prefix: None }
         );
     }
     #[test]
     fn parse_comma_dotf() {
         assert_eq!(
             parse_d3_fmt(",.0f"),
-            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f' }
+            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f', prefix: None }
         );
     }
     #[test]
     fn parse_comma_only() {
         assert_eq!(
             parse_d3_fmt(","),
-            ParsedFmt { thousands: true, precision: None, fmt_type: '\0' }
+            ParsedFmt { thousands: true, precision: None, fmt_type: '\0', prefix: None }
         );
     }
     #[test]
     fn parse_d() {
         assert_eq!(
             parse_d3_fmt("d"),
-            ParsedFmt { thousands: false, precision: None, fmt_type: 'd' }
+            ParsedFmt { thousands: false, precision: None, fmt_type: 'd', prefix: None }
         );
     }
     #[test]
     fn parse_si() {
         assert_eq!(
             parse_d3_fmt(".2s"),
-            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 's' }
+            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 's', prefix: None }
         );
+    }
+    #[test]
+    fn parse_currency_prefix() {
+        assert_eq!(
+            parse_d3_fmt("$,.0f"),
+            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f', prefix: Some('$') }
+        );
+    }
+    #[test]
+    fn currency_format_prepends_dollar() {
+        // "$,.0f" should produce "$10", "$1,000", etc.
+        assert_eq!(fmt_labels(&["10", "1000", "50"], "$,.0f"), vec!["$10", "$1,000", "$50"]);
     }
     #[test]
     fn dotf_two_decimals() {
@@ -1412,6 +1455,7 @@ mod tests {
                 data_source: None,
                 position: None,
                 blend: None,
+                name: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -1419,7 +1463,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None, blend: None,
+            position: None, blend: None, name: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -1562,7 +1606,7 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
-            position: None, blend: None,
+            position: None, blend: None, name: None,
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();

@@ -266,17 +266,89 @@ def displot(
 
     chart = chart.encode(**enc)
 
-    # Optional kde/rug layers (only when not already that kind).
-    if kde and kind != "kde":
-        kde_layer = (
-            Chart(data)
-            .mark_density(bandwidth=bandwidth, bw_adjust=bw_adjust, fill=False)
-            .encode(x=x)
-        )
-        chart = chart + kde_layer
-    if rug and kind != "rug":
-        rug_layer = Chart(data).mark_tick().encode(x=x)
-        chart = chart + rug_layer
+    # Optional kde/rug overlay layers (only when not already that kind).
+    #
+    # These overlays must NOT use Chart.__add__ because the histogram's Bin
+    # transform replaces the original data columns (e.g. "sepal_length" →
+    # "bin_start"/"bin_end"/"count").  __add__ merges all transforms into a
+    # single sequential pipeline, so the Kde overlay would run on the Bin
+    # output and fail to find the original column.
+    #
+    # Instead we resolve the chart, then manually prepend named transforms
+    # for the overlays.  Named transforms read from the current chain head
+    # (the original data, since they run before the unnamed Bin) without
+    # advancing it.  The overlay _Layer objects set data_source to the named
+    # transform key so they read the correct output.
+    if (kde and kind != "kde") or (rug and kind != "rug"):
+        from ferrum._layer import _Layer as _OverlayLayer
+        from ferrum.encoding.base import ChannelBase as _CB_overlay
+
+        chart = chart._resolve_pending()
+        chart = chart._clone()
+        x_field = x.field if isinstance(x, _CB_overlay) else str(x) if x is not None else None
+
+        # Convert single-mark chart to layered mode: promote the existing
+        # mark + encoding into a primary layer so overlay layers can be
+        # appended alongside it.
+        if chart._layers is None and chart._mark is not None:
+            primary_layer = _OverlayLayer(
+                mark=chart._mark,
+                encoding=dict(chart._encoding),
+                mark_kwargs=dict(chart._mark_kwargs) if chart._mark_kwargs else None,
+                position=chart._position,
+            )
+            chart._layers = [primary_layer]
+            chart._mark = None
+
+        if kde and kind != "kde" and x_field is not None:
+            from ferrum import Kde as _KdeTransform
+            import polars as pl
+
+            # KDE transform requires Float64; auto-cast integer x columns.
+            _INT_DTYPES = (
+                pl.Int8,
+                pl.Int16,
+                pl.Int32,
+                pl.Int64,
+                pl.UInt8,
+                pl.UInt16,
+                pl.UInt32,
+                pl.UInt64,
+            )
+            if hasattr(chart._data, "columns") and x_field in chart._data.columns:
+                if chart._data[x_field].dtype in _INT_DTYPES:
+                    chart._data = chart._data.with_columns(pl.col(x_field).cast(pl.Float64))
+
+            kde_xform = _KdeTransform(
+                x_field, bandwidth=bandwidth, bw_adjust=bw_adjust, name="kde_overlay"
+            )
+            # Prepend the named Kde before the unnamed Bin so it reads from
+            # the original (pre-Bin) data batch.
+            chart._transforms = [kde_xform] + list(chart._transforms or [])
+            chart._layers.append(
+                _OverlayLayer(
+                    name="kde",
+                    mark="line",
+                    encoding={"x": "value", "y": "density"},
+                    data_source="kde_overlay",
+                )
+            )
+
+        if rug and kind != "rug" and x_field is not None:
+            from ferrum._core import PyIdentity as _IdentityTransform
+
+            rug_xform = _IdentityTransform("rug_data")
+            # Prepend the named Identity before the unnamed Bin so it
+            # captures the original data for the rug tick marks.
+            chart._transforms = [rug_xform] + list(chart._transforms or [])
+            chart._layers.append(
+                _OverlayLayer(
+                    name="rug",
+                    mark="tick",
+                    encoding={"x": x_field},
+                    data_source="rug_data",
+                )
+            )
 
     # Name the layers so override passthrough can target them.
     if chart._layers is not None:
@@ -504,19 +576,30 @@ def catplot(
     from ferrum.encoding import Color as _Color
     from ferrum.encoding import X as _X, Y as _Y
 
+    # Build the encoding with x=categorical, y=value regardless of orientation.
+    # CoordFlip (added below when horizontal=True) handles the visual axis swap.
+    # Stat-mark desugars (boxplot, violin, swarm, etc.) always expect x=cat, y=val,
+    # so we normalise the encoding here rather than propagating the orientation
+    # through every desugar function.
     enc: dict = {}
-    if x is not None:
-        enc["x"] = x
-    if y is not None:
-        enc["y"] = y
+    if not horizontal:
+        if x is not None:
+            enc["x"] = x
+        if y is not None:
+            enc["y"] = y
+    else:
+        # orient="h": user passed x=val, y=cat — swap so x=cat, y=val for desugars.
+        if y is not None:
+            enc["x"] = y  # cat_field goes on x
+        if x is not None:
+            enc["y"] = x  # val_field goes on y
     if hue is not None:
         enc["color"] = hue
 
     # Wire order → sort on the categorical axis encoding.
+    # After the swap above, cat is always on x, so cat_channel is always "x".
     if order is not None and cat_field is not None:
-        cat_channel = "x" if not horizontal else "y"
-        cls = _X if cat_channel == "x" else _Y
-        enc[cat_channel] = cls(cat_field, sort=list(order))
+        enc["x"] = _X(cat_field, sort=list(order))
 
     # Wire hue_order → sort on the color encoding.
     if hue_order is not None and hue is not None:
@@ -532,9 +615,10 @@ def catplot(
             # adjustments aren't composable in Phase 9c).
             chart = chart.mark_point(position=position)
         elif jitter:
-            jit_axis = "x" if not horizontal else "y"
+            # After the enc normalisation above, cat is always on x, so jitter
+            # always acts on the x axis (the categorical band axis).
             chart = chart.mark_point(
-                position=Jitter(axis=jit_axis, width=0.4, seed=seed),
+                position=Jitter(axis="x", width=0.4, seed=seed),
             )
         else:
             chart = chart.mark_point(position=Identity())
@@ -570,10 +654,9 @@ def catplot(
         chart = chart.transform(Aggregate([op], groupby=[cat_field]))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
         # Remap value axis to the count column.
-        if not horizontal:
-            enc["y"] = "n"
-        else:
-            enc["x"] = "n"
+        # After enc normalisation, val is always on y (cat on x), so "n" always
+        # goes on y regardless of orientation.
+        enc["y"] = "n"
 
     chart = chart.encode(**enc)
 

@@ -27,7 +27,7 @@ from ferrum.selection import selection_point, value
 
 
 def _render(chart: fm.Chart) -> dict:
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     result = render_interactive(spec, data, viewport=viewport, theme=theme)
     json_str = result[0] if isinstance(result, tuple) else result
     return json.loads(json_str)
@@ -155,7 +155,7 @@ def test_interaction_config_includes_selections():
         .properties(width=300, height=200)
     )
 
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
 
     cfg = json.loads(InteractiveChart._extract_interaction_config(scene_json))
@@ -170,7 +170,7 @@ def test_interaction_config_empty_when_no_selections():
     from ferrum._interactive import InteractiveChart
 
     chart = _simple_scatter()
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     scene_json, _ = render_interactive(spec, data, viewport=viewport, theme=theme)
     cfg = json.loads(InteractiveChart._extract_interaction_config(scene_json))
     assert cfg.get("selections", []) == []
@@ -836,7 +836,7 @@ def test_geoshape_polygon_inside_plot_area():
 
 def _render_with_packed(chart: fm.Chart) -> tuple[dict, bytes]:
     """Return (scene_dict, packed_bytes) for a chart."""
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     result = render_interactive(spec, data, viewport=viewport, theme=theme)
     json_str, packed = result
     return json.loads(json_str), packed

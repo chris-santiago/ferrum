@@ -58,6 +58,9 @@ impl FacetGrid {
         gutter_x: f64,
         gutter_y: f64,
     ) -> FacetGrid {
+        // L-1: guard negative spacing — negative gutters cause panels to overlap.
+        let gutter_x = gutter_x.max(0.0);
+        let gutter_y = gutter_y.max(0.0);
         let ncols = ncols.max(1);
         let nrows = (n_panels + ncols - 1) / ncols;
         let nrows = nrows.max(1);
@@ -112,6 +115,9 @@ impl FacetGrid {
         gutter_x: f64,
         gutter_y: f64,
     ) -> FacetGrid {
+        // L-1: guard negative spacing — negative gutters cause panels to overlap.
+        let gutter_x = gutter_x.max(0.0);
+        let gutter_y = gutter_y.max(0.0);
         let nrows = nrows.max(1);
         let ncols = ncols.max(1);
         let total_x_gutter = gutter_x * (ncols.saturating_sub(1) as f64);

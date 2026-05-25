@@ -605,3 +605,437 @@ def test_svg_has_valid_viewbox():
     assert len(parts) == 4, f"viewBox must have 4 values, got: {match.group(1)}"
     w, h = float(parts[2]), float(parts[3])
     assert w > 0 and h > 0, f"viewBox width/height must be positive: {w}x{h}"
+
+
+# ---------------------------------------------------------------------------
+# 15. All-NaN data columns (targets: point.rs line 306 v.is_finite() guard,
+#     area.rs line 144, bar.rs line 410, etc.)
+# ---------------------------------------------------------------------------
+
+
+def test_point_all_nan_x_and_y_produces_no_marks():
+    """All-NaN in both x and y must produce valid SVG with zero marks, no crash."""
+    df = pl.DataFrame({
+        "x": [float("nan")] * 5,
+        "y": [float("nan")] * 5,
+    })
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y")
+    svg = chart.show_svg()
+    assert svg.startswith("<svg")
+    assert "NaN" not in svg
+    assert svg.count("<circle") == 0
+
+
+def test_bar_all_nan_y_ordinal_x_no_marks():
+    """Ordinal x bar chart where all y values are NaN must produce no bar rects."""
+    df = pl.DataFrame({
+        "cat": ["a", "b", "c"],
+        "val": [float("nan"), float("nan"), float("nan")],
+    })
+    chart = fr.Chart(df).mark_bar().encode(x="cat:N", y="val")
+    svg = chart.show_svg()
+    assert svg.startswith("<svg")
+    assert "NaN" not in svg
+
+
+def test_line_all_nan_y_produces_no_polyline():
+    """mark_line with all-NaN y must produce zero polylines, not a NaN path."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [float("nan")] * 4,
+    })
+    chart = fr.Chart(df).mark_line().encode(x="x", y="y")
+    svg = chart.show_svg()
+    assert svg.startswith("<svg")
+    assert "NaN" not in svg
+    # No polyline or path should be rendered
+    assert "<polyline" not in svg
+
+
+# ---------------------------------------------------------------------------
+# 16. Null in color/groupby columns (targets: point.rs line 342 match arm,
+#     line.rs grouping, bar.rs color_values)
+# ---------------------------------------------------------------------------
+
+
+def test_null_in_categorical_color_falls_back_to_default():
+    """Null values in a categorical color column should fall back to default fill,
+    not panic or produce NaN in the color attribute."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [10.0, 20.0, 30.0, 40.0],
+        "c": ["red", None, "blue", None],
+    })
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="c:N")
+    svg = chart.show_svg()
+    assert "NaN" not in svg
+    assert svg.count("<circle") >= 4  # all rows should render (+ legend glyphs)
+
+
+def test_line_null_in_color_grouping():
+    """Null in a line color column means those rows belong to a 'null' group;
+    must not crash during grouping (line.rs group construction)."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "g": ["A", "A", "A", None, None, None],
+    })
+    chart = fr.Chart(df).mark_line().encode(x="x", y="y", color="g:N")
+    svg = chart.show_svg()
+    assert "NaN" not in svg
+    assert svg.startswith("<svg")
+
+
+# ---------------------------------------------------------------------------
+# 17. Empty string categories (targets: bar.rs build_ordinal line 189,
+#     tick.rs ordinal-x-only, rect.rs heatmap)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_string_category_bar():
+    """Empty string as ordinal category should render as a valid bar label."""
+    df = pl.DataFrame({
+        "cat": ["", "b", "c"],
+        "val": [10.0, 20.0, 30.0],
+    })
+    chart = fr.Chart(df).mark_bar().encode(x="cat:N", y="val")
+    svg = chart.show_svg()
+    assert "NaN" not in svg
+    assert _count_rects(svg) >= 3
+
+
+def test_empty_string_category_heatmap():
+    """Empty string in heatmap x/y ordinal axis should not crash."""
+    df = pl.DataFrame({
+        "row": ["", "a"],
+        "col": ["x", ""],
+        "v": [1.0, 2.0],
+    })
+    chart = fr.Chart(df).mark_rect().encode(x="row:N", y="col:N", color="v:Q")
+    svg = chart.show_svg()
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# 18. configure() interactions (targets: draw.rs resolve_mark_style,
+#     theme propagation to mark rendering)
+# ---------------------------------------------------------------------------
+
+
+def test_theme_mark_color_changes_point_fill():
+    """Theme(mark_color=...) must change fill color in point SVG output.
+    Targets resolve_mark_style line 132 (theme.mark_color)."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [10.0, 20.0]})
+    svg = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .theme(fr.Theme(mark_color="#ff0000"))
+        .show_svg()
+    )
+    assert "#ff0000" in svg.lower() or "ff0000" in svg.lower()
+
+
+def test_theme_font_family_propagates_to_axis_labels():
+    """Theme(font=...) must appear in SVG text elements.
+    Targets ThemeInputs.font_family used in text.rs line 199."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [10.0, 20.0]})
+    svg = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .theme(fr.Theme(font_family="Courier New"))
+        .show_svg()
+    )
+    assert "Courier New" in svg
+
+
+def test_configure_axis_on_layered_chart_no_crash():
+    """configure() with typed config on a layered chart must not cause errors.
+    Targets theme/config merging across layers."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    chart = (
+        fr.Chart(df).mark_line().encode(x="x", y="y")
+        + fr.Chart(df).mark_point().encode(x="x", y="y")
+    )
+    svg = chart.configure(
+        axis=fr.configure.AxisConfig(label_angle=-45)
+    ).show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# 19. Annotation edge cases (targets: annotations.py annotate_hline etc.)
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_hline_at_zero():
+    """annotate_hline(y=0) must produce valid SVG, testing rule mark at y=0."""
+    ann = fr.annotate_hline(y=0.0)
+    svg = ann.show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg
+
+
+def test_annotate_vline_negative_x():
+    """annotate_vline at negative x must produce valid SVG."""
+    ann = fr.annotate_vline(x=-100.0)
+    svg = ann.show_svg()
+    assert "NaN" not in svg
+
+
+def test_annotate_text_empty_string_content():
+    """annotate_text with empty string should not crash.
+    Targets text.rs line 147: continue on None, but empty string is Some("")."""
+    ann = fr.annotate_text(x=1.0, y=1.0, text="")
+    svg = ann.show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg
+
+
+def test_annotate_rect_inverted_bounds():
+    """annotate_rect where x1 > x2 and y1 > y2 should still produce valid SVG.
+    Targets rect.rs build_quantitative_range abs() on width/height."""
+    ann = fr.annotate_rect(x1=10.0, x2=0.0, y1=10.0, y2=0.0, opacity=0.2)
+    svg = ann.show_svg()
+    assert "NaN" not in svg
+    assert "<rect" in svg
+
+
+def test_annotate_abline_zero_slope_horizontal():
+    """annotate_abline with slope=0 (horizontal) should produce valid SVG.
+    Targets line.rs with only 2 points spanning -1e6 to 1e6."""
+    line = fr.annotate_abline(slope=0.0, intercept=5.0)
+    svg = line.show_svg()
+    assert "NaN" not in svg
+
+
+def test_annotate_arrow_zero_length_segment():
+    """annotate_arrow where start==end produces a zero-length segment.
+    Targets segment.rs: the line should still render (both endpoints the same)."""
+    arrow_chart = fr.annotate_arrow(x1=1.0, y1=1.0, x2=1.0, y2=1.0)
+    svg = arrow_chart.show_svg()
+    assert "NaN" not in svg
+
+
+def test_annotate_arrow_with_label_text():
+    """annotate_arrow with label should produce SVG with the label text."""
+    arrow_chart = fr.annotate_arrow(x1=0.0, y1=0.0, x2=1.0, y2=1.0, label="peak")
+    svg = arrow_chart.show_svg()
+    assert "NaN" not in svg
+    assert ">peak<" in svg
+
+
+# ---------------------------------------------------------------------------
+# 20. Infinity in data (targets: is_finite() guards in point.rs line 306,
+#     bar.rs line 410, area.rs line 144)
+# ---------------------------------------------------------------------------
+
+
+def test_infinity_x_point_no_infinity_in_svg():
+    """Inf in x column must be filtered; SVG must not contain 'Infinity'."""
+    df = pl.DataFrame({
+        "x": [1.0, float("inf"), 3.0],
+        "y": [10.0, 20.0, 30.0],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "Infinity" not in svg
+    assert "NaN" not in svg
+
+
+def test_negative_infinity_y_bar_no_crash():
+    """Negative infinity in bar y column must not crash."""
+    df = pl.DataFrame({
+        "cat": ["a", "b", "c"],
+        "val": [10.0, float("-inf"), 30.0],
+    })
+    svg = fr.Chart(df).mark_bar().encode(x="cat:N", y="val").show_svg()
+    assert "Infinity" not in svg
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# 21. Very large float values (targets: scale to_pixel_f64 numeric overflow)
+# ---------------------------------------------------------------------------
+
+
+def test_very_large_floats_point():
+    """1e300 values should not produce NaN or Infinity in SVG."""
+    df = pl.DataFrame({
+        "x": [1e300, 2e300, 3e300],
+        "y": [1e300, 2e300, 3e300],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+    assert "Infinity" not in svg
+
+
+def test_very_small_positive_floats_point():
+    """1e-300 values should not produce NaN."""
+    df = pl.DataFrame({
+        "x": [1e-300, 2e-300, 3e-300],
+        "y": [1e-300, 2e-300, 3e-300],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# 22. Type boundaries: boolean, int32, pyarrow int columns
+# ---------------------------------------------------------------------------
+
+
+def test_boolean_column_as_categorical_color():
+    """Boolean column used as color should work as 2-category nominal.
+    Targets col_as_str path in draw.rs."""
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [10.0, 20.0, 30.0, 40.0],
+        "flag": [True, False, True, False],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="flag:N").show_svg()
+    assert "<circle" in svg
+    assert "NaN" not in svg
+
+
+def test_pyarrow_int32_table_cdi_boundary():
+    """PyArrow int32 columns cross the CDI boundary. Targets col_as_f64 in draw.rs."""
+    import pyarrow as pa
+    table = pa.table({
+        "x": pa.array([1, 2, 3], type=pa.int32()),
+        "y": pa.array([10, 20, 30], type=pa.int32()),
+    })
+    svg = fr.Chart(table).mark_point().encode(x="x", y="y").show_svg()
+    assert svg.count("<circle") == 3
+    assert "NaN" not in svg
+
+
+# ---------------------------------------------------------------------------
+# 23. Degenerate domain: all identical values (targets: scale domain
+#     resolution where (max - min) == 0)
+# ---------------------------------------------------------------------------
+
+
+def test_all_identical_x_degenerate_domain():
+    """All x values the same -> scale domain collapses to a single point.
+    Must not produce NaN from 0/0 in scale.to_pixel_f64."""
+    df = pl.DataFrame({
+        "x": [5.0, 5.0, 5.0],
+        "y": [1.0, 2.0, 3.0],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+
+
+def test_all_identical_y_bar_degenerate():
+    """Ordinal x bar chart with all y == 42 (degenerate y domain)."""
+    df = pl.DataFrame({
+        "cat": ["a", "b", "c"],
+        "val": [42.0, 42.0, 42.0],
+    })
+    svg = fr.Chart(df).mark_bar().encode(x="cat:N", y="val").show_svg()
+    assert "NaN" not in svg
+    assert _count_rects(svg) >= 3
+
+
+# ---------------------------------------------------------------------------
+# 24. SVG contract pin: viewBox must have finite numeric values
+# ---------------------------------------------------------------------------
+
+
+def test_viewbox_all_finite():
+    """SVG viewBox must contain 4 finite numeric values (not NaN NaN NaN NaN)."""
+    import math as _math
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    match = re.search(r'viewBox="([^"]*)"', svg)
+    assert match is not None
+    parts = match.group(1).split()
+    assert len(parts) == 4
+    for part in parts:
+        assert _math.isfinite(float(part)), f"viewBox contains non-finite: {part}"
+
+
+# ---------------------------------------------------------------------------
+# 25. Mixed null + valid alternating pattern
+# ---------------------------------------------------------------------------
+
+
+def test_alternating_null_x_y_only_both_valid_render():
+    """Rows where x is null alternate with rows where y is null.
+    Only rows with both valid should produce marks.
+    Targets point.rs per-row skip logic (lines 293-329)."""
+    df = pl.DataFrame({
+        "x": [1.0, None, 3.0, None, 5.0],
+        "y": [None, 20.0, 30.0, None, 50.0],
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+    # Only rows 2 (x=3, y=30) and 4 (x=5, y=50) have both valid
+    assert svg.count("<circle") <= 2
+
+
+# ---------------------------------------------------------------------------
+# 26. Error contracts
+# ---------------------------------------------------------------------------
+
+
+def test_missing_column_raises_valueerror():
+    """Using a non-existent column name in encoding raises ValueError.
+    Targets Python layer column validation before CDI transfer."""
+    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    with pytest.raises(ValueError):
+        fr.Chart(df).mark_point().encode(x="nonexistent", y="y").show_svg()
+
+
+def test_invalid_hex_color_theme_raises():
+    """Invalid hex color string in Theme() raises ValueError.
+    Targets ThemeInputs color parsing (from_hex_str in draw.rs)."""
+    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    with pytest.raises(ValueError):
+        fr.Chart(df).mark_point().encode(x="x", y="y").theme(
+            fr.Theme(mark_color="not-a-color")
+        ).show_svg()
+
+
+# ---------------------------------------------------------------------------
+# 27. Single-row mark for marks requiring >= 2 points
+# ---------------------------------------------------------------------------
+
+
+def test_single_row_line_no_crash():
+    """Single-row DataFrame with mark_line: line needs >= 2 points, should produce
+    valid SVG with no polyline. Targets line.rs 'if points.len() < 2 { continue }'."""
+    df = pl.DataFrame({"x": [1.0], "y": [10.0]})
+    svg = fr.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg
+
+
+def test_single_row_area_no_crash():
+    """Single-row DataFrame with mark_area: area needs >= 2 points.
+    Targets area.rs 'if top.len() < 2 { continue }'."""
+    df = pl.DataFrame({"x": [1.0], "y": [10.0]})
+    svg = fr.Chart(df).mark_area().encode(x="x", y="y").show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# 28. Composition: layer with no data overlap
+# ---------------------------------------------------------------------------
+
+
+def test_layer_different_data_no_crash():
+    """Layering two charts with completely different data should not crash.
+    Tests the merge logic in composition."""
+    df1 = pl.DataFrame({"x": [1.0, 2.0], "y": [10.0, 20.0]})
+    df2 = pl.DataFrame({"x": [3.0, 4.0], "y": [30.0, 40.0]})
+    chart = (
+        fr.Chart(df1).mark_point().encode(x="x", y="y")
+        + fr.Chart(df2).mark_line().encode(x="x", y="y")
+    )
+    svg = chart.show_svg()
+    assert "NaN" not in svg
+    assert "<svg" in svg

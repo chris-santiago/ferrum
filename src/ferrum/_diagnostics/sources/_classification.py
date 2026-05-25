@@ -58,7 +58,10 @@ class ClassificationCurvesMixin:
                 y_score,
                 drop_intermediate=drop_intermediate,
             )
-            auc = float(roc_auc_score(y_true, y_score))
+            try:
+                auc = float(roc_auc_score(y_true, y_score))
+            except ValueError:
+                auc = float("nan")
             for f, t, h in zip(fpr, tpr, thr):
                 rows.append(
                     {
@@ -210,13 +213,8 @@ class ClassificationCurvesMixin:
 
         if strategy == "uniform":
             edges = np.linspace(0.0, 1.0, n_bins + 1)
-        elif strategy == "quantile":
+        else:  # "quantile" — sklearn has already validated strategy above
             edges = np.quantile(y_score, np.linspace(0.0, 1.0, n_bins + 1))
-        else:
-            raise ValueError(
-                f"calibration_curve(strategy={strategy!r}) not supported; "
-                "use 'uniform' or 'quantile'."
-            )
         bin_idx = np.clip(np.digitize(y_score, edges[1:-1]), 0, n_bins - 1)
         counts_all = np.bincount(bin_idx, minlength=n_bins)
         centers = edges[:-1] + np.diff(edges) / 2.0

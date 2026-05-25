@@ -4,10 +4,14 @@
 //! when no explicit format is specified.
 
 /// Format a numeric tick value:
+/// - NaN or Infinity: returns empty string (not suitable for SVG text/tooltip).
 /// - Integer-valued in normal range: drop decimal ("0", "5", "100").
 /// - Decimal with ≤ 4 sig figs: drop trailing zeros ("1.5", "0.25").
 /// - |x| >= 1e6 or (0 < |x| < 1e-3): scientific notation ("1.5e6", "1e-4").
 pub fn format_numeric(x: f64) -> String {
+    if x.is_nan() || x.is_infinite() {
+        return String::new();
+    }
     if x == 0.0 {
         return "0".to_string();
     }
@@ -94,6 +98,27 @@ pub fn format_ordinal(value: &str) -> String {
     value.to_string()
 }
 
+/// Format a number as an ordinal: 1st, 2nd, 3rd, 4th, etc.
+///
+/// Handles English special cases: 11th, 12th, 13th (not 11st/12nd/13th),
+/// and the standard 1st/2nd/3rd/Nth pattern for all other values.
+///
+/// Used by axis label formatting when `label_format = "ordinal"` is specified
+/// in chart configuration (consumption wired incrementally).
+#[allow(dead_code)]
+pub fn format_ordinal_number(n: i64) -> String {
+    // Use unsigned_abs() to avoid i64::MIN overflow (i64::MIN.abs() panics in debug).
+    let abs = n.unsigned_abs();
+    let suffix = match (abs % 100, abs % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
 /// Format a numeric value per a subset of d3-format-style specs.
 ///
 /// Recognized patterns:
@@ -157,5 +182,50 @@ mod tests {
     #[test]
     fn ordinal_passthrough() {
         assert_eq!(format_ordinal("setosa"), "setosa");
+    }
+
+    #[test]
+    fn ordinal_number_basics() {
+        assert_eq!(format_ordinal_number(1), "1st");
+        assert_eq!(format_ordinal_number(2), "2nd");
+        assert_eq!(format_ordinal_number(3), "3rd");
+        assert_eq!(format_ordinal_number(4), "4th");
+        assert_eq!(format_ordinal_number(9), "9th");
+        assert_eq!(format_ordinal_number(10), "10th");
+    }
+
+    #[test]
+    fn ordinal_number_teens() {
+        assert_eq!(format_ordinal_number(11), "11th");
+        assert_eq!(format_ordinal_number(12), "12th");
+        assert_eq!(format_ordinal_number(13), "13th");
+    }
+
+    #[test]
+    fn ordinal_number_twenties() {
+        assert_eq!(format_ordinal_number(20), "20th");
+        assert_eq!(format_ordinal_number(21), "21st");
+        assert_eq!(format_ordinal_number(22), "22nd");
+        assert_eq!(format_ordinal_number(23), "23rd");
+        assert_eq!(format_ordinal_number(24), "24th");
+    }
+
+    #[test]
+    fn ordinal_number_hundreds() {
+        assert_eq!(format_ordinal_number(100), "100th");
+        assert_eq!(format_ordinal_number(101), "101st");
+        assert_eq!(format_ordinal_number(102), "102nd");
+        assert_eq!(format_ordinal_number(103), "103rd");
+        assert_eq!(format_ordinal_number(111), "111th");
+        assert_eq!(format_ordinal_number(112), "112th");
+        assert_eq!(format_ordinal_number(113), "113th");
+    }
+
+    #[test]
+    fn ordinal_number_zero_and_negative() {
+        assert_eq!(format_ordinal_number(0), "0th");
+        assert_eq!(format_ordinal_number(-1), "-1st");
+        assert_eq!(format_ordinal_number(-11), "-11th");
+        assert_eq!(format_ordinal_number(-21), "-21st");
     }
 }

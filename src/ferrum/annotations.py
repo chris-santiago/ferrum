@@ -15,6 +15,12 @@ from ferrum.chart import Chart
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
 
 
+def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
+    """Set the annotation primitive on a Chart so ``+`` routes through annotations."""
+    chart._annotation_primitive = primitive
+    return chart
+
+
 def annotate_hline(
     y: float, *, label: Optional[str] = None, stroke: Optional[str] = None, stroke_dash=None
 ) -> Chart:
@@ -47,13 +53,27 @@ def annotate_hline(
     >>> ref = fm.annotate_hline(y=0.0, stroke="red", stroke_dash=[4, 4])
     >>> chart = fm.Chart(df).encode(x="t", y="r").mark_line() & ref
     """
+    from ferrum.annotation.coords import norm
+    from ferrum.annotation.primitives import AnnotationLine
+
     df = pl.DataFrame({"_y": [y]})
     kwargs: dict = {}
     if stroke is not None:
         kwargs["stroke"] = stroke
     if stroke_dash is not None:
         kwargs["stroke_dash"] = stroke_dash
-    return Chart(df).mark_rule(**kwargs).encode(y="_y")
+    chart = Chart(df).mark_rule(**kwargs).encode(y="_y")
+    # Attach annotation primitive: horizontal line spanning the full x-axis
+    prim = AnnotationLine(
+        x1=norm(0),
+        y1=y,
+        x2=norm(1),
+        y2=y,
+        stroke=stroke or "#333",
+        stroke_width=1,
+        dash=stroke_dash,
+    )
+    return _attach_annotation_primitive(chart, prim)
 
 
 def annotate_vline(
@@ -87,13 +107,27 @@ def annotate_vline(
     >>> ref = fm.annotate_vline(x=2020, stroke="#888")
     >>> chart = fm.Chart(df).encode(x="year", y="val").mark_line() & ref
     """
+    from ferrum.annotation.coords import norm
+    from ferrum.annotation.primitives import AnnotationLine
+
     df = pl.DataFrame({"_x": [x]})
     kwargs: dict = {}
     if stroke is not None:
         kwargs["stroke"] = stroke
     if stroke_dash is not None:
         kwargs["stroke_dash"] = stroke_dash
-    return Chart(df).mark_rule(**kwargs).encode(x="_x")
+    chart = Chart(df).mark_rule(**kwargs).encode(x="_x")
+    # Attach annotation primitive: vertical line spanning the full y-axis
+    prim = AnnotationLine(
+        x1=x,
+        y1=norm(0),
+        x2=x,
+        y2=norm(1),
+        stroke=stroke or "#333",
+        stroke_width=1,
+        dash=stroke_dash,
+    )
+    return _attach_annotation_primitive(chart, prim)
 
 
 def annotate_rect(
@@ -141,11 +175,25 @@ def annotate_rect(
     ...                          fill="#ffcc00", opacity=0.2)
     >>> chart = fm.Chart(df).encode(x="year", y="val").mark_line() & shade
     """
+    from ferrum.annotation.primitives import AnnotationRect
+
     df = pl.DataFrame({"_x1": [x1], "_x2": [x2], "_y1": [y1], "_y2": [y2]})
     kwargs: dict = {"opacity": opacity}
     if fill is not None:
         kwargs["fill"] = fill
-    return Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
+    chart = Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
+    # Attach annotation primitive
+    prim = AnnotationRect(
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        fill=fill or "#cccccc",
+        opacity=opacity,
+        stroke=None,
+        corner_radius=0,
+    )
+    return _attach_annotation_primitive(chart, prim)
 
 
 def annotate_text(
@@ -203,6 +251,8 @@ def annotate_text(
     ...                          color="#333", font_size=11)
     >>> chart = fm.Chart(df).encode(x="year", y="val").mark_line() & label
     """
+    from ferrum.annotation.primitives import AnnotationText
+
     df = pl.DataFrame({"_x": [x], "_y": [y], "_text": [text]})
     kwargs: dict = {"dx": dx, "dy": dy, "align": align, "baseline": baseline}
     if font_size is not None:
@@ -211,7 +261,23 @@ def annotate_text(
         kwargs["fill"] = color
     if angle is not None:
         kwargs["angle"] = angle
-    return Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
+    chart = Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
+    # Map align to annotation anchor
+    anchor_map = {"left": "start", "center": "middle", "right": "end"}
+    prim = AnnotationText(
+        x=x,
+        y=y,
+        text=text,
+        font_size=font_size or 12,
+        color=color or "#333",
+        anchor=anchor_map.get(align, align),
+        baseline=baseline,
+        angle=angle or 0,
+        dx=dx,
+        dy=dy,
+        z="above_marks",
+    )
+    return _attach_annotation_primitive(chart, prim)
 
 
 def annotate_abline(
@@ -260,6 +326,8 @@ def annotate_abline(
     >>> identity = fm.annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
     >>> chart = scatter + identity
     """
+    from ferrum.annotation.primitives import AnnotationLine
+
     x_lo, x_hi = -1e6, 1e6
     df = pl.DataFrame(
         {
@@ -270,7 +338,18 @@ def annotate_abline(
     mark_kwargs: dict = {"stroke": stroke, "stroke_width": stroke_width, "opacity": opacity}
     if stroke_dash is not None:
         mark_kwargs["stroke_dash"] = stroke_dash
-    return Chart(df).mark_line(**mark_kwargs).encode(x="__abline_x:Q", y="__abline_y:Q")
+    chart = Chart(df).mark_line(**mark_kwargs).encode(x="__abline_x:Q", y="__abline_y:Q")
+    # Attach annotation primitive: line from extreme data coords (clipped by renderer)
+    prim = AnnotationLine(
+        x1=x_lo,
+        y1=slope * x_lo + intercept,
+        x2=x_hi,
+        y2=slope * x_hi + intercept,
+        stroke=stroke,
+        stroke_width=stroke_width,
+        dash=stroke_dash,
+    )
+    return _attach_annotation_primitive(chart, prim)
 
 
 def annotate_arrow(

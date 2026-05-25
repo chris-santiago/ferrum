@@ -263,6 +263,11 @@ class Chart(_RenderMixin):
         "_selections",
         "_conditionals",
         "_render_config",
+        "_configure",  # list[Configure] — accumulated configure layers
+        "_annotations",  # list[Annotate] — accumulated annotation layers
+        "_structural",  # list — accumulated structural features (SecondaryY, BreakAxis, Inset)
+        "_overrides",  # dict — spec-path override kwargs
+        "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
     )
 
     def __init__(
@@ -303,6 +308,11 @@ class Chart(_RenderMixin):
         self._selections: list = []
         self._conditionals: list = []
         self._render_config = None
+        self._configure: list = []
+        self._annotations: list = []
+        self._structural: list = []
+        self._overrides: dict = {}
+        self._annotation_primitive = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -327,6 +337,11 @@ class Chart(_RenderMixin):
         new._selections = list(self._selections)
         new._conditionals = list(self._conditionals)
         new._render_config = self._render_config
+        new._configure = list(self._configure)
+        new._annotations = list(self._annotations)
+        new._structural = list(self._structural)
+        new._overrides = dict(self._overrides)
+        new._annotation_primitive = self._annotation_primitive
         return new
 
     def _resolve_pending(self) -> "Chart":
@@ -416,6 +431,39 @@ class Chart(_RenderMixin):
                     and new._data[value_field].dtype != pl.Float64
                 ):
                     new._data = new._data.with_columns(pl.col(value_field).cast(pl.Float64))
+            except (ImportError, TypeError, AttributeError, ValueError):
+                pass
+
+        # boxplot / boxen / violin: Rust box_stats / letter_value / violin transforms
+        # require the value column to be Float64.  Cast integer columns here, where
+        # we have both the encoding (value field name) and the data frame.
+        #
+        # Note: catplot orient="h" encodes x=numeric, y=categorical but does not
+        # pass horizontal=True to mark_boxplot — CoordFlip handles the visual flip
+        # at render time.  Instead of relying on the horizontal kwarg, we detect
+        # the value field by dtype: cast whichever of x_field / y_field holds an
+        # integer column (skipping string/categorical columns which cannot be cast).
+        if kind in ("boxplot", "boxen", "violin"):
+            try:
+                import polars as pl
+
+                _INT_DTYPES = (
+                    pl.Int8,
+                    pl.Int16,
+                    pl.Int32,
+                    pl.Int64,
+                    pl.UInt8,
+                    pl.UInt16,
+                    pl.UInt32,
+                    pl.UInt64,
+                )
+                if new._data is not None and isinstance(new._data, pl.DataFrame):
+                    casts = []
+                    for fld in (x_field, y_field):
+                        if fld and fld in new._data.columns and new._data[fld].dtype in _INT_DTYPES:
+                            casts.append(pl.col(fld).cast(pl.Float64))
+                    if casts:
+                        new._data = new._data.with_columns(casts)
             except (ImportError, TypeError, AttributeError, ValueError):
                 pass
 
@@ -3966,35 +4014,32 @@ class Chart(_RenderMixin):
 
     # ---- Composition operators ----
 
-    def __add__(self, other: "Chart") -> "Chart":
-        """Overlay two charts as a multi-layer composite.
+    def __add__(self, other: Any) -> "Chart":
+        """Compose a chart with another chart, configuration, annotation, or structural feature.
 
-        Always produces a single multi-layer ``Chart`` that renders all
-        layers within one plot area with shared x/y scales.
+        Dispatches on the type of *other*:
 
-        When both sides share the same data (identity check or Arrow value
-        equality), the unified chart reuses the original DataFrame.
+        - ``Chart`` — overlay as a multi-layer composite with shared scales
+        - ``Configure`` — append chart-level configuration
+        - ``Annotate`` or annotation primitive — append annotation layer
+        - ``SecondaryY``, ``BreakAxis``, ``Inset`` — append structural feature
 
-        When data differs, the two DataFrames are merged via
-        ``pl.concat([df1, df2], how="diagonal")`` — columns present in only
-        one side are null-padded in the other.  Each layer's encoding
-        references only its own columns; marks skip null values, so the
-        padding is invisible at render time.
+        When composing two ``Chart`` objects, data-merging uses diagonal
+        concatenation with null-padding for non-overlapping columns.
 
         Parameters
         ----------
-        other : Chart
-            The chart to overlay on top of this one.
+        other : Chart, Configure, Annotate, annotation primitive, SecondaryY, BreakAxis, or Inset
+            The element to compose with this chart.
 
         Returns
         -------
         Chart
-            Multi-layer ``Chart``.
 
         Raises
         ------
         TypeError
-            (via ``NotImplemented``) if ``other`` is not a ``Chart``.
+            (via ``NotImplemented``) if ``other`` is not a recognized type.
 
         Examples
         --------
@@ -4005,6 +4050,54 @@ class Chart(_RenderMixin):
         >>> line = fm.Chart(df).mark_line().encode(x="x", y="y")
         >>> layered = scatter + line
         """
+        from ferrum.configure import Configure
+        from ferrum.annotation.container import Annotate
+        from ferrum.annotation.primitives import (
+            AnnotationArrow,
+            AnnotationBracket,
+            AnnotationCallout,
+            AnnotationImage,
+            AnnotationLine,
+            AnnotationRect,
+            AnnotationSpan,
+            AnnotationText,
+        )
+        from ferrum.structural import SecondaryY, BreakAxis, Inset
+
+        # Dispatch: Configure layer
+        if isinstance(other, Configure):
+            new = self._clone()
+            new._configure = new._configure + [other]
+            return new
+
+        # Dispatch: Annotate container
+        if isinstance(other, Annotate):
+            new = self._clone()
+            new._annotations = new._annotations + [other]
+            return new
+
+        # Dispatch: bare annotation primitive — wrap in Annotate
+        _ANNOTATION_TYPES = (
+            AnnotationText,
+            AnnotationArrow,
+            AnnotationRect,
+            AnnotationLine,
+            AnnotationSpan,
+            AnnotationBracket,
+            AnnotationCallout,
+            AnnotationImage,
+        )
+        if isinstance(other, _ANNOTATION_TYPES):
+            new = self._clone()
+            new._annotations = new._annotations + [Annotate(other)]
+            return new
+
+        # Dispatch: structural features
+        if isinstance(other, (SecondaryY, BreakAxis, Inset)):
+            new = self._clone()
+            new._structural = new._structural + [other]
+            return new
+
         if not isinstance(other, Chart):
             return NotImplemented
         # Resolve pending statistical marks before snapshotting encoding dicts.
@@ -4013,6 +4106,44 @@ class Chart(_RenderMixin):
         new = lhs._clone()
         lhs_layers, _ = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+
+        # When the LHS is an annotate_* helper chart, its annotation primitive
+        # fully describes the visual element — the mark layers must be excluded
+        # (same logic as the RHS path below). Use RHS layers only.
+        if lhs._annotation_primitive is not None:
+            if rhs._annotation_primitive is not None:
+                from ferrum._layer import _Layer as _CarrierLayer
+
+                carrier = _CarrierLayer(
+                    mark="point",
+                    encoding=dict(lhs._encoding),
+                    mark_kwargs={"opacity": 0, "size": 0},
+                )
+                new._layers = [carrier]
+                new._annotations = new._annotations + [
+                    Annotate(lhs._annotation_primitive),
+                    Annotate(rhs._annotation_primitive),
+                ]
+            else:
+                new = rhs._clone()
+                new._layers = rhs_layers
+                new._annotations = new._annotations + [Annotate(lhs._annotation_primitive)]
+            new._annotation_primitive = None
+            _warn_on_layer_conflicts(lhs, rhs)
+            return new
+
+        # When the RHS is an annotate_* helper chart, its annotation primitive
+        # fully describes the visual element for both SVG and interactive
+        # rendering.  The mark layers inside the annotate_* chart (mark_rule,
+        # mark_rect, mark_line, mark_text) must be excluded — they would
+        # produce a duplicate rendering alongside the annotation primitive.
+        # Data merging and transform routing for the RHS are also skipped since
+        # the annotation data is not needed by any layer.
+        if rhs._annotation_primitive is not None:
+            new._layers = lhs_layers  # LHS layers only — no RHS mark layers
+            new._annotations = new._annotations + [Annotate(rhs._annotation_primitive)]
+            _warn_on_layer_conflicts(lhs, rhs)
+            return new
 
         # Data merging: when data differs, decide whether to diagonal-concat
         # or route the RHS through a named Identity transform.
@@ -4073,6 +4204,15 @@ class Chart(_RenderMixin):
                     new._selections.append(s)
         if rhs._conditionals:
             new._conditionals.extend(rhs._conditionals)
+        # Merge RHS configure/annotation/structural/override slots.
+        if rhs._configure:
+            new._configure = new._configure + rhs._configure
+        if rhs._annotations:
+            new._annotations = new._annotations + rhs._annotations
+        if rhs._structural:
+            new._structural = new._structural + rhs._structural
+        if rhs._overrides:
+            new._overrides = {**new._overrides, **rhs._overrides}
         _warn_on_layer_conflicts(lhs, rhs)
         return new
 
@@ -4328,6 +4468,376 @@ class Chart(_RenderMixin):
                 new._axis_x = x
             if y is not None:
                 new._axis_y = y
+        return new
+
+    # ---- Declarative configuration surface ----
+
+    def configure_axis(
+        self,
+        *,
+        x: bool = True,
+        y: bool = True,
+        label_angle: "float | None" = None,
+        label_font_size: "float | None" = None,
+        label_color: "str | None" = None,
+        label_format: "str | None" = None,
+        label_format_raw: "str | None" = None,
+        label_overlap: "str | None" = None,
+        tick_count: "int | None" = None,
+        tick_size: "float | None" = None,
+        tick_values: "list | None" = None,
+        title_font_size: "float | None" = None,
+        title_color: "str | None" = None,
+        title_padding: "float | None" = None,
+        label_padding: "float | None" = None,
+        domain: "bool | None" = None,
+        domain_color: "str | None" = None,
+        domain_width: "float | None" = None,
+        grid: "bool | None" = None,
+        grid_color: "str | None" = None,
+        grid_dash: "list[float] | None" = None,
+        grid_width: "float | None" = None,
+        domain_min: "float | None" = None,
+        domain_max: "float | None" = None,
+        nice: "bool | None" = None,
+        zero: "bool | None" = None,
+    ) -> "Chart":
+        """Apply chart-level axis configuration.
+
+        Parameters
+        ----------
+        x, y : bool, default True
+            Which axes this config applies to.
+        label_angle : float, optional
+            Tick label rotation in degrees.
+        label_format : str, optional
+            Named format preset (e.g. ``"currency"``, ``"percent"``).
+        domain_min, domain_max : float, optional
+            Explicit scale domain bounds.
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import AxisConfig, Configure
+
+        cfg = AxisConfig(
+            x=x,
+            y=y,
+            label_angle=label_angle,
+            label_font_size=label_font_size,
+            label_color=label_color,
+            label_format=label_format,
+            label_format_raw=label_format_raw,
+            label_overlap=label_overlap,
+            tick_count=tick_count,
+            tick_size=tick_size,
+            tick_values=tick_values,
+            title_font_size=title_font_size,
+            title_color=title_color,
+            title_padding=title_padding,
+            label_padding=label_padding,
+            domain=domain,
+            domain_color=domain_color,
+            domain_width=domain_width,
+            grid=grid,
+            grid_color=grid_color,
+            grid_dash=grid_dash,
+            grid_width=grid_width,
+            domain_min=domain_min,
+            domain_max=domain_max,
+            nice=nice,
+            zero=zero,
+        )
+        new = self._clone()
+        new._configure = new._configure + [Configure(axis=cfg)]
+        return new
+
+    def configure_legend(
+        self,
+        *,
+        orient: "str | None" = None,
+        direction: "str | None" = None,
+        columns: "int | None" = None,
+        title_font_size: "float | None" = None,
+        label_font_size: "float | None" = None,
+        symbol_size: "float | None" = None,
+        symbol_type: "str | None" = None,
+        gradient_length: "float | None" = None,
+        offset: "float | None" = None,
+        padding: "float | None" = None,
+    ) -> "Chart":
+        """Apply chart-level legend configuration.
+
+        Parameters
+        ----------
+        orient : str, optional
+            Legend position: ``"right"``, ``"left"``, ``"top"``, ``"bottom"``, ``"none"``.
+        direction : str, optional
+            Layout direction: ``"vertical"`` or ``"horizontal"``.
+        columns : int, optional
+            Number of columns for multi-column layout.
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import LegendConfig, Configure
+
+        cfg = LegendConfig(
+            orient=orient,
+            direction=direction,
+            columns=columns,
+            title_font_size=title_font_size,
+            label_font_size=label_font_size,
+            symbol_size=symbol_size,
+            symbol_type=symbol_type,
+            gradient_length=gradient_length,
+            offset=offset,
+            padding=padding,
+        )
+        new = self._clone()
+        new._configure = new._configure + [Configure(legend=cfg)]
+        return new
+
+    def configure_title(
+        self,
+        *,
+        font_size: "float | None" = None,
+        font_weight: "str | None" = None,
+        anchor: "str | None" = None,
+        color: "str | None" = None,
+        offset: "float | None" = None,
+        subtitle_font_size: "float | None" = None,
+        subtitle_color: "str | None" = None,
+    ) -> "Chart":
+        """Apply chart-level title configuration.
+
+        Parameters
+        ----------
+        font_size : float, optional
+            Title font size.
+        anchor : str, optional
+            Title alignment: ``"start"``, ``"middle"``, or ``"end"``.
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import TitleConfig, Configure
+
+        cfg = TitleConfig(
+            font_size=font_size,
+            font_weight=font_weight,
+            anchor=anchor,
+            color=color,
+            offset=offset,
+            subtitle_font_size=subtitle_font_size,
+            subtitle_color=subtitle_color,
+        )
+        new = self._clone()
+        new._configure = new._configure + [Configure(title=cfg)]
+        return new
+
+    def configure_grid(
+        self,
+        *,
+        x: "bool | None" = None,
+        y: "bool | None" = None,
+        color: "str | None" = None,
+        width: "float | None" = None,
+        dash: "list[float] | None" = None,
+        opacity: "float | None" = None,
+        band_colors: "list[str] | None" = None,
+    ) -> "Chart":
+        """Apply chart-level grid configuration.
+
+        Parameters
+        ----------
+        x, y : bool, optional
+            Enable/disable grid on each axis.
+        color : str, optional
+            Grid line color.
+        band_colors : list[str], optional
+            Alternating band fill colors (``None`` to disable).
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import GridConfig, Configure
+
+        cfg = GridConfig(
+            x=x,
+            y=y,
+            color=color,
+            width=width,
+            dash=dash,
+            opacity=opacity,
+            band_colors=band_colors,
+        )
+        new = self._clone()
+        new._configure = new._configure + [Configure(grid=cfg)]
+        return new
+
+    def configure_padding(
+        self,
+        *,
+        top: "float | None" = None,
+        right: "float | None" = None,
+        bottom: "float | None" = None,
+        left: "float | None" = None,
+        auto: bool = True,
+    ) -> "Chart":
+        """Apply chart-level padding configuration.
+
+        Parameters
+        ----------
+        top, right, bottom, left : float, optional
+            Minimum padding in pixels per side.
+        auto : bool, default True
+            Auto-expand margins to fit labels.
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import PaddingConfig, Configure
+
+        cfg = PaddingConfig(top=top, right=right, bottom=bottom, left=left, auto=auto)
+        new = self._clone()
+        new._configure = new._configure + [Configure(padding=cfg)]
+        return new
+
+    def configure_color(
+        self,
+        *,
+        scheme: "str | None" = None,
+        sequential_scheme: "str | None" = None,
+        diverging_scheme: "str | None" = None,
+        domain: "list | None" = None,
+        range: "list[str] | None" = None,
+    ) -> "Chart":
+        """Apply chart-level color scale configuration.
+
+        Parameters
+        ----------
+        scheme : str, optional
+            Categorical color scheme name.
+        sequential_scheme : str, optional
+            Sequential color scheme name.
+        diverging_scheme : str, optional
+            Diverging color scheme name.
+
+        Returns
+        -------
+        Chart
+        """
+        from ferrum.configure import ColorConfig, Configure
+
+        cfg = ColorConfig(
+            scheme=scheme,
+            sequential_scheme=sequential_scheme,
+            diverging_scheme=diverging_scheme,
+            domain=domain,
+            range=range,
+        )
+        new = self._clone()
+        new._configure = new._configure + [Configure(color=cfg)]
+        return new
+
+    def configure(
+        self,
+        *,
+        axis: "AxisConfig | None" = None,
+        axis_x: "AxisConfig | None" = None,
+        axis_y: "AxisConfig | None" = None,
+        axis_y2: "AxisConfig | None" = None,
+        legend: "LegendConfig | None" = None,
+        title: "TitleConfig | None" = None,
+        grid: "GridConfig | None" = None,
+        padding: "PaddingConfig | None" = None,
+        color: "ColorConfig | None" = None,
+    ) -> "Chart":
+        """Append a :class:`~ferrum.configure.Configure` layer to the chart.
+
+        Accepts typed config objects for each domain.  All parameters are
+        keyword-only and default to ``None`` (no change for that domain).
+
+        Parameters
+        ----------
+        axis : AxisConfig, optional
+            Applies to all axes.
+        axis_x : AxisConfig, optional
+            Applies only to the x axis.
+        axis_y : AxisConfig, optional
+            Applies only to the y axis.
+        axis_y2 : AxisConfig, optional
+            Applies only to the secondary y axis.
+        legend : LegendConfig, optional
+            Legend appearance.
+        title : TitleConfig, optional
+            Chart title appearance.
+        grid : GridConfig, optional
+            Grid line appearance.
+        padding : PaddingConfig, optional
+            Plot-area padding.
+        color : ColorConfig, optional
+            Default color scale settings.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the configure layer appended.
+
+        Examples
+        --------
+        >>> from ferrum.configure import AxisConfig, LegendConfig
+        >>> chart.configure(
+        ...     axis=AxisConfig(label_angle=-45),
+        ...     legend=LegendConfig(orient="bottom"),
+        ... )
+        """
+        from ferrum.configure import Configure
+
+        cfg = Configure(
+            axis=axis,
+            axis_x=axis_x,
+            axis_y=axis_y,
+            axis_y2=axis_y2,
+            legend=legend,
+            title=title,
+            grid=grid,
+            padding=padding,
+            color=color,
+        )
+        new = self._clone()
+        new._configure = new._configure + [cfg]
+        return new
+
+    def override(self, **kwargs: Any) -> "Chart":
+        """Store low-level spec-path overrides to be applied at render time.
+
+        Overrides are merged into :attr:`_overrides` with later calls winning
+        on key conflicts. The ``override()`` call never mutates the receiver.
+
+        Parameters
+        ----------
+        **kwargs
+            Arbitrary spec-path key/value pairs forwarded verbatim to the
+            renderer (e.g. ``x_axis_label_angle=-45``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the overrides merged.
+
+        Examples
+        --------
+        >>> chart.override(x_axis_label_angle=-45, width=600)
+        """
+        new = self._clone()
+        new._overrides = {**new._overrides, **kwargs}
         return new
 
     def coord(self, coord: Any) -> "Chart":
@@ -4595,6 +5105,8 @@ class Chart(_RenderMixin):
                 )
             if layer.blend is not None:
                 layer_dict["blend"] = layer.blend
+            if layer.name is not None:
+                layer_dict["name"] = layer.name
             out.append(layer_dict)
         return out
 

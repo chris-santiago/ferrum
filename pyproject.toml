@@ -96,6 +96,8 @@ ignore = [
     "D205",  # 1 blank line required between summary and description — not enforced
     "D213",  # multi-line-summary-second-line (conflicts with D212)
     "D301",  # use r-strings for backslashes — too strict for docstrings with \n examples
+    "D102",  # public method docstrings — class-level docstrings cover dataclass methods
+    "D105",  # magic method docstrings — __post_init__, __new__, etc. have implicit contracts
 ]
 
 [tool.ruff.lint.pydocstyle]

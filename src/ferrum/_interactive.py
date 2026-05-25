@@ -295,7 +295,7 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
 
     from ferrum._core import render_interactive
 
-    spec, data, viewport, theme_dict = chart._render_inputs(_auto_tooltips=True)
+    spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs(_auto_tooltips=True)
     if data.num_rows == 0:
         w, h = viewport
         return _json.dumps(
@@ -318,4 +318,10 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
                 },
             }
         ), b""
-    return render_interactive(spec, data, viewport=viewport, theme=theme_dict)
+    return render_interactive(
+        spec,
+        data,
+        viewport=viewport,
+        theme=theme_dict,
+        chart_config=chart_config_dict or None,
+    )

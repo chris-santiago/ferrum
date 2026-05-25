@@ -32,7 +32,7 @@ def _simple_chart() -> fm.Chart:
 
 
 def _render(chart: fm.Chart) -> tuple[str, bytes]:
-    spec, data, viewport, theme = chart._render_inputs()
+    spec, data, viewport, theme, _ = chart._render_inputs()
     return render_interactive(spec, data, viewport=viewport, theme=theme)
 
 

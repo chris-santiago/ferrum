@@ -27,28 +27,33 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
         Some(&theme.font_weight)
     };
 
+    // Default per-orient gap between tick mark end and label baseline/edge.
+    // L-2: guard negative label_padding — negative values would place labels
+    // inside the tick area, producing overlapping or invisible labels.
+    let label_pad = axis.label_padding.unwrap_or(2.0).max(0.0);
+
     for tick in &axis.ticks {
         let effective_font_size = tick.label_font_size.unwrap_or(theme.label_font_size);
 
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
                 tick.position, r.y, tick.position, r.y + theme.tick_size,
-                tick.position, r.y + theme.tick_size + effective_font_size + 2.0,
+                tick.position, r.y + theme.tick_size + effective_font_size + label_pad,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Top => (
                 tick.position, r.y, tick.position, r.y - theme.tick_size,
-                tick.position, r.y - theme.tick_size - 4.0,
+                tick.position, r.y - theme.tick_size - label_pad - 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Left => (
                 r.x, tick.position, r.x - theme.tick_size, tick.position,
-                r.x - theme.tick_size - 2.0, tick.position + effective_font_size / 3.0,
+                r.x - theme.tick_size - label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::End, 0.0,
             ),
             AxisOrient::Right => (
                 r.x, tick.position, r.x + theme.tick_size, tick.position,
-                r.x + theme.tick_size + 2.0, tick.position + effective_font_size / 3.0,
+                r.x + theme.tick_size + label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::Start, 0.0,
             ),
         };
@@ -111,13 +116,18 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
         } else {
             Some(&theme.title_font_weight)
         };
+        let effective_title_color = axis
+            .title_color_rgba
+            .map(|[r, g, b, a]| palette::Srgba::new(r, g, b, a))
+            .unwrap_or(theme.title_color);
+        let effective_title_font_size = axis.title_font_size.unwrap_or(theme.title_font_size);
         nodes.push(SceneNode::Text {
             x: t.anchor_x,
             y: t.anchor_y,
             content: t.text.clone(),
             style: to_scene_text_style(
-                theme.title_color,
-                theme.title_font_size,
+                effective_title_color,
+                effective_title_font_size,
                 TextAnchor::Middle,
                 t.angle,
                 &theme.title_font_family,
@@ -136,6 +146,7 @@ pub fn build_grid(
     x_axis: Option<&AxisLayout>,
     y_axis: Option<&AxisLayout>,
     theme: &ThemeInputs,
+    band_colors: &[String],
 ) -> Vec<SceneNode> {
     if !theme.grid {
         return Vec::new();
@@ -150,6 +161,43 @@ pub fn build_grid(
     let x_baseline_y = x_axis
         .map(|a| a.axis_line.y)
         .unwrap_or(plot_area.y + plot_area.h);
+
+    // Band fills: drawn before gridlines so lines appear on top.
+    // Emit one rect per gap between consecutive y-tick positions.
+    if !band_colors.is_empty() {
+        if let Some(ay) = y_axis.filter(|a| a.show_grid) {
+            let mut boundaries: Vec<f64> = Vec::with_capacity(ay.ticks.len() + 2);
+            boundaries.push(plot_area.y);
+            for tick in &ay.ticks {
+                if (tick.position - x_baseline_y).abs() >= 0.5 {
+                    boundaries.push(tick.position);
+                }
+            }
+            boundaries.push(plot_area.y + plot_area.h);
+            boundaries.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+            boundaries.sort_by(f64::total_cmp);
+
+            for (band_idx, window) in boundaries.windows(2).enumerate() {
+                let top = window[0];
+                let bot = window[1];
+                let band_color_str = &band_colors[band_idx % band_colors.len()];
+                if band_color_str.eq_ignore_ascii_case("transparent") {
+                    continue;
+                }
+                if let Ok(fill) = crate::render::color::from_hex_str(band_color_str) {
+                    use crate::render::draw::to_scene_fill_stroke;
+                    nodes.push(SceneNode::Rect {
+                        x: plot_area.x,
+                        y: top,
+                        w: plot_area.w,
+                        h: bot - top,
+                        style: to_scene_fill_stroke(Some(fill), None, 0.0, 1.0, None),
+                        corner_radius: 0.0,
+                    });
+                }
+            }
+        }
+    }
 
     if let Some(ax) = x_axis.filter(|a| a.show_grid) {
         for tick in &ax.ticks {
@@ -209,6 +257,9 @@ mod tests {
             show_ticks: true,
             show_domain: true,
             show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -234,6 +285,9 @@ mod tests {
             show_ticks: true,
             show_domain: false,
             show_grid: false,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -270,6 +324,9 @@ mod tests {
             show_ticks: true,
             show_domain: false,
             show_grid: false,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -316,6 +373,9 @@ mod tests {
             show_ticks: true,
             show_domain: false,
             show_grid: false,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
         };
         let theme = ThemeInputs::default(); // theme.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
@@ -329,13 +389,109 @@ mod tests {
                 "expected font_size 9.0 from per-tick override, got {}",
                 style.font_size,
             );
-            // label_y = r.y + tick_size + effective_font_size + 2.0
-            // With r.y=80, tick_size=4 (default), effective_font_size=9: 80 + 4 + 9 + 2 = 95
+            // label_y = r.y + tick_size + effective_font_size + label_pad
+            // label_pad defaults to 2.0 when axis.label_padding is None.
+            // With r.y=80, tick_size=4 (default), effective_font_size=9, label_pad=2: 80+4+9+2=95
             let expected_y = 80.0 + theme.tick_size + 9.0 + 2.0;
             assert!(
                 (y - expected_y).abs() < 0.01,
                 "label_y should use per-tick font size for positioning: expected {expected_y}, got {y}",
             );
+        }
+    }
+
+    #[test]
+    fn build_grid_band_colors_emits_rects() {
+        // A y-axis with 3 ticks should produce 4 bands (before/between/after ticks).
+        // With 2 band_colors, they alternate: fill, transparent, fill, transparent.
+        let y_axis = AxisLayout {
+            orient: AxisOrient::Left,
+            panel_index: 0,
+            axis_line: Rect { x: 50.0, y: 10.0, w: 1.0, h: 300.0 },
+            ticks: vec![
+                TickLayout { position: 60.0, label: "a".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+                TickLayout { position: 160.0, label: "b".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+                TickLayout { position: 260.0, label: "c".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+            ],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+        };
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
+        let theme = ThemeInputs::default();
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &band_colors);
+
+        // Should emit Rect nodes for non-transparent bands only (every other band).
+        let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
+        assert!(rect_count >= 1, "expected at least one band fill rect, got {rect_count}");
+
+        // No rect should be emitted for "transparent" bands.
+        // With 4 boundaries (plot_area.y=10, tick positions, plot_area.y+h=310):
+        // bands: [10..60], [60..160], [160..260], [260..310]
+        // colors cycling: #f0f0f0, transparent, #f0f0f0, transparent → 2 rects
+        assert_eq!(rect_count, 2, "expected 2 rects (alternating with transparent), got {rect_count}");
+    }
+
+    #[test]
+    fn build_grid_no_band_colors_emits_no_rects() {
+        let y_axis = AxisLayout {
+            orient: AxisOrient::Left,
+            panel_index: 0,
+            axis_line: Rect { x: 50.0, y: 10.0, w: 1.0, h: 300.0 },
+            ticks: vec![
+                TickLayout { position: 60.0, label: "a".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+            ],
+            title: None,
+            show_labels: true, show_ticks: true, show_domain: true, show_grid: true,
+            title_font_size: None, title_color_rgba: None, label_padding: None,
+        };
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
+        assert_eq!(rect_count, 0, "no band_colors means no rects");
+    }
+
+    #[test]
+    fn build_axis_uses_per_axis_title_overrides() {
+        // An AxisLayout with title_font_size=20 and title_color_rgba=#ff0000 should
+        // render the title text with those values, not the theme defaults.
+        let axis = AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![],
+            title: Some(crate::layout::AxisTitleLayout {
+                text: "My Title".into(),
+                anchor_x: 50.0,
+                anchor_y: 100.0,
+                angle: 0.0,
+            }),
+            show_labels: true,
+            show_ticks: true,
+            show_domain: false,
+            show_grid: false,
+            title_font_size: Some(20.0),
+            title_color_rgba: Some([0xff, 0x00, 0x00, 0xff]),
+            label_padding: None,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+        let title_node = nodes.iter().find(|n| {
+            if let SceneNode::Text { content, .. } = n { content == "My Title" } else { false }
+        });
+        assert!(title_node.is_some(), "expected a title text node");
+        if let Some(SceneNode::Text { style, .. }) = title_node {
+            assert_eq!(style.font_size, 20.0, "title should use overridden font size");
+            assert_eq!(style.color.r, 0xff, "title should use overridden red color");
+            assert_eq!(style.color.g, 0x00);
+            assert_eq!(style.color.b, 0x00);
         }
     }
 }

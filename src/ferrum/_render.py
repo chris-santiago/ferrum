@@ -21,6 +21,43 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
+def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
+    """Decode or cast any Arrow column types that the Rust CDI boundary rejects.
+
+    This is a render-boundary concern, not a coerce concern — ``to_arrow_table``
+    preserves the caller's data as-is so its contract is predictable.  The Rust
+    renderer currently rejects two special types:
+
+    - ``Dictionary`` (categorical / dictionary-encoded) — decode to the plain
+      value type via ``pyarrow.compute.dictionary_decode()``.
+    - ``Null`` (all-None column with unknown type) — cast to ``float64`` so Rust
+      can represent it as a numeric column of NaNs.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    new_cols: list = []
+    needs_rebuild = False
+    for i in range(len(tbl.schema)):
+        col = tbl.column(i)
+        field_type = tbl.schema.field(i).type
+        if pa.types.is_dictionary(field_type):
+            col = pc.dictionary_decode(col)
+            # After decoding, the underlying type may be date32/date64 which
+            # Rust also rejects — cast to timestamp[ms] (same as _coerce.py).
+            decoded_type = col.type
+            if pa.types.is_date32(decoded_type) or pa.types.is_date64(decoded_type):
+                col = col.cast(pa.timestamp("ms"))
+            needs_rebuild = True
+        elif pa.types.is_null(field_type):
+            col = col.cast(pa.float64())
+            needs_rebuild = True
+        new_cols.append(col)
+    if not needs_rebuild:
+        return tbl
+    return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
+
+
 def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
     """Collect Axis(label_map=...) entries from a chart's encoding.
 
@@ -276,6 +313,94 @@ class _RenderMixin:
         new._render_config = merged
         return new
 
+    def _resolve_chart_config(self) -> dict:
+        """Merge _configure layers and annotations into a single dict for the Rust binding."""
+        merged: dict = {}
+        for cfg in self._configure:
+            d = cfg.to_dict()
+            for key, val in d.items():
+                if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+                    merged[key] = {**merged[key], **val}
+                else:
+                    merged[key] = val
+        if self._annotations:
+            ann_list = []
+            for annotate in self._annotations:
+                ann_list.extend(annotate.to_dict_list())
+            merged["annotations"] = ann_list
+        if self._structural:
+            merged["structural"] = [self._serialize_structural(feat) for feat in self._structural]
+        return merged
+
+    @staticmethod
+    def _serialize_structural(feat) -> dict:
+        """Convert a structural feature dataclass to its dict form for the Rust binding."""
+        from ferrum.structural import BreakAxis, Inset, SecondaryY
+
+        if isinstance(feat, SecondaryY):
+            d: dict = {"type": "secondary_y", "field": feat.field, "mark": feat.mark}
+            if feat.color is not None:
+                d["color"] = feat.color
+            if feat.opacity is not None:
+                d["opacity"] = feat.opacity
+            return d
+        elif isinstance(feat, BreakAxis):
+            gaps = feat.gap
+            # Normalize single (start, end) tuple to a list of [start, end] pairs.
+            if (
+                isinstance(gaps, tuple)
+                and len(gaps) == 2
+                and not isinstance(gaps[0], (list, tuple))
+            ):
+                normalized_gaps = [list(gaps)]
+            else:
+                normalized_gaps = [list(g) for g in gaps]
+            return {
+                "type": "break_axis",
+                "axis": feat.axis,
+                "gaps": normalized_gaps,
+                "break_size": feat.break_size,
+                "break_style": feat.break_style,
+            }
+        elif isinstance(feat, Inset):
+            from ferrum.annotation.coords import NormCoord, PixelCoord
+
+            def _inset_coord(c: object) -> float:
+                """Convert a bound coordinate to a normalized float for InsetSpec.
+
+                NormCoord and plain floats are passed as-is (both already in [0,1]).
+                PixelCoord is not supported for Inset bounds because the Rust side
+                expects normalized coordinates and has no access to plot dimensions
+                at serialization time.
+                """
+                if isinstance(c, NormCoord):
+                    return c.value
+                if isinstance(c, PixelCoord):
+                    raise TypeError(
+                        "Inset bounds do not support px() coordinates. "
+                        "Use fm.norm(f) (normalized [0, 1]) or plain floats instead."
+                    )
+                return float(c)
+
+            inset_svg = feat.chart.show_svg()
+            d = {
+                "type": "inset",
+                "svg": inset_svg,
+                "bounds": [_inset_coord(c) for c in feat.bounds],
+                "border": feat.border,
+                "border_color": feat.border_color,
+                "background": feat.background,
+                "shadow": feat.shadow,
+                "connect_style": feat.connect_style,
+            }
+            if feat.border_dash is not None:
+                d["border_dash"] = feat.border_dash
+            if feat.connect_to is not None:
+                d["connect_to"] = list(feat.connect_to)
+            return d
+        else:
+            raise TypeError(f"Unknown structural feature type: {type(feat)}")
+
     def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
         import json
 
@@ -292,7 +417,7 @@ class _RenderMixin:
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)
         raw_data = _apply_label_maps(chart._data, label_maps) if label_maps else chart._data
-        data = to_arrow_table(raw_data)
+        data = _sanitize_for_rust(to_arrow_table(raw_data))
         from ferrum import config as _config
 
         viewport = (
@@ -303,7 +428,8 @@ class _RenderMixin:
 
         effective_theme = chart._theme or get_default_theme()
         theme_dict = effective_theme.to_spec_dict() if effective_theme else {}
-        return spec, data, viewport, theme_dict
+        chart_config_dict = chart._resolve_chart_config()
+        return spec, data, viewport, theme_dict, chart_config_dict
 
     def show_svg(self, *, raster: bool | None = None) -> str:
         """Render the chart to an SVG string.
@@ -333,14 +459,20 @@ class _RenderMixin:
         from ferrum._core import render_svg
 
         chart = self._with_raster_override(raster)
-        spec, data, viewport, theme_dict = chart._render_inputs()
+        spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
         if data.num_rows == 0:
             w, h = viewport
             return (
                 f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
                 f"<!-- empty dataset --></svg>"
             )
-        return render_svg(spec, data, viewport=viewport, theme=theme_dict)
+        return render_svg(
+            spec,
+            data,
+            viewport=viewport,
+            theme=theme_dict,
+            chart_config=chart_config_dict or None,
+        )
 
     def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
         """Render the chart to PNG bytes.

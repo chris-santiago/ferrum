@@ -3264,3 +3264,346 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── parse_tooltip_json: NaN / special characters ────────────────────
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_with_nan_value() {
+        // "NaN" as a tooltip value must be properly escaped in JSON output.
+        let bytes = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&1u32.to_le_bytes()); // 1 field
+            let name = b"val";
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name);
+            let val = b"NaN";
+            buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+            buf.extend_from_slice(val);
+            buf
+        };
+        let json = parse_tooltip_json(&bytes, 0);
+        // Must be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("parse_tooltip_json with NaN value must produce valid JSON");
+        assert_eq!(parsed["fields"][0]["value"], "NaN");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_with_backslash_in_value() {
+        // Backslash in value must be properly escaped for JSON.
+        let bytes = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&1u32.to_le_bytes());
+            let name = b"path";
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name);
+            let val = br"C:\Users\test";
+            buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+            buf.extend_from_slice(val);
+            buf
+        };
+        let json = parse_tooltip_json(&bytes, 0);
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("backslash in tooltip value must produce valid JSON");
+        assert_eq!(parsed["fields"][0]["value"], r"C:\Users\test");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_with_empty_field_name() {
+        // Empty field name must produce valid JSON.
+        let bytes = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&1u32.to_le_bytes());
+            let name = b"";
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name);
+            let val = b"value";
+            buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+            buf.extend_from_slice(val);
+            buf
+        };
+        let json = parse_tooltip_json(&bytes, 0);
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("empty field name must produce valid JSON");
+        assert_eq!(parsed["fields"][0]["name"], "");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_with_empty_value() {
+        // Empty value must produce valid JSON.
+        let bytes = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&1u32.to_le_bytes());
+            let name = b"x";
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name);
+            let val = b"";
+            buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+            buf.extend_from_slice(val);
+            buf
+        };
+        let json = parse_tooltip_json(&bytes, 0);
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("empty value must produce valid JSON");
+        assert_eq!(parsed["fields"][0]["value"], "");
+    }
+
+    #[test]
+    fn bug_hunt_parse_tooltip_json_many_fields() {
+        // 100 fields: must produce valid JSON without panic.
+        let num_fields = 100usize;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(num_fields as u32).to_le_bytes());
+        for i in 0..num_fields {
+            let name = format!("field_{i}");
+            bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        // 1 row of data
+        for i in 0..num_fields {
+            let val = format!("val_{i}");
+            bytes.extend_from_slice(&(val.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(val.as_bytes());
+        }
+        let json = parse_tooltip_json(&bytes, 0);
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("100 fields must produce valid JSON");
+        let fields = parsed["fields"].as_array().expect("fields array");
+        assert_eq!(fields.len(), 100);
+    }
+
+    // ── srgb_to_linear edge cases ──────────────────────────────────────
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_nan_input_produces_nan() {
+        // NaN input should propagate NaN (not panic).
+        let result = srgb_to_linear(f32::NAN);
+        assert!(result.is_nan(), "srgb_to_linear(NaN) must produce NaN");
+    }
+
+    #[test]
+    fn bug_hunt_srgb_to_linear_infinity_does_not_panic() {
+        // Infinity input should not panic.
+        let result = srgb_to_linear(f32::INFINITY);
+        assert!(result.is_infinite() || result.is_finite(),
+            "srgb_to_linear(inf) must not panic");
+    }
+
+    // ── linearize_color_channels: alpha channel untouched ──────────────
+
+    #[test]
+    fn bug_hunt_linearize_color_channels_preserves_alpha() {
+        // Alpha channel must NOT be linearized.
+        let mut color = [0.5_f32, 0.5, 0.5, 0.7];
+        linearize_color_channels(&mut color);
+        // Alpha must be exactly 0.7 (untouched).
+        assert!(
+            (color[3] - 0.7).abs() < 1e-7,
+            "linearize must not modify alpha; got {}",
+            color[3]
+        );
+        // RGB channels must be modified (linearized).
+        assert!(
+            color[0] < 0.5,
+            "RGB channels must be linearized (smaller than sRGB input); got {}",
+            color[0]
+        );
+    }
+
+    // ── opt_color_to_f32: None color → transparent ─────────────────────
+
+    #[test]
+    fn bug_hunt_opt_color_none_produces_transparent() {
+        let result = opt_color_to_f32(None, 1.0);
+        assert_eq!(result, [0.0, 0.0, 0.0, 0.0],
+            "None color must produce fully transparent [0,0,0,0]");
+    }
+
+    // ── stroke_dash_index: float edge values ───────────────────────────
+
+    #[test]
+    fn bug_hunt_stroke_dash_index_non_integer_floats() {
+        // Non-integer-valued floats (e.g. 6.5, 3.5) should not match "6,3".
+        let result = stroke_dash_index(&Some(vec![6.5, 3.5]));
+        assert!(
+            (result - 0.0).abs() < 1e-6,
+            "non-integer pattern must fall back to solid (0.0); got {result}"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_stroke_dash_index_single_element_vec() {
+        // Single-element vec must not match any palette entry.
+        let result = stroke_dash_index(&Some(vec![6.0]));
+        assert!(
+            (result - 0.0).abs() < 1e-6,
+            "single-element vec must fall back to solid; got {result}"
+        );
+    }
+
+    // ── SceneCollector: collect_annotation vs collect_static routing ────
+
+    #[test]
+    fn bug_hunt_collect_annotation_circle_emits_draw_command() {
+        // A Circle annotation node must produce a draw command via collect_annotation.
+        let style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let nodes = vec![SceneNode::Circle {
+            cx: 100.0, cy: 100.0, r: 10.0, style,
+        }];
+        let mut collector = SceneCollector::new();
+        collector.collect_annotation(&nodes, None, None);
+        assert_eq!(collector.circles.len(), 1, "circle annotation must be collected");
+        // Must have a draw command for the circle
+        let circle_cmds: Vec<_> = collector.draw_commands.iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+        assert_eq!(circle_cmds.len(), 1, "circle annotation must emit a draw command");
+        // The draw command must be non-mark (is_mark=false) since annotations use identity transform
+        assert!(!circle_cmds[0].is_mark, "annotation circle draw command must not be is_mark");
+    }
+
+    #[test]
+    fn bug_hunt_collect_annotation_line_goes_to_annotation_mesh() {
+        // A Line annotation node must go to annotation_mesh, not static_mesh.
+        let style = ferrum_scene::StrokeStyle {
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 2.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+        };
+        let nodes = vec![SceneNode::Line {
+            x1: 0.0, y1: 50.0, x2: 500.0, y2: 50.0, style,
+        }];
+        let mut collector = SceneCollector::new();
+        collector.collect_annotation(&nodes, None, None);
+        assert!(
+            !collector.annotation_mesh.vertices.is_empty(),
+            "Line annotation must go to annotation_mesh"
+        );
+        assert!(
+            collector.static_mesh.vertices.is_empty(),
+            "Line annotation must NOT go to static_mesh"
+        );
+        assert!(
+            collector.mesh.vertices.is_empty(),
+            "Line annotation must NOT go to mark mesh"
+        );
+    }
+
+    #[test]
+    fn bug_hunt_collect_static_line_goes_to_static_mesh() {
+        // A Line node via collect_static must go to static_mesh.
+        let style = ferrum_scene::StrokeStyle {
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+        };
+        let nodes = vec![SceneNode::Line {
+            x1: 0.0, y1: 100.0, x2: 500.0, y2: 100.0, style,
+        }];
+        let mut collector = SceneCollector::new();
+        collector.collect_static(&nodes, None, None);
+        assert!(
+            !collector.static_mesh.vertices.is_empty(),
+            "Line via collect_static must go to static_mesh"
+        );
+        assert!(
+            collector.annotation_mesh.vertices.is_empty(),
+            "Line via collect_static must NOT go to annotation_mesh"
+        );
+    }
+
+    // ── batch_uses_additive_blend: exhaustive ──────────────────────────
+
+    #[test]
+    fn bug_hunt_batch_additive_is_exhaustive() {
+        // Only Additive returns true; Normal returns false.
+        assert!(batch_uses_additive_blend(BlendMode::Additive));
+        assert!(!batch_uses_additive_blend(BlendMode::Normal));
+    }
+
+    // ── unpack_binary_instances: multi-batch stream ────────────────────
+
+    #[test]
+    fn bug_hunt_unpack_two_batches_in_single_stream() {
+        // Two batches (circles then rects) concatenated in a single stream.
+        let ci = CircleInstance {
+            center: [10.0, 20.0], radius: 3.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0; 4], stroke_width: 0.0,
+            opacity: 1.0, stroke_opacity: 1.0,
+            stroke_dash: 0.0, angle: 0.0,
+        };
+        let ri = RectInstance {
+            position: [50.0, 60.0], size: [20.0, 30.0],
+            corner_radius: 0.0,
+            fill_color: [0.0, 1.0, 0.0, 1.0],
+            stroke_color: [0.0; 4], stroke_width: 0.0,
+            opacity: 1.0, stroke_opacity: 1.0,
+            stroke_dash: 0.0, angle: 0.0,
+        };
+
+        let mut buf = Vec::new();
+        // Batch 0: panel=0, batch=0, kind=0 (circle), count=1, flags=0
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(bytemuck::bytes_of(&ci));
+        // Batch 1: panel=0, batch=1, kind=1 (rect), count=1, flags=0
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(bytemuck::bytes_of(&ri));
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&buf, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 1, "must unpack 1 circle from first batch");
+        assert_eq!(rects.len(), 1, "must unpack 1 rect from second batch");
+        assert!(meta.contains_key(&(0, 0)), "meta for (0,0) must exist");
+        assert!(meta.contains_key(&(0, 1)), "meta for (0,1) must exist");
+    }
+
+    // ── color_to_linear: zero opacity ──────────────────────────────────
+
+    #[test]
+    fn bug_hunt_color_to_linear_zero_opacity_produces_transparent() {
+        let c = Color { r: 255, g: 128, b: 0, a: 255 };
+        let result = color_to_linear(&c, 0.0);
+        assert!(
+            result[3].abs() < 1e-7,
+            "zero opacity must produce alpha=0.0; got {}",
+            result[3]
+        );
+        // RGB channels are still linearized (opacity only affects alpha).
+        assert!(result[0] > 0.0, "R channel must still be linearized");
+    }
+}

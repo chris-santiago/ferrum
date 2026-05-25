@@ -493,6 +493,27 @@ def lmplot(
     if method not in _VALID_METHODS:
         raise ValueError(f"lmplot: method must be one of {sorted(_VALID_METHODS)}; got {method!r}")
 
+    # Rust Smooth/Robust transforms require Float64 columns. Auto-cast
+    # integer columns to Float64, matching catplot's pattern (chart.py).
+    _INT_DTYPES = (
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+    )
+    data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+    casts = []
+    for fld in (x, y):
+        col_name = fld.field if hasattr(fld, "field") else str(fld)
+        if col_name in data.columns and data[col_name].dtype in _INT_DTYPES:
+            casts.append(pl.col(col_name).cast(pl.Float64))
+    if casts:
+        data = data.with_columns(casts)
+
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
 
@@ -774,10 +795,40 @@ def residplot(
         data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         data = data.drop_nulls(subset=[x, y])
 
+    # Rust Smooth/Robust transforms require Float64 columns.  Auto-cast
+    # integer columns, matching lmplot and catplot.
+    _INT_DTYPES = (
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+    )
+    data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+    casts = []
+    for fld in (x, y):
+        if fld in data.columns and data[fld].dtype in _INT_DTYPES:
+            casts.append(pl.col(fld).cast(pl.Float64))
+    if casts:
+        data = data.with_columns(casts)
+
     # The Rust Smooth/Robust transforms inject ``_ref_zero``,
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
     # ``inject_*`` kwargs are set — single source of truth for residual
     # computation lives in Rust; Python only declares the spec.
+    # When ``label`` is set, inject a constant ``_label`` column into the data
+    # and use ``groupby="_label"`` on the Smooth transform so the column
+    # survives the Rust transform's output schema (which otherwise only emits
+    # its declared columns).  Robust does not support groupby, so the label
+    # column cannot be preserved through that path — a Rust-side ``groupby``
+    # addition to the Robust transform would be needed.
+    if label is not None:
+        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = data.with_columns(pl.lit(str(label)).alias("_label"))
+
     if robust:
         resid_transform = Robust(
             x=x,
@@ -787,9 +838,7 @@ def residplot(
             inject_metrics=show_metrics,
         )
     else:
-        resid_transform = Smooth(
-            x=x,
-            y=y,
+        smooth_kwargs: dict = dict(
             method="lm",
             degree=order,
             ci=None,
@@ -797,14 +846,13 @@ def residplot(
             inject_zero_ref=zero_line,
             inject_metrics=show_metrics,
         )
-
-    if label is not None:
-        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
-        data = data.with_columns(pl.lit(label).alias("_label"))
+        if label is not None:
+            smooth_kwargs["groupby"] = "_label"
+        resid_transform = Smooth(x=x, y=y, **smooth_kwargs)
 
     chart = Chart(data).transform(resid_transform).mark_point()
     enc: dict = {"x": "x", "y": "residual"}
-    if label is not None and color is None:
+    if label is not None and color is None and not robust:
         enc["color"] = "_label"
     if color is not None:
         enc["color"] = color
