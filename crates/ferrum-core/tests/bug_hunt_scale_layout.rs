@@ -25,6 +25,13 @@ mod tests {
     }
 
     impl LogScaleData {
+        /// Snap a raw exponent to the nearest integer when within floating-point epsilon.
+        /// Mirrors LogScaleData::snap_exp in scale/log.rs.
+        fn snap_exp(raw: f64) -> f64 {
+            let rounded = raw.round();
+            if (raw - rounded).abs() < 1e-10 { rounded } else { raw }
+        }
+
         fn scale(&self, x: f64) -> f64 {
             if x.is_nan() { return f64::NAN; }
             let [d0, d1] = self.domain;
@@ -77,8 +84,8 @@ mod tests {
             let log_base = self.base.ln();
             let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
             let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
-            let lo_exp = (lo.ln() / log_base).floor();
-            let hi_exp = (hi.ln() / log_base).ceil();
+            let lo_exp = Self::snap_exp(lo.ln() / log_base).floor();
+            let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil();
             let (new_lo, new_hi) = if neg {
                 (sign * self.base.powf(hi_exp), sign * self.base.powf(lo_exp))
             } else {
@@ -98,20 +105,24 @@ mod tests {
             let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
             let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
             let log_base = self.base.ln();
-            let lo_exp = (lo.ln() / log_base).floor() as i64;
-            let hi_exp = (hi.ln() / log_base).ceil() as i64;
+            let lo_exp = Self::snap_exp(lo.ln() / log_base).floor() as i64;
+            let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil() as i64;
             let span_decades = (hi_exp - lo_exp).max(1) as usize;
+            let should_reverse = if neg {
+                self.domain[0] < self.domain[1]
+            } else {
+                self.domain[0] > self.domain[1]
+            };
             if span_decades >= count {
                 let mut out: Vec<f64> = (lo_exp..=hi_exp)
                     .map(|e| sign * self.base.powi(e as i32))
                     .filter(|t| (t.abs() >= lo) && (t.abs() <= hi))
                     .collect();
-                if self.domain[0] > self.domain[1] { out.reverse(); }
+                if should_reverse { out.reverse(); }
                 out
             } else {
-                // Fall back to nice_ticks — simplified here for test purposes
                 let mut out: Vec<f64> = vec![sign * lo, sign * hi];
-                if self.domain[0] > self.domain[1] { out.reverse(); }
+                if should_reverse { out.reverse(); }
                 out
             }
         }

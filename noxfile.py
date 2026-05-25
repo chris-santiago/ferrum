@@ -17,6 +17,40 @@ def test(session: nox.Session) -> None:
     session.run("uv", "run", "pytest", "-n", "auto", *session.posargs, external=True)
 
 
+@nox.session(python=False)
+def cargo_test(session: nox.Session) -> None:
+    """Run Rust tests with correct macOS DYLD paths."""
+    import subprocess
+
+    result = subprocess.run(
+        ["uv", "run", "python", "-c", "import sys; print(sys.base_prefix)"],
+        capture_output=True,
+        text=True,
+    )
+    base_prefix = result.stdout.strip()
+    lib_dir = f"{base_prefix}/lib"
+    python_exe = subprocess.run(
+        ["uv", "run", "python", "-c", "import sys; print(sys.executable)"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    env = {
+        "DYLD_LIBRARY_PATH": lib_dir,
+        "RUSTFLAGS": f"-L {lib_dir}",
+        "PYO3_PYTHON": python_exe,
+    }
+    session.run(
+        "cargo",
+        "test",
+        "-p",
+        "ferrum-core",
+        *session.posargs,
+        external=True,
+        env=env,
+    )
+
+
 @nox.session()
 def build(session: nox.Session) -> None:
     """Build the ferrum package in an isolated environment."""

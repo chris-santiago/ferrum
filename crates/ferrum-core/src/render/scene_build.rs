@@ -28,7 +28,7 @@ pub fn build_scene(
     warnings: &mut Vec<RenderWarning>,
     chart_config: &super::chart_config::ChartConfig,
 ) -> Result<SceneGraph, RenderError> {
-    let background = config.background.or(Some(theme.background_color));
+    let background = config.background.or(Some(theme.colors.background_color));
 
     let mut title_nodes: Vec<SceneNode> = Vec::new();
     let mut legend_nodes: Vec<SceneNode> = Vec::new();
@@ -401,14 +401,14 @@ fn build_title(
     let title_spec = spec.title.as_ref();
     let resolved_font_size = title_spec
         .and_then(|t| t.font_size)
-        .unwrap_or(theme.title_font_size);
+        .unwrap_or(theme.typography.title_font_size);
     let resolved_font_weight: String = title_spec
         .and_then(|t| t.font_weight.clone())
-        .unwrap_or_else(|| theme.title_font_weight.clone());
+        .unwrap_or_else(|| theme.typography.title_font_weight.clone());
     let resolved_color = title_spec
         .and_then(|t| t.color.as_deref())
         .and_then(|hex| super::color::from_hex_str(hex).ok())
-        .unwrap_or(theme.title_color);
+        .unwrap_or(theme.colors.title_color);
     let fw = if resolved_font_weight == "normal" { None } else { Some(resolved_font_weight.as_str()) };
     out.push(SceneNode::Text {
         x: title.x,
@@ -416,14 +416,14 @@ fn build_title(
         content: title.text.clone(),
         style: to_scene_text_style(
             resolved_color, resolved_font_size, title.anchor, 0.0,
-            &theme.title_font_family, fw, None, 1.0,
+            &theme.typography.title_font_family, fw, None, 1.0,
         ),
     });
     if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
         let resolved_sub_color = title_spec
             .and_then(|t| t.subtitle_color.as_deref())
             .and_then(|hex| super::color::from_hex_str(hex).ok())
-            .unwrap_or(theme.font_color);
+            .unwrap_or(theme.colors.font_color);
         let resolved_sub_font_size = title_spec
             .and_then(|t| t.subtitle_font_size)
             .unwrap_or(resolved_font_size * 0.85);
@@ -433,7 +433,7 @@ fn build_title(
             content: subtitle.clone(),
             style: to_scene_text_style(
                 resolved_sub_color, resolved_sub_font_size, title.anchor, 0.0,
-                &theme.font_family, None, None, 1.0,
+                &theme.typography.font_family, None, None, 1.0,
             ),
         });
     }
@@ -734,10 +734,10 @@ fn build_polar_axes(
     use std::f64::consts::TAU;
     use ferrum_scene::PathCmd;
 
-    let axis_color = draw::to_scene_color(theme.axis_line_color);
+    let axis_color = draw::to_scene_color(theme.colors.axis_line_color);
     let stroke = ferrum_scene::StrokeStyle {
         color: axis_color,
-        width: theme.axis_line_width,
+        width: theme.sizes.axis_line_width,
         dash: None,
         opacity: 1.0,
         stroke_opacity: 1.0,
@@ -755,7 +755,7 @@ fn build_polar_axes(
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx + outer_r, y: cy },
                 PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx - outer_r, y: cy },
             ],
-            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.axis_line_width, opacity: 1.0, stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0 },
+            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.sizes.axis_line_width, opacity: 1.0, stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0 },
             closed: true,
         });
     }
@@ -784,9 +784,9 @@ fn build_polar_axes(
                 y: ly,
                 content: tick.label.clone(),
                 style: draw::to_scene_text_style(
-                    theme.label_color, theme.label_font_size,
+                    theme.colors.label_color, theme.typography.label_font_size,
                     crate::layout::TextAnchor::Middle, 0.0,
-                    &theme.font_family, None, None, 1.0,
+                    &theme.typography.font_family, None, None, 1.0,
                 ),
             });
         }

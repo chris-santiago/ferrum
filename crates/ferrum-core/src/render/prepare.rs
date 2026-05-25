@@ -173,35 +173,46 @@ pub struct PreparedInputs {
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
-    /// D13: legend orient override from `encoding.color.legend.orient`.
-    /// `None` means use the theme default. The renderer applies this by
-    /// temporarily replacing `theme.legend_orient` before calling
-    /// `compute_layout`.
-    pub legend_orient_override: Option<crate::layout::LegendOrient>,
-    /// D13: legend title override from `encoding.color.legend.title`.
+    /// D13: all per-encoding legend style overrides extracted from
+    /// `encoding.color.legend.*`. Grouped here to keep `PreparedInputs`
+    /// flat and to make adding new override fields a one-location change.
+    pub legend_overrides: LegendPreparedOverrides,
+}
+
+/// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
+///
+/// All fields are `Option` so `Default` (all `None`) represents "use theme defaults".
+/// Populated by `prepare_render_inputs` from the `color_legend_extra` JSON map and
+/// consumed by `legend_overrides_from_prep` (layout) and `prepare_and_layout`
+/// (effective-theme construction).
+#[derive(Debug, Clone, Default)]
+pub struct LegendPreparedOverrides {
+    /// D13: orient override from `encoding.color.legend.orient`.
+    /// `None` means use the theme default.
+    pub orient: Option<crate::layout::LegendOrient>,
+    /// D13: title override from `encoding.color.legend.title`.
     /// `Some(s)` replaces the default field-name legend title.
-    pub legend_title_override: Option<String>,
-    /// D13: legend title font size override from `encoding.color.legend.titleFontSize`.
-    pub legend_title_font_size_override: Option<f64>,
-    /// D13: legend columns override from `encoding.color.legend.columns`.
-    /// When `Some`, categorical legend entries are arranged in N columns instead of
-    /// the default single vertical column.
-    pub legend_columns_override: Option<u32>,
+    pub title: Option<String>,
+    /// D13: title font size override from `encoding.color.legend.titleFontSize`.
+    pub title_font_size: Option<f64>,
+    /// D13: columns override from `encoding.color.legend.columns`.
+    /// When `Some`, categorical legend entries are arranged in N columns.
+    pub columns: Option<u32>,
     /// D13+: maximum number of colorbar ticks from `encoding.color.legend.tickCount`.
-    pub legend_tick_count_override: Option<usize>,
+    pub tick_count: Option<usize>,
     /// D13+: label font size from `encoding.color.legend.labelFontSize`.
-    pub legend_label_font_size_override: Option<f64>,
+    pub label_font_size: Option<f64>,
     /// D13+: colorbar gradient bar length in pixels from `encoding.color.legend.gradientLength`.
-    pub legend_gradient_length_override: Option<f64>,
+    pub gradient_length: Option<f64>,
     /// D13+: colorbar gradient bar thickness in pixels from `encoding.color.legend.gradientThickness`.
-    pub legend_gradient_thickness_override: Option<f64>,
+    pub gradient_thickness: Option<f64>,
     /// D13+: direction override from `encoding.color.legend.direction`.
-    pub legend_direction_override: Option<crate::layout::LegendDirection>,
+    pub direction: Option<crate::layout::LegendDirection>,
     /// D13+: explicit tick/entry values from `encoding.color.legend.values`.
-    pub legend_values_override: Option<Vec<String>>,
+    pub values: Option<Vec<String>>,
     /// D13+: legend type override from `encoding.color.legend.type`.
     /// "gradient" forces colorbar rendering; "symbol" forces discrete entries.
-    pub legend_type_override: Option<String>,
+    pub legend_type: Option<String>,
 }
 
 impl PreparedInputs {
@@ -595,77 +606,79 @@ pub fn prepare_render_inputs(
         .as_ref()
         .and_then(|c| c.legend.as_ref())
         .map(|l| &l.extra);
-    let legend_orient_override = color_legend_extra
-        .and_then(|extra| extra.get("orient"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "right" => Some(LegendOrient::Right),
-            "left" => Some(LegendOrient::Left),
-            "top" => Some(LegendOrient::Top),
-            "bottom" => Some(LegendOrient::Bottom),
-            _ => None,
-        });
-    let legend_title_override = color_legend_extra
-        .and_then(|extra| extra.get("title"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
-    let legend_title_font_size_override = color_legend_extra
-        .and_then(|extra| {
-            extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
-        })
-        .and_then(|v| v.as_f64());
-    let legend_columns_override = color_legend_extra
-        .and_then(|extra| extra.get("columns"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
-    let legend_tick_count_override = color_legend_extra
-        .and_then(|extra| extra.get("tickCount"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let legend_label_font_size_override = color_legend_extra
-        .and_then(|extra| extra.get("labelFontSize").or_else(|| extra.get("label_font_size")))
-        .and_then(|v| v.as_f64());
-    let legend_gradient_length_override = color_legend_extra
-        .and_then(|extra| extra.get("gradientLength").or_else(|| extra.get("gradient_length")))
-        .and_then(|v| v.as_f64());
-    let legend_gradient_thickness_override = color_legend_extra
-        .and_then(|extra| extra.get("gradientThickness").or_else(|| extra.get("gradient_thickness")))
-        .and_then(|v| v.as_f64());
-    let legend_direction_override = color_legend_extra
-        .and_then(|extra| extra.get("direction"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| match s {
-            "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
-            "vertical"   => Some(crate::layout::LegendDirection::Vertical),
-            _ => None,
-        });
-    // `values`: explicit tick/entry labels for the legend. Accepts an array of
-    // strings or numbers. Numbers are formatted to a short decimal string.
-    let legend_values_override: Option<Vec<String>> = color_legend_extra
-        .and_then(|extra| extra.get("values"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|item| {
-                    if let Some(s) = item.as_str() {
-                        s.to_string()
-                    } else if let Some(n) = item.as_f64() {
-                        if n.fract() == 0.0 && n.abs() < 1e15 {
-                            format!("{}", n as i64)
+    let legend_overrides = LegendPreparedOverrides {
+        orient: color_legend_extra
+            .and_then(|extra| extra.get("orient"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "right"  => Some(LegendOrient::Right),
+                "left"   => Some(LegendOrient::Left),
+                "top"    => Some(LegendOrient::Top),
+                "bottom" => Some(LegendOrient::Bottom),
+                _ => None,
+            }),
+        title: color_legend_extra
+            .and_then(|extra| extra.get("title"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        title_font_size: color_legend_extra
+            .and_then(|extra| {
+                extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
+            })
+            .and_then(|v| v.as_f64()),
+        columns: color_legend_extra
+            .and_then(|extra| extra.get("columns"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32),
+        tick_count: color_legend_extra
+            .and_then(|extra| extra.get("tickCount"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize),
+        label_font_size: color_legend_extra
+            .and_then(|extra| extra.get("labelFontSize").or_else(|| extra.get("label_font_size")))
+            .and_then(|v| v.as_f64()),
+        gradient_length: color_legend_extra
+            .and_then(|extra| extra.get("gradientLength").or_else(|| extra.get("gradient_length")))
+            .and_then(|v| v.as_f64()),
+        gradient_thickness: color_legend_extra
+            .and_then(|extra| extra.get("gradientThickness").or_else(|| extra.get("gradient_thickness")))
+            .and_then(|v| v.as_f64()),
+        direction: color_legend_extra
+            .and_then(|extra| extra.get("direction"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
+                "vertical"   => Some(crate::layout::LegendDirection::Vertical),
+                _ => None,
+            }),
+        // `values`: explicit tick/entry labels for the legend. Accepts an array of
+        // strings or numbers. Numbers are formatted to a short decimal string.
+        values: color_legend_extra
+            .and_then(|extra| extra.get("values"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|item| {
+                        if let Some(s) = item.as_str() {
+                            s.to_string()
+                        } else if let Some(n) = item.as_f64() {
+                            if n.fract() == 0.0 && n.abs() < 1e15 {
+                                format!("{}", n as i64)
+                            } else {
+                                format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
+                            }
                         } else {
-                            format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
+                            item.to_string()
                         }
-                    } else {
-                        item.to_string()
-                    }
-                })
-                .collect()
-        });
-    // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
-    let legend_type_override = color_legend_extra
-        .and_then(|extra| extra.get("type"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+                    })
+                    .collect()
+            }),
+        // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
+        legend_type: color_legend_extra
+            .and_then(|extra| extra.get("type"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+    };
 
     Ok(PreparedInputs {
         transform_outputs,
@@ -678,17 +691,7 @@ pub fn prepare_render_inputs(
         warnings: scale_warnings,
         layers,
         coord_flipped,
-        legend_orient_override,
-        legend_title_override,
-        legend_title_font_size_override,
-        legend_columns_override,
-        legend_tick_count_override,
-        legend_label_font_size_override,
-        legend_gradient_length_override,
-        legend_gradient_thickness_override,
-        legend_direction_override,
-        legend_values_override,
-        legend_type_override,
+        legend_overrides,
     })
 }
 

@@ -70,17 +70,17 @@ pub fn build_secondary_axis(
     let plot_bottom = plot_area.y + plot_area.h;
 
     let axis_stroke = to_scene_stroke(
-        theme.axis_line_color,
-        theme.axis_line_width,
+        theme.colors.axis_line_color,
+        theme.sizes.axis_line_width,
         1.0,
         None,
         None,
         None,
     );
-    let tick_stroke = to_scene_stroke(theme.tick_color, theme.tick_width, 1.0, None, None, None);
+    let tick_stroke = to_scene_stroke(theme.colors.tick_color, theme.sizes.tick_width, 1.0, None, None, None);
 
     // Domain line on the right side of the plot area.
-    if theme.axis_line {
+    if theme.axis.axis_line {
         nodes.push(SceneNode::Line {
             x1: axis_x,
             y1: plot_top,
@@ -114,22 +114,22 @@ pub fn build_secondary_axis(
         nodes.push(SceneNode::Line {
             x1: axis_x,
             y1: py,
-            x2: axis_x + theme.tick_size,
+            x2: axis_x + theme.sizes.tick_size,
             y2: py,
             style: tick_stroke.clone(),
         });
 
         // Label to the right of the tick.
         nodes.push(SceneNode::Text {
-            x: axis_x + theme.tick_size + 2.0,
-            y: py + theme.label_font_size / 3.0,
+            x: axis_x + theme.sizes.tick_size + 2.0,
+            y: py + theme.typography.label_font_size / 3.0,
             content: format_numeric(*v),
             style: to_scene_text_style(
-                theme.label_color,
-                theme.label_font_size,
+                theme.colors.label_color,
+                theme.typography.label_font_size,
                 LayoutAnchor::Start,
                 0.0,
-                &theme.label_font_family,
+                &theme.typography.label_font_family,
                 None,
                 None,
                 1.0,

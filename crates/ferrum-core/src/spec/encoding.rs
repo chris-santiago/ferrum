@@ -59,6 +59,28 @@ impl FromStr for DataType {
     }
 }
 
+/// Shared fields across all 7 continuous `ScaleSpec` variants (Linear, Log, Time,
+/// Symlog, Pow, Sqrt, Utc).  Embedded via `#[serde(flatten)]` so these fields
+/// appear at the same JSON level as the variant-specific fields (no `"common"` key).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContinuousScaleCommon {
+    /// Explicit data domain [min, max].  Auto-inferred from the column when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<Vec<f64>>,
+    /// Pixel range [lo, hi].  Defaults to the plot extent when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<Vec<f64>>,
+    /// Clamp output to the range bounds.
+    #[serde(default)]
+    pub clamp: bool,
+    /// Fractional inward pixel padding (0.0 = no padding).  Themes-T4
+    /// quantitative default is 0.05, applied at the renderer when
+    /// `padding.is_none()` and `domain.is_none()`.  User-specified
+    /// `domain` suppresses the default to 0.0 unless `padding` is also set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<f64>,
+}
+
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
 /// Mirrors the Python ScaleLog/ScalePow/etc. classes via tagged enum.
 ///
@@ -69,63 +91,34 @@ impl FromStr for DataType {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ScaleSpec {
     Linear {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
         #[serde(default)]
         nice: bool,
         #[serde(default)]
         zero: bool,
-        #[serde(default)]
-        clamp: bool,
-        /// Fractional inward pixel padding (0.0 = no padding). Themes-T4
-        /// quantitative default is 0.05, applied at the renderer when
-        /// `padding.is_none()` and `domain.is_none()`. User-specified
-        /// `domain` suppresses the default to 0.0 unless `padding` is
-        /// also set.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
     },
     Log {
         #[serde(default = "default_log_base")]
         base: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
         #[serde(default)]
         nice: bool,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
     },
     Time {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
         #[serde(default)]
         nice: bool,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
     },
     Symlog {
         #[serde(default = "default_symlog_constant")]
         constant: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
         #[serde(default)]
         nice: bool,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
     },
     Ordinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,36 +131,18 @@ pub enum ScaleSpec {
     Pow {
         #[serde(default = "default_pow_exponent")]
         exponent: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
     },
     Sqrt {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
     },
     Utc {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        domain: Option<Vec<f64>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        #[serde(flatten)]
+        common: ContinuousScaleCommon,
         #[serde(default)]
         nice: bool,
-        #[serde(default)]
-        clamp: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f64>,
     },
     Band {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -606,6 +581,48 @@ pub struct Encoding {
     pub fill_opacity: Option<EncodingSpec>,
 }
 
+/// Merge a single `parent` `EncodingSpec` into a `child` slot.
+///
+/// - If `child` is `None`, adopt the entire parent value.
+/// - If `child` and `parent` share the same `field`, propagate any parent
+///   metadata that the child has not set (scale, title, scheme, type_,
+///   axis, legend, format, format_type).
+/// - If the fields differ, do nothing.
+fn inherit_encoding_spec(child: &mut Option<EncodingSpec>, parent: &Option<EncodingSpec>) {
+    match (child.as_mut(), parent.as_ref()) {
+        (None, Some(_)) => {
+            *child = parent.clone();
+        }
+        (Some(c), Some(p)) if c.field == p.field => {
+            if c.scale.is_none() && p.scale.is_some() {
+                c.scale = p.scale.clone();
+            }
+            if c.title.is_none() && p.title.is_some() {
+                c.title = p.title.clone();
+            }
+            if c.scheme.is_none() && p.scheme.is_some() {
+                c.scheme = p.scheme.clone();
+            }
+            if c.type_.is_none() && p.type_.is_some() {
+                c.type_ = p.type_;
+            }
+            if c.axis.is_none() && p.axis.is_some() {
+                c.axis = p.axis.clone();
+            }
+            if c.legend.is_none() && p.legend.is_some() {
+                c.legend = p.legend.clone();
+            }
+            if c.format.is_none() && p.format.is_some() {
+                c.format = p.format.clone();
+            }
+            if c.format_type.is_none() && p.format_type.is_some() {
+                c.format_type = p.format_type.clone();
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Encoding {
     /// Inherit unset encoding channels from `parent`.
     ///
@@ -622,107 +639,53 @@ impl Encoding {
     /// merge uniformly so the policy is symmetric and predictable — the
     /// per-channel asymmetry was an undocumented accident.
     pub fn inherit_from(&mut self, parent: &Encoding) {
-        fn inherit(
-            child: &mut Option<EncodingSpec>,
-            parent: &Option<EncodingSpec>,
-        ) {
-            match (child.as_mut(), parent.as_ref()) {
-                (None, Some(_)) => { *child = parent.clone(); }
-                (Some(c), Some(p)) if c.field == p.field => {
-                    if c.scale.is_none() && p.scale.is_some() {
-                        c.scale = p.scale.clone();
-                    }
-                    if c.title.is_none() && p.title.is_some() {
-                        c.title = p.title.clone();
-                    }
-                    if c.scheme.is_none() && p.scheme.is_some() {
-                        c.scheme = p.scheme.clone();
-                    }
-                    if c.type_.is_none() && p.type_.is_some() {
-                        c.type_ = p.type_;
-                    }
-                    if c.axis.is_none() && p.axis.is_some() {
-                        c.axis = p.axis.clone();
-                    }
-                    if c.legend.is_none() && p.legend.is_some() {
-                        c.legend = p.legend.clone();
-                    }
-                    if c.format.is_none() && p.format.is_some() {
-                        c.format = p.format.clone();
-                    }
-                    if c.format_type.is_none() && p.format_type.is_some() {
-                        c.format_type = p.format_type.clone();
-                    }
-                }
-                _ => {}
-            }
-        }
-        inherit(&mut self.x, &parent.x);
-        inherit(&mut self.y, &parent.y);
-        inherit(&mut self.color, &parent.color);
-        inherit(&mut self.size, &parent.size);
-        inherit(&mut self.shape, &parent.shape);
-        inherit(&mut self.opacity, &parent.opacity);
-        inherit(&mut self.x2, &parent.x2);
-        inherit(&mut self.y2, &parent.y2);
-        inherit(&mut self.text, &parent.text);
-        inherit(&mut self.tooltip, &parent.tooltip);
+        inherit_encoding_spec(&mut self.x, &parent.x);
+        inherit_encoding_spec(&mut self.y, &parent.y);
+        inherit_encoding_spec(&mut self.color, &parent.color);
+        inherit_encoding_spec(&mut self.size, &parent.size);
+        inherit_encoding_spec(&mut self.shape, &parent.shape);
+        inherit_encoding_spec(&mut self.opacity, &parent.opacity);
+        inherit_encoding_spec(&mut self.x2, &parent.x2);
+        inherit_encoding_spec(&mut self.y2, &parent.y2);
+        inherit_encoding_spec(&mut self.text, &parent.text);
+        inherit_encoding_spec(&mut self.tooltip, &parent.tooltip);
         if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
             self.tooltip_fields = parent.tooltip_fields.clone();
         }
-        inherit(&mut self.href, &parent.href);
-        inherit(&mut self.description, &parent.description);
-        inherit(&mut self.key, &parent.key);
-        inherit(&mut self.url, &parent.url);
-        inherit(&mut self.stroke_width, &parent.stroke_width);
-        inherit(&mut self.stroke_opacity, &parent.stroke_opacity);
-        inherit(&mut self.stroke_dash, &parent.stroke_dash);
-        inherit(&mut self.angle, &parent.angle);
-        inherit(&mut self.fill_opacity, &parent.fill_opacity);
+        inherit_encoding_spec(&mut self.href, &parent.href);
+        inherit_encoding_spec(&mut self.description, &parent.description);
+        inherit_encoding_spec(&mut self.key, &parent.key);
+        inherit_encoding_spec(&mut self.url, &parent.url);
+        inherit_encoding_spec(&mut self.stroke_width, &parent.stroke_width);
+        inherit_encoding_spec(&mut self.stroke_opacity, &parent.stroke_opacity);
+        inherit_encoding_spec(&mut self.stroke_dash, &parent.stroke_dash);
+        inherit_encoding_spec(&mut self.angle, &parent.angle);
+        inherit_encoding_spec(&mut self.fill_opacity, &parent.fill_opacity);
     }
 
     /// Like `inherit_from` but skips positional channels (x, y, x2, y2).
     /// Used for layers routed to their own data via `data_source` — they
     /// should not inherit the primary batch's positional fields.
     pub fn inherit_non_positional(&mut self, parent: &Encoding) {
-        fn inherit(
-            child: &mut Option<EncodingSpec>,
-            parent: &Option<EncodingSpec>,
-        ) {
-            match (child.as_mut(), parent.as_ref()) {
-                (None, Some(_)) => { *child = parent.clone(); }
-                (Some(c), Some(p)) if c.field == p.field => {
-                    if c.scale.is_none() && p.scale.is_some() { c.scale = p.scale.clone(); }
-                    if c.title.is_none() && p.title.is_some() { c.title = p.title.clone(); }
-                    if c.scheme.is_none() && p.scheme.is_some() { c.scheme = p.scheme.clone(); }
-                    if c.type_.is_none() && p.type_.is_some() { c.type_ = p.type_; }
-                    if c.axis.is_none() && p.axis.is_some() { c.axis = p.axis.clone(); }
-                    if c.legend.is_none() && p.legend.is_some() { c.legend = p.legend.clone(); }
-                    if c.format.is_none() && p.format.is_some() { c.format = p.format.clone(); }
-                    if c.format_type.is_none() && p.format_type.is_some() { c.format_type = p.format_type.clone(); }
-                }
-                _ => {}
-            }
-        }
         // Skip x, y, x2, y2 — positional channels belong to the layer's own data.
-        inherit(&mut self.color, &parent.color);
-        inherit(&mut self.size, &parent.size);
-        inherit(&mut self.shape, &parent.shape);
-        inherit(&mut self.opacity, &parent.opacity);
-        inherit(&mut self.text, &parent.text);
-        inherit(&mut self.tooltip, &parent.tooltip);
+        inherit_encoding_spec(&mut self.color, &parent.color);
+        inherit_encoding_spec(&mut self.size, &parent.size);
+        inherit_encoding_spec(&mut self.shape, &parent.shape);
+        inherit_encoding_spec(&mut self.opacity, &parent.opacity);
+        inherit_encoding_spec(&mut self.text, &parent.text);
+        inherit_encoding_spec(&mut self.tooltip, &parent.tooltip);
         if self.tooltip_fields.is_none() && parent.tooltip_fields.is_some() {
             self.tooltip_fields = parent.tooltip_fields.clone();
         }
-        inherit(&mut self.href, &parent.href);
-        inherit(&mut self.description, &parent.description);
-        inherit(&mut self.key, &parent.key);
-        inherit(&mut self.url, &parent.url);
-        inherit(&mut self.stroke_width, &parent.stroke_width);
-        inherit(&mut self.stroke_opacity, &parent.stroke_opacity);
-        inherit(&mut self.stroke_dash, &parent.stroke_dash);
-        inherit(&mut self.angle, &parent.angle);
-        inherit(&mut self.fill_opacity, &parent.fill_opacity);
+        inherit_encoding_spec(&mut self.href, &parent.href);
+        inherit_encoding_spec(&mut self.description, &parent.description);
+        inherit_encoding_spec(&mut self.key, &parent.key);
+        inherit_encoding_spec(&mut self.url, &parent.url);
+        inherit_encoding_spec(&mut self.stroke_width, &parent.stroke_width);
+        inherit_encoding_spec(&mut self.stroke_opacity, &parent.stroke_opacity);
+        inherit_encoding_spec(&mut self.stroke_dash, &parent.stroke_dash);
+        inherit_encoding_spec(&mut self.angle, &parent.angle);
+        inherit_encoding_spec(&mut self.fill_opacity, &parent.fill_opacity);
     }
 
     /// Overlay channels from `overlay` onto `self`.
@@ -863,11 +826,13 @@ mod tests {
             type_: Some(DataType::Quantitative),
             scale: Some(ScaleSpec::Log {
                 base: 10.0,
-                domain: None,
-                range: None,
+                common: ContinuousScaleCommon {
+                    domain: None,
+                    range: None,
+                    clamp: false,
+                    padding: None,
+                },
                 nice: true,
-                clamp: false,
-                padding: None,
             }),
             ..Default::default()
         };
@@ -980,10 +945,10 @@ mod tests {
         let json = r#"{"type":"pow"}"#;
         let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
         match parsed {
-            ScaleSpec::Pow { exponent, clamp, padding, .. } => {
+            ScaleSpec::Pow { exponent, common } => {
                 assert_eq!(exponent, 2.0);
-                assert!(!clamp);
-                assert_eq!(padding, None);
+                assert!(!common.clamp);
+                assert_eq!(common.padding, None);
             }
             _ => panic!("expected Pow variant"),
         }
@@ -994,7 +959,7 @@ mod tests {
         let json = r#"{"type":"sqrt","clamp":true}"#;
         let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
         match &parsed {
-            ScaleSpec::Sqrt { clamp, .. } => assert!(clamp),
+            ScaleSpec::Sqrt { common } => assert!(common.clamp),
             _ => panic!("expected Sqrt variant"),
         }
         let re = serde_json::to_string(&parsed).unwrap();
@@ -1233,7 +1198,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 2.0, domain: None, range: None, nice: true, clamp: false, padding: None }),
+                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: true }),
                 title: Some("Value (log2)".into()),
                 axis: Some(AxisSpec { extra: {
                     let mut m = serde_json::Map::new();
@@ -1270,7 +1235,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Temporal),
-                scale: Some(ScaleSpec::Linear { domain: None, range: None, nice: true, zero: false, clamp: false, padding: None }),
+                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: true, zero: false }),
                 title: Some("Parent Title".into()),
                 scheme: Some("parent_scheme".into()),
                 format: Some("parent_fmt".into()),
@@ -1283,7 +1248,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 10.0, domain: None, range: None, nice: false, clamp: false, padding: None }),
+                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: false }),
                 title: Some("Child Title".into()),
                 scheme: Some("child_scheme".into()),
                 format: Some("child_fmt".into()),

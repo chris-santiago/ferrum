@@ -106,14 +106,17 @@ impl std::fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Theme fields actually read by Phase 6 + Phase 7. Kept decoupled from a full
-/// Theme type — Phase 8 grammar will translate ferrum.Theme into this shape.
-///
-/// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
-/// and `from_hex_str` helper; for now we construct directly via Srgba::new.
+// ── ThemeInputs sub-structs ──────────────────────────────────────────────────
+//
+// The flat ~42-field ThemeInputs is decomposed into logical sub-structs.
+// Each group is Clone + Debug + PartialEq + Default so ThemeInputs retains
+// those derives. Serde is not derived on the sub-structs because
+// ThemeInputs itself is not `Serialize`/`Deserialize` — it is populated
+// from Python dicts via `render/binding.rs` (ThemeOverridesSpec).
+
+/// Outer and inter-cell padding values.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ThemeInputs {
-    // Phase 6 layout fields.
+pub struct ThemePadding {
     pub padding: f64,
     /// Per-side padding overrides. When `Some`, these win over `padding` for
     /// that side. `configure_padding(top=N)` sets `padding_top = Some(N)`.
@@ -124,24 +127,70 @@ pub struct ThemeInputs {
     pub column_padding: f64,
     pub row_padding: f64,
     pub axis_title_padding: f64,
-    pub label_font_size: f64,
-    pub title_font_size: f64,
-    pub legend_orient: LegendOrient,
+    pub strip_padding: f64,
+}
 
-    // Phase 7 render fields — sizes/widths/opacities.
+impl Default for ThemePadding {
+    fn default() -> Self {
+        Self {
+            padding: 16.0,
+            padding_top: None,
+            padding_right: None,
+            padding_bottom: None,
+            padding_left: None,
+            column_padding: 12.0,
+            row_padding: 12.0,
+            axis_title_padding: 8.0,
+            strip_padding: 6.0,
+        }
+    }
+}
+
+/// Numeric sizes, widths, opacities, and range extremes for marks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeRenderSizes {
     pub point_size: f64,
     pub line_stroke_width: f64,
     pub bar_corner_radius: f64,
     pub area_opacity: f64,
     pub default_opacity: f64,
+    pub point_opacity: f64,
     pub axis_line_width: f64,
     pub tick_size: f64,
+    pub tick_width: f64,
     pub grid_width: f64,
-    pub grid: bool,
     pub strip_text_size: f64,
-    pub strip_padding: f64,
+    pub point_size_min: f64,
+    pub point_size_max: f64,
+    pub opacity_min: f64,
+    pub opacity_max: f64,
+}
 
-    // Phase 7 render fields — colors.
+impl Default for ThemeRenderSizes {
+    fn default() -> Self {
+        Self {
+            point_size: 36.0,
+            line_stroke_width: 1.5,
+            bar_corner_radius: 0.0,
+            area_opacity: 0.35,
+            default_opacity: 1.0,
+            point_opacity: 1.0,
+            axis_line_width: 1.0,
+            tick_size: 4.0,
+            tick_width: 1.0,
+            grid_width: 0.5,
+            strip_text_size: 12.0,
+            point_size_min: 4.0,
+            point_size_max: 36.0,
+            opacity_min: 0.1,
+            opacity_max: 1.0,
+        }
+    }
+}
+
+/// Color values for marks, axes, grid, text, background, and strips.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeColors {
     pub mark_color: palette::Srgba<u8>,
     pub axis_line_color: palette::Srgba<u8>,
     pub tick_color: palette::Srgba<u8>,
@@ -149,54 +198,170 @@ pub struct ThemeInputs {
     pub font_color: palette::Srgba<u8>,
     pub background_color: palette::Srgba<u8>,
     pub strip_background_color: palette::Srgba<u8>,
+    pub title_color: palette::Srgba<u8>,
+    pub label_color: palette::Srgba<u8>,
+    pub reference_line_color: palette::Srgba<u8>,
+}
 
-    // Phase 8a size/opacity range fields.
-    pub point_size_min: f64,  // default 3.0
-    pub point_size_max: f64,  // default 30.0
-    pub opacity_min: f64,     // default 0.1
-    pub opacity_max: f64,     // default 1.0
+impl Default for ThemeColors {
+    fn default() -> Self {
+        let mark_blue  = palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF);
+        let text_fg    = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
+        let label_gray = palette::Srgba::new(0x6B, 0x72, 0x80, 0xFF);
+        let grid_warm  = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
+        let bg_cream   = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
+        let strip_bg   = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
+        Self {
+            mark_color: mark_blue,
+            axis_line_color: label_gray,
+            tick_color: label_gray,
+            grid_color: grid_warm,
+            font_color: text_fg,
+            background_color: bg_cream,
+            strip_background_color: strip_bg,
+            title_color: text_fg,
+            label_color: label_gray,
+            reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
+        }
+    }
+}
 
-    // Themes-T1 additions (ferrum-spec.md §3.13).
-
-    // Typography
+/// Font family, weight, and size fields for body, title, and label text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeTypography {
     pub font_family: String,
     pub font_weight: String,
+    pub label_font_size: f64,
+    pub label_font_family: String,
     pub title_font_family: String,
+    pub title_font_size: f64,
     pub title_font_weight: String,
-    pub title_color: palette::Srgba<u8>,
     pub title_anchor: TextAnchor,
     pub title_offset: f64,
-    pub label_font_family: String,
-    pub label_color: palette::Srgba<u8>,
-
-    // Axes
-    pub axis_line: bool,
-    pub tick_width: f64,
-
-    // Grid
-    pub grid_dash: Option<Vec<f64>>,
-    pub grid_opacity: f64,
-
-    // Marks
-    pub point_opacity: f64,
-
-    // Palette
-    pub color_scheme: String,
-    pub sequential_scheme: String,
-    pub diverging_scheme: String,
-
-    // Legend
-    pub legend_direction: Option<LegendDirection>,
     pub legend_title_font_size: f64,
+}
+
+impl Default for ThemeTypography {
+    fn default() -> Self {
+        Self {
+            font_family: "Inter".into(),
+            font_weight: "normal".into(),
+            label_font_size: DEFAULT_LABEL_FONT_SIZE,
+            label_font_family: "Inter".into(),
+            title_font_family: "Inter".into(),
+            title_font_size: DEFAULT_TITLE_FONT_SIZE,
+            title_font_weight: "600".into(),
+            title_anchor: TextAnchor::Start,
+            title_offset: 6.0,
+            legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
+        }
+    }
+}
+
+/// Legend placement and layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeLegend {
+    pub legend_orient: LegendOrient,
+    pub legend_direction: Option<LegendDirection>,
     /// Number of columns for categorical legend entries. `None` (default) means
     /// a single vertical column (Right/Left orient) or a single horizontal row
     /// (Top/Bottom orient). `Some(N)` arranges entries left-to-right, top-to-bottom
     /// in N columns; only meaningful for vertical-direction legends.
     pub legend_columns: Option<u32>,
+}
 
-    // Reference lines
-    pub reference_line_color: palette::Srgba<u8>,
+impl Default for ThemeLegend {
+    fn default() -> Self {
+        Self {
+            legend_orient: LegendOrient::Right,
+            legend_direction: None,
+            legend_columns: None,
+        }
+    }
+}
+
+/// Grid visibility and styling.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeGrid {
+    pub grid: bool,
+    pub grid_dash: Option<Vec<f64>>,
+    pub grid_opacity: f64,
+}
+
+impl Default for ThemeGrid {
+    fn default() -> Self {
+        Self {
+            grid: true,
+            grid_dash: None,
+            grid_opacity: 1.0,
+        }
+    }
+}
+
+/// Axis domain line visibility.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeAxis {
+    pub axis_line: bool,
+}
+
+impl Default for ThemeAxis {
+    fn default() -> Self {
+        Self { axis_line: true }
+    }
+}
+
+/// Palette scheme names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemePalette {
+    pub color_scheme: String,
+    pub sequential_scheme: String,
+    pub diverging_scheme: String,
+}
+
+impl Default for ThemePalette {
+    fn default() -> Self {
+        Self {
+            color_scheme: "paper_ink".into(),
+            sequential_scheme: "cool_blue".into(),
+            diverging_scheme: "blue_to_red".into(),
+        }
+    }
+}
+
+/// Reference-line defaults.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeReferenceLine {
     pub reference_line_dash: Option<Vec<f64>>,
+}
+
+impl Default for ThemeReferenceLine {
+    fn default() -> Self {
+        Self {
+            reference_line_dash: Some(vec![4.0, 4.0]),
+        }
+    }
+}
+
+/// Theme fields actually read by Phase 6 + Phase 7. Kept decoupled from a full
+/// Theme type — Phase 8 grammar will translate ferrum.Theme into this shape.
+///
+/// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
+/// and `from_hex_str` helper; for now we construct directly via Srgba::new.
+///
+/// Fields are organized into logical sub-structs. Accessor methods provide
+/// backward-compatible flat access for consumers that prefer `theme.field_name`
+/// style.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeInputs {
+    pub padding: ThemePadding,
+    pub sizes: ThemeRenderSizes,
+    pub colors: ThemeColors,
+    pub typography: ThemeTypography,
+    pub legend: ThemeLegend,
+    pub grid: ThemeGrid,
+    pub axis: ThemeAxis,
+    pub palette: ThemePalette,
+    pub reference_line: ThemeReferenceLine,
 
     // Axis label overhaul
     /// Maximum number of visible tick labels before culling kicks in.
@@ -209,78 +374,16 @@ impl Default for ThemeInputs {
         // Paper Ink default identity (2026-05-12).
         // Warm cream background, blue lead mark, warm-tinted grid.
         // See docs/superpowers/specs/2026-05-12-custom-themes-design.md §4.
-        let mark_blue  = palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF);
-        let text_fg    = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
-        let label_gray = palette::Srgba::new(0x6B, 0x72, 0x80, 0xFF);
-        let grid_warm  = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
-        let bg_cream   = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
-        let strip_bg   = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
-
         Self {
-            padding: 16.0,
-            padding_top: None,
-            padding_right: None,
-            padding_bottom: None,
-            padding_left: None,
-            column_padding: 12.0,
-            row_padding: 12.0,
-            axis_title_padding: 8.0,
-            background_color: bg_cream,
-
-            font_family: "Inter".into(),
-            font_weight: "normal".into(),
-            font_color: text_fg,
-            label_font_family: "Inter".into(),
-            label_font_size: DEFAULT_LABEL_FONT_SIZE,
-            label_color: label_gray,
-            title_font_family: "Inter".into(),
-            title_font_size: DEFAULT_TITLE_FONT_SIZE,
-            title_font_weight: "600".into(),
-            title_color: text_fg,
-            title_anchor: TextAnchor::Start,
-            title_offset: 6.0,
-
-            grid: true,
-            grid_color: grid_warm,
-            grid_width: 0.5,
-            grid_dash: None,
-            grid_opacity: 1.0,
-
-            axis_line: true,
-            axis_line_color: label_gray,
-            axis_line_width: 1.0,
-            tick_size: 4.0,
-            tick_width: 1.0,
-            tick_color: label_gray,
-
-            mark_color: mark_blue,
-            point_size: 36.0,
-            point_size_min: 4.0,
-            point_size_max: 36.0,
-            point_opacity: 1.0,
-            line_stroke_width: 1.5,
-            bar_corner_radius: 0.0,
-            area_opacity: 0.35,
-            default_opacity: 1.0,
-            opacity_min: 0.1,
-            opacity_max: 1.0,
-
-            color_scheme: "paper_ink".into(),
-            sequential_scheme: "cool_blue".into(),
-            diverging_scheme: "blue_to_red".into(),
-
-            strip_background_color: strip_bg,
-            strip_text_size: 12.0,
-            strip_padding: 6.0,
-
-            legend_orient: LegendOrient::Right,
-            legend_direction: None,
-            legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
-            legend_columns: None,
-
-            reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
-            reference_line_dash: Some(vec![4.0, 4.0]),
-
+            padding: ThemePadding::default(),
+            sizes: ThemeRenderSizes::default(),
+            colors: ThemeColors::default(),
+            typography: ThemeTypography::default(),
+            legend: ThemeLegend::default(),
+            grid: ThemeGrid::default(),
+            axis: ThemeAxis::default(),
+            palette: ThemePalette::default(),
+            reference_line: ThemeReferenceLine::default(),
             cull_threshold: DEFAULT_CULL_THRESHOLD,
         }
     }
@@ -323,16 +426,16 @@ pub fn compute_layout(
     // 2. Apply outer padding.
     let viewport_rect = viewport.into_rect();
     let inset = Inset {
-        top:    theme.padding_top.unwrap_or(theme.padding),
-        right:  theme.padding_right.unwrap_or(theme.padding),
-        bottom: theme.padding_bottom.unwrap_or(theme.padding),
-        left:   theme.padding_left.unwrap_or(theme.padding),
+        top:    theme.padding.padding_top.unwrap_or(theme.padding.padding),
+        right:  theme.padding.padding_right.unwrap_or(theme.padding.padding),
+        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
+        left:   theme.padding.padding_left.unwrap_or(theme.padding.padding),
     };
     let inner = viewport_rect.shrink(inset);
     if inner.w <= 0.0 || inner.h <= 0.0 {
         let dim = viewport.width.min(viewport.height);
         return Err(LayoutError::PaddingExceedsViewport {
-            padding: theme.padding,
+            padding: theme.padding.padding,
             viewport_dim: dim,
         });
     }
@@ -344,15 +447,15 @@ pub fn compute_layout(
         // D1-D6: per-chart TitleSpec overrides for layout geometry.
         let resolved_font_size = title_spec
             .font_size
-            .unwrap_or(theme.title_font_size);
+            .unwrap_or(theme.typography.title_font_size);
         let resolved_offset = title_spec
             .offset
-            .unwrap_or(theme.title_offset);
+            .unwrap_or(theme.typography.title_offset);
         let resolved_anchor = match title_spec.anchor.as_deref() {
             Some("middle") => TextAnchor::Middle,
             Some("end")    => TextAnchor::End,
             Some(_)        => TextAnchor::Start,
-            None           => theme.title_anchor,
+            None           => theme.typography.title_anchor,
         };
         let title_line_h = metrics.line_height(resolved_font_size);
         let subtitle_font_size = title_spec
@@ -401,8 +504,8 @@ pub fn compute_layout(
     //   tickCount      → subsample colorbar ticks to at most N
     //   values         → replace auto-generated tick labels
     //   gradientLength / gradientThickness → colorbar bar dimensions
-    let effective_label_font_size = legend_overrides.label_font_size.unwrap_or(theme.label_font_size);
-    let effective_direction = legend_overrides.direction.or(theme.legend_direction);
+    let effective_label_font_size = legend_overrides.label_font_size.unwrap_or(theme.typography.label_font_size);
+    let effective_direction = legend_overrides.direction.or(theme.legend.legend_direction);
     let force_colorbar = legend_overrides.legend_type.as_deref() == Some("gradient");
     let force_symbol   = legend_overrides.legend_type.as_deref() == Some("symbol");
     let use_colorbar   = (colorbar.is_some() && legend_entries.is_empty() && !force_symbol)
@@ -419,28 +522,28 @@ pub fn compute_layout(
         };
         legend::layout_colorbar(
             inner,
-            theme.legend_orient,
+            theme.legend.legend_orient,
             legend_title.clone(),
             cb.stops.clone(),
             tick_labels,
             effective_label_font_size,
-            theme.legend_title_font_size,
+            theme.typography.legend_title_font_size,
             metrics,
-            theme.column_padding,
+            theme.padding.column_padding,
             legend_overrides.gradient_length,
             legend_overrides.gradient_thickness,
         )
     } else {
         legend::layout_legend(
             legend_entries,
-            theme.legend_orient,
+            theme.legend.legend_orient,
             inner,
             effective_label_font_size,
             metrics,
             effective_direction,
             legend_title.as_deref(),
-            theme.legend_title_font_size,
-            theme.legend_columns,
+            theme.typography.legend_title_font_size,
+            theme.legend.legend_columns,
             legend_overrides.symbol_type.as_deref(),
         )
     };
@@ -452,11 +555,11 @@ pub fn compute_layout(
     // 4 + 5. Reserve y-axis title gutter + label band; reserve x-axis label band.
     let y_title_gutter = axis::compute_y_title_width(
         &axes.y,
-        theme.title_font_size,
-        theme.axis_title_padding,
+        theme.typography.title_font_size,
+        theme.padding.axis_title_padding,
         metrics,
     );
-    let y_label_band = axis::compute_y_label_band_width(&axes.y, theme.label_font_size, metrics);
+    let y_label_band = axis::compute_y_label_band_width(&axes.y, theme.typography.label_font_size, metrics);
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
     // angle the cascade will choose by running a lightweight worst-case check
@@ -468,7 +571,7 @@ pub fn compute_layout(
         let estimated_slot_w = estimated_plot_w / n_labels as f64;
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
-            theme.label_font_size,
+            theme.typography.label_font_size,
             axes.x.label_angle_override,
             metrics,
             estimated_slot_w,
@@ -483,8 +586,8 @@ pub fn compute_layout(
     // Previously used theme.title_font_size unconditionally, which caused the
     // gutter to be undersized when axes.x.title_font_size was larger than theme.
     let x_title_gutter = if axes.x.title.is_some() {
-        let effective_title_font_size = axes.x.title_font_size.unwrap_or(theme.title_font_size);
-        let effective_title_padding = axes.x.title_padding.unwrap_or(theme.axis_title_padding);
+        let effective_title_font_size = axes.x.title_font_size.unwrap_or(theme.typography.title_font_size);
+        let effective_title_padding = axes.x.title_padding.unwrap_or(theme.padding.axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
@@ -509,7 +612,7 @@ pub fn compute_layout(
         let (gx, gy) = facet
             .spacing
             .map(|s| (s, s))
-            .unwrap_or((theme.column_padding, theme.row_padding));
+            .unwrap_or((theme.padding.column_padding, theme.padding.row_padding));
         // When there are multiple rows of facet panels and the x-axis is
         // visible, the inter-row gutter must accommodate x-axis tick labels
         // so non-bottom-row labels are not clipped by the next row's panel.
@@ -550,7 +653,7 @@ pub fn compute_layout(
     };
 
     let strip_band_height = if spec.facet.is_some() {
-        metrics.line_height(theme.strip_text_size) + 2.0 * theme.strip_padding
+        metrics.line_height(theme.sizes.strip_text_size) + 2.0 * theme.padding.strip_padding
     } else {
         0.0
     };
@@ -591,10 +694,10 @@ pub fn compute_layout(
                     text: key.value.clone(),
                     anchor: (
                         strip_rect.x + strip_rect.w / 2.0,
-                        strip_rect.y + theme.strip_padding + theme.strip_text_size,
+                        strip_rect.y + theme.padding.strip_padding + theme.sizes.strip_text_size,
                     ),
                     align: TextAnchor::Middle,
-                    font_size: theme.strip_text_size,
+                    font_size: theme.sizes.strip_text_size,
                 })
             } else {
                 None
@@ -649,9 +752,9 @@ pub fn compute_layout(
                     &y_input,
                     rect,
                     panel_index,
-                    theme.label_font_size,
-                    theme.title_font_size,
-                    theme.axis_title_padding,
+                    theme.typography.label_font_size,
+                    theme.typography.title_font_size,
+                    theme.padding.axis_title_padding,
                     metrics,
                 );
                 axis_layouts.push(y_axis);
@@ -672,9 +775,9 @@ pub fn compute_layout(
                     &x_input,
                     rect,
                     panel_index,
-                    theme.label_font_size,
-                    theme.title_font_size,
-                    theme.axis_title_padding,
+                    theme.typography.label_font_size,
+                    theme.typography.title_font_size,
+                    theme.padding.axis_title_padding,
                     theme.cull_threshold,
                     metrics,
                 );
@@ -851,7 +954,7 @@ mod tests {
         let spec = minimal_chart_spec();
         let axes = dummy_axes();
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let theme = ThemeInputs { padding: 100.0, ..ThemeInputs::default() };
+        let theme = ThemeInputs { padding: ThemePadding { padding: 100.0, ..ThemePadding::default() }, ..ThemeInputs::default() };
         let err = compute_layout(
             &spec,
             &theme,
@@ -1249,31 +1352,31 @@ mod tests {
     fn theme_inputs_default_includes_render_fields() {
         // Paper Ink default identity (2026-05-12).
         let t = ThemeInputs::default();
-        assert_eq!(t.padding, 16.0);
-        assert_eq!(t.column_padding, 12.0);
-        assert_eq!(t.row_padding, 12.0);
-        assert_eq!(t.label_font_size, DEFAULT_LABEL_FONT_SIZE);
-        assert_eq!(t.point_size, 36.0);
-        assert_eq!(t.point_size_min, 4.0);
-        assert_eq!(t.point_size_max, 36.0);
-        assert_eq!(t.line_stroke_width, 1.5);
-        assert_eq!(t.bar_corner_radius, 0.0);
-        assert_eq!(t.area_opacity, 0.35);
-        assert_eq!(t.default_opacity, 1.0);
-        assert_eq!(t.axis_line_width, 1.0);
-        assert_eq!(t.tick_size, 4.0);
-        assert_eq!(t.grid_width, 0.5);
-        assert_eq!(t.grid, true);
-        assert_eq!(t.strip_text_size, 12.0);
-        assert_eq!(t.strip_padding, 6.0);
-        assert_eq!(t.axis_title_padding, 8.0);
-        assert_eq!(t.color_scheme, "paper_ink");
-        assert_eq!(t.sequential_scheme, "cool_blue");
-        assert_eq!(t.diverging_scheme, "blue_to_red");
-        assert_eq!(t.title_font_weight, "600");
-        assert_eq!(t.title_anchor, TextAnchor::Start);
-        assert_eq!(t.title_offset, 6.0);
-        assert_eq!(t.background_color, palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF));
-        assert_eq!(t.mark_color, palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF));
+        assert_eq!(t.padding.padding, 16.0);
+        assert_eq!(t.padding.column_padding, 12.0);
+        assert_eq!(t.padding.row_padding, 12.0);
+        assert_eq!(t.typography.label_font_size, DEFAULT_LABEL_FONT_SIZE);
+        assert_eq!(t.sizes.point_size, 36.0);
+        assert_eq!(t.sizes.point_size_min, 4.0);
+        assert_eq!(t.sizes.point_size_max, 36.0);
+        assert_eq!(t.sizes.line_stroke_width, 1.5);
+        assert_eq!(t.sizes.bar_corner_radius, 0.0);
+        assert_eq!(t.sizes.area_opacity, 0.35);
+        assert_eq!(t.sizes.default_opacity, 1.0);
+        assert_eq!(t.sizes.axis_line_width, 1.0);
+        assert_eq!(t.sizes.tick_size, 4.0);
+        assert_eq!(t.sizes.grid_width, 0.5);
+        assert_eq!(t.grid.grid, true);
+        assert_eq!(t.sizes.strip_text_size, 12.0);
+        assert_eq!(t.padding.strip_padding, 6.0);
+        assert_eq!(t.padding.axis_title_padding, 8.0);
+        assert_eq!(t.palette.color_scheme, "paper_ink");
+        assert_eq!(t.palette.sequential_scheme, "cool_blue");
+        assert_eq!(t.palette.diverging_scheme, "blue_to_red");
+        assert_eq!(t.typography.title_font_weight, "600");
+        assert_eq!(t.typography.title_anchor, TextAnchor::Start);
+        assert_eq!(t.typography.title_offset, 6.0);
+        assert_eq!(t.colors.background_color, palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF));
+        assert_eq!(t.colors.mark_color, palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF));
     }
 }

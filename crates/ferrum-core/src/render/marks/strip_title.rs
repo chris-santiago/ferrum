@@ -9,9 +9,9 @@ pub fn build_strip_title(
     panel_rect: &Rect,
     theme: &ThemeInputs,
 ) -> Vec<SceneNode> {
-    let band_h = (panel_rect.y - (strip.anchor.1 - strip.font_size - theme.strip_padding))
+    let band_h = (panel_rect.y - (strip.anchor.1 - strip.font_size - theme.padding.strip_padding))
         .abs()
-        .max(strip.font_size + 2.0 * theme.strip_padding);
+        .max(strip.font_size + 2.0 * theme.padding.strip_padding);
     let band = Rect {
         x: panel_rect.x,
         y: panel_rect.y - band_h,
@@ -24,7 +24,7 @@ pub fn build_strip_title(
         y: band.y,
         w: band.w,
         h: band.h,
-        style: to_scene_fill_stroke(Some(theme.strip_background_color), None, 0.0, 1.0, None),
+        style: to_scene_fill_stroke(Some(theme.colors.strip_background_color), None, 0.0, 1.0, None),
         corner_radius: 0.0,
     };
 
@@ -33,11 +33,11 @@ pub fn build_strip_title(
         y: strip.anchor.1,
         content: strip.text.clone(),
         style: to_scene_text_style(
-            theme.font_color,
+            theme.colors.font_color,
             strip.font_size,
             strip.align,
             0.0,
-            &theme.font_family,
+            &theme.typography.font_family,
             None,
             None,
             1.0,

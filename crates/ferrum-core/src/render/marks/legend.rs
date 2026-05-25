@@ -13,17 +13,17 @@ pub fn build_legend(
 ) -> Vec<SceneNode> {
     let mut nodes = Vec::new();
 
-    let label_fw: Option<&str> = if theme.font_weight == "normal" {
+    let label_fw: Option<&str> = if theme.typography.font_weight == "normal" {
         None
     } else {
-        Some(&theme.font_weight)
+        Some(&theme.typography.font_weight)
     };
     let label_text_style = to_scene_text_style(
-        theme.font_color,
-        theme.label_font_size,
+        theme.colors.font_color,
+        theme.typography.label_font_size,
         TextAnchor::Start,
         0.0,
-        &theme.label_font_family,
+        &theme.typography.label_font_family,
         label_fw,
         None,
         1.0,
@@ -31,21 +31,21 @@ pub fn build_legend(
 
     // Legend title.
     if let Some(title) = &legend.title {
-        let title_fw: Option<&str> = if theme.title_font_weight == "normal" {
+        let title_fw: Option<&str> = if theme.typography.title_font_weight == "normal" {
             None
         } else {
-            Some(&theme.title_font_weight)
+            Some(&theme.typography.title_font_weight)
         };
         nodes.push(SceneNode::Text {
             x: title.x,
             y: title.y,
             content: title.text.clone(),
             style: to_scene_text_style(
-                theme.title_color,
-                theme.legend_title_font_size,
+                theme.colors.title_color,
+                theme.typography.legend_title_font_size,
                 TextAnchor::Start,
                 0.0,
-                &theme.title_font_family,
+                &theme.typography.title_font_family,
                 title_fw,
                 None,
                 1.0,
@@ -77,7 +77,7 @@ pub fn build_legend(
                 fmt_f(cb.bar_rect.y),
                 fmt_f(cb.bar_rect.w),
                 fmt_f(cb.bar_rect.h),
-                crate::render::color::fmt_svg(theme.axis_line_color),
+                crate::render::color::fmt_svg(theme.colors.axis_line_color),
             ),
         });
 
@@ -92,8 +92,8 @@ pub fn build_legend(
                 x2: tick_x_end,
                 y2: tick.y,
                 style: to_scene_stroke(
-                    theme.axis_line_color,
-                    theme.axis_line_width,
+                    theme.colors.axis_line_color,
+                    theme.sizes.axis_line_width,
                     1.0,
                     None,
                     None,
@@ -102,7 +102,7 @@ pub fn build_legend(
             });
             nodes.push(SceneNode::Text {
                 x: label_x,
-                y: tick.y + theme.label_font_size * 0.35,
+                y: tick.y + theme.typography.label_font_size * 0.35,
                 content: tick.label.clone(),
                 style: label_text_style.clone(),
             });
@@ -116,7 +116,7 @@ pub fn build_legend(
                 ColorScale::Categorical { .. } => s.lookup(&entry.label),
                 ColorScale::Continuous { .. } => None,
             })
-            .unwrap_or(theme.mark_color);
+            .unwrap_or(theme.colors.mark_color);
         let sx = entry.symbol_anchor_x;
         let sy = entry.symbol_anchor_y;
         match entry.symbol_kind {
@@ -144,7 +144,7 @@ pub fn build_legend(
                     y1: sy,
                     x2: sx + 6.0,
                     y2: sy,
-                    style: to_scene_stroke(color, theme.line_stroke_width, 1.0, None, None, None),
+                    style: to_scene_stroke(color, theme.sizes.line_stroke_width, 1.0, None, None, None),
                 });
             }
         }

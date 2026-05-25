@@ -9,22 +9,22 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     let r = axis.axis_line;
 
     // Domain line.
-    if theme.axis_line && axis.show_domain {
+    if theme.axis.axis_line && axis.show_domain {
         nodes.push(SceneNode::Line {
             x1: r.x,
             y1: r.y,
             x2: r.x + r.w,
             y2: r.y + r.h,
-            style: to_scene_stroke(theme.axis_line_color, theme.axis_line_width, 1.0, None, None, None),
+            style: to_scene_stroke(theme.colors.axis_line_color, theme.sizes.axis_line_width, 1.0, None, None, None),
         });
     }
 
-    let tick_stroke = to_scene_stroke(theme.tick_color, theme.tick_width, 1.0, None, None, None);
+    let tick_stroke = to_scene_stroke(theme.colors.tick_color, theme.sizes.tick_width, 1.0, None, None, None);
 
-    let label_fw: Option<&str> = if theme.font_weight == "normal" {
+    let label_fw: Option<&str> = if theme.typography.font_weight == "normal" {
         None
     } else {
-        Some(&theme.font_weight)
+        Some(&theme.typography.font_weight)
     };
 
     // Default per-orient gap between tick mark end and label baseline/edge.
@@ -33,27 +33,27 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     let label_pad = axis.label_padding.unwrap_or(2.0).max(0.0);
 
     for tick in &axis.ticks {
-        let effective_font_size = tick.label_font_size.unwrap_or(theme.label_font_size);
+        let effective_font_size = tick.label_font_size.unwrap_or(theme.typography.label_font_size);
 
         let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
-                tick.position, r.y, tick.position, r.y + theme.tick_size,
-                tick.position, r.y + theme.tick_size + effective_font_size + label_pad,
+                tick.position, r.y, tick.position, r.y + theme.sizes.tick_size,
+                tick.position, r.y + theme.sizes.tick_size + effective_font_size + label_pad,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Top => (
-                tick.position, r.y, tick.position, r.y - theme.tick_size,
-                tick.position, r.y - theme.tick_size - label_pad - 2.0,
+                tick.position, r.y, tick.position, r.y - theme.sizes.tick_size,
+                tick.position, r.y - theme.sizes.tick_size - label_pad - 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Left => (
-                r.x, tick.position, r.x - theme.tick_size, tick.position,
-                r.x - theme.tick_size - label_pad, tick.position + effective_font_size / 3.0,
+                r.x, tick.position, r.x - theme.sizes.tick_size, tick.position,
+                r.x - theme.sizes.tick_size - label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::End, 0.0,
             ),
             AxisOrient::Right => (
-                r.x, tick.position, r.x + theme.tick_size, tick.position,
-                r.x + theme.tick_size + label_pad, tick.position + effective_font_size / 3.0,
+                r.x, tick.position, r.x + theme.sizes.tick_size, tick.position,
+                r.x + theme.sizes.tick_size + label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::Start, 0.0,
             ),
         };
@@ -75,11 +75,11 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                     y: label_y,
                     content: tick.label.clone(),
                     style: to_scene_text_style(
-                        theme.label_color,
+                        theme.colors.label_color,
                         effective_font_size,
                         anchor,
                         angle,
-                        &theme.label_font_family,
+                        &theme.typography.label_font_family,
                         label_fw,
                         None,
                         1.0,
@@ -95,11 +95,11 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                         y: line_y,
                         content: line.to_string(),
                         style: to_scene_text_style(
-                            theme.label_color,
+                            theme.colors.label_color,
                             effective_font_size,
                             anchor,
                             angle,
-                            &theme.label_font_family,
+                            &theme.typography.label_font_family,
                             label_fw,
                             None,
                             1.0,
@@ -111,16 +111,16 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     }
 
     if let Some(t) = &axis.title {
-        let title_fw: Option<&str> = if theme.title_font_weight == "normal" {
+        let title_fw: Option<&str> = if theme.typography.title_font_weight == "normal" {
             None
         } else {
-            Some(&theme.title_font_weight)
+            Some(&theme.typography.title_font_weight)
         };
         let effective_title_color = axis
             .title_color_rgba
             .map(|[r, g, b, a]| palette::Srgba::new(r, g, b, a))
-            .unwrap_or(theme.title_color);
-        let effective_title_font_size = axis.title_font_size.unwrap_or(theme.title_font_size);
+            .unwrap_or(theme.colors.title_color);
+        let effective_title_font_size = axis.title_font_size.unwrap_or(theme.typography.title_font_size);
         nodes.push(SceneNode::Text {
             x: t.anchor_x,
             y: t.anchor_y,
@@ -130,7 +130,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                 effective_title_font_size,
                 TextAnchor::Middle,
                 t.angle,
-                &theme.title_font_family,
+                &theme.typography.title_font_family,
                 title_fw,
                 None,
                 1.0,
@@ -148,14 +148,14 @@ pub fn build_grid(
     theme: &ThemeInputs,
     band_colors: &[String],
 ) -> Vec<SceneNode> {
-    if !theme.grid {
+    if !theme.grid.grid {
         return Vec::new();
     }
     let mut nodes = Vec::new();
-    let color = theme.grid_color;
-    let width = theme.grid_width;
-    let dash: Option<&[f64]> = theme.grid_dash.as_deref();
-    let opacity = theme.grid_opacity;
+    let color = theme.colors.grid_color;
+    let width = theme.sizes.grid_width;
+    let dash: Option<&[f64]> = theme.grid.grid_dash.as_deref();
+    let opacity = theme.grid.grid_opacity;
 
     let y_baseline_x = y_axis.map(|a| a.axis_line.x).unwrap_or(plot_area.x);
     let x_baseline_y = x_axis
@@ -377,7 +377,7 @@ mod tests {
             title_color_rgba: None,
             label_padding: None,
         };
-        let theme = ThemeInputs::default(); // theme.label_font_size == 11.0
+        let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
 
         // The text node should use font_size 9.0, not the theme default.
@@ -392,7 +392,7 @@ mod tests {
             // label_y = r.y + tick_size + effective_font_size + label_pad
             // label_pad defaults to 2.0 when axis.label_padding is None.
             // With r.y=80, tick_size=4 (default), effective_font_size=9, label_pad=2: 80+4+9+2=95
-            let expected_y = 80.0 + theme.tick_size + 9.0 + 2.0;
+            let expected_y = 80.0 + theme.sizes.tick_size + 9.0 + 2.0;
             assert!(
                 (y - expected_y).abs() < 0.01,
                 "label_y should use per-tick font size for positioning: expected {expected_y}, got {y}",

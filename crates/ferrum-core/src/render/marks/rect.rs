@@ -465,7 +465,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if let Some(ref texts) = text_values {
             if let Some(Some(content)) = texts.get(i) {
                 if !content.is_empty() {
-                    let text_color = ctx.theme.font_color;
+                    let text_color = ctx.theme.colors.font_color;
                     let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
                     nodes.push(SceneNode::Text {
                         x: cx,
@@ -476,7 +476,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                             font_size,
                             crate::layout::TextAnchor::Middle,
                             0.0,
-                            &ctx.theme.font_family,
+                            &ctx.theme.typography.font_family,
                             None,
                             Some("central"),
                             1.0,

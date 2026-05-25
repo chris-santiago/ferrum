@@ -828,7 +828,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![1.0, 2.0])),
         ]).unwrap();
         let mut theme = ThemeInputs::default();
-        theme.bar_corner_radius = 3.0;
+        theme.sizes.bar_corner_radius = 3.0;
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);

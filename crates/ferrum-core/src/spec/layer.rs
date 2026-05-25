@@ -39,7 +39,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None, blend: None, name: None, name: None,
+        position: None, blend: None, name: None,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
