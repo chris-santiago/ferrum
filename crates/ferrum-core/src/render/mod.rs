@@ -389,14 +389,15 @@ fn apply_axis_y_config_to_theme(theme: &mut ThemeInputs, axis: &AxisConfigSpec) 
 
 /// Build a [`LegendOverrides`] from a [`prepare::PreparedInputs`].
 fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides {
+    let lo = &prep.legend_overrides;
     LegendOverrides {
-        tick_count:         prep.legend_tick_count_override,
-        label_font_size:    prep.legend_label_font_size_override,
-        gradient_length:    prep.legend_gradient_length_override,
-        gradient_thickness: prep.legend_gradient_thickness_override,
-        direction:          prep.legend_direction_override,
-        values:             prep.legend_values_override.clone(),
-        legend_type:        prep.legend_type_override.clone(),
+        tick_count:         lo.tick_count,
+        label_font_size:    lo.label_font_size,
+        gradient_length:    lo.gradient_length,
+        gradient_thickness: lo.gradient_thickness,
+        direction:          lo.direction,
+        values:             lo.values.clone(),
+        legend_type:        lo.legend_type.clone(),
         symbol_type:        None, // filled by apply_chart_config_to_legend_overrides
     }
 }
@@ -611,13 +612,13 @@ fn prepare_and_layout(
     // Per-channel axis overrides (level 2) are in AxisInput and applied at layout time.
     let mut effective_theme = theme.clone();
     // D13: per-encoding legend overrides.
-    if let Some(orient) = prep.legend_orient_override {
+    if let Some(orient) = prep.legend_overrides.orient {
         effective_theme.legend_orient = orient;
     }
-    if let Some(fs) = prep.legend_title_font_size_override {
+    if let Some(fs) = prep.legend_overrides.title_font_size {
         effective_theme.legend_title_font_size = fs;
     }
-    if let Some(cols) = prep.legend_columns_override {
+    if let Some(cols) = prep.legend_overrides.columns {
         effective_theme.legend_columns = Some(cols);
     }
     // ChartConfig overrides (configure > theme).
@@ -652,7 +653,8 @@ fn prepare_and_layout(
 
     // D13: legend title override (replaces the default field-name title when Some).
     let effective_legend_title = prep
-        .legend_title_override
+        .legend_overrides
+        .title
         .clone()
         .or_else(|| prep.legend_title.clone());
 
@@ -956,19 +958,20 @@ mod orchestration_tests {
         let mut warnings = prep.warnings.clone();
 
         let mut effective_theme = theme.clone();
-        if let Some(orient) = prep.legend_orient_override {
+        if let Some(orient) = prep.legend_overrides.orient {
             effective_theme.legend_orient = orient;
         }
-        if let Some(fs) = prep.legend_title_font_size_override {
+        if let Some(fs) = prep.legend_overrides.title_font_size {
             effective_theme.legend_title_font_size = fs;
         }
-        if let Some(cols) = prep.legend_columns_override {
+        if let Some(cols) = prep.legend_overrides.columns {
             effective_theme.legend_columns = Some(cols);
         }
         apply_chart_config(&mut effective_theme, &ChartConfig::default());
         let theme_ref = &effective_theme;
         let effective_legend_title = prep
-            .legend_title_override
+            .legend_overrides
+            .title
             .clone()
             .or_else(|| prep.legend_title.clone());
 
