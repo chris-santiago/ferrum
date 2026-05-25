@@ -1455,6 +1455,7 @@ mod tests {
                 data_source: None,
                 position: None,
                 blend: None,
+                name: None,
             },
             Layer {
                 mark: Mark::Line,
@@ -1462,7 +1463,7 @@ mod tests {
                 transforms: vec![],
                 mark_style: None,
                 data_source: None,
-            position: None, blend: None,
+            position: None, blend: None, name: None,
             },
         ]);
         let batch = price_weight_batch();
@@ -1605,7 +1606,7 @@ mod tests {
             transforms: vec![],
             mark_style: None,
             data_source: Some("missing".into()),
-            position: None, blend: None,
+            position: None, blend: None, name: None,
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();

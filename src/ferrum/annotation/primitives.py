@@ -10,6 +10,7 @@ All coordinate arguments accept ``float`` (data-space), :class:`~ferrum.annotati
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -261,15 +262,22 @@ class AnnotationImage:
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_coord(v: Any) -> Any:
+    """Replace NaN/Inf with 0.0 so JSON serialization doesn't crash."""
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return 0.0
+    return v
+
+
 def _coord(v: CoordValue) -> Any:
     """Normalize a CoordValue to a renderer-serializable form."""
     from ferrum.annotation.coords import PixelCoord, NormCoord
 
     if isinstance(v, PixelCoord):
-        return {"px": v.value}
+        return {"px": _sanitize_coord(v.value)}
     if isinstance(v, NormCoord):
-        return {"norm": v.value}
-    return v  # plain float — data-space
+        return {"norm": _sanitize_coord(v.value)}
+    return _sanitize_coord(v)  # plain float — data-space
 
 
 # ---------------------------------------------------------------------------

@@ -1431,3 +1431,1043 @@ def test_empty_dataframe_with_configure_renders():
     svg = chart.show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
+
+
+# ================================================================
+# Round 3: coerce-render-boundary — _sanitize_for_rust and RecordBatch recursion
+#
+# Targets recent changes:
+# - _coerce.py line 120: RecordBatch path now recurses via to_arrow_table()
+# - _render.py lines 24-53: _sanitize_for_rust() decodes dictionary-encoded
+#   columns and casts Null-typed columns to float64 at the render boundary
+# ================================================================
+
+
+# ================================================================
+# Category: _sanitize_for_rust — dictionary-encoded date columns (BUG)
+# ================================================================
+
+
+def test_sanitize_dict_encoded_date32_leaks_date_type():  # BUG: _sanitize_for_rust decodes dictionary but leaves date32 unchecked
+    """Dictionary-encoded date32 column: _sanitize_for_rust decodes the dictionary
+    wrapper but does NOT cast the resulting date32 type to timestamp[ms].
+    to_arrow_table runs first and sees Dictionary type (not date32), so it skips
+    the date cast. _sanitize_for_rust then decodes to plain date32, which Rust
+    rejects with 'unsupported dtype: Date32'.
+
+    Targets _render.py lines 44-45: dictionary decode does not re-check for date types.
+    Targets _render.py line 53: rebuilt table contains date32 column.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([0, 100], type=pa.date32()),
+    )
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    # After sanitize, the decoded column should be timestamp, not date32.
+    # Currently it remains date32 — this is the bug.
+    d_type = result.schema.field("d").type
+    assert pa.types.is_timestamp(d_type) or not pa.types.is_date32(d_type), (
+        f"_sanitize_for_rust decoded dictionary but left date32 type unchecked: {d_type}. "
+        f"Rust will reject this with 'unsupported dtype: Date32'."
+    )
+
+
+def test_sanitize_dict_encoded_date64_leaks_date_type():  # BUG: _sanitize_for_rust decodes dictionary but leaves date64 unchecked
+    """Same as above but for dictionary-encoded date64 values.
+
+    Targets _render.py lines 44-45 and line 53.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()),
+        pa.array([0, 86_400_000], type=pa.date64()),
+    )
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0]})
+    result = _sanitize_for_rust(tbl)
+    d_type = result.schema.field("d").type
+    assert pa.types.is_timestamp(d_type) or not pa.types.is_date64(d_type), (
+        f"_sanitize_for_rust decoded dictionary but left date64 type unchecked: {d_type}. "
+        f"Rust will reject this with 'unsupported dtype: Date64'."
+    )
+
+
+def test_render_dict_encoded_date32_raises():  # BUG: dictionary-encoded date32 causes ValueError in Rust renderer
+    """End-to-end: dictionary-encoded date32 column used in x encoding causes
+    ValueError because _sanitize_for_rust decodes to date32, which Rust rejects.
+
+    Targets _render.py line 415: _sanitize_for_rust(to_arrow_table(raw_data)) pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([0, 100], type=pa.date32()),
+    )
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
+    # This should render valid SVG, not raise ValueError
+    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_render_dict_encoded_date64_raises():  # BUG: dictionary-encoded date64 causes ValueError in Rust renderer
+    """End-to-end: dictionary-encoded date64 column in x encoding.
+
+    Targets _render.py line 415: pipeline fails because date64 leaks through.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()),
+        pa.array([0, 86_400_000], type=pa.date64()),
+    )
+    tbl = pa.table({"d": arr, "y": [1.0, 2.0]})
+    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ================================================================
+# Category: _sanitize_for_rust — duplicate column name data loss (BUG)
+# ================================================================
+
+
+def test_sanitize_duplicate_column_names_silently_drops_columns():  # BUG: dict comprehension silently drops duplicate column names
+    """When _sanitize_for_rust rebuilds a table using a dict comprehension
+    {name: col}, duplicate column names cause the first column to be
+    silently overwritten by the last column with that name.
+    A table with 3 columns (x, y, x) becomes 2 columns (x, y).
+
+    Targets _render.py line 53: pa.table({tbl.schema.field(i).name: new_cols[i] ...})
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    # Create a table with duplicate column names where sanitization is triggered
+    dict_col = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
+    )
+    tbl = pa.table({"x": dict_col, "y": pa.array([1.0, 2.0])})
+    tbl = tbl.append_column("x", pa.array([3.0, 4.0]))  # duplicate 'x' column
+    assert tbl.num_columns == 3, "Precondition: table has 3 columns"
+
+    result = _sanitize_for_rust(tbl)
+    # The dict comprehension collapses duplicate names
+    assert result.num_columns == 3, (
+        f"_sanitize_for_rust dropped a column during rebuild: "
+        f"input had {tbl.num_columns} columns, output has {result.num_columns}. "
+        f"The dict comprehension at line 53 silently overwrites duplicate names."
+    )
+
+
+def test_coerce_date_cast_duplicate_column_names_drops_columns():  # BUG: dict comprehension in to_arrow_table silently drops duplicate column names
+    """Same duplicate-name data loss bug exists in to_arrow_table's date cast
+    path at line 117.
+
+    Targets _coerce.py line 117: pa.table({...field(i).name: new_cols[i]...})
+    """
+    tbl = pa.table({
+        "d": pa.array([0, 100], type=pa.date32()),
+        "y": pa.array([1.0, 2.0]),
+    })
+    tbl = tbl.append_column("d", pa.array([3.0, 4.0]))
+    assert tbl.num_columns == 3, "Precondition: table has 3 columns"
+
+    result = to_arrow_table(tbl)
+    assert result.num_columns == 3, (
+        f"to_arrow_table date cast dropped a column during rebuild: "
+        f"input had {tbl.num_columns} columns, output has {result.num_columns}."
+    )
+
+
+# ================================================================
+# Category: _sanitize_for_rust — dictionary-encoded with nulls
+# ================================================================
+
+
+def test_sanitize_dict_encoded_with_null_indices():
+    """Dictionary-encoded column where some indices are null.
+    _sanitize_for_rust should decode without error, nulls in indices
+    become nulls in the decoded output.
+
+    Targets _render.py line 45: pc.dictionary_decode(col) with null indices.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, None, 1], type=pa.int8()),
+        pa.array(["a", "b"]),
+    )
+    tbl = pa.table({"cat": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(result.schema.field("cat").type)
+    vals = result.column("cat").to_pylist()
+    assert vals == ["a", None, "b"]
+
+
+def test_sanitize_dict_encoded_all_null_indices():
+    """Dictionary-encoded column where ALL indices are null.
+    After decode, the column should be all nulls of the value type.
+
+    Targets _render.py line 45: pc.dictionary_decode with all-null indices.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([None, None, None], type=pa.int8()),
+        pa.array(["a", "b"]),
+    )
+    tbl = pa.table({"cat": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(result.schema.field("cat").type)
+    assert result.column("cat").null_count == 3
+
+
+def test_sanitize_dict_encoded_with_null_in_dictionary_values():
+    """Dictionary where the value array itself contains a null entry.
+    The null propagates through decode.
+
+    Targets _render.py line 45.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 2], type=pa.int8()),
+        pa.array(["a", None, "c"]),
+    )
+    tbl = pa.table({"cat": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert result.column("cat").to_pylist() == ["a", None, "c"]
+
+
+def test_render_dict_encoded_all_null_indices_as_color():
+    """End-to-end: dictionary-encoded column with all-null indices used as color.
+    After decode, this becomes an all-null string column.
+
+    Targets _render.py line 415 full pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([None, None, None], type=pa.int8()),
+        pa.array(["a", "b"]),
+    )
+    tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": arr})
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="cat").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ================================================================
+# Category: _sanitize_for_rust — Null-typed columns in various positions
+# ================================================================
+
+
+def test_sanitize_null_column_first_position():
+    """Null-typed column in the first position of the table.
+    Tests that column order is preserved after sanitization.
+
+    Targets _render.py lines 47-48: null cast to float64.
+    Targets _render.py line 53: table rebuild preserves column order.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "nothing": pa.array([None, None], type=pa.null()),
+        "x": pa.array([1.0, 2.0]),
+        "y": pa.array([3.0, 4.0]),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert result.column_names == ["nothing", "x", "y"], "Column order must be preserved"
+    assert pa.types.is_float64(result.schema.field("nothing").type)
+
+
+def test_sanitize_null_column_last_position():
+    """Null-typed column in the last position.
+
+    Targets _render.py lines 47-48.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "x": pa.array([1.0, 2.0]),
+        "y": pa.array([3.0, 4.0]),
+        "nothing": pa.array([None, None], type=pa.null()),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert result.column_names == ["x", "y", "nothing"]
+    assert pa.types.is_float64(result.schema.field("nothing").type)
+
+
+def test_sanitize_multiple_null_columns():
+    """Multiple Null-typed columns in the same table.
+
+    Targets _render.py lines 47-48: multiple iterations of the null branch.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "n1": pa.array([None, None], type=pa.null()),
+        "x": pa.array([1.0, 2.0]),
+        "n2": pa.array([None, None], type=pa.null()),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_float64(result.schema.field("n1").type)
+    assert pa.types.is_float64(result.schema.field("n2").type)
+    assert result.column("n1").null_count == 2
+    assert result.column("n2").null_count == 2
+
+
+def test_sanitize_all_columns_null_typed():
+    """Table where EVERY column is Null-typed.
+
+    Targets _render.py lines 47-48: all columns trigger the null branch.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "a": pa.array([None, None], type=pa.null()),
+        "b": pa.array([None, None], type=pa.null()),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_float64(result.schema.field("a").type)
+    assert pa.types.is_float64(result.schema.field("b").type)
+    assert result.num_rows == 2
+
+
+def test_render_all_null_columns_as_encodings():
+    """End-to-end: table where both x and y are Null-typed columns.
+    After sanitize, both become float64 columns of NaN/null.
+
+    Targets _render.py line 415 full pipeline.
+    """
+    import ferrum as fr
+
+    tbl = pa.table({
+        "x": pa.array([None, None, None], type=pa.null()),
+        "y": pa.array([None, None, None], type=pa.null()),
+    })
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert "Infinity" not in svg
+
+
+# ================================================================
+# Category: _sanitize_for_rust — no-op passthrough
+# ================================================================
+
+
+def test_sanitize_passthrough_when_no_problematic_columns():
+    """Table with no dictionary or null columns should pass through unchanged
+    (same object reference).
+
+    Targets _render.py lines 51-52: needs_rebuild == False path.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    result = _sanitize_for_rust(tbl)
+    assert result is tbl, "No-op sanitize should return the same object"
+
+
+def test_sanitize_passthrough_zero_column_table():
+    """0-column table should pass through unchanged.
+
+    Targets _render.py line 41: loop body never executes.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    schema = pa.schema([])
+    tbl = pa.table({}, schema=schema)
+    result = _sanitize_for_rust(tbl)
+    assert result is tbl
+
+
+def test_sanitize_passthrough_zero_row_table():
+    """0-row table with normal types should pass through unchanged.
+
+    Targets _render.py lines 51-52.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({"x": pa.array([], type=pa.float64()), "y": pa.array([], type=pa.string())})
+    result = _sanitize_for_rust(tbl)
+    assert result is tbl
+
+
+# ================================================================
+# Category: _sanitize_for_rust — dictionary-encoded with different value types
+# ================================================================
+
+
+def test_sanitize_dict_encoded_float_values():
+    """Dictionary-encoded float column is decoded to plain float.
+
+    Targets _render.py line 45: decode with float value type.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1.5, 2.5]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_float64(result.schema.field("x").type)
+    assert result.column("x").to_pylist() == [1.5, 2.5, 1.5]
+
+
+def test_sanitize_dict_encoded_int_values():
+    """Dictionary-encoded integer column is decoded to plain integer.
+
+    Targets _render.py line 45: decode with int value type.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([100, 200]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_int64(result.schema.field("x").type)
+    assert result.column("x").to_pylist() == [100, 200, 100]
+
+
+def test_sanitize_dict_encoded_bool_values():
+    """Dictionary-encoded boolean column is decoded to plain boolean.
+
+    Targets _render.py line 45.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([True, False]),
+    )
+    tbl = pa.table({"flag": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    assert result.schema.field("flag").type == pa.bool_()
+    assert result.column("flag").to_pylist() == [True, False, True]
+
+
+def test_sanitize_dict_encoded_float_with_nan_values():
+    """Dictionary-encoded float column where dictionary contains NaN.
+
+    Targets _render.py line 45: decode preserves NaN.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1.0, float("nan")]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    vals = result.column("x").to_pylist()
+    assert vals[0] == 1.0
+    assert math.isnan(vals[1])
+
+
+def test_sanitize_dict_encoded_float_with_inf_values():
+    """Dictionary-encoded float column where dictionary contains Infinity.
+
+    Targets _render.py line 45.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1.0, float("inf")]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    result = _sanitize_for_rust(tbl)
+    vals = result.column("x").to_pylist()
+    assert vals[0] == 1.0
+    assert vals[1] == float("inf")
+
+
+# ================================================================
+# Category: _sanitize_for_rust — mixed dictionary + null columns
+# ================================================================
+
+
+def test_sanitize_mixed_dict_and_null_columns():
+    """Table with both dictionary-encoded and null-typed columns.
+    Both should be sanitized in a single pass.
+
+    Targets _render.py lines 44-49: both branches fire in the same loop.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "cat": pa.DictionaryArray.from_arrays(
+            pa.array([0, 1, 0], type=pa.int8()), pa.array(["a", "b"])
+        ),
+        "nothing": pa.array([None, None, None], type=pa.null()),
+        "val": pa.array([1.0, 2.0, 3.0]),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(result.schema.field("cat").type)
+    assert pa.types.is_float64(result.schema.field("nothing").type)
+    assert pa.types.is_float64(result.schema.field("val").type)
+    assert result.column("cat").to_pylist() == ["a", "b", "a"]
+    assert result.column("nothing").null_count == 3
+
+
+def test_sanitize_all_columns_need_sanitization():
+    """Table where every column is either dictionary-encoded or null-typed.
+
+    Targets _render.py lines 44-49: every iteration triggers a branch.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "a": pa.DictionaryArray.from_arrays(
+            pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])
+        ),
+        "b": pa.DictionaryArray.from_arrays(
+            pa.array([0, 0], type=pa.int8()), pa.array([10, 20])
+        ),
+        "c": pa.array([None, None], type=pa.null()),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert result.column_names == ["a", "b", "c"]
+    assert result.column("a").to_pylist() == ["x", "y"]
+    assert result.column("b").to_pylist() == [10, 10]
+    assert pa.types.is_float64(result.schema.field("c").type)
+
+
+def test_render_mixed_dict_null_normal_columns():
+    """End-to-end: table with dictionary x, null-typed extra column, and normal y.
+
+    Targets _render.py line 415 full pipeline with mixed sanitization.
+    """
+    import ferrum as fr
+
+    tbl = pa.table({
+        "x": pa.DictionaryArray.from_arrays(
+            pa.array([0, 1, 2], type=pa.int8()), pa.array([1.0, 2.0, 3.0])
+        ),
+        "y": pa.array([4.0, 5.0, 6.0]),
+        "unused": pa.array([None, None, None], type=pa.null()),
+    })
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ================================================================
+# Category: _sanitize_for_rust — 0-row edge cases
+# ================================================================
+
+
+def test_sanitize_zero_row_dict_column():
+    """0-row table with dictionary-encoded column.
+
+    Targets _render.py line 45: decode on empty array.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([], type=pa.int8()), pa.array([], type=pa.string())
+    )
+    tbl = pa.table({"cat": arr, "y": pa.array([], type=pa.float64())})
+    result = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(result.schema.field("cat").type)
+    assert result.num_rows == 0
+
+
+def test_sanitize_zero_row_null_column():
+    """0-row table with null-typed column.
+
+    Targets _render.py lines 47-48: cast on empty null array.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "nothing": pa.array([], type=pa.null()),
+        "y": pa.array([], type=pa.float64()),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_float64(result.schema.field("nothing").type)
+    assert result.num_rows == 0
+
+
+# ================================================================
+# Category: _sanitize_for_rust — single-row edge cases
+# ================================================================
+
+
+def test_sanitize_single_row_dict_column():
+    """Single-row table with dictionary-encoded column.
+
+    Targets _render.py line 45.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0], type=pa.int8()), pa.array(["solo"])
+    )
+    tbl = pa.table({"cat": arr, "y": pa.array([1.0])})
+    result = _sanitize_for_rust(tbl)
+    assert result.column("cat").to_pylist() == ["solo"]
+
+
+def test_sanitize_single_row_null_column():
+    """Single-row table with null-typed column.
+
+    Targets _render.py lines 47-48.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "nothing": pa.array([None], type=pa.null()),
+        "y": pa.array([1.0]),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert pa.types.is_float64(result.schema.field("nothing").type)
+    assert result.column("nothing").null_count == 1
+
+
+# ================================================================
+# Category: _sanitize_for_rust — chunked arrays
+# ================================================================
+
+
+def test_sanitize_chunked_dict_column():
+    """Chunked dictionary-encoded column (multiple chunks).
+    pc.dictionary_decode must handle ChunkedArray of DictionaryArrays.
+
+    Targets _render.py line 45: col may be a ChunkedArray.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    chunk1 = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
+    )
+    chunk2 = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
+    )
+    chunked = pa.chunked_array([chunk1, chunk2])
+    tbl = pa.table({"cat": chunked, "y": [1.0, 2.0, 3.0, 4.0]})
+    result = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(result.schema.field("cat").type)
+    assert result.column("cat").to_pylist() == ["a", "b", "a", "b"]
+
+
+# ================================================================
+# Category: RecordBatch with mixed date/non-date columns
+# ================================================================
+
+
+def test_recordbatch_mixed_date_and_dict_columns():
+    """RecordBatch with date32, dictionary-encoded, and normal columns.
+    The RecordBatch recursion fix (line 120) converts to Table and recurses,
+    so date columns get cast. Then _sanitize_for_rust decodes the dictionary.
+
+    Targets _coerce.py line 120: recursive to_arrow_table.
+    Targets _render.py line 415: _sanitize_for_rust on the result.
+    """
+    import ferrum as fr
+
+    rb = pa.RecordBatch.from_arrays(
+        [
+            pa.array([0, 100, 200], type=pa.date32()),
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, 0], type=pa.int8()), pa.array(["a", "b"])
+            ),
+            pa.array([1.0, 2.0, 3.0]),
+        ],
+        names=["d", "cat", "y"],
+    )
+    tbl = to_arrow_table(rb)
+    # After recursion, date32 should be cast to timestamp
+    assert pa.types.is_timestamp(tbl.schema.field("d").type)
+    # Dictionary column passes through to_arrow_table unchanged
+    assert pa.types.is_dictionary(tbl.schema.field("cat").type)
+
+    # Full render pipeline: _sanitize_for_rust decodes the dictionary
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y", color="cat").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_recordbatch_mixed_date_and_null_columns():
+    """RecordBatch with date32, null-typed, and normal columns.
+    Tests both the RecordBatch recursion fix and _sanitize_for_rust null handling.
+
+    Targets _coerce.py line 120 + _render.py lines 47-48.
+    """
+    import ferrum as fr
+
+    rb = pa.RecordBatch.from_arrays(
+        [
+            pa.array([0, 100], type=pa.date32()),
+            pa.array([None, None], type=pa.null()),
+            pa.array([1.0, 2.0]),
+        ],
+        names=["d", "nothing", "y"],
+    )
+    tbl = to_arrow_table(rb)
+    assert pa.types.is_timestamp(tbl.schema.field("d").type)
+
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_recordbatch_all_special_columns():
+    """RecordBatch where every column needs either date cast or sanitization.
+    date32 + date64 + dictionary + null.
+
+    Targets _coerce.py line 120 + _render.py lines 44-49.
+    """
+    rb = pa.RecordBatch.from_arrays(
+        [
+            pa.array([0, 100], type=pa.date32()),
+            pa.array([0, 86_400_000], type=pa.date64()),
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])
+            ),
+            pa.array([None, None], type=pa.null()),
+        ],
+        names=["d32", "d64", "cat", "nothing"],
+    )
+    tbl = to_arrow_table(rb)
+    assert pa.types.is_timestamp(tbl.schema.field("d32").type)
+    assert pa.types.is_timestamp(tbl.schema.field("d64").type)
+
+    from ferrum._render import _sanitize_for_rust
+    sanitized = _sanitize_for_rust(tbl)
+    assert not pa.types.is_dictionary(sanitized.schema.field("cat").type)
+    assert pa.types.is_float64(sanitized.schema.field("nothing").type)
+
+
+def test_recordbatch_non_date_passthrough():
+    """RecordBatch with no date columns -- after recursion, no date cast occurs.
+
+    Targets _coerce.py line 120: recursive call hits line 118 (passthrough).
+    """
+    rb = pa.RecordBatch.from_pydict({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
+    tbl = to_arrow_table(rb)
+    assert isinstance(tbl, pa.Table)
+    assert tbl.num_rows == 3
+
+
+# ================================================================
+# Category: Interaction between _sanitize_for_rust and label_map pipeline
+# ================================================================
+
+
+def test_label_map_with_dict_encoded_x_column():
+    """Axis(label_map=...) applied to a dictionary-encoded x column.
+    label_map runs in polars space before _sanitize_for_rust, so the
+    dictionary encoding should be handled by the polars conversion.
+
+    Targets _render.py lines 414-415: _apply_label_maps then _sanitize_for_rust.
+    """
+    import ferrum as fr
+    from ferrum.encoding import X
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 2], type=pa.int8()),
+        pa.array(["a", "b", "c"]),
+    )
+    tbl = pa.table({"cat": arr, "y": [1.0, 2.0, 3.0]})
+    chart = (
+        fr.Chart(tbl)
+        .mark_bar()
+        .encode(
+            x=X("cat", axis=fr.Axis(label_map={"a": "Alpha", "b": "Beta", "c": "Gamma"})),
+            y="y",
+        )
+    )
+    svg = chart.show_svg()
+    assert "<svg" in svg
+    assert "Alpha" in svg
+
+
+def test_label_map_with_null_typed_x_column():
+    """Axis(label_map=...) applied to a Null-typed x column.
+    The label_map code checks for string/categorical dtype, so it should
+    be a no-op on a null column (which becomes float64 after sanitize).
+
+    Targets _render.py lines 414-415.
+    """
+    import ferrum as fr
+    from ferrum.encoding import X
+
+    tbl = pa.table({
+        "cat": pa.array([None, None, None], type=pa.null()),
+        "y": [1.0, 2.0, 3.0],
+    })
+    chart = (
+        fr.Chart(tbl)
+        .mark_bar()
+        .encode(
+            x=X("cat", axis=fr.Axis(label_map={"a": "Alpha"})),
+            y="y",
+        )
+    )
+    # Should not crash even though the column is all nulls
+    svg = chart.show_svg()
+    assert "<svg" in svg
+
+
+# ================================================================
+# Category: Contract pins -- SVG correctness after sanitization
+# ================================================================
+
+
+def test_dict_encoded_color_produces_distinct_marks():
+    """Dictionary-encoded color column should produce marks with distinct colors
+    after sanitization. The decode must preserve the categorical semantics.
+
+    Targets _render.py line 45 + full pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, 1], type=pa.int8()),
+        pa.array(["red_group", "blue_group"]),
+    )
+    tbl = pa.table({
+        "x": [1.0, 2.0, 3.0, 4.0],
+        "y": [1.0, 2.0, 3.0, 4.0],
+        "group": arr,
+    })
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="group").show_svg()
+    assert "<svg" in svg
+    # Should have at least 4 circle elements (one per data point)
+    assert svg.count("<circle") >= 4 or svg.count('cx="') >= 4
+    assert "NaN" not in svg
+    assert "Infinity" not in svg
+
+
+def test_null_column_renders_valid_viewbox():
+    """Table with null-typed column used as encoding should produce a valid
+    viewBox (not NaN NaN NaN NaN).
+
+    Targets _render.py lines 47-48 + full pipeline.
+    """
+    import ferrum as fr
+    import re
+
+    tbl = pa.table({
+        "x": pa.array([None, None, None], type=pa.null()),
+        "y": [1.0, 2.0, 3.0],
+    })
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert 'viewBox="' in svg
+    # Extract viewBox and verify no NaN
+    vb_match = re.search(r'viewBox="([^"]+)"', svg)
+    assert vb_match is not None
+    vb_parts = vb_match.group(1).split()
+    for part in vb_parts:
+        assert "NaN" not in part, f"viewBox contains NaN: {vb_match.group(1)}"
+        assert "Infinity" not in part, f"viewBox contains Infinity: {vb_match.group(1)}"
+
+
+def test_dict_encoded_y_produces_valid_svg():
+    """Dictionary-encoded y column (numeric values) in y encoding.
+    After decode, the y values should produce correctly positioned marks.
+
+    Targets _render.py line 45 + full pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 2], type=pa.int8()),
+        pa.array([10.0, 20.0, 30.0]),
+    )
+    tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": arr})
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ================================================================
+# Category: Extreme values through sanitize
+# ================================================================
+
+
+def test_dict_encoded_with_inf_renders():
+    """Dictionary-encoded float column with Infinity values.
+    Tests that the decode + render pipeline handles extreme values.
+
+    Targets _render.py line 45 + full pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1.0, float("inf")]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+def test_dict_encoded_with_neg_inf_renders():
+    """Dictionary-encoded float column with -Infinity values.
+
+    Targets _render.py line 45 + full pipeline.
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1.0, float("-inf")]),
+    )
+    tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+
+
+# ================================================================
+# Category: _sanitize_for_rust — data integrity after rebuild
+# ================================================================
+
+
+def test_sanitize_preserves_non_sanitized_column_values():
+    """When sanitization triggers a rebuild, non-dictionary/non-null columns
+    must retain their exact values.
+
+    Targets _render.py line 53: rebuild preserves all column data.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "cat": pa.DictionaryArray.from_arrays(
+            pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
+        ),
+        "ints": pa.array([42, 99]),
+        "floats": pa.array([3.14, 2.72]),
+        "strings": pa.array(["hello", "world"]),
+    })
+    result = _sanitize_for_rust(tbl)
+    # Verify non-sanitized columns are identical
+    assert result.column("ints").to_pylist() == [42, 99]
+    assert result.column("floats").to_pylist() == [3.14, 2.72]
+    assert result.column("strings").to_pylist() == ["hello", "world"]
+    # Verify sanitized column
+    assert result.column("cat").to_pylist() == ["a", "b"]
+
+
+def test_sanitize_preserves_column_count():
+    """Sanitization must not change the number of columns.
+
+    Targets _render.py line 53.
+    """
+    from ferrum._render import _sanitize_for_rust
+
+    tbl = pa.table({
+        "a": pa.DictionaryArray.from_arrays(
+            pa.array([0], type=pa.int8()), pa.array(["x"])
+        ),
+        "b": pa.array([None], type=pa.null()),
+        "c": pa.array([1.0]),
+        "d": pa.array(["hello"]),
+        "e": pa.array([True]),
+    })
+    result = _sanitize_for_rust(tbl)
+    assert result.num_columns == 5
+    assert result.column_names == ["a", "b", "c", "d", "e"]
+
+
+# ================================================================
+# Category: RecordBatch with dictionary-encoded date columns (compound bug)
+# ================================================================
+
+
+def test_recordbatch_dict_encoded_date32():  # BUG: RecordBatch + dict(date32) produces date32 after sanitize
+    """RecordBatch containing a dictionary-encoded date32 column.
+    The RecordBatch recursion (line 120) calls to_arrow_table which sees the
+    dictionary type (not date32), so skips the date cast. Then _sanitize_for_rust
+    decodes the dictionary to date32, which Rust rejects.
+
+    Targets _coerce.py line 120 + _render.py lines 44-45.
+    """
+    import ferrum as fr
+
+    rb = pa.RecordBatch.from_arrays(
+        [
+            pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, 0], type=pa.int8()),
+                pa.array([0, 100], type=pa.date32()),
+            ),
+            pa.array([1.0, 2.0, 3.0]),
+        ],
+        names=["d", "y"],
+    )
+    # This should work but will fail because date32 leaks through
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+# ================================================================
+# Category: Polars Null column through full render boundary
+# ================================================================
+
+
+def test_polars_null_column_through_render_pipeline():
+    """Polars Null-typed column goes through to_arrow() producing Arrow Null type,
+    then _sanitize_for_rust casts to float64 for Rust compatibility.
+
+    Targets _coerce.py line 86 (to_arrow) + _render.py line 47.
+    """
+    import ferrum as fr
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [4.0, 5.0, 6.0],
+        "null_col": pl.Series([None, None, None], dtype=pl.Null),
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+
+
+def test_polars_null_column_as_color_through_render():
+    """Polars Null-typed column used as color encoding.
+    After sanitize, this becomes an all-null float64 column.
+
+    Targets _coerce.py line 86 + _render.py lines 47-48 + full pipeline.
+    """
+    import ferrum as fr
+
+    df = pl.DataFrame({
+        "x": [1.0, 2.0, 3.0],
+        "y": [4.0, 5.0, 6.0],
+        "color": pl.Series([None, None, None], dtype=pl.Null),
+    })
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="color").show_svg()
+    assert "<svg" in svg
+
+
+# ================================================================
+# Category: Edge case -- dictionary-encoded timestamp (should work)
+# ================================================================
+
+
+def test_dict_encoded_timestamp_survives_sanitize():
+    """Dictionary-encoded timestamp column should decode to plain timestamp,
+    which Rust can handle (unlike date32/date64).
+
+    Targets _render.py line 45: decode produces timestamp (valid for Rust).
+    """
+    import ferrum as fr
+
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([1_000_000, 2_000_000], type=pa.timestamp("ms")),
+    )
+    tbl = pa.table({"ts": arr, "y": [1.0, 2.0, 3.0]})
+    svg = fr.Chart(tbl).mark_point().encode(x="ts", y="y").show_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg

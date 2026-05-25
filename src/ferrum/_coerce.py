@@ -114,7 +114,9 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 needs_cast = True
             new_cols.append(col)
         if needs_cast:
-            return pa.table({data.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
+            return pa.table(
+                new_cols, names=[data.schema.field(i).name for i in range(len(data.schema))]
+            )
         return data
     if isinstance(data, pa.RecordBatch):
         return to_arrow_table(pa.Table.from_batches([data]))

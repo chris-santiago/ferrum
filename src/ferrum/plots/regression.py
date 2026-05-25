@@ -852,7 +852,7 @@ def residplot(
 
     chart = Chart(data).transform(resid_transform).mark_point()
     enc: dict = {"x": "x", "y": "residual"}
-    if label is not None and color is None:
+    if label is not None and color is None and not robust:
         enc["color"] = "_label"
     if color is not None:
         enc["color"] = color

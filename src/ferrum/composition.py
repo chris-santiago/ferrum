@@ -598,6 +598,25 @@ class _CompositeBase(_ChartLike):
         self.charts = list(charts)
         self.spacing = spacing
 
+    def __copy__(self):
+        """Shallow copy that duplicates mutable list attributes."""
+        new = object.__new__(type(self))
+        # Copy __dict__ for dynamic attributes (e.g. _configure_layers).
+        if hasattr(self, "__dict__"):
+            new.__dict__.update(self.__dict__)
+        # Copy slot attributes from the full MRO.
+        for cls in type(self).__mro__:
+            for slot in getattr(cls, "__slots__", ()):
+                if slot == "__dict__":
+                    continue
+                try:
+                    setattr(new, slot, getattr(self, slot))
+                except AttributeError:
+                    pass
+        # Ensure the mutable charts list is a fresh copy.
+        new.charts = list(self.charts)
+        return new
+
     def __or__(self, other):
         return HConcatChart([self, other])
 
@@ -1644,6 +1663,18 @@ class LayerChart(_ChartLike):
         self._charts = list(charts)
         self._resolve = resolve
         self._title = title
+
+    def __copy__(self):
+        """Shallow copy that duplicates the mutable _charts list."""
+        new = object.__new__(type(self))
+        new._charts = list(self._charts)
+        new._resolve = self._resolve
+        new._title = self._title
+        # Copy __dict__ (holds dynamic attrs like _configure_layers from the
+        # parent _ChartLike which doesn't define __slots__).
+        if hasattr(self, "__dict__"):
+            new.__dict__.update(self.__dict__)
+        return new
 
     @property
     def charts(self) -> list:

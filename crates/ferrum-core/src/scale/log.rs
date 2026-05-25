@@ -13,6 +13,17 @@ struct LogScaleData {
 }
 
 impl LogScaleData {
+    /// Snap a raw exponent to the nearest integer when within floating-point epsilon.
+    /// Prevents `ln(1000)/ln(10) = 2.9999999999999996` from flooring to 2 instead of 3.
+    fn snap_exp(raw: f64) -> f64 {
+        let rounded = raw.round();
+        if (raw - rounded).abs() < 1e-10 {
+            rounded
+        } else {
+            raw
+        }
+    }
+
     fn scale(&self, x: f64) -> f64 {
         if x.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -64,20 +75,35 @@ impl LogScaleData {
         let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
         let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
         let log_base = self.base.ln();
-        let lo_exp = (lo.ln() / log_base).floor() as i64;
-        let hi_exp = (hi.ln() / log_base).ceil() as i64;
+        let lo_exp = Self::snap_exp(lo.ln() / log_base).floor() as i64;
+        let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil() as i64;
         let span_decades = (hi_exp - lo_exp).max(1) as usize;
+
+        // Ticks are generated in ascending-exponent order.
+        // For positive domains, ascending exponent = ascending value.
+        // For negative domains, ascending exponent = descending value (more negative).
+        // Reversal condition must account for the sign flip.
+        let should_reverse = if neg {
+            // Negative: ticks come out descending on the number line.
+            // Reverse only if the domain is ascending (d[0] < d[1]).
+            self.domain[0] < self.domain[1]
+        } else {
+            // Positive: ticks come out ascending on the number line.
+            // Reverse only if the domain is descending (d[0] > d[1]).
+            self.domain[0] > self.domain[1]
+        };
+
         if span_decades >= count {
             let mut out: Vec<f64> = (lo_exp..=hi_exp)
                 .map(|e| sign * self.base.powi(e as i32))
                 .filter(|t| (t.abs() >= lo) && (t.abs() <= hi))
                 .collect();
-            if self.domain[0] > self.domain[1] { out.reverse(); }
+            if should_reverse { out.reverse(); }
             out
         } else {
             let lvals = nice_ticks(lo.ln() / log_base, hi.ln() / log_base, count);
             let mut out: Vec<f64> = lvals.into_iter().map(|lv| sign * self.base.powf(lv)).collect();
-            if self.domain[0] > self.domain[1] { out.reverse(); }
+            if should_reverse { out.reverse(); }
             out
         }
     }
@@ -88,8 +114,8 @@ impl LogScaleData {
         let log_base = self.base.ln();
         let lo = (self.domain[0] * sign).min(self.domain[1] * sign);
         let hi = (self.domain[0] * sign).max(self.domain[1] * sign);
-        let lo_exp = (lo.ln() / log_base).floor();
-        let hi_exp = (hi.ln() / log_base).ceil();
+        let lo_exp = Self::snap_exp(lo.ln() / log_base).floor();
+        let hi_exp = Self::snap_exp(hi.ln() / log_base).ceil();
         // For positive domains: new_lo < new_hi (smallest to largest absolute value)
         // For negative domains: new_lo = sign * base^lo_exp is closest to zero (e.g. -1),
         // and new_hi = sign * base^hi_exp is most negative (e.g. -1000). Swap them so

@@ -4107,6 +4107,31 @@ class Chart(_RenderMixin):
         lhs_layers, _ = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
 
+        # When the LHS is an annotate_* helper chart, its annotation primitive
+        # fully describes the visual element — the mark layers must be excluded
+        # (same logic as the RHS path below). Use RHS layers only.
+        if lhs._annotation_primitive is not None:
+            if rhs._annotation_primitive is not None:
+                from ferrum._layer import _Layer as _CarrierLayer
+
+                carrier = _CarrierLayer(
+                    mark="point",
+                    encoding=dict(lhs._encoding),
+                    mark_kwargs={"opacity": 0, "size": 0},
+                )
+                new._layers = [carrier]
+                new._annotations = new._annotations + [
+                    Annotate(lhs._annotation_primitive),
+                    Annotate(rhs._annotation_primitive),
+                ]
+            else:
+                new = rhs._clone()
+                new._layers = rhs_layers
+                new._annotations = new._annotations + [Annotate(lhs._annotation_primitive)]
+            new._annotation_primitive = None
+            _warn_on_layer_conflicts(lhs, rhs)
+            return new
+
         # When the RHS is an annotate_* helper chart, its annotation primitive
         # fully describes the visual element for both SVG and interactive
         # rendering.  The mark layers inside the annotate_* chart (mark_rule,
@@ -5080,6 +5105,8 @@ class Chart(_RenderMixin):
                 )
             if layer.blend is not None:
                 layer_dict["blend"] = layer.blend
+            if layer.name is not None:
+                layer_dict["name"] = layer.name
             out.append(layer_dict)
         return out
 

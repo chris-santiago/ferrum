@@ -302,6 +302,22 @@ def displot(
 
         if kde and kind != "kde" and x_field is not None:
             from ferrum import Kde as _KdeTransform
+            import polars as pl
+
+            # KDE transform requires Float64; auto-cast integer x columns.
+            _INT_DTYPES = (
+                pl.Int8,
+                pl.Int16,
+                pl.Int32,
+                pl.Int64,
+                pl.UInt8,
+                pl.UInt16,
+                pl.UInt32,
+                pl.UInt64,
+            )
+            if hasattr(chart._data, "columns") and x_field in chart._data.columns:
+                if chart._data[x_field].dtype in _INT_DTYPES:
+                    chart._data = chart._data.with_columns(pl.col(x_field).cast(pl.Float64))
 
             kde_xform = _KdeTransform(
                 x_field, bandwidth=bandwidth, bw_adjust=bw_adjust, name="kde_overlay"

@@ -43,6 +43,11 @@ def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
         field_type = tbl.schema.field(i).type
         if pa.types.is_dictionary(field_type):
             col = pc.dictionary_decode(col)
+            # After decoding, the underlying type may be date32/date64 which
+            # Rust also rejects — cast to timestamp[ms] (same as _coerce.py).
+            decoded_type = col.type
+            if pa.types.is_date32(decoded_type) or pa.types.is_date64(decoded_type):
+                col = col.cast(pa.timestamp("ms"))
             needs_rebuild = True
         elif pa.types.is_null(field_type):
             col = col.cast(pa.float64())
@@ -50,7 +55,7 @@ def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
         new_cols.append(col)
     if not needs_rebuild:
         return tbl
-    return pa.table({tbl.schema.field(i).name: new_cols[i] for i in range(len(new_cols))})
+    return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
 
 
 def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
