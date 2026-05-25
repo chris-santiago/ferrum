@@ -4,6 +4,7 @@ Focus: annotation primitive routing through chart.__add__, interactive scene
 rendering, SVG rendering, clone preservation, composition interactions, and
 degenerate inputs.
 """
+
 from __future__ import annotations
 
 import json
@@ -92,9 +93,7 @@ def test_hline_preserves_dash_in_annotation():
     assert len(annotations) >= 1
     # Scene format: style.dash is the dash array
     dash = annotations[0].get("style", {}).get("dash")
-    assert dash == [4.0, 4.0], (
-        f"Expected dash=[4.0, 4.0], got {dash}"
-    )
+    assert dash == [4.0, 4.0], f"Expected dash=[4.0, 4.0], got {dash}"
 
 
 # ============================================================================
@@ -171,9 +170,7 @@ def test_annotation_plus_regular_chart_layer():
         f"Expected 1 annotation after adding regular chart, got {len(annotations)}"
     )
     # Must have at least 2 mark batches (point + line)
-    assert len(marks) >= 2, (
-        f"Expected >=2 mark batches after layering, got {len(marks)}"
-    )
+    assert len(marks) >= 2, f"Expected >=2 mark batches after layering, got {len(marks)}"
 
 
 def test_regular_chart_then_annotation():
@@ -183,9 +180,7 @@ def test_regular_chart_then_annotation():
     combined = line_chart + fr.annotate_hline(y=3.0, stroke="red")
     scene, _ = _scene(combined)
     annotations = scene["panels"][0].get("annotations", [])
-    assert len(annotations) == 1, (
-        f"Expected 1 annotation, got {len(annotations)}"
-    )
+    assert len(annotations) == 1, f"Expected 1 annotation, got {len(annotations)}"
 
 
 def test_annotation_between_two_layers():
@@ -227,9 +222,7 @@ def test_two_regular_charts_have_two_mark_batches():
     combined = c1 + c2
     scene, _ = _scene(combined)
     marks = scene["panels"][0].get("marks", [])
-    assert len(marks) >= 2, (
-        f"Expected >= 2 mark batches, got {len(marks)}"
-    )
+    assert len(marks) >= 2, f"Expected >= 2 mark batches, got {len(marks)}"
 
 
 # ============================================================================
@@ -240,13 +233,9 @@ def test_two_regular_charts_have_two_mark_batches():
 def test_clone_preserves_annotation_primitive():
     """Chart._clone() must preserve _annotation_primitive."""
     hline = fr.annotate_hline(y=3.0, stroke="red")
-    assert hline._annotation_primitive is not None, (
-        "annotate_hline must set _annotation_primitive"
-    )
+    assert hline._annotation_primitive is not None, "annotate_hline must set _annotation_primitive"
     cloned = hline._clone()
-    assert cloned._annotation_primitive is not None, (
-        "_clone() must preserve _annotation_primitive"
-    )
+    assert cloned._annotation_primitive is not None, "_clone() must preserve _annotation_primitive"
     assert cloned._annotation_primitive is hline._annotation_primitive, (
         "_clone() must preserve the same annotation primitive object"
     )
@@ -328,9 +317,7 @@ def test_hconcat_both_children_have_annotations():
     concat = c1 | c2
     scene_json, _ = concat._render_interactive()
     scene = json.loads(scene_json)
-    panels_with_annot = sum(
-        1 for p in scene.get("panels", []) if len(p.get("annotations", [])) > 0
-    )
+    panels_with_annot = sum(1 for p in scene.get("panels", []) if len(p.get("annotations", [])) > 0)
     assert panels_with_annot >= 2, (
         f"Both HConcat panels should have annotations; only {panels_with_annot} do"
     )
@@ -400,9 +387,7 @@ def test_multiple_annotations_svg_no_duplicates():
     assert "NaN" not in svg
     # The SVG should render the base chart's marks plus annotation overlays.
     # The key invariant: no duplicate rule marks from the annotation helpers.
-    assert svg.count("<circle") >= 3, (
-        "Base chart's 3 points must still appear in SVG"
-    )
+    assert svg.count("<circle") >= 3, "Base chart's 3 points must still appear in SVG"
 
 
 # ============================================================================
@@ -495,6 +480,7 @@ def test_annotate_abline_with_vertical_like_slope():
 def test_annotation_primitive_set_on_hline():
     """annotate_hline must set _annotation_primitive to an AnnotationLine."""
     from ferrum.annotation.primitives import AnnotationLine
+
     hline = fr.annotate_hline(y=3.0)
     assert isinstance(hline._annotation_primitive, AnnotationLine)
 
@@ -502,6 +488,7 @@ def test_annotation_primitive_set_on_hline():
 def test_annotation_primitive_set_on_vline():
     """annotate_vline must set _annotation_primitive to an AnnotationLine."""
     from ferrum.annotation.primitives import AnnotationLine
+
     vline = fr.annotate_vline(x=2.0)
     assert isinstance(vline._annotation_primitive, AnnotationLine)
 
@@ -509,6 +496,7 @@ def test_annotation_primitive_set_on_vline():
 def test_annotation_primitive_set_on_text():
     """annotate_text must set _annotation_primitive to an AnnotationText."""
     from ferrum.annotation.primitives import AnnotationText
+
     txt = fr.annotate_text(x=1.0, y=2.0, text="hi")
     assert isinstance(txt._annotation_primitive, AnnotationText)
 
@@ -516,6 +504,7 @@ def test_annotation_primitive_set_on_text():
 def test_annotation_primitive_set_on_rect():
     """annotate_rect must set _annotation_primitive to an AnnotationRect."""
     from ferrum.annotation.primitives import AnnotationRect
+
     r = fr.annotate_rect(x1=0, x2=1, y1=0, y2=1, fill="red")
     assert isinstance(r._annotation_primitive, AnnotationRect)
 
@@ -523,6 +512,7 @@ def test_annotation_primitive_set_on_rect():
 def test_annotation_primitive_set_on_abline():
     """annotate_abline must set _annotation_primitive to an AnnotationLine."""
     from ferrum.annotation.primitives import AnnotationLine
+
     ab = fr.annotate_abline(slope=1.0, intercept=0.0)
     assert isinstance(ab._annotation_primitive, AnnotationLine)
 
@@ -602,9 +592,7 @@ def test_five_hlines_produce_five_annotations():
         chart = chart + fr.annotate_hline(y=y)
     scene, _ = _scene(chart)
     annotations = scene["panels"][0].get("annotations", [])
-    assert len(annotations) == 5, (
-        f"Expected 5 annotations, got {len(annotations)}"
-    )
+    assert len(annotations) == 5, f"Expected 5 annotations, got {len(annotations)}"
 
 
 # ============================================================================
@@ -616,9 +604,15 @@ def test_bare_annotation_primitive_via_add():
     """chart + AnnotationLine(...) directly must also work (bare primitive path)."""
     from ferrum.annotation.primitives import AnnotationLine
     from ferrum.annotation.coords import norm
+
     prim = AnnotationLine(
-        x1=norm(0), y1=3.0, x2=norm(1), y2=3.0,
-        stroke="#333", stroke_width=1, dash=None,
+        x1=norm(0),
+        y1=3.0,
+        x2=norm(1),
+        y2=3.0,
+        stroke="#333",
+        stroke_width=1,
+        dash=None,
     )
     chart = _base_chart() + prim
     scene, _ = _scene(chart)
@@ -632,9 +626,15 @@ def test_annotate_container_via_add():
     """chart + Annotate(AnnotationLine(...)) must produce 1 annotation."""
     from ferrum.annotation.primitives import AnnotationLine
     from ferrum.annotation.coords import norm
+
     prim = AnnotationLine(
-        x1=norm(0), y1=3.0, x2=norm(1), y2=3.0,
-        stroke="#333", stroke_width=1, dash=None,
+        x1=norm(0),
+        y1=3.0,
+        x2=norm(1),
+        y2=3.0,
+        stroke="#333",
+        stroke_width=1,
+        dash=None,
     )
     chart = _base_chart() + Annotate(prim)
     scene, _ = _scene(chart)
@@ -673,10 +673,12 @@ def test_annotate_arrow_with_label():
 
 def test_annotation_on_zero_row_chart():
     """chart(empty df) + annotate_hline must produce a valid (empty) scene."""
-    df = pl.DataFrame({
-        "x": pl.Series([], dtype=pl.Float64),
-        "y": pl.Series([], dtype=pl.Float64),
-    })
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Float64),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_hline(y=0.0)
     scene_json, _ = _render_scene(chart)
     scene = json.loads(scene_json)
@@ -702,11 +704,7 @@ def test_annotations_in_chart_config():
 
 def test_two_annotations_in_chart_config():
     """_resolve_chart_config with 2 annotations must list both."""
-    chart = (
-        _base_chart()
-        + fr.annotate_hline(y=3.0)
-        + fr.annotate_text(x=2.0, y=4.0, text="note")
-    )
+    chart = _base_chart() + fr.annotate_hline(y=3.0) + fr.annotate_text(x=2.0, y=4.0, text="note")
     config = chart._resolve_chart_config()
     assert len(config["annotations"]) == 2
 
@@ -723,7 +721,7 @@ def test_chart_config_no_annotations_when_none_added():
 # ============================================================================
 
 
-def test_annotate_hline_with_nan_y(): # BUG: NaN in annotation y causes ValueError from Rust JSON deserialization
+def test_annotate_hline_with_nan_y():  # BUG: NaN in annotation y causes ValueError from Rust JSON deserialization
     """annotate_hline(y=NaN) must not crash the interactive pipeline."""
     chart = _base_chart() + fr.annotate_hline(y=float("nan"))
     # This might produce NaN in the annotation node, but must not crash.
@@ -732,7 +730,7 @@ def test_annotate_hline_with_nan_y(): # BUG: NaN in annotation y causes ValueErr
     assert "panels" in scene
 
 
-def test_annotate_hline_with_inf_y(): # BUG: Infinity in annotation y causes ValueError from Rust JSON deserialization
+def test_annotate_hline_with_inf_y():  # BUG: Infinity in annotation y causes ValueError from Rust JSON deserialization
     """annotate_hline(y=inf) must not crash the interactive pipeline."""
     chart = _base_chart() + fr.annotate_hline(y=float("inf"))
     scene_json, _ = _render_scene(chart)
@@ -740,11 +738,9 @@ def test_annotate_hline_with_inf_y(): # BUG: Infinity in annotation y causes Val
     assert "panels" in scene
 
 
-def test_annotate_rect_with_nan_coords(): # BUG: NaN in annotation rect coords causes ValueError from Rust JSON deserialization
+def test_annotate_rect_with_nan_coords():  # BUG: NaN in annotation rect coords causes ValueError from Rust JSON deserialization
     """annotate_rect with NaN coordinates must not crash."""
-    chart = _base_chart() + fr.annotate_rect(
-        x1=float("nan"), x2=3.0, y1=2.0, y2=6.0, fill="yellow"
-    )
+    chart = _base_chart() + fr.annotate_rect(x1=float("nan"), x2=3.0, y1=2.0, y2=6.0, fill="yellow")
     scene_json, _ = _render_scene(chart)
     scene = json.loads(scene_json)
     assert "panels" in scene
@@ -805,7 +801,7 @@ def test_annotated_scene_panels_have_plot_area():
 # ============================================================================
 
 
-def test_two_annotation_charts_compose_as_two_annotations(): # BUG: LHS annotation primitive becomes a mark layer when composing two annotation charts directly
+def test_two_annotation_charts_compose_as_two_annotations():  # BUG: LHS annotation primitive becomes a mark layer when composing two annotation charts directly
     """annotate_hline + annotate_vline must produce 2 annotations, 0 mark layers.
 
     When the LHS is itself an annotate_* chart, its _annotation_primitive
@@ -824,15 +820,14 @@ def test_two_annotation_charts_compose_as_two_annotations(): # BUG: LHS annotati
     # Currently it appears as a rule mark because _expand_layers treats
     # the LHS as a regular chart.
     assert len(annotations) == 2, (
-        f"Expected 2 annotations from hline+vline, got {len(annotations)}; "
-        f"mark kinds: {mark_kinds}"
+        f"Expected 2 annotations from hline+vline, got {len(annotations)}; mark kinds: {mark_kinds}"
     )
     assert "rule" not in [k.lower() for k in mark_kinds], (
         f"No rule marks expected from two annotation charts; got: {mark_kinds}"
     )
 
 
-def test_three_annotation_charts_compose(): # BUG: Only last annotation uses primitive path; earlier ones become mark layers
+def test_three_annotation_charts_compose():  # BUG: Only last annotation uses primitive path; earlier ones become mark layers
     """annotate_hline + annotate_vline + annotate_text must produce 3 annotations."""
     combined = (
         fr.annotate_hline(y=3.0)
@@ -843,8 +838,7 @@ def test_three_annotation_charts_compose(): # BUG: Only last annotation uses pri
     annotations = scene["panels"][0].get("annotations", [])
     marks = scene["panels"][0].get("marks", [])
     assert len(annotations) == 3, (
-        f"Expected 3 annotations, got {len(annotations)}; "
-        f"marks: {[m['kind'] for m in marks]}"
+        f"Expected 3 annotations, got {len(annotations)}; marks: {[m['kind'] for m in marks]}"
     )
 
 
@@ -853,14 +847,14 @@ def test_three_annotation_charts_compose(): # BUG: Only last annotation uses pri
 # ============================================================================
 
 
-def test_annotate_hline_nan_crashes_svg(): # BUG: NaN in annotation y causes ValueError: Python json.dumps(NaN) produces invalid JSON for Rust serde_json
+def test_annotate_hline_nan_crashes_svg():  # BUG: NaN in annotation y causes ValueError: Python json.dumps(NaN) produces invalid JSON for Rust serde_json
     """annotate_hline(y=NaN) must not crash the SVG render path."""
     chart = _base_chart() + fr.annotate_hline(y=float("nan"))
     svg = chart.show_svg()
     assert isinstance(svg, str)
 
 
-def test_annotate_hline_inf_crashes_svg(): # BUG: Infinity in annotation y causes ValueError: Python json.dumps(Infinity) produces invalid JSON for Rust serde_json
+def test_annotate_hline_inf_crashes_svg():  # BUG: Infinity in annotation y causes ValueError: Python json.dumps(Infinity) produces invalid JSON for Rust serde_json
     """annotate_hline(y=inf) must not crash the SVG render path."""
     chart = _base_chart() + fr.annotate_hline(y=float("inf"))
     svg = chart.show_svg()
@@ -872,7 +866,7 @@ def test_annotate_hline_inf_crashes_svg(): # BUG: Infinity in annotation y cause
 # ============================================================================
 
 
-def test_annotate_vline_nan_crashes_interactive(): # BUG: NaN in vline x causes ValueError: Python json.dumps(NaN) produces invalid JSON
+def test_annotate_vline_nan_crashes_interactive():  # BUG: NaN in vline x causes ValueError: Python json.dumps(NaN) produces invalid JSON
     """annotate_vline(x=NaN) must not crash the interactive pipeline."""
     chart = _base_chart() + fr.annotate_vline(x=float("nan"))
     scene_json, _ = _render_scene(chart)
@@ -880,7 +874,7 @@ def test_annotate_vline_nan_crashes_interactive(): # BUG: NaN in vline x causes 
     assert "panels" in scene
 
 
-def test_annotate_vline_inf_crashes_interactive(): # BUG: Infinity in vline x causes ValueError: Python json.dumps(Infinity) produces invalid JSON
+def test_annotate_vline_inf_crashes_interactive():  # BUG: Infinity in vline x causes ValueError: Python json.dumps(Infinity) produces invalid JSON
     """annotate_vline(x=inf) must not crash the interactive pipeline."""
     chart = _base_chart() + fr.annotate_vline(x=float("inf"))
     scene_json, _ = _render_scene(chart)

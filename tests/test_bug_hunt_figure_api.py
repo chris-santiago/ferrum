@@ -25,6 +25,7 @@ rejection x1). Those are covered by the existing tests. This round targets:
 - configure_color domain+range interaction
 - override + configure interaction on rendered SVG
 """
+
 from __future__ import annotations
 
 import json
@@ -331,6 +332,7 @@ class TestCatplotOrientH:
         chart = fm.catplot(cat_float_df, x="value", y="group", kind="strip", orient="h")
         # CoordFlip should be set
         from ferrum.coord import CoordFlip
+
         assert isinstance(chart._coord, CoordFlip) or chart._coord == "flip"
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -439,7 +441,9 @@ class TestLmplotMethods:
 
     def test_lmplot_quadratic(self, simple_df):
         """lmplot(method='lm', order=2) should produce a polynomial fit."""
-        chart = fm.lmplot(simple_df, x="x", y="y", method="lm", order=2, ci=None, show_metrics=False)
+        chart = fm.lmplot(
+            simple_df, x="x", y="y", method="lm", order=2, ci=None, show_metrics=False
+        )
         svg = chart.show_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
@@ -480,8 +484,7 @@ class TestRegplot:
 
 
 class TestResidplot:
-    """Tests for residplot, targeting regression.py residplot lines 679-866.
-    """
+    """Tests for residplot, targeting regression.py residplot lines 679-866."""
 
     def test_residplot_basic(self, simple_df):
         """residplot should produce a scatter of residuals."""
@@ -502,10 +505,13 @@ class TestResidplot:
         svg = chart.show_svg()
         assert "<svg" in svg
 
-    def test_residplot_with_label(self, simple_df):  # BUG: ValueError: unknown column '_label' — Smooth transform discards injected columns
+    def test_residplot_with_label(
+        self, simple_df
+    ):  # BUG: ValueError: unknown column '_label' — Smooth transform discards injected columns
         """residplot(label='series') should inject a _label column."""
-        chart = fm.residplot(simple_df, x="x", y="y", label="series A", show_metrics=False,
-                             zero_line=False)
+        chart = fm.residplot(
+            simple_df, x="x", y="y", label="series A", show_metrics=False, zero_line=False
+        )
         svg = chart.show_svg()
         assert "<svg" in svg
 
@@ -717,9 +723,7 @@ class TestLabsErrorContract:
     def test_labs_multiple_unknown_keys_reports_all(self, simple_df):
         """labs() with multiple unknown keys should mention them in the error."""
         with pytest.raises(ValueError, match="unknown label keys"):
-            fm.Chart(simple_df).mark_point().encode(x="x", y="y").labs(
-                foo="Foo", bar="Bar"
-            )
+            fm.Chart(simple_df).mark_point().encode(x="x", y="y").labs(foo="Foo", bar="Bar")
 
 
 # ===================================================================
@@ -734,11 +738,7 @@ class TestAnnotationsRenderedInSvg:
 
     def test_text_annotation_appears_in_svg(self, simple_df):
         """A text annotation at a data coordinate should produce text elements in SVG."""
-        chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-        )
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.text(3.0, 3.0, "Annotation Text")
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -747,11 +747,7 @@ class TestAnnotationsRenderedInSvg:
 
     def test_line_annotation_appears_in_svg(self, simple_df):
         """A line annotation should add a line/path element to the SVG."""
-        chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-        )
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.line(1.0, 1.0, 5.0, 5.0, stroke="red")
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -760,11 +756,7 @@ class TestAnnotationsRenderedInSvg:
 
     def test_rect_annotation_appears_in_svg(self, simple_df):
         """A rect annotation should add a rect element to the SVG."""
-        chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-        )
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.rect(1.0, 1.0, 4.0, 4.0, fill="lightblue", opacity=0.3)
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -974,7 +966,9 @@ class TestConfigureColorDomainRange:
         assert d["domain"] == ["A", "B", "C"]
         assert d["range"] == ["#ff0000", "#00ff00", "#0000ff"]
 
-    def test_configure_color_domain_range_renders(self, hue_df):  # BUG: ValueError: chart_config invalid type string expected f64 — string domain values crash Rust renderer
+    def test_configure_color_domain_range_renders(
+        self, hue_df
+    ):  # BUG: ValueError: chart_config invalid type string expected f64 — string domain values crash Rust renderer
         """Chart with configure_color(domain=..., range=...) should render valid SVG."""
         chart = (
             fm.Chart(hue_df)
@@ -1076,7 +1070,9 @@ class TestDisplotOverlays:
     Targets distribution.py displot lines 270-279.
     """
 
-    def test_displot_hist_with_kde_overlay(self, iris_df):  # BUG: stat_kde column not found — histogram transform renames column, KDE overlay cannot find original
+    def test_displot_hist_with_kde_overlay(
+        self, iris_df
+    ):  # BUG: stat_kde column not found — histogram transform renames column, KDE overlay cannot find original
         """displot(kind='hist', kde=True) should layer a density curve on the histogram.
         distribution.py line 271-276: kde=True and kind != 'kde'."""
         chart = fm.displot(iris_df, x="sepal_length", kde=True)
@@ -1092,7 +1088,9 @@ class TestDisplotOverlays:
         assert "<svg" in svg
         assert "NaN" not in svg
 
-    def test_displot_hist_with_both_kde_and_rug(self, iris_df):  # BUG: stat_kde column not found — same root cause as kde=True overlay
+    def test_displot_hist_with_both_kde_and_rug(
+        self, iris_df
+    ):  # BUG: stat_kde column not found — same root cause as kde=True overlay
         """displot(kde=True, rug=True) should layer both KDE and rug on histogram."""
         chart = fm.displot(iris_df, x="sepal_length", kde=True, rug=True)
         svg = chart.show_svg()
@@ -1226,6 +1224,7 @@ class TestXlimYlim:
         """xlim() should set a CoordCartesian with the specified xlim.
         chart.py xlim line 4874: CoordCartesian(xlim=(lo, hi))."""
         from ferrum.coord import CoordCartesian
+
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").xlim(0, 10)
         assert isinstance(chart._coord, CoordCartesian)
         assert chart._coord.xlim == (0, 10)
@@ -1233,6 +1232,7 @@ class TestXlimYlim:
     def test_ylim_sets_coord_cartesian(self, simple_df):
         """ylim() should set a CoordCartesian with the specified ylim."""
         from ferrum.coord import CoordCartesian
+
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").ylim(-5, 15)
         assert isinstance(chart._coord, CoordCartesian)
         assert chart._coord.ylim == (-5, 15)
@@ -1241,26 +1241,15 @@ class TestXlimYlim:
         """xlim then ylim should preserve both limits.
         chart.py ylim line 4909: replaces existing CoordCartesian preserving xlim."""
         from ferrum.coord import CoordCartesian
-        chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-            .xlim(0, 10)
-            .ylim(-5, 15)
-        )
+
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").xlim(0, 10).ylim(-5, 15)
         assert isinstance(chart._coord, CoordCartesian)
         assert chart._coord.xlim == (0, 10)
         assert chart._coord.ylim == (-5, 15)
 
     def test_xlim_ylim_renders(self, simple_df):
         """Chart with both xlim and ylim should render valid SVG."""
-        chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-            .xlim(0, 10)
-            .ylim(0, 10)
-        )
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").xlim(0, 10).ylim(0, 10)
         svg = chart.show_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
@@ -1402,9 +1391,7 @@ class TestLmplotLogx:
 
     def test_lmplot_logx_true(self):
         """lmplot(logx=True) should set x encoding to log scale."""
-        df = pl.DataFrame(
-            {"x": [0.1, 1.0, 10.0, 100.0, 1000.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
-        )
+        df = pl.DataFrame({"x": [0.1, 1.0, 10.0, 100.0, 1000.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
         chart = fm.lmplot(df, x="x", y="y", logx=True, ci=None, show_metrics=False)
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -1477,7 +1464,12 @@ class TestToDictCompleteness:
 
     def test_to_dict_includes_facet(self, iris_df):
         """to_dict should include facet when facet() was called."""
-        chart = fm.Chart(iris_df).mark_point().encode(x="sepal_length", y="sepal_width").facet("species")
+        chart = (
+            fm.Chart(iris_df)
+            .mark_point()
+            .encode(x="sepal_length", y="sepal_width")
+            .facet("species")
+        )
         d = chart.to_dict()
         assert "facet" in d
 
@@ -1492,10 +1484,9 @@ class TestToDictCompleteness:
 
     def test_to_dict_captures_layers(self, simple_df):
         """to_dict for a layered chart should include layers array."""
-        chart = (
-            fm.Chart(simple_df).mark_point().encode(x="x", y="y")
-            + fm.Chart(simple_df).mark_line().encode(x="x", y="y")
-        )
+        chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y") + fm.Chart(
+            simple_df
+        ).mark_line().encode(x="x", y="y")
         d = chart.to_dict()
         assert "layers" in d
         assert len(d["layers"]) >= 2
@@ -1590,7 +1581,9 @@ class TestMixedIntFloatColumns:
         assert "<svg" in svg
         assert "NaN" not in svg
 
-    def test_lmplot_integer_columns(self):  # BUG: stat_smooth 'x' must be Float64 — lmplot does not auto-cast integer columns to Float64
+    def test_lmplot_integer_columns(
+        self,
+    ):  # BUG: stat_smooth 'x' must be Float64 — lmplot does not auto-cast integer columns to Float64
         """lmplot with integer columns should not crash the Smooth transform."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 5, 4, 5]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
@@ -1610,10 +1603,7 @@ class TestRepr:
     def test_repr_after_configure(self, simple_df):
         """__repr__ should still work after configure calls."""
         chart = (
-            fm.Chart(simple_df)
-            .mark_point()
-            .encode(x="x", y="y")
-            .configure_axis(label_angle=-45)
+            fm.Chart(simple_df).mark_point().encode(x="x", y="y").configure_axis(label_angle=-45)
         )
         r = repr(chart)
         assert "Chart" in r
@@ -1650,19 +1640,26 @@ class TestFacetValidation:
 
     def test_facet_field_string(self, iris_df):
         """facet(field='species') should set wrap mode."""
-        chart = fm.Chart(iris_df).mark_point().encode(x="sepal_length", y="sepal_width").facet("species")
+        chart = (
+            fm.Chart(iris_df)
+            .mark_point()
+            .encode(x="sepal_length", y="sepal_width")
+            .facet("species")
+        )
         assert chart._facet is not None
         assert chart._facet.mode_kind == "wrap"
         assert chart._facet.field == "species"
 
     def test_facet_grid_mode(self):
         """facet(row=..., col=...) should set grid mode."""
-        df = pl.DataFrame({
-            "x": [1.0, 2.0, 3.0, 4.0],
-            "y": [1.0, 2.0, 3.0, 4.0],
-            "r": ["R1", "R1", "R2", "R2"],
-            "c": ["C1", "C2", "C1", "C2"],
-        })
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0],
+                "y": [1.0, 2.0, 3.0, 4.0],
+                "r": ["R1", "R1", "R2", "R2"],
+                "c": ["C1", "C2", "C1", "C2"],
+            }
+        )
         chart = fm.Chart(df).mark_point().encode(x="x", y="y").facet(row="r", col="c")
         assert chart._facet is not None
         assert chart._facet.mode_kind == "grid"

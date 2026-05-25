@@ -50,13 +50,7 @@ def test_configure_axis_domain_min_max_overrides_data():
 def test_configure_axis_domain_min_only():
     """configure_axis with only domain_min should override the lower bound."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(domain_min=-10.0)
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_min=-10.0).show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -64,13 +58,7 @@ def test_configure_axis_domain_min_only():
 def test_configure_axis_domain_max_only():
     """configure_axis with only domain_max should override upper bound."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(domain_max=100.0)
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_max=100.0).show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -81,13 +69,7 @@ def test_configure_axis_zero_includes_zero():
     Data [10, 20, 30] -> with zero=True the axis domain should start at 0.
     """
     df = pl.DataFrame({"x": [10.0, 20.0, 30.0], "y": [1.0, 2.0, 3.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(zero=True)
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(zero=True).show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -95,13 +77,7 @@ def test_configure_axis_zero_includes_zero():
 def test_configure_axis_nice_true():
     """configure_axis(nice=True) should round domain to nice values."""
     df = pl.DataFrame({"x": [0.13, 9.7], "y": [1.0, 2.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(nice=True)
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(nice=True).show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -142,9 +118,9 @@ def test_configure_axis_label_format_invalid_preset_raises():
     Targets configure.py:AxisConfig.__post_init__ -> resolve_format().
     """
     with pytest.raises(ValueError, match="Unknown format preset"):
-        fr.Chart(
-            pl.DataFrame({"x": [1.0], "y": [1.0]})
-        ).mark_point().encode(x="x", y="y").configure_axis(label_format="bogus")
+        fr.Chart(pl.DataFrame({"x": [1.0], "y": [1.0]})).mark_point().encode(
+            x="x", y="y"
+        ).configure_axis(label_format="bogus")
 
 
 def test_configure_axis_label_format_and_raw_mutually_exclusive():
@@ -153,11 +129,9 @@ def test_configure_axis_label_format_and_raw_mutually_exclusive():
     Targets configure.py:AxisConfig.__post_init__ line 110-114.
     """
     with pytest.raises(ValueError, match="mutually exclusive"):
-        fr.Chart(
-            pl.DataFrame({"x": [1.0], "y": [1.0]})
-        ).mark_point().encode(x="x", y="y").configure_axis(
-            label_format="percent", label_format_raw=".2f"
-        )
+        fr.Chart(pl.DataFrame({"x": [1.0], "y": [1.0]})).mark_point().encode(
+            x="x", y="y"
+        ).configure_axis(label_format="percent", label_format_raw=".2f")
 
 
 def test_configure_legend_invalid_orient_raises():
@@ -166,11 +140,9 @@ def test_configure_legend_invalid_orient_raises():
     Targets configure.py:LegendConfig.__post_init__ line 173-178.
     """
     with pytest.raises(ValueError, match="orient"):
-        fr.Chart(
-            pl.DataFrame({"x": [1.0], "y": [1.0], "c": ["a"]})
-        ).mark_point().encode(x="x", y="y", color="c").configure_legend(
-            orient="diagonal"
-        )
+        fr.Chart(pl.DataFrame({"x": [1.0], "y": [1.0], "c": ["a"]})).mark_point().encode(
+            x="x", y="y", color="c"
+        ).configure_legend(orient="diagonal")
 
 
 def test_configure_title_invalid_anchor_raises():
@@ -179,9 +151,9 @@ def test_configure_title_invalid_anchor_raises():
     Targets configure.py:TitleConfig.__post_init__ line 215-219.
     """
     with pytest.raises(ValueError, match="anchor"):
-        fr.Chart(
-            pl.DataFrame({"x": [1.0], "y": [1.0]})
-        ).mark_point().encode(x="x", y="y").configure_title(anchor="center")
+        fr.Chart(pl.DataFrame({"x": [1.0], "y": [1.0]})).mark_point().encode(
+            x="x", y="y"
+        ).configure_title(anchor="center")
 
 
 def test_configure_multiple_layers_merge():
@@ -219,9 +191,7 @@ def test_configure_axis_x_only_selective():
 
 def test_configure_on_empty_data():
     """configure_ calls on a chart with empty data should not crash."""
-    df = pl.DataFrame(
-        {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
-    )
+    df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
     svg = (
         fr.Chart(df)
         .mark_point()
@@ -419,9 +389,7 @@ def test_time_scale_ticks_zero_count():
 
     Targets ticks.rs:calendar_ticks — count==0 guard at line 151.
     """
-    s = fr.TimeScale(
-        domain=[1_767_225_600_000.0, 1_798_761_599_000.0], range=[0.0, 1000.0]
-    )
+    s = fr.TimeScale(domain=[1_767_225_600_000.0, 1_798_761_599_000.0], range=[0.0, 1000.0])
     t = s.ticks(0)
     assert t == []
 
@@ -678,6 +646,7 @@ def test_log_scale_base_2():
 def test_log_scale_base_e():
     """LogScale with base=e should use natural logarithm."""
     import math as m
+
     s = fr.LogScale(domain=[1.0, m.e**3], range=[0.0, 3.0], base=m.e)
     assert math.isclose(s.scale(m.e), 1.0, abs_tol=1e-9)
     assert math.isclose(s.scale(m.e**2), 2.0, abs_tol=1e-9)
@@ -703,7 +672,7 @@ def test_log_scale_ticks_many_decades():
         assert v > 0, f"log scale tick should be positive: {v}"
 
 
-def test_log_scale_negative_domain_nice(): # BUG: nice() inverts domain for negative log scales — d[0]=-1 instead of -1000
+def test_log_scale_negative_domain_nice():  # BUG: nice() inverts domain for negative log scales — d[0]=-1 instead of -1000
     """LogScale.nice() with negative domain should round to powers of base.
 
     Targets log.rs:nice() line 95-99. With domain=[-700, -3], sign=-1.
@@ -919,9 +888,7 @@ def test_configure_with_all_nan_data():
 
 def test_configure_color_scheme_on_categorical():
     """configure_color(scheme=...) should apply to categorical color encoding."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "c": ["a", "b", "c"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "c": ["a", "b", "c"]})
     svg = (
         fr.Chart(df)
         .mark_point()
@@ -1017,7 +984,7 @@ def test_configure_axis_domain_min_max_with_ordinal():
 # ---------------------------------------------------------------------------
 
 
-def test_configure_on_layer_chart(): # BUG: LayerChart missing configure_axis method — AttributeError
+def test_configure_on_layer_chart():  # BUG: LayerChart missing configure_axis method — AttributeError
     """configure_ calls on layered charts should apply to all layers.
 
     Targets composition.py:LayerChart — it does not inherit or implement
@@ -1026,12 +993,7 @@ def test_configure_on_layer_chart(): # BUG: LayerChart missing configure_axis me
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [3.0, 2.0, 1.0]})
     c1 = fr.Chart(df).mark_point().encode(x="x", y="y1")
     c2 = fr.Chart(df).mark_line().encode(x="x", y="y2")
-    svg = (
-        fr.layer(c1, c2)
-        .configure_axis(label_angle=-30)
-        .configure_grid(x=True, y=True)
-        .show_svg()
-    )
+    svg = fr.layer(c1, c2).configure_axis(label_angle=-30).configure_grid(x=True, y=True).show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1138,16 +1100,8 @@ def test_axis_config_to_dict_raw_format_passthrough():
 
 def test_configure_axis_label_angle_reflected_in_svg():
     """Configuring label_angle=-45 should produce transform attributes in SVG."""
-    df = pl.DataFrame(
-        {"x": ["alpha", "beta", "gamma"], "y": [1.0, 2.0, 3.0]}
-    )
-    svg = (
-        fr.Chart(df)
-        .mark_bar()
-        .encode(x="x", y="y")
-        .configure_axis(label_angle=-45)
-        .show_svg()
-    )
+    df = pl.DataFrame({"x": ["alpha", "beta", "gamma"], "y": [1.0, 2.0, 3.0]})
+    svg = fr.Chart(df).mark_bar().encode(x="x", y="y").configure_axis(label_angle=-45).show_svg()
     assert "<svg" in svg
     # A rotated label produces a transform="rotate(...)" attribute
     assert "rotate" in svg
@@ -1378,9 +1332,7 @@ def test_very_large_float_chart_renders():
 
 def test_very_small_positive_values_do_not_collapse_to_zero():
     """Data with 1e-15 differences should still produce distinct marks."""
-    df = pl.DataFrame(
-        {"x": [1e-15, 2e-15, 3e-15], "y": [1.0, 2.0, 3.0]}
-    )
+    df = pl.DataFrame({"x": [1e-15, 2e-15, 3e-15], "y": [1.0, 2.0, 3.0]})
     svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1885,9 +1837,9 @@ def test_facet_single_panel():
 def test_facet_many_panels():
     """Facet with 20+ panels should render without overflow or crash."""
     cats = [f"cat_{i:02d}" for i in range(25)]
-    df = pl.DataFrame(
-        {"x": list(range(25)), "y": list(range(25)), "f": cats}
-    ).cast({"x": pl.Float64, "y": pl.Float64})
+    df = pl.DataFrame({"x": list(range(25)), "y": list(range(25)), "f": cats}).cast(
+        {"x": pl.Float64, "y": pl.Float64}
+    )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg

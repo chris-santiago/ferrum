@@ -427,8 +427,7 @@ class TestBreakAxisAxisLabelsPreserved:
         displaced = re.findall(r'<text[^>]*y="-99999[^"]*"[^>]*>([^<]+)</text>', svg)
         x_labels_displaced = [t for t in displaced if t in ("A", "B", "C", "D", "category")]
         assert not x_labels_displaced, (
-            f"X-axis labels should not be at the sentinel y=-99999; "
-            f"found: {x_labels_displaced}"
+            f"X-axis labels should not be at the sentinel y=-99999; found: {x_labels_displaced}"
         )
 
 

@@ -196,7 +196,9 @@ class TestAddAnnotationPrimitive:
         assert "point" in marks
         assert "line" in marks
 
-    def test_annotation_chart_as_lhs_should_route_through_annotations(self):  # BUG: hline + chart loses annotation routing
+    def test_annotation_chart_as_lhs_should_route_through_annotations(
+        self,
+    ):  # BUG: hline + chart loses annotation routing
         """When an annotation chart is the LHS of +, its annotation should be
         routed the same way as when it is on the RHS.
 
@@ -367,9 +369,7 @@ class TestConfigurePropagation:
         """configure_color on RepeatChart should add to _configure_layers."""
         df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
         template = Chart(df).encode(x=fr.Repeat.column, y="a").mark_point()
-        rc = fr.RepeatChart(template, column=["a", "b"]).configure_color(
-            scheme="tableau10"
-        )
+        rc = fr.RepeatChart(template, column=["a", "b"]).configure_color(scheme="tableau10")
         assert len(rc._configure_layers) == 1
 
     def test_multiple_configure_calls_accumulate(self):
@@ -511,6 +511,7 @@ class TestCopyConfigureLayers:
 
         Targets composition.py:25-27: getattr returns None.
         """
+
         class FakeSrc:
             pass
 
@@ -528,6 +529,7 @@ class TestCopyConfigureLayers:
 
         Targets composition.py:26: 'if config:' is falsy for empty list.
         """
+
         class FakeSrc:
             _configure_layers = []
 
@@ -733,9 +735,7 @@ class TestAnnotationEdgeCases:
 
     def test_nan_data_plus_annotation(self):
         """Chart with NaN values + annotation should render valid SVG."""
-        df = pl.DataFrame(
-            {"x": [1.0, float("nan"), 3.0], "y": [4.0, 5.0, float("nan")]}
-        )
+        df = pl.DataFrame({"x": [1.0, float("nan"), 3.0], "y": [4.0, 5.0, float("nan")]})
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
         svg = result.show_svg()
@@ -847,9 +847,7 @@ class TestConfigureCascade:
         c1 = Chart(df).mark_point().encode(x="x", y="y")
         c2 = Chart(df).mark_bar().encode(x="x", y="y")
         inner = (c1 | c2).configure_axis(label_angle=0)  # inner level
-        outer = VConcatChart([inner, _simple_chart(mark="line")]).configure_axis(
-            label_angle=-45
-        )
+        outer = VConcatChart([inner, _simple_chart(mark="line")]).configure_axis(label_angle=-45)
         svg = outer.show_svg()
         _assert_valid_svg(svg)
 
@@ -877,8 +875,13 @@ class TestAttachAnnotationPrimitive:
         df = pl.DataFrame({"x": [1.0], "y": [2.0]})
         chart = Chart(df).mark_rule().encode(y="y")
         prim = AnnotationLine(
-            x1=norm(0), y1=5.0, x2=norm(1), y2=5.0,
-            stroke="#333", stroke_width=1, dash=None,
+            x1=norm(0),
+            y1=5.0,
+            x2=norm(1),
+            y2=5.0,
+            stroke="#333",
+            stroke_width=1,
+            dash=None,
         )
         result = _attach_annotation_primitive(chart, prim)
         # result IS chart (same object), not a clone
@@ -1110,7 +1113,9 @@ class TestConfigureImmutability:
         assert len(c._configure) == 0
         assert len(configured._configure) == 1
 
-    def test_configure_axis_shallow_copy_aliasing_hconcat(self):  # BUG: charts list shared after configure
+    def test_configure_axis_shallow_copy_aliasing_hconcat(
+        self,
+    ):  # BUG: charts list shared after configure
         """configure_axis uses copy.copy which shares the charts list on HConcatChart.
 
         Targets composition.py:359: new = copy.copy(self).
@@ -1129,7 +1134,9 @@ class TestConfigureImmutability:
             "mutating original.charts after configure_axis() would corrupt the configured copy"
         )
 
-    def test_configure_axis_shallow_copy_aliasing_vconcat(self):  # BUG: charts list shared after configure
+    def test_configure_axis_shallow_copy_aliasing_vconcat(
+        self,
+    ):  # BUG: charts list shared after configure
         """configure_axis uses copy.copy which shares the charts list on VConcatChart.
 
         Same shallow copy aliasing bug as HConcatChart.
@@ -1143,7 +1150,9 @@ class TestConfigureImmutability:
             "copy.copy shares the charts list between original and configured VConcatChart"
         )
 
-    def test_configure_axis_shallow_copy_aliasing_layer_chart(self):  # BUG: _charts list shared after configure
+    def test_configure_axis_shallow_copy_aliasing_layer_chart(
+        self,
+    ):  # BUG: _charts list shared after configure
         """configure_axis uses copy.copy which shares _charts on LayerChart.
 
         LayerChart uses __slots__ with _charts, but copy.copy still shallow-copies

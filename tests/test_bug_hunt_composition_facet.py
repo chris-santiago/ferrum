@@ -55,7 +55,11 @@ def _simple_chart(data=None, mark="point", x="x", y="y"):
     """Build a minimal Chart for testing."""
     if data is None:
         data = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    return Chart(data).mark_point().encode(x=x, y=y) if mark == "point" else Chart(data).mark_line().encode(x=x, y=y)
+    return (
+        Chart(data).mark_point().encode(x=x, y=y)
+        if mark == "point"
+        else Chart(data).mark_line().encode(x=x, y=y)
+    )
 
 
 def _assert_valid_svg(svg: str) -> None:
@@ -82,12 +86,8 @@ def test_configure_preserved_through_layer_add():
     Targets __add__ lines 4134-4135 in chart.py: rhs._configure merge.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-45)
-    )
-    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
-        grid=GridConfig(color="#eee")
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
+    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(grid=GridConfig(color="#eee"))
     layered = c1 + c2
     # Both configure layers should be present
     assert len(layered._configure) == 2
@@ -102,9 +102,7 @@ def test_configure_on_hconcat_fans_out_to_sub_charts():
     Targets _render_inputs -> _resolve_chart_config in _render.py line 282.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 | c2
     svg = combined.show_svg()
@@ -116,9 +114,7 @@ def test_configure_on_hconcat_fans_out_to_sub_charts():
 def test_configure_on_vconcat_fans_out():
     """Calling .configure() on a Chart before & preserves it when rendering."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        legend=LegendConfig(orient="bottom")
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(legend=LegendConfig(orient="bottom"))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 & c2
     svg = combined.show_svg()
@@ -150,11 +146,19 @@ def test_configure_override_conflict_in_merge():
     Targets _resolve_chart_config in _render.py lines 284-288: dict merge.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-45, tick_count=5)
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis=AxisConfig(label_angle=-45, tick_count=5))
     )
-    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=0)  # should override -45 in merge
+    c2 = (
+        Chart(df)
+        .mark_line()
+        .encode(x="x", y="y")
+        .configure(
+            axis=AxisConfig(label_angle=0)  # should override -45 in merge
+        )
     )
     layered = c1 + c2
     merged = layered._resolve_chart_config()
@@ -175,9 +179,7 @@ def test_secondary_y_preserved_through_layer():
 
     Targets __add__ lines 4138-4139 in chart.py: rhs._structural merge.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
     assert len(c._structural) == 1
     assert isinstance(c._structural[0], SecondaryY)
@@ -188,9 +190,7 @@ def test_secondary_y_preserved_through_layer():
 def test_break_axis_preserved_through_layer():
     """BreakAxis added via + should persist in the layered chart's _structural."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 50.0, 6.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(
-        axis="y", gap=(15, 45)
-    )
+    c = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(15, 45))
     assert len(c._structural) == 1
     assert isinstance(c._structural[0], BreakAxis)
     svg = c.show_svg()
@@ -215,9 +215,7 @@ def test_structural_features_merge_from_both_sides():
 
     Targets __add__ lines 4138-4139: rhs._structural merge.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_line().encode(x="x", y="y") + BreakAxis(axis="y", gap=(3, 5))
     combined = c1 + c2
@@ -228,16 +226,10 @@ def test_structural_features_merge_from_both_sides():
 
 def test_chart_with_configure_and_structural_renders():
     """A chart with both configure() and structural features renders valid SVG."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
-    c = (
-        Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure(axis=AxisConfig(label_angle=-30))
-        + SecondaryY("z", color="red")
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(
+        axis=AxisConfig(label_angle=-30)
+    ) + SecondaryY("z", color="red")
     svg = c.show_svg()
     _assert_valid_svg(svg)
 
@@ -247,9 +239,7 @@ def test_chart_with_structural_in_hconcat():
 
     Tests that _render_inputs works when a sub-chart has _structural set.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 | c2
@@ -365,7 +355,9 @@ def test_hconcat_with_zero_row_chart():
 
     Targets _render.py show_svg lines 426-431: empty dataset path.
     """
-    df_empty = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
+    df_empty = pl.DataFrame(
+        {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
+    )
     df_normal = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c1 = Chart(df_empty).mark_point().encode(x="x", y="y")
     c2 = Chart(df_normal).mark_point().encode(x="x", y="y")
@@ -378,7 +370,9 @@ def test_hconcat_with_zero_row_chart():
 
 def test_vconcat_with_zero_row_chart():
     """VConcatChart where one chart has 0 rows."""
-    df_empty = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
+    df_empty = pl.DataFrame(
+        {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
+    )
     df_normal = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c1 = Chart(df_normal).mark_point().encode(x="x", y="y")
     c2 = Chart(df_empty).mark_point().encode(x="x", y="y")
@@ -394,7 +388,9 @@ def test_layer_chart_with_zero_row_chart():
     Targets LayerChart._build_merged which calls + operator.
     The + operator's _shares_data_with path may handle empty differently.
     """
-    df_empty = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
+    df_empty = pl.DataFrame(
+        {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
+    )
     df_normal = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c1 = Chart(df_normal).mark_point().encode(x="x", y="y")
     c2 = Chart(df_empty).mark_line().encode(x="x", y="y")
@@ -1035,7 +1031,9 @@ def test_layer_warns_on_coord_conflict():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         _ = c1 + c2
-        coord_warns = [x for x in w if "coord" in str(x.message).lower() or "facet" in str(x.message).lower()]
+        coord_warns = [
+            x for x in w if "coord" in str(x.message).lower() or "facet" in str(x.message).lower()
+        ]
         assert len(coord_warns) >= 1, "Expected warning about conflicting coord/facet"
 
 
@@ -1050,7 +1048,9 @@ def test_layer_warns_on_facet_conflict():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         _ = c1 + c2
-        warns = [x for x in w if "coord" in str(x.message).lower() or "facet" in str(x.message).lower()]
+        warns = [
+            x for x in w if "coord" in str(x.message).lower() or "facet" in str(x.message).lower()
+        ]
         assert len(warns) >= 1, "Expected warning about conflicting facet"
 
 
@@ -1249,8 +1249,11 @@ def test_coord_flip_in_hconcat():
 def test_coord_cartesian_xlim_ylim_in_vconcat():
     """CoordCartesian with xlim/ylim in VConcat should render valid SVG."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").coord(
-        fr.CoordCartesian(xlim=(0, 5), ylim=(0, 10))
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .coord(fr.CoordCartesian(xlim=(0, 5), ylim=(0, 10)))
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     svg = (c1 & c2).show_svg()
@@ -1604,7 +1607,14 @@ def test_coord_flip_not_equal_to_non_coordflip():
 
 def test_coord_geo_all_projections():
     """All CoordGeo projection values should produce valid spec dicts."""
-    for proj in ("mercator", "albers_usa", "equal_earth", "natural_earth", "orthographic", "equirectangular"):
+    for proj in (
+        "mercator",
+        "albers_usa",
+        "equal_earth",
+        "natural_earth",
+        "orthographic",
+        "equirectangular",
+    ):
         geo = fr.CoordGeo(projection=proj)
         d = geo.to_spec_dict()
         assert d["kind"] == "geo"
@@ -1678,9 +1688,7 @@ def test_resolve_chart_config_structural_serialized():
 
     Targets _render.py _resolve_chart_config lines 294-295.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [7.0, 8.0, 9.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [7.0, 8.0, 9.0]})
     c = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     merged = c._resolve_chart_config()
     assert "structural" in merged
@@ -1866,8 +1874,6 @@ def test_joint_chart_center_only_renders():
     _assert_valid_svg(svg)
 
 
-
-
 # ---------------------------------------------------------------------------
 # 31. configure_axis / configure_legend / configure_grid / etc.
 # ---------------------------------------------------------------------------
@@ -1983,12 +1989,8 @@ def test_faceted_chart_with_structural():
         }
     )
     df = pl.from_arrow(tbl)
-    chart = (
-        Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .facet(col="grp")
-        + SecondaryY("z", color="red")
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet(col="grp") + SecondaryY(
+        "z", color="red"
     )
     svg = chart.show_svg()
     _assert_valid_svg(svg)
@@ -2012,12 +2014,13 @@ def test_configure_cascade_through_hconcat_inside_vconcat():
     configure should be present on c1 and c3 but not c2.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-45)
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    c3 = Chart(df).mark_line().encode(x="x", y="y").configure(
-        grid=GridConfig(color="#ccc", width=2.0)
+    c3 = (
+        Chart(df)
+        .mark_line()
+        .encode(x="x", y="y")
+        .configure(grid=GridConfig(color="#ccc", width=2.0))
     )
     nested = (c1 | c2) & c3
     svg = nested.show_svg()
@@ -2035,12 +2038,8 @@ def test_configure_survives_theme_propagation_on_nested_composition():
     _configure list from the original chart.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
-    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(
-        padding=PaddingConfig(top=20, left=30)
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
+    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(padding=PaddingConfig(top=20, left=30))
     hc = c1 | c2
     # Apply theme to the composition
     themed = hc.theme(fr.themes.dark)
@@ -2058,9 +2057,7 @@ def test_configure_survives_properties_propagation():
     Targets _rebuild_with_charts -> Chart.properties which calls _clone.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(tick_count=5)
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(tick_count=5))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     vc = c1 & c2
     updated = vc.properties(width=800)
@@ -2078,15 +2075,9 @@ def test_configure_cascade_three_levels_of_layer_add():
     multiple + operations.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
-    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
-        grid=GridConfig(color="#ccc")
-    )
-    c3 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        padding=PaddingConfig(top=10)
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
+    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(grid=GridConfig(color="#ccc"))
+    c3 = Chart(df).mark_point().encode(x="x", y="y").configure(padding=PaddingConfig(top=10))
     combined = c1 + c2 + c3
     # All three configure layers should be present
     assert len(combined._configure) == 3
@@ -2106,12 +2097,8 @@ def test_configure_on_layerchart_survives_rebuild():
     survive fn(c) = c.theme(...) or c.properties(...).
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-45)
-    )
-    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(
-        legend=LegendConfig(orient="top")
-    )
+    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
+    c2 = Chart(df).mark_line().encode(x="x", y="y").configure(legend=LegendConfig(orient="top"))
     lc = LayerChart(c1, c2)
     rebuilt = lc.theme(fr.themes.dark)
     assert isinstance(rebuilt, LayerChart)
@@ -2127,12 +2114,13 @@ def test_configure_on_concat_chart_survives_rebuild():
     Targets ConcatChart._rebuild_with_charts line 1460-1466.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        grid=GridConfig(color="#eee", width=1.0)
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(grid=GridConfig(color="#eee", width=1.0))
     )
-    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
+    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     cc = ConcatChart(c1, c2, columns=2)
     rebuilt = cc.theme(fr.themes.dark)
     assert isinstance(rebuilt, ConcatChart)
@@ -2388,9 +2376,7 @@ def test_configure_axis_x_only_produces_axis_x_in_config():
     Targets chart.py configure() lines 4760-4764: axis_x parameter.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis_x=AxisConfig(label_angle=-90)
-    )
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(axis_x=AxisConfig(label_angle=-90))
     merged = c._resolve_chart_config()
     assert "axis_x" in merged
     assert merged["axis_x"]["label_angle"] == -90
@@ -2401,9 +2387,7 @@ def test_configure_axis_x_only_produces_axis_x_in_config():
 def test_configure_axis_y_only_produces_axis_y_in_config():
     """configure(axis_y=...) should produce axis_y in the merged config."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis_y=AxisConfig(tick_count=10)
-    )
+    c = Chart(df).mark_point().encode(x="x", y="y").configure(axis_y=AxisConfig(tick_count=10))
     merged = c._resolve_chart_config()
     assert "axis_y" in merged
     assert merged["axis_y"]["tick_count"] == 10
@@ -2415,9 +2399,14 @@ def test_configure_axis_and_axis_x_coexist():
     Targets _resolve_chart_config dict merge: axis and axis_x are separate keys.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30),
-        axis_x=AxisConfig(tick_count=5),
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(
+            axis=AxisConfig(label_angle=-30),
+            axis_x=AxisConfig(tick_count=5),
+        )
     )
     merged = c._resolve_chart_config()
     assert "axis" in merged
@@ -2432,8 +2421,11 @@ def test_configure_axis_y2_produces_axis_y2_in_config():
     Targets chart.py configure() line 4764: axis_y2 parameter.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis_y2=AxisConfig(label_angle=45, title_color="red")
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis_y2=AxisConfig(label_angle=45, title_color="red"))
     )
     merged = c._resolve_chart_config()
     assert "axis_y2" in merged
@@ -2448,9 +2440,14 @@ def test_per_axis_configure_in_hconcat_renders():
     emits both axis and axis_x as separate keys.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c1 = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis_x=AxisConfig(label_angle=-45),
-        axis_y=AxisConfig(tick_count=5),
+    c1 = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(
+            axis_x=AxisConfig(label_angle=-45),
+            axis_y=AxisConfig(tick_count=5),
+        )
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     svg = (c1 | c2).show_svg()
@@ -2480,9 +2477,7 @@ def test_structural_survives_theme_on_composition():
 
     Targets _rebuild_with_charts -> Chart._clone which copies _structural.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     hc = c1 | c2
@@ -2498,9 +2493,7 @@ def test_structural_survives_properties_on_composition():
 
     Targets _rebuild_with_charts -> Chart.properties which calls _clone.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="blue")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     vc = c1 & c2
@@ -2532,9 +2525,7 @@ def test_secondary_y_in_layer_chart_renders():
     Targets LayerChart._build_merged: the merged chart should contain
     both the layer structure and the structural features.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     lc = LayerChart(c1, c2)
@@ -2552,9 +2543,7 @@ def test_configure_color_range_renders():
 
     Targets configure.py ColorConfig.to_dict: range field serialization.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]})
     c = (
         Chart(df)
         .mark_point()
@@ -2565,7 +2554,7 @@ def test_configure_color_range_renders():
     _assert_valid_svg(svg)
 
 
-def test_configure_color_domain_renders(): # BUG: ColorConfig domain with string values fails: Rust expects f64 but Python sends strings
+def test_configure_color_domain_renders():  # BUG: ColorConfig domain with string values fails: Rust expects f64 but Python sends strings
     """ColorConfig with explicit string domain fails at render time.
 
     Targets configure.py ColorConfig.to_dict: domain field serialization.
@@ -2578,9 +2567,7 @@ def test_configure_color_domain_renders(): # BUG: ColorConfig domain with string
     should validate or the Rust side should accept string domains for
     categorical color scales.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]})
     c = (
         Chart(df)
         .mark_point()
@@ -2593,9 +2580,7 @@ def test_configure_color_domain_renders(): # BUG: ColorConfig domain with string
 
 def test_configure_color_in_hconcat_renders():
     """ColorConfig on charts within HConcat should render valid SVG."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["a", "b", "c"]})
     c1 = (
         Chart(df)
         .mark_point()
@@ -2723,14 +2708,9 @@ def test_chart_with_all_three_config_domains_renders():
     """
     from ferrum.annotation.primitives import text
 
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c = (
-        Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure(axis=AxisConfig(label_angle=-45))
+        Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
         + text(2.0, 5.0, "Peak")
         + SecondaryY("z", color="red")
     )
@@ -2753,23 +2733,14 @@ def test_chart_with_all_domains_in_hconcat():
     """
     from ferrum.annotation.primitives import text
 
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = (
-        Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure(axis=AxisConfig(label_angle=-30))
+        Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
         + text(2.0, 5.0, "Chart1")
         + SecondaryY("z")
     )
-    c2 = (
-        Chart(df)
-        .mark_bar()
-        .encode(x="x", y="y")
-        .configure(grid=GridConfig(color="#ddd"))
-        + text(2.0, 5.0, "Chart2")
+    c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(grid=GridConfig(color="#ddd")) + text(
+        2.0, 5.0, "Chart2"
     )
     svg = (c1 | c2).show_svg()
     _assert_valid_svg(svg)
@@ -2812,11 +2783,8 @@ def test_repeat_chart_with_annotation_on_template_renders():
     from ferrum.annotation.primitives import text
 
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
-    template = (
-        Chart(df)
-        .encode(x=fr.Repeat.column, y=fr.Repeat.row)
-        .mark_point()
-        + text(2.0, 5.0, "Cell")
+    template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point() + text(
+        2.0, 5.0, "Cell"
     )
     rc = RepeatChart(template, row=["a", "b"], column=["a", "b"])
     cells = rc.expand()
@@ -2838,9 +2806,7 @@ def test_joint_chart_with_configure_on_center_renders():
     _resolve_chart_config which includes the configure.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [6.0, 7.0, 8.0, 9.0, 10.0]})
-    center = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
+    center = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     top = Chart(df).mark_point().encode(x="x", y="y")
     right = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center, top=top, right=right)
@@ -2855,12 +2821,8 @@ def test_joint_chart_rebuild_preserves_configure():
     The fn (e.g., .theme()) must preserve _configure.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    center = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-45)
-    )
-    top = Chart(df).mark_point().encode(x="x", y="y").configure(
-        grid=GridConfig(color="#eee")
-    )
+    center = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
+    top = Chart(df).mark_point().encode(x="x", y="y").configure(grid=GridConfig(color="#eee"))
     joint = JointChart(center, top=top)
     themed = joint.theme(fr.themes.dark)
     assert len(themed.center._configure) == 1
@@ -2881,9 +2843,7 @@ def test_cluster_map_with_configure_on_heatmap_renders():
     _resolve_chart_config with the configure.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    hm = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
+    hm = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     cm = ClusterMapChart(hm)
     svg = cm.show_svg()
     _assert_valid_svg(svg)
@@ -2892,9 +2852,7 @@ def test_cluster_map_with_configure_on_heatmap_renders():
 def test_cluster_map_rebuild_preserves_configure():
     """ClusterMapChart._rebuild_with_charts preserves configure on heatmap."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    hm = Chart(df).mark_point().encode(x="x", y="y").configure(
-        padding=PaddingConfig(top=20)
-    )
+    hm = Chart(df).mark_point().encode(x="x", y="y").configure(padding=PaddingConfig(top=20))
     cm = ClusterMapChart(hm, dendrogram_ratio=0.2)
     themed = cm.theme(fr.themes.dark)
     assert len(themed.heatmap._configure) == 1
@@ -2914,12 +2872,8 @@ def test_concat_chart_with_configure_and_resolve_renders():
     """
     df1 = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     df2 = pl.DataFrame({"x": [10.0, 20.0, 30.0], "y": [40.0, 50.0, 60.0]})
-    c1 = Chart(df1).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(label_angle=-30)
-    )
-    c2 = Chart(df2).mark_point().encode(x="x", y="y").configure(
-        grid=GridConfig(y=True)
-    )
+    c1 = Chart(df1).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
+    c2 = Chart(df2).mark_point().encode(x="x", y="y").configure(grid=GridConfig(y=True))
     cc = ConcatChart(c1, c2, resolve={"x": "shared"})
     svg = cc.show_svg()
     _assert_valid_svg(svg)
@@ -2949,8 +2903,11 @@ def test_axis_config_domain_min_max_renders():
     render_svg.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(domain_min=0.0, domain_max=10.0)
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis=AxisConfig(domain_min=0.0, domain_max=10.0))
     )
     svg = c.show_svg()
     _assert_valid_svg(svg)
@@ -3021,8 +2978,11 @@ def test_axis_config_tick_values_renders():
     Tests the full pipeline with explicit tick values.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y").configure(
-        axis=AxisConfig(tick_values=[1.0, 2.0, 3.0])
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .configure(axis=AxisConfig(tick_values=[1.0, 2.0, 3.0]))
     )
     svg = c.show_svg()
     _assert_valid_svg(svg)
@@ -3421,9 +3381,7 @@ def test_repeat_chart_share_scale_merges_resolve():
     """
     df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
     template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point()
-    rc = RepeatChart(
-        template, row=["a", "b"], column=["a", "b"], resolve={"x": "shared"}
-    )
+    rc = RepeatChart(template, row=["a", "b"], column=["a", "b"], resolve={"x": "shared"})
     updated = rc.share_scale(y="shared")
     assert updated.resolve == {"x": "shared", "y": "shared"}
 
@@ -3573,9 +3531,7 @@ def test_hconcat_single_category_color():
 
     Tests that ordinal scale with domain of length 1 does not crash.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["only", "only", "only"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["only", "only", "only"]})
     c1 = Chart(df).mark_point().encode(x="x", y="y", color="c")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     svg = (c1 | c2).show_svg()

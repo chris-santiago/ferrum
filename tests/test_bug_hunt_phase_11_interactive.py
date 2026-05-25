@@ -38,29 +38,25 @@ def _scene(chart):
 # ============================================================================
 
 
-def test_annotate_hline_in_interactive_scene_panel_annotations(): # BUG: annotations from annotate_hline are silently dropped from the interactive scene
+def test_annotate_hline_in_interactive_scene_panel_annotations():  # BUG: annotations from annotate_hline are silently dropped from the interactive scene
     """annotate_hline must appear in panel.annotations in the scene JSON."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_hline(
-        y=3.0, stroke="red"
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_hline(y=3.0, stroke="red")
     scene, _ = _scene(chart)
     annotations = scene["panels"][0].get("annotations", [])
     assert len(annotations) > 0, "annotate_hline must produce annotation nodes"
 
 
-def test_annotate_vline_in_interactive_scene(): # BUG: annotations silently dropped from interactive scene
+def test_annotate_vline_in_interactive_scene():  # BUG: annotations silently dropped from interactive scene
     """annotate_vline must produce annotation nodes in the interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_vline(
-        x=2.0, stroke="blue"
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_vline(x=2.0, stroke="blue")
     scene, _ = _scene(chart)
     annotations = scene["panels"][0].get("annotations", [])
     assert len(annotations) > 0, "annotate_vline must produce annotation nodes"
 
 
-def test_annotate_text_in_interactive_scene(): # BUG: annotations silently dropped from interactive scene
+def test_annotate_text_in_interactive_scene():  # BUG: annotations silently dropped from interactive scene
     """annotate_text must produce annotation nodes in the interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_text(
@@ -71,7 +67,7 @@ def test_annotate_text_in_interactive_scene(): # BUG: annotations silently dropp
     assert len(annotations) > 0, "annotate_text must produce annotation nodes"
 
 
-def test_annotate_rect_in_interactive_scene(): # BUG: annotations silently dropped from interactive scene
+def test_annotate_rect_in_interactive_scene():  # BUG: annotations silently dropped from interactive scene
     """annotate_rect must produce annotation nodes in the interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 4.0, 6.0, 8.0]})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_rect(
@@ -82,7 +78,7 @@ def test_annotate_rect_in_interactive_scene(): # BUG: annotations silently dropp
     assert len(annotations) > 0, "annotate_rect must produce annotation nodes"
 
 
-def test_multiple_annotations_all_appear(): # BUG: annotations silently dropped from interactive scene
+def test_multiple_annotations_all_appear():  # BUG: annotations silently dropped from interactive scene
     """Multiple annotations must all appear in the interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     chart = (
@@ -95,7 +91,7 @@ def test_multiple_annotations_all_appear(): # BUG: annotations silently dropped 
     assert len(annotations) >= 2, f"expected >=2 annotations, got {len(annotations)}"
 
 
-def test_annotate_abline_in_interactive_scene(): # BUG: annotations silently dropped from interactive scene
+def test_annotate_abline_in_interactive_scene():  # BUG: annotations silently dropped from interactive scene
     """annotate_abline must produce annotation nodes in the interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.annotate_abline(
@@ -114,18 +110,8 @@ def test_annotate_abline_in_interactive_scene(): # BUG: annotations silently dro
 def test_configure_axis_label_font_size_affects_interactive_scene():
     """configure_axis(label_font_size=) must change text element font_size in scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart_small = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(label_font_size=8)
-    )
-    chart_large = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(label_font_size=24)
-    )
+    chart_small = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(label_font_size=8)
+    chart_large = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(label_font_size=24)
     scene_small, _ = _scene(chart_small)
     scene_large, _ = _scene(chart_large)
     # Both must produce valid scenes with panels
@@ -188,12 +174,7 @@ def test_configure_padding_changes_plot_area():
 def test_configure_grid_dash_in_interactive_scene():
     """configure_grid(dash=) must flow through to grid nodes in interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_grid(dash=[4, 4])
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").configure_grid(dash=[4, 4])
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
     # Grid nodes exist in panels
@@ -204,20 +185,12 @@ def test_configure_grid_dash_in_interactive_scene():
 
 def test_configure_color_scheme_interactive():
     """configure_color with a scheme must change mark colors in interactive scene."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "c"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "c"]})
     chart1 = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y", color="c")
-        .configure_color(scheme="dark2")
+        fr.Chart(df).mark_point().encode(x="x", y="y", color="c").configure_color(scheme="dark2")
     )
     chart2 = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y", color="c")
-        .configure_color(scheme="set1")
+        fr.Chart(df).mark_point().encode(x="x", y="y", color="c").configure_color(scheme="set1")
     )
     scene1, _ = _scene(chart1)
     scene2, _ = _scene(chart2)
@@ -234,14 +207,9 @@ def test_configure_color_scheme_interactive():
 
 def test_configure_legend_orient_interactive():
     """configure_legend(orient=) must not crash and must produce legend data."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "a"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "a"]})
     chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y", color="c")
-        .configure_legend(orient="bottom")
+        fr.Chart(df).mark_point().encode(x="x", y="y", color="c").configure_legend(orient="bottom")
     )
     scene, _ = _scene(chart)
     assert "legend" in scene
@@ -250,9 +218,7 @@ def test_configure_legend_orient_interactive():
 
 def test_configure_multiple_layers_interactive():
     """Multiple configure_ calls chained together must not crash interactive."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "a"]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0], "c": ["a", "b", "a"]})
     chart = (
         fr.Chart(df)
         .mark_point()
@@ -277,13 +243,9 @@ def test_configure_multiple_layers_interactive():
 def test_annotation_plus_configure_axis():
     """Annotation + configure_axis combined must not crash interactive pipeline."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(label_font_size=14)
-        + fr.annotate_hline(y=3.0, stroke="red")
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(
+        label_font_size=14
+    ) + fr.annotate_hline(y=3.0, stroke="red")
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
 
@@ -291,13 +253,9 @@ def test_annotation_plus_configure_axis():
 def test_annotation_plus_configure_padding():
     """Annotation + configure_padding combined must render without crash."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_padding(left=80, right=30)
-        + fr.annotate_vline(x=2.0, stroke="blue")
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(
+        left=80, right=30
+    ) + fr.annotate_vline(x=2.0, stroke="blue")
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
 
@@ -310,16 +268,16 @@ def test_annotation_plus_configure_padding():
 def test_secondary_y_interactive_no_crash():
     """SecondaryY structural feature must not crash interactive pipeline."""
     from ferrum.structural import SecondaryY
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y1": [10.0, 20.0, 15.0, 25.0],
-        "y2": [100.0, 200.0, 150.0, 250.0],
-    })
-    chart = (
-        fr.Chart(df)
-        .mark_line()
-        .encode(x="x", y="y1")
-        + SecondaryY(field="y2", mark="line", color="red")
+
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y1": [10.0, 20.0, 15.0, 25.0],
+            "y2": [100.0, 200.0, 150.0, 250.0],
+        }
+    )
+    chart = fr.Chart(df).mark_line().encode(x="x", y="y1") + SecondaryY(
+        field="y2", mark="line", color="red"
     )
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
@@ -329,13 +287,9 @@ def test_secondary_y_interactive_no_crash():
 def test_break_axis_interactive_no_crash():
     """BreakAxis structural feature must not crash interactive pipeline."""
     from ferrum.structural import BreakAxis
+
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 100.0, 15.0]})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        + BreakAxis(axis="y", gap=(30.0, 90.0))
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(30.0, 90.0))
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
 
@@ -343,13 +297,11 @@ def test_break_axis_interactive_no_crash():
 def test_inset_interactive_no_crash():
     """Inset structural feature must not crash interactive pipeline."""
     from ferrum.structural import Inset
+
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     inset_chart = fr.Chart(df).mark_point().encode(x="x", y="y")
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        + Inset(chart=inset_chart, bounds=(0.6, 0.6, 0.95, 0.95))
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + Inset(
+        chart=inset_chart, bounds=(0.6, 0.6, 0.95, 0.95)
     )
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
@@ -420,11 +372,13 @@ def test_single_category_bar_interactive():
 
 def test_null_in_color_column_interactive():
     """Null in color encoding column must not crash interactive pipeline."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [2.0, 4.0, 6.0],
-        "c": ["a", None, "b"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [2.0, 4.0, 6.0],
+            "c": ["a", None, "b"],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="c")
     scene_json, _ = _render_scene(chart)
     scene = json.loads(scene_json)
@@ -433,11 +387,13 @@ def test_null_in_color_column_interactive():
 
 def test_nan_in_size_column_interactive():
     """NaN in size encoding column must not crash interactive pipeline."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [2.0, 4.0, 6.0],
-        "s": [10.0, float("nan"), 30.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [2.0, 4.0, 6.0],
+            "s": [10.0, float("nan"), 30.0],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", size="s")
     scene_json, _ = _render_scene(chart)
     scene = json.loads(scene_json)
@@ -446,10 +402,12 @@ def test_nan_in_size_column_interactive():
 
 def test_all_null_x_and_y_interactive():
     """All-null x AND y columns must not crash interactive pipeline."""
-    df = pl.DataFrame({
-        "x": pl.Series([None, None, None], dtype=pl.Float64),
-        "y": pl.Series([None, None, None], dtype=pl.Float64),
-    })
+    df = pl.DataFrame(
+        {
+            "x": pl.Series([None, None, None], dtype=pl.Float64),
+            "y": pl.Series([None, None, None], dtype=pl.Float64),
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
     # Should not raise
     scene_json, _ = _render_scene(chart)
@@ -459,10 +417,12 @@ def test_all_null_x_and_y_interactive():
 
 def test_mixed_null_and_inf_interactive():
     """Mix of null and infinity values in data must not crash."""
-    df = pl.DataFrame({
-        "x": [1.0, None, float("inf")],
-        "y": [float("-inf"), 2.0, None],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, None, float("inf")],
+            "y": [float("-inf"), 2.0, None],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
     scene_json, _ = _render_scene(chart)
     scene = json.loads(scene_json)
@@ -485,6 +445,7 @@ def test_very_small_positive_values_interactive():
 def test_i64_max_values_interactive():
     """i64 max values used as data must not crash interactive pipeline."""
     import sys
+
     big = sys.maxsize
     df = pl.DataFrame({"x": [0, big], "y": [0, big]})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
@@ -519,9 +480,7 @@ def test_integer_columns_interactive():
 
 def test_boolean_color_column_interactive():
     """Boolean column used for color encoding must not crash interactive."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "flag": [True, False, True]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "flag": [True, False, True]})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="flag")
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
@@ -530,10 +489,13 @@ def test_boolean_color_column_interactive():
 def test_date_column_x_interactive():
     """Date column on x axis must work through the interactive pipeline."""
     from datetime import date
-    df = pl.DataFrame({
-        "date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
-        "y": [1.0, 2.0, 3.0],
-    })
+
+    df = pl.DataFrame(
+        {
+            "date": [date(2024, 1, 1), date(2024, 2, 1), date(2024, 3, 1)],
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     chart = fr.Chart(df).mark_line().encode(x="date", y="y")
     scene_json, _ = _render_scene(chart)
     assert "NaN" not in scene_json
@@ -544,6 +506,7 @@ def test_date_column_x_interactive():
 def test_pyarrow_table_through_interactive():
     """PyArrow table as input must work through the interactive pipeline."""
     import pyarrow as pa
+
     tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     chart = fr.Chart(tbl).mark_point().encode(x="x", y="y")
     scene_json, _ = _render_scene(chart)
@@ -591,10 +554,12 @@ def test_vconcat_with_different_data_interactive():
 
 def test_hconcat_with_empty_and_nonempty_interactive():
     """HConcat with one empty-data chart and one non-empty must not crash."""
-    df_empty = pl.DataFrame({
-        "x": pl.Series([], dtype=pl.Float64),
-        "y": pl.Series([], dtype=pl.Float64),
-    })
+    df_empty = pl.DataFrame(
+        {
+            "x": pl.Series([], dtype=pl.Float64),
+            "y": pl.Series([], dtype=pl.Float64),
+        }
+    )
     df_normal = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     c1 = fr.Chart(df_empty).mark_point().encode(x="x", y="y")
     c2 = fr.Chart(df_normal).mark_point().encode(x="x", y="y")
@@ -607,9 +572,8 @@ def test_hconcat_with_empty_and_nonempty_interactive():
 def test_layer_merge_with_different_marks_interactive():
     """Layer merge (point + line + bar) must render interactively."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    layered = (
-        fr.Chart(df).mark_point().encode(x="x", y="y")
-        + fr.Chart(df).mark_line().encode(x="x", y="y")
+    layered = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.Chart(df).mark_line().encode(
+        x="x", y="y"
     )
     scene_json, _ = _render_scene(layered)
     scene = json.loads(scene_json)
@@ -626,12 +590,15 @@ def test_layer_merge_with_different_marks_interactive():
 def test_large_dataset_packed_data_has_valid_structure():
     """Large dataset packed data must have non-zero length and valid header."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     n = 2000
-    df = pl.DataFrame({
-        "x": rng.uniform(0, 100, n).tolist(),
-        "y": rng.uniform(0, 100, n).tolist(),
-    })
+    df = pl.DataFrame(
+        {
+            "x": rng.uniform(0, 100, n).tolist(),
+            "y": rng.uniform(0, 100, n).tolist(),
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y")
     _, packed = _render_scene(chart)
     assert len(packed) > 0, "2000-row dataset must produce packed binary sidecar"
@@ -642,14 +609,17 @@ def test_large_dataset_packed_data_has_valid_structure():
 def test_large_dataset_with_color_produces_packed():
     """Large dataset with color encoding must produce packed data."""
     import numpy as np
+
     rng = np.random.default_rng(42)
     n = 2000
     categories = ["a", "b", "c", "d"]
-    df = pl.DataFrame({
-        "x": rng.uniform(0, 100, n).tolist(),
-        "y": rng.uniform(0, 100, n).tolist(),
-        "c": [categories[i % len(categories)] for i in range(n)],
-    })
+    df = pl.DataFrame(
+        {
+            "x": rng.uniform(0, 100, n).tolist(),
+            "y": rng.uniform(0, 100, n).tolist(),
+            "c": [categories[i % len(categories)] for i in range(n)],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="c")
     scene_json, packed = _render_scene(chart)
     assert "NaN" not in scene_json
@@ -660,10 +630,12 @@ def test_large_dataset_with_color_produces_packed():
 def test_large_bar_dataset_packed_interactive():
     """Large bar chart dataset must work through interactive packed path."""
     n = 1500
-    df = pl.DataFrame({
-        "x": [f"cat_{i}" for i in range(n)],
-        "y": list(range(n)),
-    })
+    df = pl.DataFrame(
+        {
+            "x": [f"cat_{i}" for i in range(n)],
+            "y": list(range(n)),
+        }
+    )
     chart = fr.Chart(df).mark_bar().encode(x="x", y="y")
     scene_json, packed = _render_scene(chart)
     assert "NaN" not in scene_json
@@ -678,11 +650,13 @@ def test_large_bar_dataset_packed_interactive():
 
 def test_selection_point_with_fields_in_scene():
     """Point selection with fields must include fields in scene JSON."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [2.0, 4.0, 6.0],
-        "grp": ["a", "b", "a"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [2.0, 4.0, 6.0],
+            "grp": ["a", "b", "a"],
+        }
+    )
     sel = fr.selection_point(name="my_sel", fields=["grp"])
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="grp").add_selection(sel)
     scene, _ = _scene(chart)
@@ -708,12 +682,7 @@ def test_multiple_selections_in_scene():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
     sel1 = fr.selection_point(name="sel1")
     sel2 = fr.selection_interval(name="sel2")
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .add_selection(sel1, sel2)
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").add_selection(sel1, sel2)
     scene, _ = _scene(chart)
     sels = scene.get("selections", [])
     names = {s.get("name", "") for s in sels}
@@ -801,11 +770,13 @@ def test_auto_tooltips_have_correct_field_names():
 
 def test_explicit_tooltip_encoding_in_interactive():
     """Explicit tooltip encoding must produce tooltip data in interactive scene."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [2.0, 4.0, 6.0],
-        "label": ["foo", "bar", "baz"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [2.0, 4.0, 6.0],
+            "label": ["foo", "bar", "baz"],
+        }
+    )
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", tooltip="label")
     scene, _ = _scene(chart)
     if len(scene["panels"]) > 0:
@@ -929,10 +900,7 @@ def test_coord_polar_pie_interactive():
     """CoordPolar + mark_arc must produce valid interactive scene."""
     df = pl.DataFrame({"category": ["A", "B", "C"], "value": [30.0, 20.0, 50.0]})
     chart = (
-        fr.Chart(df)
-        .mark_arc()
-        .encode(x="value", color="category")
-        .coord(fr.CoordPolar(theta="x"))
+        fr.Chart(df).mark_arc().encode(x="value", color="category").coord(fr.CoordPolar(theta="x"))
     )
     scene_json, _ = _render_scene(chart)
     assert "NaN" not in scene_json
@@ -943,12 +911,7 @@ def test_coord_polar_pie_interactive():
 def test_coord_fixed_interactive():
     """CoordFixed must produce valid interactive scene."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .coord(fr.CoordFixed(ratio=1.0))
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").coord(fr.CoordFixed(ratio=1.0))
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1
 
@@ -1019,11 +982,13 @@ def test_mark_tick_interactive():
 
 def test_mark_rect_heatmap_interactive():
     """mark_rect (heatmap) must produce valid interactive scene."""
-    df = pl.DataFrame({
-        "x": ["a", "a", "b", "b"],
-        "y": ["p", "q", "p", "q"],
-        "val": [1.0, 2.0, 3.0, 4.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": ["a", "a", "b", "b"],
+            "y": ["p", "q", "p", "q"],
+            "val": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
     chart = fr.Chart(df).mark_rect().encode(x="x", y="y", color="val")
     scene, _ = _scene(chart)
     assert len(scene["panels"]) >= 1

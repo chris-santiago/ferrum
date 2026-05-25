@@ -4,6 +4,7 @@ Targets recent refactors:
 - distribution.py: displot kde=True / rug=True overlay via named-transform routing
 - regression.py: residplot label preservation via Smooth groupby="_label", lmplot/residplot int-to-Float64 auto-cast
 """
+
 from __future__ import annotations
 
 import json
@@ -151,9 +152,7 @@ class TestDisplotKdeOverlayWithHue:
 
     def test_hist_kde_with_hue_stacked_renders(self, iris_like):
         """displot(kde=True, hue=..., multiple='stack') — stacked hist with kde overlay."""
-        chart = fm.displot(
-            iris_like, x="sepal_length", hue="species", kde=True, multiple="stack"
-        )
+        chart = fm.displot(iris_like, x="sepal_length", hue="species", kde=True, multiple="stack")
         svg = chart.show_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
@@ -257,9 +256,7 @@ class TestDisplotKdeAndRugOverlay:
 
     def test_hist_kde_rug_with_hue(self, iris_like):
         """displot(kde=True, rug=True, hue=...) — all features with grouping."""
-        chart = fm.displot(
-            iris_like, x="sepal_length", hue="species", kde=True, rug=True
-        )
+        chart = fm.displot(iris_like, x="sepal_length", hue="species", kde=True, rug=True)
         svg = chart.show_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
@@ -344,8 +341,12 @@ class TestResidplotLabel:
         """residplot(label='MyLabel') should produce valid SVG.
         regression.py line 849-851: Smooth(groupby='_label')."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="MyLabel",
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="MyLabel",
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -355,8 +356,12 @@ class TestResidplotLabel:
         """The data should have a '_label' column after injection.
         regression.py line 831: data.with_columns(pl.lit(str(label)).alias('_label'))."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="series A",
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="series A",
+            show_metrics=False,
+            zero_line=False,
         )
         # Check the chart's internal data has the _label column
         assert "_label" in chart._data.columns
@@ -365,8 +370,12 @@ class TestResidplotLabel:
         """residplot(label=...) should map color='_label' in encoding.
         regression.py line 855: enc['color'] = '_label'."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="Residuals",
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="Residuals",
+            show_metrics=False,
+            zero_line=False,
         )
         spec = json.loads(chart.to_spec().to_json())
         # The encoding should have color mapped to _label
@@ -378,8 +387,12 @@ class TestResidplotLabel:
         """The Smooth transform should have groupby='_label'.
         regression.py line 850: smooth_kwargs['groupby'] = '_label'."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="test",
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="test",
+            show_metrics=False,
+            zero_line=False,
         )
         spec = json.loads(chart.to_spec().to_json())
         smooth_t = next(
@@ -393,8 +406,12 @@ class TestResidplotLabel:
         """residplot(label=..., show_metrics=True) should render with metrics annotation.
         Both label column preservation and metrics injection."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="series",
-            show_metrics=True, zero_line=True,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="series",
+            show_metrics=True,
+            zero_line=True,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -404,8 +421,13 @@ class TestResidplotLabel:
         """residplot(label=..., lowess=True) — label + lowess smoother overlay.
         regression.py lines 891-908: lowess layer added alongside label."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="data",
-            lowess=True, show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="data",
+            lowess=True,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -415,22 +437,34 @@ class TestResidplotLabel:
         """residplot(label=..., color=...) — explicit color overrides _label.
         regression.py lines 855-858: color wins over label."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="test", color="x",
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="test",
+            color="x",
+            show_metrics=False,
+            zero_line=False,
         )
         spec = json.loads(chart.to_spec().to_json())
         enc = spec.get("encoding", {})
         color_field = enc.get("color", {}).get("field", enc.get("color"))
         assert color_field == "x", "Explicit color= should override label"
 
-    def test_residplot_robust_no_label_support(self, simple_float_df):  # BUG: ValueError: unknown column '_label' — Robust transform drops _label column but encoding still references it via color='_label'
+    def test_residplot_robust_no_label_support(
+        self, simple_float_df
+    ):  # BUG: ValueError: unknown column '_label' — Robust transform drops _label column but encoding still references it via color='_label'
         """residplot(robust=True, label=...) — Robust has no groupby, so _label
         is dropped by the transform output, but the encoding still references
         it via color='_label', causing a ValueError at render time.
         regression.py line 826-827 warns about the limitation but doesn't guard against it."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", label="robust_label",
-            robust=True, show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            label="robust_label",
+            robust=True,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -481,8 +515,12 @@ class TestLmplotIntegerAutoCast:
     def test_lmplot_int_with_hue(self, int_hue_reg_df):
         """lmplot with Int64 columns and hue should auto-cast and group."""
         chart = fm.lmplot(
-            int_hue_reg_df, x="x", y="y", hue="grp",
-            ci=None, show_metrics=False,
+            int_hue_reg_df,
+            x="x",
+            y="y",
+            hue="grp",
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -491,8 +529,12 @@ class TestLmplotIntegerAutoCast:
     def test_lmplot_int_with_facet(self, int_hue_reg_df):
         """lmplot with Int64 columns and faceting."""
         chart = fm.lmplot(
-            int_hue_reg_df, x="x", y="y", col="grp",
-            ci=None, show_metrics=False,
+            int_hue_reg_df,
+            x="x",
+            y="y",
+            col="grp",
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -502,8 +544,10 @@ class TestLmplotIntegerAutoCast:
         """lmplot with UInt8 columns should auto-cast (covers unsigned int path).
         regression.py line 505: pl.UInt8 in _INT_DTYPES tuple."""
         df = pl.DataFrame(
-            {"x": pl.Series([1, 2, 3, 4, 5], dtype=pl.UInt8),
-             "y": pl.Series([2, 4, 5, 4, 5], dtype=pl.UInt8)}
+            {
+                "x": pl.Series([1, 2, 3, 4, 5], dtype=pl.UInt8),
+                "y": pl.Series([2, 4, 5, 4, 5], dtype=pl.UInt8),
+            }
         )
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
         svg = chart.show_svg()
@@ -513,8 +557,10 @@ class TestLmplotIntegerAutoCast:
     def test_lmplot_int32_columns(self):
         """lmplot with Int32 columns should auto-cast."""
         df = pl.DataFrame(
-            {"x": pl.Series([10, 20, 30, 40, 50], dtype=pl.Int32),
-             "y": pl.Series([20, 40, 50, 40, 50], dtype=pl.Int32)}
+            {
+                "x": pl.Series([10, 20, 30, 40, 50], dtype=pl.Int32),
+                "y": pl.Series([20, 40, 50, 40, 50], dtype=pl.Int32),
+            }
         )
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
         svg = chart.show_svg()
@@ -546,8 +592,7 @@ class TestLmplotIntegerAutoCast:
         """lmplot with Int64 columns and method='logistic' should auto-cast.
         Logistic regression requires binary (0/1) y values."""
         df = pl.DataFrame(
-            {"x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-             "y": [0, 0, 0, 0, 1, 0, 1, 1, 1, 1]}
+            {"x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "y": [0, 0, 0, 0, 1, 0, 1, 1, 1, 1]}
         )
         chart = fm.lmplot(df, x="x", y="y", method="logistic", ci=None)
         svg = chart.show_svg()
@@ -573,7 +618,11 @@ class TestResidplotIntegerAutoCast:
         """residplot with Int64 x and y should auto-cast and render.
         regression.py lines 812-816."""
         chart = fm.residplot(
-            int_reg_df, x="x", y="y", show_metrics=False, zero_line=False,
+            int_reg_df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -589,8 +638,12 @@ class TestResidplotIntegerAutoCast:
     def test_residplot_int_with_lowess(self, int_reg_df):
         """residplot with Int64 and lowess — tests int-cast + loess overlay."""
         chart = fm.residplot(
-            int_reg_df, x="x", y="y", lowess=True,
-            show_metrics=False, zero_line=False,
+            int_reg_df,
+            x="x",
+            y="y",
+            lowess=True,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -599,8 +652,12 @@ class TestResidplotIntegerAutoCast:
     def test_residplot_int_robust(self, int_reg_df):
         """residplot with Int64 and robust=True — tests int-cast for Robust transform."""
         chart = fm.residplot(
-            int_reg_df, x="x", y="y", robust=True,
-            show_metrics=False, zero_line=False,
+            int_reg_df,
+            x="x",
+            y="y",
+            robust=True,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -609,8 +666,12 @@ class TestResidplotIntegerAutoCast:
     def test_residplot_int_with_label(self, int_reg_df):
         """residplot with Int64 and label — tests int-cast + groupby='_label'."""
         chart = fm.residplot(
-            int_reg_df, x="x", y="y", label="test",
-            show_metrics=False, zero_line=False,
+            int_reg_df,
+            x="x",
+            y="y",
+            label="test",
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -619,8 +680,10 @@ class TestResidplotIntegerAutoCast:
     def test_residplot_uint16(self):
         """residplot with UInt16 columns should auto-cast."""
         df = pl.DataFrame(
-            {"x": pl.Series([1, 2, 3, 4, 5, 6, 7, 8], dtype=pl.UInt16),
-             "y": pl.Series([2, 4, 5, 4, 5, 7, 8, 9], dtype=pl.UInt16)}
+            {
+                "x": pl.Series([1, 2, 3, 4, 5, 6, 7, 8], dtype=pl.UInt16),
+                "y": pl.Series([2, 4, 5, 4, 5, 7, 8, 9], dtype=pl.UInt16),
+            }
         )
         chart = fm.residplot(df, x="x", y="y", show_metrics=False, zero_line=False)
         svg = chart.show_svg()
@@ -698,7 +761,9 @@ class TestDisplotEdgeCases:
         svg = chart.show_svg()
         assert "<svg" in svg
 
-    def test_kde_overlay_integer_column(self):  # BUG: ValueError: stat_kde: column 'x' must be Float64 — displot does not auto-cast integer columns for KDE overlay
+    def test_kde_overlay_integer_column(
+        self,
+    ):  # BUG: ValueError: stat_kde: column 'x' must be Float64 — displot does not auto-cast integer columns for KDE overlay
         """displot(kde=True) with an integer x column — the KDE transform requires
         Float64 but displot doesn't auto-cast for the overlay path (unlike lmplot/residplot)."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5, 3, 2, 4, 3, 2]})
@@ -744,8 +809,12 @@ class TestResidplotEdgeCases:
     def test_residplot_polynomial_order_2(self, simple_float_df):
         """residplot(order=2) should compute quadratic residuals."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", order=2,
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            order=2,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -754,8 +823,12 @@ class TestResidplotEdgeCases:
     def test_residplot_polynomial_order_3(self, simple_float_df):
         """residplot(order=3) should compute cubic residuals."""
         chart = fm.residplot(
-            simple_float_df, x="x", y="y", order=3,
-            show_metrics=False, zero_line=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            order=3,
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -765,12 +838,18 @@ class TestResidplotEdgeCases:
         """residplot(dropna=False) with nulls — should not pre-filter.
         regression.py line 794-796: only drops if dropna=True."""
         df = pl.DataFrame(
-            {"x": [1.0, None, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-             "y": [2.0, 4.0, None, 8.0, 10.0, 12.0, 14.0, 16.0]}
+            {
+                "x": [1.0, None, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                "y": [2.0, 4.0, None, 8.0, 10.0, 12.0, 14.0, 16.0],
+            }
         )
         chart = fm.residplot(
-            df, x="x", y="y", dropna=False,
-            show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            dropna=False,
+            show_metrics=False,
+            zero_line=False,
         )
         # Data should retain nulls (not pre-filtered)
         assert chart._data.height == 8
@@ -779,11 +858,17 @@ class TestResidplotEdgeCases:
         """residplot with constant y — all residuals should be 0.
         Tests degenerate case where variance is 0."""
         df = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-             "y": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]}
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                "y": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+            }
         )
         chart = fm.residplot(
-            df, x="x", y="y", show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -793,7 +878,11 @@ class TestResidplotEdgeCases:
         """residplot with exactly 2 rows — minimum for regression."""
         df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 5.0]})
         chart = fm.residplot(
-            df, x="x", y="y", show_metrics=False, zero_line=False,
+            df,
+            x="x",
+            y="y",
+            show_metrics=False,
+            zero_line=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -818,10 +907,7 @@ class TestLmplotEdgeCases:
 
     def test_lmplot_constant_y(self):
         """lmplot with constant y — regression line should be flat."""
-        df = pl.DataFrame(
-            {"x": [1.0, 2.0, 3.0, 4.0, 5.0],
-             "y": [7.0, 7.0, 7.0, 7.0, 7.0]}
-        )
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [7.0, 7.0, 7.0, 7.0, 7.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -829,10 +915,7 @@ class TestLmplotEdgeCases:
 
     def test_lmplot_constant_x(self):
         """lmplot with constant x — degenerate domain, regression undefined."""
-        df = pl.DataFrame(
-            {"x": [5.0, 5.0, 5.0, 5.0, 5.0],
-             "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
-        )
+        df = pl.DataFrame({"x": [5.0, 5.0, 5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -842,8 +925,12 @@ class TestLmplotEdgeCases:
         """lmplot(truncate=False) should extend the fit line beyond data range.
         regression.py lines 537-556: x_range computed from data extent + 5% margin."""
         chart = fm.lmplot(
-            simple_float_df, x="x", y="y",
-            truncate=False, ci=None, show_metrics=False,
+            simple_float_df,
+            x="x",
+            y="y",
+            truncate=False,
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -857,8 +944,13 @@ class TestLmplotEdgeCases:
             pl.col("y").cast(pl.Float64),
         )
         chart = fm.lmplot(
-            df, x="x", y="y", hue="grp",
-            truncate=False, ci=None, show_metrics=False,
+            df,
+            x="x",
+            y="y",
+            hue="grp",
+            truncate=False,
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -913,7 +1005,9 @@ class TestDisplotLayerNaming:
         names = [l.name for l in chart._layers]
         assert len(names) == len(set(names)), f"Duplicate layer names: {names}"
 
-    def test_layer_names_survive_json_serialization(self, iris_like):  # BUG: layer names are silently dropped during JSON serialization — _build_layers_list omits the 'name' field
+    def test_layer_names_survive_json_serialization(
+        self, iris_like
+    ):  # BUG: layer names are silently dropped during JSON serialization — _build_layers_list omits the 'name' field
         """Layer names should be preserved in the JSON spec for round-trip fidelity.
         _build_layers_list in chart.py line 5058-5083 does not serialize layer.name."""
         chart = fm.displot(iris_like, x="sepal_length", kde=True)
@@ -1049,8 +1143,12 @@ class TestLmplotScatterKwsIntColumns:
     def test_lmplot_int_with_x_jitter(self, int_reg_df):
         """lmplot with Int64 + x_jitter — auto-cast must happen before jitter."""
         chart = fm.lmplot(
-            int_reg_df, x="x", y="y", x_jitter=0.3,
-            ci=None, show_metrics=False,
+            int_reg_df,
+            x="x",
+            y="y",
+            x_jitter=0.3,
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -1059,9 +1157,12 @@ class TestLmplotScatterKwsIntColumns:
     def test_lmplot_int_with_scatter_kws(self, int_reg_df):
         """lmplot with Int64 + scatter_kws={opacity: 0.5}."""
         chart = fm.lmplot(
-            int_reg_df, x="x", y="y",
+            int_reg_df,
+            x="x",
+            y="y",
             scatter_kws={"opacity": 0.5},
-            ci=None, show_metrics=False,
+            ci=None,
+            show_metrics=False,
         )
         svg = chart.show_svg()
         assert "<svg" in svg
@@ -1100,6 +1201,7 @@ class TestOverlaySvgContracts:
         svg = chart.show_svg()
         # Extract viewBox
         import re
+
         vb_match = re.search(r'viewBox="([^"]*)"', svg)
         if vb_match:
             vb = vb_match.group(1)

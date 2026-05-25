@@ -388,29 +388,19 @@ def test_point_with_filled_false():
     """mark_point(filled=False) should produce hollow points with stroke but no fill.
     Targets point.rs lines 363-373 filled=false branch."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point(filled=False)
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_point(filled=False).encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert svg.count("<circle") == 3
     assert "NaN" not in svg
     # Hollow points should have stroke but no fill (or fill="none")
-    assert 'fill="none"' in svg or 'stroke=' in svg
+    assert 'fill="none"' in svg or "stroke=" in svg
 
 
 def test_line_with_step_interpolation():
     """mark_line with interpolate='step' should produce step-shaped path.
     Targets line.rs build_line_cmds step branch (line 37-42)."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, 30.0, 20.0, 40.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_line(interpolate="step")
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_line(interpolate="step").encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     # Step interpolation produces Path instead of Polyline
@@ -421,12 +411,7 @@ def test_line_with_step_before_interpolation():
     """mark_line with interpolate='step-before' should produce path.
     Targets line.rs build_line_cmds step-before branch (line 44-47)."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, 30.0, 20.0, 40.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_line(interpolate="step-before")
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_line(interpolate="step-before").encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     assert "<path" in svg
@@ -436,12 +421,7 @@ def test_line_with_step_after_interpolation():
     """mark_line with interpolate='step-after' should produce path.
     Targets line.rs build_line_cmds step-after branch (line 48-51)."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, 30.0, 20.0, 40.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_line(interpolate="step-after")
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_line(interpolate="step-after").encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     assert "<path" in svg
@@ -456,12 +436,7 @@ def test_area_with_step_interpolation():
     """mark_area with interpolate='step' should produce a valid area path.
     Targets area.rs build_top_line_cmds step branch (line 20-26)."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 15.0, 10.0, 20.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_area(interpolate="step")
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_area(interpolate="step").encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "<path" in svg
     assert "NaN" not in svg
@@ -471,12 +446,7 @@ def test_area_with_line_border():
     """mark_area with line=True should produce an additional border path.
     Targets area.rs lines 209-223 line_border branch."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 10.0, 8.0, 12.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_area(line=True)
-        .encode(x="x", y="y")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_area(line=True).encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     # Should have at least 2 paths: fill area + border line
@@ -486,10 +456,12 @@ def test_area_with_line_border():
 def test_area_all_nan_y_produces_no_path():
     """mark_area with all-NaN y should produce no path elements.
     Targets area.rs per-row skip at line 144 where is_finite guards."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [float("nan")] * 4,
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [float("nan")] * 4,
+        }
+    )
     svg = fr.Chart(df).mark_area().encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -505,10 +477,12 @@ def test_point_fewer_than_expected_marks_with_nulls():
     Regression: polygon is internal-only; this tests the same principle on
     the public mark_point API -- skip rows with invalid data gracefully.
     Targets point.rs per-row skip logic."""
-    df = pl.DataFrame({
-        "x": [None, None, 3.0],
-        "y": [None, 2.0, None],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [None, None, 3.0],
+            "y": [None, 2.0, None],
+        }
+    )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -547,11 +521,13 @@ def test_tick_y_rug_with_null_values():
 def test_text_mark_with_numeric_text_channel():
     """mark_text with a numeric text channel should format the numbers.
     Targets text.rs lines 63-79 where col_as_f64 fallback formats numbers."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "val": [3.14159, 2.71828, 1.41421],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "val": [3.14159, 2.71828, 1.41421],
+        }
+    )
     svg = fr.Chart(df).mark_text().encode(x="x", y="y", text="val").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -562,17 +538,14 @@ def test_text_mark_with_numeric_text_channel():
 def test_text_mark_with_limit_truncates():
     """mark_text with limit=5 should truncate labels with ellipsis.
     Targets text.rs lines 161-169 label truncation logic."""
-    df = pl.DataFrame({
-        "x": [1.0],
-        "y": [1.0],
-        "label": ["VeryLongLabelThatShouldBeTruncated"],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_text(limit=5)
-        .encode(x="x", y="y", text="label")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [1.0],
+            "y": [1.0],
+            "label": ["VeryLongLabelThatShouldBeTruncated"],
+        }
     )
+    svg = fr.Chart(df).mark_text(limit=5).encode(x="x", y="y", text="label").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     # The full label should NOT appear; a truncated version should
@@ -582,11 +555,13 @@ def test_text_mark_with_limit_truncates():
 def test_text_mark_with_nan_in_text_column():
     """NaN in a numeric text channel should be skipped (not rendered as 'NaN').
     Targets text.rs line 68: if !v.is_finite() { return None }."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "val": [1.0, float("nan"), 3.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "val": [1.0, float("nan"), 3.0],
+        }
+    )
     svg = fr.Chart(df).mark_text().encode(x="x", y="y", text="val").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -596,12 +571,7 @@ def test_text_mark_alignment_left():
     """mark_text(align='left') should set text-anchor='start'.
     Targets text.rs lines 82-86 align matching."""
     df = pl.DataFrame({"x": [1.0], "y": [1.0], "t": ["hello"]})
-    svg = (
-        fr.Chart(df)
-        .mark_text(align="left")
-        .encode(x="x", y="y", text="t")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_text(align="left").encode(x="x", y="y", text="t").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -614,18 +584,15 @@ def test_text_mark_alignment_left():
 def test_segment_with_nan_in_endpoint():
     """Segment with NaN in x2 should skip that row, not crash.
     Targets segment.rs line 48-53: is_finite guard on all 4 endpoints."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0],
-        "y": [0.0, 1.0],
-        "x2": [1.0, float("nan")],
-        "y2": [1.0, 2.0],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_segment()
-        .encode(x="x", y="y", x2="x2", y2="y2")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "y": [0.0, 1.0],
+            "x2": [1.0, float("nan")],
+            "y2": [1.0, 2.0],
+        }
     )
+    svg = fr.Chart(df).mark_segment().encode(x="x", y="y", x2="x2", y2="y2").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -647,17 +614,14 @@ def test_segment_missing_x2_y2_no_crash():
 def test_ribbon_with_nan_in_y2():
     """Ribbon with NaN in y2 column should skip affected rows.
     Targets ribbon.rs line 118: y2v_ok filter."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y_upper": [12.0, 22.0, 18.0, 28.0],
-        "y_lower": [8.0, float("nan"), 12.0, 22.0],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_ribbon()
-        .encode(x="x", y="y_upper", y2="y_lower")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y_upper": [12.0, 22.0, 18.0, 28.0],
+            "y_lower": [8.0, float("nan"), 12.0, 22.0],
+        }
     )
+    svg = fr.Chart(df).mark_ribbon().encode(x="x", y="y_upper", y2="y_lower").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -665,17 +629,14 @@ def test_ribbon_with_nan_in_y2():
 def test_ribbon_single_point_no_crash():
     """Ribbon with 1 valid row (below 2-point threshold) should produce no path.
     Targets ribbon.rs line 129: 'if indices.len() < 2 { continue }'."""
-    df = pl.DataFrame({
-        "x": [1.0],
-        "y_upper": [10.0],
-        "y_lower": [5.0],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_ribbon()
-        .encode(x="x", y="y_upper", y2="y_lower")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [1.0],
+            "y_upper": [10.0],
+            "y_lower": [5.0],
+        }
     )
+    svg = fr.Chart(df).mark_ribbon().encode(x="x", y="y_upper", y2="y_lower").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -689,13 +650,7 @@ def test_arc_single_slice_full_circle():
     """A pie chart with one value should produce exactly one full-circle arc.
     Targets arc.rs wedge_path full_circle branch (line 174)."""
     df = pl.DataFrame({"val": [100.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_arc()
-        .encode(x="val")
-        .coord(fr.CoordPolar(theta="x"))
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_arc().encode(x="val").coord(fr.CoordPolar(theta="x")).show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     assert "<path" in svg
@@ -705,13 +660,7 @@ def test_arc_with_zero_values_skipped():
     """Zero and negative values in pie data should be skipped.
     Targets arc.rs line 76-78: skip if v <= 0."""
     df = pl.DataFrame({"val": [0.0, 10.0, -5.0, 20.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_arc()
-        .encode(x="val")
-        .coord(fr.CoordPolar(theta="x"))
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_arc().encode(x="val").coord(fr.CoordPolar(theta="x")).show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     # Only 2 valid slices (10 and 20), 0 and -5 are skipped
@@ -722,13 +671,7 @@ def test_arc_all_zero_no_crash():
     """Pie chart with all zero values should produce empty result, not crash.
     Targets arc.rs line 41: 'if total <= 0.0 { return empty }'."""
     df = pl.DataFrame({"val": [0.0, 0.0, 0.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_arc()
-        .encode(x="val")
-        .coord(fr.CoordPolar(theta="x"))
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_arc().encode(x="val").coord(fr.CoordPolar(theta="x")).show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -741,14 +684,15 @@ def test_arc_all_zero_no_crash():
 def test_layer_point_and_text_on_same_data():
     """Layering point and text on the same data should produce both mark types.
     Tests composition.py merge logic for identical-data layers."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "label": ["A", "B", "C"],
-    })
-    chart = (
-        fr.Chart(df).mark_point().encode(x="x", y="y")
-        + fr.Chart(df).mark_text().encode(x="x", y="y", text="label")
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "label": ["A", "B", "C"],
+        }
+    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.Chart(df).mark_text().encode(
+        x="x", y="y", text="label"
     )
     svg = chart.show_svg()
     assert svg.startswith("<svg")
@@ -762,13 +706,10 @@ def test_layer_with_configure_applied_to_composition():
     """configure() on a layered chart should apply to all layers.
     Tests configure propagation through composition."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    chart = (
-        fr.Chart(df).mark_point().encode(x="x", y="y")
-        + fr.Chart(df).mark_line().encode(x="x", y="y")
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y") + fr.Chart(df).mark_line().encode(
+        x="x", y="y"
     )
-    svg = chart.configure(
-        axis=fr.configure.AxisConfig(grid=True)
-    ).show_svg()
+    svg = chart.configure(axis=fr.configure.AxisConfig(grid=True)).show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -781,11 +722,13 @@ def test_layer_with_configure_applied_to_composition():
 def test_heatmap_with_text_encoding():
     """Heatmap with text encoding should render cell annotations.
     Targets rect.rs build_heatmap lines 465-487 text annotation path."""
-    df = pl.DataFrame({
-        "row": ["a", "a", "b", "b"],
-        "col": ["x", "y", "x", "y"],
-        "val": [1.0, 2.0, 3.0, 4.0],
-    })
+    df = pl.DataFrame(
+        {
+            "row": ["a", "a", "b", "b"],
+            "col": ["x", "y", "x", "y"],
+            "val": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
     svg = (
         fr.Chart(df)
         .mark_rect()
@@ -801,12 +744,7 @@ def test_heatmap_single_cell():
     """Heatmap with a single cell (1x1 grid) should render one rect.
     Targets rect.rs build_heatmap with n_x=1, n_y=1."""
     df = pl.DataFrame({"row": ["a"], "col": ["x"], "val": [42.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_rect()
-        .encode(x="row:N", y="col:N", color="val:Q")
-        .show_svg()
-    )
+    svg = fr.Chart(df).mark_rect().encode(x="row:N", y="col:N", color="val:Q").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     assert "<rect" in svg
@@ -821,10 +759,12 @@ def test_label_mark_collision_avoidance_many_overlapping_points():
     """mark_label with many overlapping points should use collision avoidance.
     Targets label.rs candidate_offsets and greedy placement (line 70 onward)."""
     # 10 points at the same location should trigger collision avoidance
-    df = pl.DataFrame({
-        "x": [50.0] * 10,
-        "y": [50.0] * 10,
-    })
+    df = pl.DataFrame(
+        {
+            "x": [50.0] * 10,
+            "y": [50.0] * 10,
+        }
+    )
     svg = fr.Chart(df).mark_label().encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -835,16 +775,13 @@ def test_label_mark_collision_avoidance_many_overlapping_points():
 def test_label_mark_with_explicit_dx_dy_skips_collision():
     """mark_label with both dx and dy set should skip collision avoidance.
     Targets label.rs line 98: manual_override path."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_label(dx=10, dy=-10)
-        .encode(x="x", y="y")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+        }
     )
+    svg = fr.Chart(df).mark_label(dx=10, dy=-10).encode(x="x", y="y").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
 
@@ -857,11 +794,13 @@ def test_label_mark_with_explicit_dx_dy_skips_collision():
 def test_image_mark_with_empty_url_column():
     """Image mark with empty URLs should skip all rows silently.
     Targets image.rs build_url_tiles line 120: data URL check."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0],
-        "y": [1.0, 2.0],
-        "url": ["", ""],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0],
+            "y": [1.0, 2.0],
+            "url": ["", ""],
+        }
+    )
     # This should not crash; empty URLs should be silently skipped
     svg = fr.Chart(df).mark_image().encode(x="x", y="y", url="url").show_svg()
     assert svg.startswith("<svg")
@@ -876,17 +815,14 @@ def test_image_mark_with_empty_url_column():
 def test_rect_coordflip_ordinal_y_with_x2():
     """Rect mark with ordinal y and x/x2 (CoordFlip case) should render.
     Targets rect.rs build_ordinal_range y_is_ordinal branch (line 253-313)."""
-    df = pl.DataFrame({
-        "cat": ["a", "b"],
-        "x_lo": [1.0, 2.0],
-        "x_hi": [3.0, 4.0],
-    })
-    svg = (
-        fr.Chart(df)
-        .mark_rect()
-        .encode(y="cat:N", x="x_lo:Q", x2="x_hi:Q")
-        .show_svg()
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b"],
+            "x_lo": [1.0, 2.0],
+            "x_hi": [3.0, 4.0],
+        }
     )
+    svg = fr.Chart(df).mark_rect().encode(y="cat:N", x="x_lo:Q", x2="x_hi:Q").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
     assert "<rect" in svg
@@ -921,11 +857,13 @@ def test_configure_to_dict_omits_none():
 def test_point_null_in_x_y_color_simultaneously():
     """Null in x, y, and color columns at different rows should render only
     fully-valid rows. Targets point.rs per-row skip + color fallback."""
-    df = pl.DataFrame({
-        "x": [1.0, None, 3.0, 4.0],
-        "y": [10.0, 20.0, None, 40.0],
-        "c": ["red", "blue", "green", None],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, None, 3.0, 4.0],
+            "y": [10.0, 20.0, None, 40.0],
+            "c": ["red", "blue", "green", None],
+        }
+    )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c:N").show_svg()
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -947,9 +885,7 @@ def test_grid_config_band_colors():
         fr.Chart(df)
         .mark_point()
         .encode(x="x", y="y")
-        .configure(grid=fr.configure.GridConfig(
-            x=True, y=True, band_colors=["#f0f0f0", "#ffffff"]
-        ))
+        .configure(grid=fr.configure.GridConfig(x=True, y=True, band_colors=["#f0f0f0", "#ffffff"]))
         .show_svg()
     )
     assert svg.startswith("<svg")
@@ -969,9 +905,7 @@ def test_padding_config_zero_on_all_sides():
         fr.Chart(df)
         .mark_point()
         .encode(x="x", y="y")
-        .configure(padding=fr.configure.PaddingConfig(
-            top=0, right=0, bottom=0, left=0
-        ))
+        .configure(padding=fr.configure.PaddingConfig(top=0, right=0, bottom=0, left=0))
         .show_svg()
     )
     assert svg.startswith("<svg")
@@ -987,9 +921,7 @@ def test_padding_config_very_large_values_raises():
             fr.Chart(df)
             .mark_point()
             .encode(x="x", y="y")
-            .configure(padding=fr.configure.PaddingConfig(
-                top=500, right=500, bottom=500, left=500
-            ))
+            .configure(padding=fr.configure.PaddingConfig(top=500, right=500, bottom=500, left=500))
             .show_svg()
         )
 
@@ -1002,11 +934,13 @@ def test_padding_config_very_large_values_raises():
 def test_color_config_custom_scheme():
     """ColorConfig with a custom scheme name should not crash.
     Targets configure.py ColorConfig.scheme field."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "c": ["a", "b", "c"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "c": ["a", "b", "c"],
+        }
+    )
     svg = (
         fr.Chart(df)
         .mark_point()

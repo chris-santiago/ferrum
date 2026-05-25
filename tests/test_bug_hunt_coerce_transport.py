@@ -12,6 +12,7 @@ confirmed fixed in bd182a8. This round targets:
 - Timestamp unit coercion edge cases
 - Dictionary-encoded Arrow columns
 """
+
 from __future__ import annotations
 
 import json
@@ -416,12 +417,7 @@ def test_chart_with_configure_and_special_data_types():
     df = pl.DataFrame(
         {"d": [date(2024, 1, 1), date(2024, 6, 15), date(2024, 12, 31)], "y": [1.0, 2.0, 3.0]}
     )
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="d", y="y")
-        .configure_axis(label_angle=45)
-    )
+    chart = fr.Chart(df).mark_point().encode(x="d", y="y").configure_axis(label_angle=45)
     svg = chart.show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -443,11 +439,8 @@ def test_chart_with_annotations_and_categorical_data():
             "cat": pl.Series(["a", "b", "c"], dtype=pl.Categorical),
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y", color="cat")
-        + Annotate([ann_text(2.0, 5.0, "label")])
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="cat") + Annotate(
+        [ann_text(2.0, 5.0, "label")]
     )
     svg = chart.show_svg()
     assert "<svg" in svg
@@ -508,9 +501,7 @@ def test_lazyframe_date_cast_fixed():
     """
     from datetime import date
 
-    lf = pl.LazyFrame(
-        {"d": [date(2024, 1, 1), date(2024, 6, 15)], "y": [1.0, 2.0]}
-    )
+    lf = pl.LazyFrame({"d": [date(2024, 1, 1), date(2024, 6, 15)], "y": [1.0, 2.0]})
     tbl = to_arrow_table(lf)
     assert pa.types.is_timestamp(tbl.schema.field("d").type)
 
@@ -531,9 +522,7 @@ def test_lazyframe_duration_cast_fixed():
     """Verify LazyFrame Duration cast fix from bd182a8.
     Targets line 88.
     """
-    lf = pl.LazyFrame(
-        {"dur": pl.Series([1000, 2000], dtype=pl.Duration("ns")), "y": [1.0, 2.0]}
-    )
+    lf = pl.LazyFrame({"dur": pl.Series([1000, 2000], dtype=pl.Duration("ns")), "y": [1.0, 2.0]})
     tbl = to_arrow_table(lf)
     assert pa.types.is_int64(tbl.schema.field("dur").type)
 
@@ -677,11 +666,13 @@ def test_geojson_many_features():
     """
     features = []
     for i in range(100):
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [float(i), float(i)]},
-            "properties": {"id": i, "name": f"pt_{i}"},
-        })
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [float(i), float(i)]},
+                "properties": {"id": i, "name": f"pt_{i}"},
+            }
+        )
     fc = {"type": "FeatureCollection", "features": features}
     tbl = to_arrow_table(fc)
     assert tbl.num_rows == 100
@@ -1159,13 +1150,9 @@ def test_chart_with_configure_grid_and_annotations():
             "y": [1.0, 2.0, 3.0],
         }
     )
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="dur", y="y")
-        .configure_grid(x=True, y=True, color="#ddd")
-        + Annotate([ann_line(0, 0, 3000, 3.0)])
-    )
+    chart = fr.Chart(df).mark_point().encode(x="dur", y="y").configure_grid(
+        x=True, y=True, color="#ddd"
+    ) + Annotate([ann_line(0, 0, 3000, 3.0)])
     svg = chart.show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1422,12 +1409,7 @@ def test_empty_dataframe_with_configure_renders():
     import ferrum as fr
 
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
-    chart = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(label_angle=30)
-    )
+    chart = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(label_angle=30)
     svg = chart.show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1569,10 +1551,12 @@ def test_coerce_date_cast_duplicate_column_names_drops_columns():  # BUG: dict c
 
     Targets _coerce.py line 117: pa.table({...field(i).name: new_cols[i]...})
     """
-    tbl = pa.table({
-        "d": pa.array([0, 100], type=pa.date32()),
-        "y": pa.array([1.0, 2.0]),
-    })
+    tbl = pa.table(
+        {
+            "d": pa.array([0, 100], type=pa.date32()),
+            "y": pa.array([1.0, 2.0]),
+        }
+    )
     tbl = tbl.append_column("d", pa.array([3.0, 4.0]))
     assert tbl.num_columns == 3, "Precondition: table has 3 columns"
 
@@ -1675,11 +1659,13 @@ def test_sanitize_null_column_first_position():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "nothing": pa.array([None, None], type=pa.null()),
-        "x": pa.array([1.0, 2.0]),
-        "y": pa.array([3.0, 4.0]),
-    })
+    tbl = pa.table(
+        {
+            "nothing": pa.array([None, None], type=pa.null()),
+            "x": pa.array([1.0, 2.0]),
+            "y": pa.array([3.0, 4.0]),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert result.column_names == ["nothing", "x", "y"], "Column order must be preserved"
     assert pa.types.is_float64(result.schema.field("nothing").type)
@@ -1692,11 +1678,13 @@ def test_sanitize_null_column_last_position():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "x": pa.array([1.0, 2.0]),
-        "y": pa.array([3.0, 4.0]),
-        "nothing": pa.array([None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "x": pa.array([1.0, 2.0]),
+            "y": pa.array([3.0, 4.0]),
+            "nothing": pa.array([None, None], type=pa.null()),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert result.column_names == ["x", "y", "nothing"]
     assert pa.types.is_float64(result.schema.field("nothing").type)
@@ -1709,11 +1697,13 @@ def test_sanitize_multiple_null_columns():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "n1": pa.array([None, None], type=pa.null()),
-        "x": pa.array([1.0, 2.0]),
-        "n2": pa.array([None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "n1": pa.array([None, None], type=pa.null()),
+            "x": pa.array([1.0, 2.0]),
+            "n2": pa.array([None, None], type=pa.null()),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert pa.types.is_float64(result.schema.field("n1").type)
     assert pa.types.is_float64(result.schema.field("n2").type)
@@ -1728,10 +1718,12 @@ def test_sanitize_all_columns_null_typed():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "a": pa.array([None, None], type=pa.null()),
-        "b": pa.array([None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "a": pa.array([None, None], type=pa.null()),
+            "b": pa.array([None, None], type=pa.null()),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert pa.types.is_float64(result.schema.field("a").type)
     assert pa.types.is_float64(result.schema.field("b").type)
@@ -1746,10 +1738,12 @@ def test_render_all_null_columns_as_encodings():
     """
     import ferrum as fr
 
-    tbl = pa.table({
-        "x": pa.array([None, None, None], type=pa.null()),
-        "y": pa.array([None, None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "x": pa.array([None, None, None], type=pa.null()),
+            "y": pa.array([None, None, None], type=pa.null()),
+        }
+    )
     svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1904,13 +1898,15 @@ def test_sanitize_mixed_dict_and_null_columns():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "cat": pa.DictionaryArray.from_arrays(
-            pa.array([0, 1, 0], type=pa.int8()), pa.array(["a", "b"])
-        ),
-        "nothing": pa.array([None, None, None], type=pa.null()),
-        "val": pa.array([1.0, 2.0, 3.0]),
-    })
+    tbl = pa.table(
+        {
+            "cat": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, 0], type=pa.int8()), pa.array(["a", "b"])
+            ),
+            "nothing": pa.array([None, None, None], type=pa.null()),
+            "val": pa.array([1.0, 2.0, 3.0]),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert not pa.types.is_dictionary(result.schema.field("cat").type)
     assert pa.types.is_float64(result.schema.field("nothing").type)
@@ -1926,15 +1922,17 @@ def test_sanitize_all_columns_need_sanitization():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "a": pa.DictionaryArray.from_arrays(
-            pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])
-        ),
-        "b": pa.DictionaryArray.from_arrays(
-            pa.array([0, 0], type=pa.int8()), pa.array([10, 20])
-        ),
-        "c": pa.array([None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "a": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])
+            ),
+            "b": pa.DictionaryArray.from_arrays(
+                pa.array([0, 0], type=pa.int8()), pa.array([10, 20])
+            ),
+            "c": pa.array([None, None], type=pa.null()),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert result.column_names == ["a", "b", "c"]
     assert result.column("a").to_pylist() == ["x", "y"]
@@ -1949,13 +1947,15 @@ def test_render_mixed_dict_null_normal_columns():
     """
     import ferrum as fr
 
-    tbl = pa.table({
-        "x": pa.DictionaryArray.from_arrays(
-            pa.array([0, 1, 2], type=pa.int8()), pa.array([1.0, 2.0, 3.0])
-        ),
-        "y": pa.array([4.0, 5.0, 6.0]),
-        "unused": pa.array([None, None, None], type=pa.null()),
-    })
+    tbl = pa.table(
+        {
+            "x": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, 2], type=pa.int8()), pa.array([1.0, 2.0, 3.0])
+            ),
+            "y": pa.array([4.0, 5.0, 6.0]),
+            "unused": pa.array([None, None, None], type=pa.null()),
+        }
+    )
     svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1989,10 +1989,12 @@ def test_sanitize_zero_row_null_column():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "nothing": pa.array([], type=pa.null()),
-        "y": pa.array([], type=pa.float64()),
-    })
+    tbl = pa.table(
+        {
+            "nothing": pa.array([], type=pa.null()),
+            "y": pa.array([], type=pa.float64()),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert pa.types.is_float64(result.schema.field("nothing").type)
     assert result.num_rows == 0
@@ -2010,9 +2012,7 @@ def test_sanitize_single_row_dict_column():
     """
     from ferrum._render import _sanitize_for_rust
 
-    arr = pa.DictionaryArray.from_arrays(
-        pa.array([0], type=pa.int8()), pa.array(["solo"])
-    )
+    arr = pa.DictionaryArray.from_arrays(pa.array([0], type=pa.int8()), pa.array(["solo"]))
     tbl = pa.table({"cat": arr, "y": pa.array([1.0])})
     result = _sanitize_for_rust(tbl)
     assert result.column("cat").to_pylist() == ["solo"]
@@ -2025,10 +2025,12 @@ def test_sanitize_single_row_null_column():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "nothing": pa.array([None], type=pa.null()),
-        "y": pa.array([1.0]),
-    })
+    tbl = pa.table(
+        {
+            "nothing": pa.array([None], type=pa.null()),
+            "y": pa.array([1.0]),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert pa.types.is_float64(result.schema.field("nothing").type)
     assert result.column("nothing").null_count == 1
@@ -2047,12 +2049,8 @@ def test_sanitize_chunked_dict_column():
     """
     from ferrum._render import _sanitize_for_rust
 
-    chunk1 = pa.DictionaryArray.from_arrays(
-        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
-    )
-    chunk2 = pa.DictionaryArray.from_arrays(
-        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
-    )
+    chunk1 = pa.DictionaryArray.from_arrays(pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"]))
+    chunk2 = pa.DictionaryArray.from_arrays(pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"]))
     chunked = pa.chunked_array([chunk1, chunk2])
     tbl = pa.table({"cat": chunked, "y": [1.0, 2.0, 3.0, 4.0]})
     result = _sanitize_for_rust(tbl)
@@ -2130,9 +2128,7 @@ def test_recordbatch_all_special_columns():
         [
             pa.array([0, 100], type=pa.date32()),
             pa.array([0, 86_400_000], type=pa.date64()),
-            pa.DictionaryArray.from_arrays(
-                pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])
-            ),
+            pa.DictionaryArray.from_arrays(pa.array([0, 1], type=pa.int8()), pa.array(["x", "y"])),
             pa.array([None, None], type=pa.null()),
         ],
         names=["d32", "d64", "cat", "nothing"],
@@ -2142,6 +2138,7 @@ def test_recordbatch_all_special_columns():
     assert pa.types.is_timestamp(tbl.schema.field("d64").type)
 
     from ferrum._render import _sanitize_for_rust
+
     sanitized = _sanitize_for_rust(tbl)
     assert not pa.types.is_dictionary(sanitized.schema.field("cat").type)
     assert pa.types.is_float64(sanitized.schema.field("nothing").type)
@@ -2201,10 +2198,12 @@ def test_label_map_with_null_typed_x_column():
     import ferrum as fr
     from ferrum.encoding import X
 
-    tbl = pa.table({
-        "cat": pa.array([None, None, None], type=pa.null()),
-        "y": [1.0, 2.0, 3.0],
-    })
+    tbl = pa.table(
+        {
+            "cat": pa.array([None, None, None], type=pa.null()),
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     chart = (
         fr.Chart(tbl)
         .mark_bar()
@@ -2235,11 +2234,13 @@ def test_dict_encoded_color_produces_distinct_marks():
         pa.array([0, 1, 0, 1], type=pa.int8()),
         pa.array(["red_group", "blue_group"]),
     )
-    tbl = pa.table({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [1.0, 2.0, 3.0, 4.0],
-        "group": arr,
-    })
+    tbl = pa.table(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "group": arr,
+        }
+    )
     svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="group").show_svg()
     assert "<svg" in svg
     # Should have at least 4 circle elements (one per data point)
@@ -2257,10 +2258,12 @@ def test_null_column_renders_valid_viewbox():
     import ferrum as fr
     import re
 
-    tbl = pa.table({
-        "x": pa.array([None, None, None], type=pa.null()),
-        "y": [1.0, 2.0, 3.0],
-    })
+    tbl = pa.table(
+        {
+            "x": pa.array([None, None, None], type=pa.null()),
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
     assert 'viewBox="' in svg
     # Extract viewBox and verify no NaN
@@ -2341,14 +2344,16 @@ def test_sanitize_preserves_non_sanitized_column_values():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "cat": pa.DictionaryArray.from_arrays(
-            pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
-        ),
-        "ints": pa.array([42, 99]),
-        "floats": pa.array([3.14, 2.72]),
-        "strings": pa.array(["hello", "world"]),
-    })
+    tbl = pa.table(
+        {
+            "cat": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"])
+            ),
+            "ints": pa.array([42, 99]),
+            "floats": pa.array([3.14, 2.72]),
+            "strings": pa.array(["hello", "world"]),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     # Verify non-sanitized columns are identical
     assert result.column("ints").to_pylist() == [42, 99]
@@ -2365,15 +2370,15 @@ def test_sanitize_preserves_column_count():
     """
     from ferrum._render import _sanitize_for_rust
 
-    tbl = pa.table({
-        "a": pa.DictionaryArray.from_arrays(
-            pa.array([0], type=pa.int8()), pa.array(["x"])
-        ),
-        "b": pa.array([None], type=pa.null()),
-        "c": pa.array([1.0]),
-        "d": pa.array(["hello"]),
-        "e": pa.array([True]),
-    })
+    tbl = pa.table(
+        {
+            "a": pa.DictionaryArray.from_arrays(pa.array([0], type=pa.int8()), pa.array(["x"])),
+            "b": pa.array([None], type=pa.null()),
+            "c": pa.array([1.0]),
+            "d": pa.array(["hello"]),
+            "e": pa.array([True]),
+        }
+    )
     result = _sanitize_for_rust(tbl)
     assert result.num_columns == 5
     assert result.column_names == ["a", "b", "c", "d", "e"]
@@ -2423,11 +2428,13 @@ def test_polars_null_column_through_render_pipeline():
     """
     import ferrum as fr
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [4.0, 5.0, 6.0],
-        "null_col": pl.Series([None, None, None], dtype=pl.Null),
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [4.0, 5.0, 6.0],
+            "null_col": pl.Series([None, None, None], dtype=pl.Null),
+        }
+    )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -2441,11 +2448,13 @@ def test_polars_null_column_as_color_through_render():
     """
     import ferrum as fr
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [4.0, 5.0, 6.0],
-        "color": pl.Series([None, None, None], dtype=pl.Null),
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [4.0, 5.0, 6.0],
+            "color": pl.Series([None, None, None], dtype=pl.Null),
+        }
+    )
     svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="color").show_svg()
     assert "<svg" in svg
 
