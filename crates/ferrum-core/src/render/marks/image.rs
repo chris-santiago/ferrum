@@ -24,7 +24,7 @@
 //!
 //! Colormap resolution priority (three-step):
 //!   1. `mark_style.cmap` name (explicit kwarg on the mark)
-//!   2. `theme.sequential_scheme` (theme default)
+//!   2. `theme.palette.sequential_scheme` (theme default)
 //!   3. Viridis fallback
 
 use arrow::array::{BinaryArray, Float64Array, UInt32Array};
@@ -230,14 +230,14 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         return empty();
     }
 
-    // Resolve colormap: mark_style.cmap → theme.sequential_scheme → Viridis.
+    // Resolve colormap: mark_style.cmap → theme.palette.sequential_scheme → Viridis.
     let named = ctx
         .mark_style
         .cmap
         .as_deref()
         .and_then(NamedContinuous::from_name)
         .unwrap_or_else(|| {
-            NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+            NamedContinuous::from_name(&ctx.theme.palette.sequential_scheme)
                 .unwrap_or(NamedContinuous::Viridis)
         });
     let scheme = ContinuousScheme::Named(named);

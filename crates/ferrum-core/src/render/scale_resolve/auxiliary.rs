@@ -12,7 +12,7 @@ use super::{column_min_max_f64, distinct_values_in_order, OpacityScale, ScaleKin
 /// Build a SizeScale if `encoding.size` is present.
 ///
 /// Honors a user-supplied `scale.range` (Phase 10f); when absent, falls back
-/// to `[theme.point_size_min, theme.point_size_max]`.
+/// to `[theme.sizes.point_size_min, theme.sizes.point_size_max]`.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -36,13 +36,13 @@ pub fn build_size_scale(
             if r.len() == 2 {
                 (r[0], r[1])
             } else {
-                (theme.point_size_min, theme.point_size_max)
+                (theme.sizes.point_size_min, theme.sizes.point_size_max)
             }
         } else {
-            (theme.point_size_min, theme.point_size_max)
+            (theme.sizes.point_size_min, theme.sizes.point_size_max)
         }
     } else {
-        (theme.point_size_min, theme.point_size_max)
+        (theme.sizes.point_size_min, theme.sizes.point_size_max)
     };
     let inner = ScaleKind::Linear(LinearScale::new_internal(
         vec![min, max],
@@ -96,7 +96,7 @@ pub fn build_opacity_scale(
     })?;
     let inner = ScaleKind::Linear(LinearScale::new_internal(
         vec![min, max],
-        vec![theme.opacity_min, theme.opacity_max],
+        vec![theme.sizes.opacity_min, theme.sizes.opacity_max],
         true,
         false,
     ));

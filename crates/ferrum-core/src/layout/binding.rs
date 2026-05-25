@@ -100,7 +100,7 @@ pub fn compute_layout(
 ) -> PyResult<Py<PyDict>> {
     let viewport = Viewport { width: viewport.0, height: viewport.1 };
     let mut theme = ThemeInputs::default();
-    theme.legend_orient = parse_legend_orient(legend_orient)?;
+    theme.legend.legend_orient = parse_legend_orient(legend_orient)?;
 
     let axes = AxesInput {
         x: AxisInput::new(AxisOrient::Bottom, x_title, x_tick_labels, label_angle),

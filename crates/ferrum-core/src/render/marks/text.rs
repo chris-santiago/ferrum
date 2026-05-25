@@ -86,7 +86,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let dx = ctx.mark_style.dx.unwrap_or(0.0);
     let dy = ctx.mark_style.dy.unwrap_or(0.0);
-    let base_font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.label_font_size);
+    let base_font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.typography.label_font_size);
     let base_angle = ctx.mark_style.angle.unwrap_or(0.0);
     let base_opacity = ctx.mark_style.opacity;
 
@@ -196,11 +196,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             y: py + dy,
             content: label,
             style: to_scene_text_style(
-                ctx.theme.font_color,
+                ctx.theme.colors.font_color,
                 row_font_size,
                 anchor,
                 row_angle,
-                &ctx.theme.font_family,
+                &ctx.theme.typography.font_family,
                 ctx.mark_style.font_weight.as_deref(),
                 ctx.mark_style.baseline.as_deref(),
                 row_opacity,

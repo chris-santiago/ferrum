@@ -82,11 +82,11 @@ impl MarkStyle {
     /// arm byte-for-byte.
     fn theme_base(theme: &ThemeInputs) -> Self {
         MarkStyle {
-            fill: with_opacity(theme.mark_color, theme.default_opacity),
+            fill: with_opacity(theme.colors.mark_color, theme.sizes.default_opacity),
             stroke: None,
             stroke_width: 0.0,
-            opacity: theme.default_opacity,
-            point_size: theme.point_size,
+            opacity: theme.sizes.default_opacity,
+            point_size: theme.sizes.point_size,
             corner_radius: 0.0,
             stroke_dash: None,
             font_size: None,
@@ -132,34 +132,34 @@ pub fn resolve_mark_style(
     let mut style = MarkStyle::theme_base(theme);
     match mark {
         Mark::Area | Mark::Ribbon | Mark::Polygon => {
-            style.fill = theme.mark_color;
+            style.fill = theme.colors.mark_color;
             style.stroke = None;
             style.stroke_width = 0.0;
-            style.opacity = theme.area_opacity;
+            style.opacity = theme.sizes.area_opacity;
         }
         Mark::Line => {
-            style.fill = theme.mark_color;
-            style.stroke = Some(theme.mark_color);
-            style.stroke_width = theme.line_stroke_width;
+            style.fill = theme.colors.mark_color;
+            style.stroke = Some(theme.colors.mark_color);
+            style.stroke_width = theme.sizes.line_stroke_width;
         }
         Mark::Bar | Mark::Rect => {
-            style.corner_radius = theme.bar_corner_radius;
+            style.corner_radius = theme.sizes.bar_corner_radius;
         }
         Mark::Rule => {
             // Reference-line defaults from theme; non-reference rules
             // (boxplot whiskers, error bars) override via mark_kwargs.
-            style.fill = theme.reference_line_color;
-            style.stroke = Some(theme.reference_line_color);
-            style.stroke_width = theme.line_stroke_width;
-            style.stroke_dash = theme.reference_line_dash.clone();
+            style.fill = theme.colors.reference_line_color;
+            style.stroke = Some(theme.colors.reference_line_color);
+            style.stroke_width = theme.sizes.line_stroke_width;
+            style.stroke_dash = theme.reference_line.reference_line_dash.clone();
         }
         Mark::Segment => {
-            style.fill = theme.mark_color;
-            style.stroke = Some(theme.mark_color);
-            style.stroke_width = theme.line_stroke_width;
+            style.fill = theme.colors.mark_color;
+            style.stroke = Some(theme.colors.mark_color);
+            style.stroke_width = theme.sizes.line_stroke_width;
         }
         Mark::Point => {
-            style.opacity = theme.point_opacity;
+            style.opacity = theme.sizes.point_opacity;
         }
         Mark::Tick | Mark::Text | Mark::Image | Mark::Label => {
             // Baseline applies as-is.
@@ -168,8 +168,8 @@ pub fn resolve_mark_style(
             style.stroke_width = 0.0;
         }
         Mark::Geoshape => {
-            style.fill = theme.mark_color;
-            style.stroke = Some(theme.mark_color);
+            style.fill = theme.colors.mark_color;
+            style.stroke = Some(theme.colors.mark_color);
             style.stroke_width = 0.5;
         }
     }
@@ -188,7 +188,7 @@ pub fn resolve_mark_style(
 
     if let Some(ref hex) = o.stroke {
         if hex == "theme:label" {
-            style.stroke = Some(theme.label_color);
+            style.stroke = Some(theme.colors.label_color);
         } else if let Ok(c) = from_hex_str(hex) {
             style.stroke = Some(c);
         }
@@ -196,7 +196,7 @@ pub fn resolve_mark_style(
     }
     if let Some(ref hex) = o.fill {
         if hex == "theme:label" {
-            style.fill = theme.label_color;
+            style.fill = theme.colors.label_color;
         } else if let Ok(c) = from_hex_str(hex) {
             style.fill = c;
         }
@@ -545,14 +545,14 @@ mod tests {
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Area);
         assert_eq!(style.fill.alpha, 0xFF, "area fill should be opaque");
-        assert!((style.opacity - theme.area_opacity).abs() < 1e-6,
-            "area opacity should default to theme.area_opacity");
+        assert!((style.opacity - theme.sizes.area_opacity).abs() < 1e-6,
+            "area opacity should default to theme.sizes.area_opacity");
     }
 
     #[test]
     fn resolve_style_for_bar_has_corner_radius_from_theme() {
         let mut theme = ThemeInputs::default();
-        theme.bar_corner_radius = 4.0;
+        theme.sizes.bar_corner_radius = 4.0;
         let style = resolve_mark_style(None, &theme, &Mark::Bar);
         assert_eq!(style.corner_radius, 4.0);
     }
@@ -570,7 +570,7 @@ mod tests {
     fn resolve_mark_style_with_no_overrides_returns_theme_defaults() {
         let theme = ThemeInputs::default();
         let style = resolve_mark_style(None, &theme, &Mark::Point);
-        assert_eq!(style.point_size, theme.point_size);
+        assert_eq!(style.point_size, theme.sizes.point_size);
     }
 
     #[test]
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn resolve_mark_style_stroke_theme_label_sentinel_uses_label_color() {
         let mut theme = ThemeInputs::default();
-        theme.label_color = palette::Srgba::new(0x11, 0x22, 0x33, 0xFF);
+        theme.colors.label_color = palette::Srgba::new(0x11, 0x22, 0x33, 0xFF);
         let overrides = MarkKwargsSpec { stroke: Some("theme:label".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
         let stroke = style.stroke.expect("stroke must be set by sentinel");
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn resolve_mark_style_fill_theme_label_sentinel_uses_label_color() {
         let mut theme = ThemeInputs::default();
-        theme.label_color = palette::Srgba::new(0x44, 0x55, 0x66, 0xFF);
+        theme.colors.label_color = palette::Srgba::new(0x44, 0x55, 0x66, 0xFF);
         let overrides = MarkKwargsSpec { fill: Some("theme:label".into()), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick);
         assert_eq!(style.fill.red,   0x44, "sentinel fill.red must be label_color.red");
@@ -632,7 +632,7 @@ mod tests {
         // Rule mark picks up reference_line_dash from theme by default.
         // Passing stroke_dash: [] should clear it (solid line for composite structural rules).
         let theme = ThemeInputs::default(); // reference_line_dash = Some([4.0, 4.0])
-        assert!(theme.reference_line_dash.is_some(), "test requires non-None reference_line_dash");
+        assert!(theme.reference_line.reference_line_dash.is_some(), "test requires non-None reference_line_dash");
         let overrides = MarkKwargsSpec { stroke_dash: Some(vec![]), ..Default::default() };
         let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
         assert!(style.stroke_dash.is_none(), "empty stroke_dash override must clear the dash");

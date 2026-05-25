@@ -87,7 +87,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
 
             // Quantitative y only → y-rug: horizontal ticks at left axis edge.
-            let tick_len = ctx.theme.tick_size * 2.0;
+            let tick_len = ctx.theme.sizes.tick_size * 2.0;
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
                 Err(_) => return MarkBuildResult {
@@ -240,7 +240,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     // Quantitative x → rug-style vertical tick at panel baseline.
-    let tick_len = ctx.theme.tick_size * 2.0;
+    let tick_len = ctx.theme.sizes.tick_size * 2.0;
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
         kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
         tooltips: None, hrefs: None, descriptions: None,

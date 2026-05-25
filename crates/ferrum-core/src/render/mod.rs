@@ -195,100 +195,100 @@ use chart_config::{AxisConfigSpec, ChartConfig};
 /// are never touched here.
 fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
     // ── Grid overrides ────────────────────────────────────────────────────────
-    if let Some(ref grid) = config.grid {
-        if let Some(enabled) = grid.x {
-            // x-grid is controlled globally via theme.grid; a dedicated x-only
+    if let Some(ref grid_cfg) = config.grid {
+        if let Some(enabled) = grid_cfg.x {
+            // x-grid is controlled globally via theme.grid.grid; a dedicated x-only
             // flag does not exist in ThemeInputs. When both x and y are present
             // we only flip the global flag when they agree.
-            if grid.y.unwrap_or(enabled) == enabled {
-                theme.grid = enabled;
+            if grid_cfg.y.unwrap_or(enabled) == enabled {
+                theme.grid.grid = enabled;
             }
-        } else if let Some(enabled) = grid.y {
-            theme.grid = enabled;
+        } else if let Some(enabled) = grid_cfg.y {
+            theme.grid.grid = enabled;
         }
-        if let Some(ref color) = grid.color {
-            if let Ok(c) = color::from_hex_str(color) {
-                theme.grid_color = c;
+        if let Some(ref color_str) = grid_cfg.color {
+            if let Ok(c) = color::from_hex_str(color_str) {
+                theme.colors.grid_color = c;
             }
         }
-        if let Some(w) = grid.width {
-            theme.grid_width = w;
+        if let Some(w) = grid_cfg.width {
+            theme.sizes.grid_width = w;
         }
-        if let Some(ref d) = grid.dash {
-            theme.grid_dash = Some(d.clone());
+        if let Some(ref d) = grid_cfg.dash {
+            theme.grid.grid_dash = Some(d.clone());
         }
-        if let Some(o) = grid.opacity {
-            theme.grid_opacity = o;
+        if let Some(o) = grid_cfg.opacity {
+            theme.grid.grid_opacity = o;
         }
     }
 
     // ── Padding overrides ─────────────────────────────────────────────────────
-    // Per-side padding: map each supplied side directly to ThemeInputs.padding_*.
+    // Per-side padding: map each supplied side directly to ThemeInputs.padding.*.
     // `auto=true` (the Python default) is no longer a guard — it was previously
     // blocking all padding overrides. The `auto` field is reserved for a future
     // "auto-expand to fit labels" semantic; it does not disable explicit values.
-    if let Some(ref padding) = config.padding {
-        if let Some(top) = padding.top {
-            theme.padding_top = Some(top);
+    if let Some(ref pad) = config.padding {
+        if let Some(top) = pad.top {
+            theme.padding.padding_top = Some(top);
         }
-        if let Some(right) = padding.right {
-            theme.padding_right = Some(right);
+        if let Some(right) = pad.right {
+            theme.padding.padding_right = Some(right);
         }
-        if let Some(bottom) = padding.bottom {
-            theme.padding_bottom = Some(bottom);
+        if let Some(bottom) = pad.bottom {
+            theme.padding.padding_bottom = Some(bottom);
         }
-        if let Some(left) = padding.left {
-            theme.padding_left = Some(left);
+        if let Some(left) = pad.left {
+            theme.padding.padding_left = Some(left);
         }
     }
 
     // ── Legend overrides ──────────────────────────────────────────────────────
-    if let Some(ref legend) = config.legend {
-        if let Some(ref orient) = legend.orient {
-            theme.legend_orient = match orient.as_str() {
+    if let Some(ref legend_cfg) = config.legend {
+        if let Some(ref orient) = legend_cfg.orient {
+            theme.legend.legend_orient = match orient.as_str() {
                 "right"  => LegendOrient::Right,
                 "left"   => LegendOrient::Left,
                 "top"    => LegendOrient::Top,
                 "bottom" => LegendOrient::Bottom,
-                _ => theme.legend_orient,
+                _ => theme.legend.legend_orient,
             };
         }
-        if let Some(ref dir) = legend.direction {
-            theme.legend_direction = match dir.as_str() {
+        if let Some(ref dir) = legend_cfg.direction {
+            theme.legend.legend_direction = match dir.as_str() {
                 "vertical"   => Some(LegendDirection::Vertical),
                 "horizontal" => Some(LegendDirection::Horizontal),
-                _ => theme.legend_direction,
+                _ => theme.legend.legend_direction,
             };
         }
-        if let Some(cols) = legend.columns {
-            theme.legend_columns = Some(cols);
+        if let Some(cols) = legend_cfg.columns {
+            theme.legend.legend_columns = Some(cols);
         }
-        if let Some(fs) = legend.title_font_size {
-            theme.legend_title_font_size = fs;
+        if let Some(fs) = legend_cfg.title_font_size {
+            theme.typography.legend_title_font_size = fs;
         }
-        // legend.label_font_size maps to the shared theme.label_font_size,
+        // legend.label_font_size maps to the shared theme.typography.label_font_size,
         // which controls both axis and legend label sizing.
-        if let Some(fs) = legend.label_font_size {
-            theme.label_font_size = fs;
+        if let Some(fs) = legend_cfg.label_font_size {
+            theme.typography.label_font_size = fs;
         }
     }
 
     // ── Color scheme overrides ────────────────────────────────────────────────
-    if let Some(ref color) = config.color {
-        if let Some(ref scheme) = color.scheme {
-            theme.color_scheme = scheme.clone();
+    if let Some(ref color_cfg) = config.color {
+        if let Some(ref scheme) = color_cfg.scheme {
+            theme.palette.color_scheme = scheme.clone();
         }
-        if let Some(ref seq) = color.sequential_scheme {
-            theme.sequential_scheme = seq.clone();
+        if let Some(ref seq) = color_cfg.sequential_scheme {
+            theme.palette.sequential_scheme = seq.clone();
         }
-        if let Some(ref div) = color.diverging_scheme {
-            theme.diverging_scheme = div.clone();
+        if let Some(ref div) = color_cfg.diverging_scheme {
+            theme.palette.diverging_scheme = div.clone();
         }
     }
 
     // ── Axis overrides (applied to both axes simultaneously) ──────────────────
-    if let Some(ref axis) = config.axis {
-        apply_axis_config_to_theme(theme, axis);
+    if let Some(ref axis_cfg) = config.axis {
+        apply_axis_config_to_theme(theme, axis_cfg);
     }
     // Per-axis overrides run after the combined override so axis_x / axis_y
     // wins over axis when both are specified.
@@ -302,13 +302,13 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
     // ── Title overrides ───────────────────────────────────────────────────────
     if let Some(ref title) = config.title {
         if let Some(fs) = title.font_size {
-            theme.title_font_size = fs;
+            theme.typography.title_font_size = fs;
         }
         if let Some(ref fw) = title.font_weight {
-            theme.title_font_weight = fw.clone();
+            theme.typography.title_font_weight = fw.clone();
         }
         if let Some(ref anchor) = title.anchor {
-            theme.title_anchor = match anchor.as_str() {
+            theme.typography.title_anchor = match anchor.as_str() {
                 "middle" => TextAnchor::Middle,
                 "end"    => TextAnchor::End,
                 _        => TextAnchor::Start,
@@ -316,11 +316,11 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
         }
         if let Some(ref c) = title.color {
             if let Ok(parsed) = color::from_hex_str(c) {
-                theme.title_color = parsed;
+                theme.colors.title_color = parsed;
             }
         }
         if let Some(o) = title.offset {
-            theme.title_offset = o;
+            theme.typography.title_offset = o;
         }
     }
 }
@@ -330,42 +330,42 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
 /// Fields like `label_font_size`, `tick_size`, and grid color are global in
 /// `ThemeInputs` and are applied here regardless of x/y axis distinction.
 /// Per-axis-specific overrides (x vs y) are handled in the sibling functions.
-fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis: &AxisConfigSpec) {
-    if let Some(fs) = axis.label_font_size {
-        theme.label_font_size = fs;
+fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec) {
+    if let Some(fs) = axis_cfg.label_font_size {
+        theme.typography.label_font_size = fs;
     }
-    if let Some(ref c) = axis.label_color {
+    if let Some(ref c) = axis_cfg.label_color {
         if let Ok(parsed) = color::from_hex_str(c) {
-            theme.label_color = parsed;
+            theme.colors.label_color = parsed;
         }
     }
-    if let Some(ts) = axis.tick_size {
-        theme.tick_size = ts;
+    if let Some(ts) = axis_cfg.tick_size {
+        theme.sizes.tick_size = ts;
     }
-    if let Some(enabled) = axis.domain {
-        theme.axis_line = enabled;
+    if let Some(enabled) = axis_cfg.domain {
+        theme.axis.axis_line = enabled;
     }
-    if let Some(ref c) = axis.domain_color {
+    if let Some(ref c) = axis_cfg.domain_color {
         if let Ok(parsed) = color::from_hex_str(c) {
-            theme.axis_line_color = parsed;
+            theme.colors.axis_line_color = parsed;
         }
     }
-    if let Some(w) = axis.domain_width {
-        theme.axis_line_width = w;
+    if let Some(w) = axis_cfg.domain_width {
+        theme.sizes.axis_line_width = w;
     }
-    if let Some(enabled) = axis.grid {
-        theme.grid = enabled;
+    if let Some(enabled) = axis_cfg.grid {
+        theme.grid.grid = enabled;
     }
-    if let Some(ref c) = axis.grid_color {
+    if let Some(ref c) = axis_cfg.grid_color {
         if let Ok(parsed) = color::from_hex_str(c) {
-            theme.grid_color = parsed;
+            theme.colors.grid_color = parsed;
         }
     }
-    if let Some(ref d) = axis.grid_dash {
-        theme.grid_dash = Some(d.clone());
+    if let Some(ref d) = axis_cfg.grid_dash {
+        theme.grid.grid_dash = Some(d.clone());
     }
-    if let Some(w) = axis.grid_width {
-        theme.grid_width = w;
+    if let Some(w) = axis_cfg.grid_width {
+        theme.sizes.grid_width = w;
     }
 }
 
@@ -613,13 +613,13 @@ fn prepare_and_layout(
     let mut effective_theme = theme.clone();
     // D13: per-encoding legend overrides.
     if let Some(orient) = prep.legend_overrides.orient {
-        effective_theme.legend_orient = orient;
+        effective_theme.legend.legend_orient = orient;
     }
     if let Some(fs) = prep.legend_overrides.title_font_size {
-        effective_theme.legend_title_font_size = fs;
+        effective_theme.typography.legend_title_font_size = fs;
     }
     if let Some(cols) = prep.legend_overrides.columns {
-        effective_theme.legend_columns = Some(cols);
+        effective_theme.legend.legend_columns = Some(cols);
     }
     // ChartConfig overrides (configure > theme).
     apply_chart_config(&mut effective_theme, chart_config);
@@ -638,14 +638,14 @@ fn prepare_and_layout(
                     (0..=5).map(|i| {
                         let v = lo + step * i as f64;
                         let label = crate::render::format::format_numeric(v);
-                        m.measure_width(&label, effective_theme.label_font_size)
+                        m.measure_width(&label, effective_theme.typography.label_font_size)
                     }).fold(0.0_f64, f64::max)
                 } else { 30.0 }
             } else { 30.0 };
-            let needed = y2_label_width + effective_theme.tick_size + 8.0;
-            let current = effective_theme.padding_right.unwrap_or(effective_theme.padding);
+            let needed = y2_label_width + effective_theme.sizes.tick_size + 8.0;
+            let current = effective_theme.padding.padding_right.unwrap_or(effective_theme.padding.padding);
             if current < needed {
-                effective_theme.padding_right = Some(needed);
+                effective_theme.padding.padding_right = Some(needed);
             }
             break;
         }
@@ -959,13 +959,13 @@ mod orchestration_tests {
 
         let mut effective_theme = theme.clone();
         if let Some(orient) = prep.legend_overrides.orient {
-            effective_theme.legend_orient = orient;
+            effective_theme.legend.legend_orient = orient;
         }
         if let Some(fs) = prep.legend_overrides.title_font_size {
-            effective_theme.legend_title_font_size = fs;
+            effective_theme.typography.legend_title_font_size = fs;
         }
         if let Some(cols) = prep.legend_overrides.columns {
-            effective_theme.legend_columns = Some(cols);
+            effective_theme.legend.legend_columns = Some(cols);
         }
         apply_chart_config(&mut effective_theme, &ChartConfig::default());
         let theme_ref = &effective_theme;
@@ -1400,14 +1400,14 @@ mod chart_config_application_tests {
         let mut theme = default_theme.clone();
         apply_chart_config(&mut theme, &ChartConfig::default());
         // Empty config must not change anything.
-        assert_eq!(theme.grid, default_theme.grid);
-        assert_eq!(theme.grid_width, default_theme.grid_width);
-        assert_eq!(theme.grid_color, default_theme.grid_color);
-        assert_eq!(theme.padding, default_theme.padding);
-        assert_eq!(theme.legend_orient, default_theme.legend_orient);
-        assert_eq!(theme.color_scheme, default_theme.color_scheme);
-        assert_eq!(theme.label_font_size, default_theme.label_font_size);
-        assert_eq!(theme.title_font_size, default_theme.title_font_size);
+        assert_eq!(theme.grid.grid, default_theme.grid.grid);
+        assert_eq!(theme.sizes.grid_width, default_theme.sizes.grid_width);
+        assert_eq!(theme.colors.grid_color, default_theme.colors.grid_color);
+        assert_eq!(theme.padding.padding, default_theme.padding.padding);
+        assert_eq!(theme.legend.legend_orient, default_theme.legend.legend_orient);
+        assert_eq!(theme.palette.color_scheme, default_theme.palette.color_scheme);
+        assert_eq!(theme.typography.label_font_size, default_theme.typography.label_font_size);
+        assert_eq!(theme.typography.title_font_size, default_theme.typography.title_font_size);
     }
 
     #[test]
@@ -1423,33 +1423,33 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.grid_color, color::from_hex_str("#ff0000").unwrap());
-        assert_eq!(theme.grid_width, 2.0);
-        assert_eq!(theme.grid_opacity, 0.5);
+        assert_eq!(theme.colors.grid_color, color::from_hex_str("#ff0000").unwrap());
+        assert_eq!(theme.sizes.grid_width, 2.0);
+        assert_eq!(theme.grid.grid_opacity, 0.5);
     }
 
     #[test]
     fn apply_chart_config_grid_disabled_via_grid_config() {
         let mut theme = ThemeInputs::default();
-        assert!(theme.grid); // default is on
+        assert!(theme.grid.grid); // default is on
         let config = ChartConfig {
             grid: Some(GridConfigSpec { x: Some(false), y: Some(false), ..Default::default() }),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert!(!theme.grid);
+        assert!(!theme.grid.grid);
     }
 
     #[test]
     fn apply_chart_config_grid_enabled_via_axis_config() {
         let mut theme = ThemeInputs::default();
-        theme.grid = false;
+        theme.grid.grid = false;
         let config = ChartConfig {
             axis: Some(AxisConfigSpec { grid: Some(true), ..Default::default() }),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert!(theme.grid);
+        assert!(theme.grid.grid);
     }
 
     #[test]
@@ -1467,12 +1467,12 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         // Each side is set independently.
-        assert_eq!(theme.padding_top, Some(10.0));
-        assert_eq!(theme.padding_right, Some(20.0));
-        assert_eq!(theme.padding_bottom, Some(30.0));
-        assert_eq!(theme.padding_left, Some(40.0));
+        assert_eq!(theme.padding.padding_top, Some(10.0));
+        assert_eq!(theme.padding.padding_right, Some(20.0));
+        assert_eq!(theme.padding.padding_bottom, Some(30.0));
+        assert_eq!(theme.padding.padding_left, Some(40.0));
         // Uniform fallback padding is unchanged.
-        assert_eq!(theme.padding, 16.0);
+        assert_eq!(theme.padding.padding, 16.0);
     }
 
     #[test]
@@ -1489,11 +1489,11 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         // The explicit top value must be applied even when auto=true.
-        assert_eq!(theme.padding_top, Some(5.0));
+        assert_eq!(theme.padding.padding_top, Some(5.0));
         // Sides not specified remain None.
-        assert!(theme.padding_right.is_none());
-        assert!(theme.padding_bottom.is_none());
-        assert!(theme.padding_left.is_none());
+        assert!(theme.padding.padding_right.is_none());
+        assert!(theme.padding.padding_bottom.is_none());
+        assert!(theme.padding.padding_left.is_none());
     }
 
     #[test]
@@ -1511,11 +1511,11 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.legend_orient, LegendOrient::Bottom);
-        assert_eq!(theme.legend_direction, Some(LegendDirection::Horizontal));
-        assert_eq!(theme.legend_columns, Some(4));
-        assert_eq!(theme.legend_title_font_size, 16.0);
-        assert_eq!(theme.label_font_size, 9.0);
+        assert_eq!(theme.legend.legend_orient, LegendOrient::Bottom);
+        assert_eq!(theme.legend.legend_direction, Some(LegendDirection::Horizontal));
+        assert_eq!(theme.legend.legend_columns, Some(4));
+        assert_eq!(theme.typography.legend_title_font_size, 16.0);
+        assert_eq!(theme.typography.label_font_size, 9.0);
     }
 
     #[test]
@@ -1531,9 +1531,9 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.color_scheme, "tableau10");
-        assert_eq!(theme.sequential_scheme, "viridis");
-        assert_eq!(theme.diverging_scheme, "rdbu");
+        assert_eq!(theme.palette.color_scheme, "tableau10");
+        assert_eq!(theme.palette.sequential_scheme, "viridis");
+        assert_eq!(theme.palette.diverging_scheme, "rdbu");
     }
 
     #[test]
@@ -1544,13 +1544,13 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.label_font_size, 14.0);
+        assert_eq!(theme.typography.label_font_size, 14.0);
     }
 
     #[test]
     fn apply_chart_config_axis_tick_size_and_domain_visibility() {
         let mut theme = ThemeInputs::default();
-        assert!(theme.axis_line); // default on
+        assert!(theme.axis.axis_line); // default on
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
                 tick_size: Some(6.0),
@@ -1561,9 +1561,9 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.tick_size, 6.0);
-        assert!(!theme.axis_line);
-        assert_eq!(theme.axis_line_width, 2.0);
+        assert_eq!(theme.sizes.tick_size, 6.0);
+        assert!(!theme.axis.axis_line);
+        assert_eq!(theme.sizes.axis_line_width, 2.0);
     }
 
     #[test]
@@ -1580,17 +1580,17 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.title_font_size, 22.0);
-        assert_eq!(theme.title_font_weight, "700");
-        assert_eq!(theme.title_anchor, TextAnchor::End);
-        assert_eq!(theme.title_color, color::from_hex_str("#123456").unwrap());
-        assert_eq!(theme.title_offset, 8.0);
+        assert_eq!(theme.typography.title_font_size, 22.0);
+        assert_eq!(theme.typography.title_font_weight, "700");
+        assert_eq!(theme.typography.title_anchor, TextAnchor::End);
+        assert_eq!(theme.colors.title_color, color::from_hex_str("#123456").unwrap());
+        assert_eq!(theme.typography.title_offset, 8.0);
     }
 
     #[test]
     fn apply_chart_config_invalid_hex_color_silently_ignored() {
         let mut theme = ThemeInputs::default();
-        let original_grid_color = theme.grid_color;
+        let original_grid_color = theme.colors.grid_color;
         let config = ChartConfig {
             grid: Some(GridConfigSpec {
                 color: Some("not-a-hex-color".to_string()),
@@ -1600,7 +1600,7 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         // Bad color must not change the existing value.
-        assert_eq!(theme.grid_color, original_grid_color);
+        assert_eq!(theme.colors.grid_color, original_grid_color);
     }
 
     #[test]
@@ -1614,13 +1614,13 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.label_font_size, 14.0);
+        assert_eq!(theme.typography.label_font_size, 14.0);
     }
 
     #[test]
     fn apply_chart_config_grid_dash() {
         let mut theme = ThemeInputs::default();
-        assert!(theme.grid_dash.is_none());
+        assert!(theme.grid.grid_dash.is_none());
         let config = ChartConfig {
             grid: Some(GridConfigSpec {
                 dash: Some(vec![4.0, 4.0]),
@@ -1629,7 +1629,7 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.grid_dash, Some(vec![4.0, 4.0]));
+        assert_eq!(theme.grid.grid_dash, Some(vec![4.0, 4.0]));
     }
 
     // ── New wired fields (configure-punchlist, 2026-05-24) ───────────────────

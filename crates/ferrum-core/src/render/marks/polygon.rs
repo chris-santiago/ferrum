@@ -124,7 +124,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .as_deref()
             .and_then(NamedContinuous::from_name)
             .unwrap_or_else(|| {
-                NamedContinuous::from_name(&ctx.theme.sequential_scheme)
+                NamedContinuous::from_name(&ctx.theme.palette.sequential_scheme)
                     .unwrap_or(NamedContinuous::Viridis)
             });
         Some(ContinuousScheme::Named(named))

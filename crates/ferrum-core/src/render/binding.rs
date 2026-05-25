@@ -293,24 +293,24 @@ fn parse_color_val(s: &str) -> PyResult<super::color::Color> {
 }
 
 fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyResult<()> {
-    if let Some(s) = spec.mark_color { t.mark_color = parse_color_val(&s)?; }
+    if let Some(s) = spec.mark_color { t.colors.mark_color = parse_color_val(&s)?; }
     // `background` is an alias for `background_color`; both populate the
     // same field. Last-write-wins if a user passes both.
-    if let Some(s) = spec.background_color { t.background_color = parse_color_val(&s)?; }
-    if let Some(s) = spec.background { t.background_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.padding { t.padding = v; }
+    if let Some(s) = spec.background_color { t.colors.background_color = parse_color_val(&s)?; }
+    if let Some(s) = spec.background { t.colors.background_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.padding { t.padding.padding = v; }
 
     // Typography
-    if let Some(v) = spec.font_family { t.font_family = v; }
-    if let Some(v) = spec.font_weight { t.font_weight = v; }
-    if let Some(s) = spec.font_color { t.font_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.font_size { t.label_font_size = v; }
-    if let Some(v) = spec.title_font_family { t.title_font_family = v; }
-    if let Some(v) = spec.title_font_size { t.title_font_size = v; }
-    if let Some(v) = spec.title_font_weight { t.title_font_weight = v; }
-    if let Some(s) = spec.title_color { t.title_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.font_family { t.typography.font_family = v; }
+    if let Some(v) = spec.font_weight { t.typography.font_weight = v; }
+    if let Some(s) = spec.font_color { t.colors.font_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.font_size { t.typography.label_font_size = v; }
+    if let Some(v) = spec.title_font_family { t.typography.title_font_family = v; }
+    if let Some(v) = spec.title_font_size { t.typography.title_font_size = v; }
+    if let Some(v) = spec.title_font_weight { t.typography.title_font_weight = v; }
+    if let Some(s) = spec.title_color { t.colors.title_color = parse_color_val(&s)?; }
     if let Some(s) = spec.title_anchor {
-        t.title_anchor = match s.as_str() {
+        t.typography.title_anchor = match s.as_str() {
             "start" => TextAnchor::Start,
             "middle" => TextAnchor::Middle,
             "end" => TextAnchor::End,
@@ -319,32 +319,32 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
             ))),
         };
     }
-    if let Some(v) = spec.title_offset { t.title_offset = v; }
-    if let Some(v) = spec.label_font_family { t.label_font_family = v; }
-    if let Some(s) = spec.label_color { t.label_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.title_offset { t.typography.title_offset = v; }
+    if let Some(v) = spec.label_font_family { t.typography.label_font_family = v; }
+    if let Some(s) = spec.label_color { t.colors.label_color = parse_color_val(&s)?; }
 
     // Axes
-    if let Some(v) = spec.axis_line { t.axis_line = v; }
-    if let Some(s) = spec.axis_line_color { t.axis_line_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.axis_line_width { t.axis_line_width = v; }
-    if let Some(s) = spec.tick_color { t.tick_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.tick_size { t.tick_size = v; }
-    if let Some(v) = spec.tick_width { t.tick_width = v; }
+    if let Some(v) = spec.axis_line { t.axis.axis_line = v; }
+    if let Some(s) = spec.axis_line_color { t.colors.axis_line_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.axis_line_width { t.sizes.axis_line_width = v; }
+    if let Some(s) = spec.tick_color { t.colors.tick_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.tick_size { t.sizes.tick_size = v; }
+    if let Some(v) = spec.tick_width { t.sizes.tick_width = v; }
 
     // Grid
-    if let Some(v) = spec.grid { t.grid = v; }
-    if let Some(s) = spec.grid_color { t.grid_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.grid_width { t.grid_width = v; }
-    if let Some(v) = spec.grid_dash { t.grid_dash = Some(v); }
-    if let Some(v) = spec.grid_opacity { t.grid_opacity = v; }
+    if let Some(v) = spec.grid { t.grid.grid = v; }
+    if let Some(s) = spec.grid_color { t.colors.grid_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.grid_width { t.sizes.grid_width = v; }
+    if let Some(v) = spec.grid_dash { t.grid.grid_dash = Some(v); }
+    if let Some(v) = spec.grid_opacity { t.grid.grid_opacity = v; }
 
     // Marks
-    if let Some(v) = spec.point_size { t.point_size = v; }
-    if let Some(v) = spec.point_opacity { t.point_opacity = v; }
-    if let Some(v) = spec.line_stroke_width { t.line_stroke_width = v; }
-    if let Some(v) = spec.bar_corner_radius { t.bar_corner_radius = v; }
-    if let Some(v) = spec.area_opacity { t.area_opacity = v; }
-    if let Some(v) = spec.opacity { t.default_opacity = v; }
+    if let Some(v) = spec.point_size { t.sizes.point_size = v; }
+    if let Some(v) = spec.point_opacity { t.sizes.point_opacity = v; }
+    if let Some(v) = spec.line_stroke_width { t.sizes.line_stroke_width = v; }
+    if let Some(v) = spec.bar_corner_radius { t.sizes.bar_corner_radius = v; }
+    if let Some(v) = spec.area_opacity { t.sizes.area_opacity = v; }
+    if let Some(v) = spec.opacity { t.sizes.default_opacity = v; }
 
     // Palette
     if let Some(s) = spec.color_scheme {
@@ -358,7 +358,7 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
                 super::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
-        t.color_scheme = s;
+        t.palette.color_scheme = s;
     }
     if let Some(s) = spec.sequential_scheme {
         if !super::palette::is_sequential_scheme(&s) {
@@ -367,7 +367,7 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
                 super::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
-        t.sequential_scheme = s;
+        t.palette.sequential_scheme = s;
     }
     if let Some(s) = spec.diverging_scheme {
         if !super::palette::is_sequential_scheme(&s) {
@@ -376,17 +376,17 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
                 super::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
-        t.diverging_scheme = s;
+        t.palette.diverging_scheme = s;
     }
 
     // Strip
-    if let Some(s) = spec.strip_background_color { t.strip_background_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.strip_text_size { t.strip_text_size = v; }
-    if let Some(v) = spec.strip_padding { t.strip_padding = v; }
+    if let Some(s) = spec.strip_background_color { t.colors.strip_background_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.strip_text_size { t.sizes.strip_text_size = v; }
+    if let Some(v) = spec.strip_padding { t.padding.strip_padding = v; }
 
     // Legend
     if let Some(s) = spec.legend_orient {
-        t.legend_orient = match s.as_str() {
+        t.legend.legend_orient = match s.as_str() {
             "left" => LegendOrient::Left,
             "right" => LegendOrient::Right,
             "top" => LegendOrient::Top,
@@ -397,7 +397,7 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
         };
     }
     if let Some(s) = spec.legend_direction {
-        t.legend_direction = Some(match s.as_str() {
+        t.legend.legend_direction = Some(match s.as_str() {
             "horizontal" => LegendDirection::Horizontal,
             "vertical" => LegendDirection::Vertical,
             other => return Err(PyValueError::new_err(format!(
@@ -405,16 +405,16 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
             ))),
         });
     }
-    if let Some(v) = spec.legend_title_font_size { t.legend_title_font_size = v; }
+    if let Some(v) = spec.legend_title_font_size { t.typography.legend_title_font_size = v; }
 
     // Reference lines
-    if let Some(s) = spec.reference_line_color { t.reference_line_color = parse_color_val(&s)?; }
-    if let Some(v) = spec.reference_line_dash { t.reference_line_dash = Some(v); }
+    if let Some(s) = spec.reference_line_color { t.colors.reference_line_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.reference_line_dash { t.reference_line.reference_line_dash = Some(v); }
 
     // Spacing
-    if let Some(v) = spec.axis_title_padding { t.axis_title_padding = v; }
-    if let Some(v) = spec.column_padding { t.column_padding = v; }
-    if let Some(v) = spec.row_padding { t.row_padding = v; }
+    if let Some(v) = spec.axis_title_padding { t.padding.axis_title_padding = v; }
+    if let Some(v) = spec.column_padding { t.padding.column_padding = v; }
+    if let Some(v) = spec.row_padding { t.padding.row_padding = v; }
 
     // Axis label culling
     if let Some(v) = spec.cull_threshold { t.cull_threshold = v; }
@@ -457,9 +457,9 @@ mod theme_dict_tests {
             let d = PyDict::new(py);
             d.set_item("background", "#ff0000").unwrap();
             let t = theme_from_dict(Some(&d)).unwrap();
-            assert_eq!(t.background_color.red, 0xFF);
-            assert_eq!(t.background_color.green, 0x00);
-            assert_eq!(t.background_color.blue, 0x00);
+            assert_eq!(t.colors.background_color.red, 0xFF);
+            assert_eq!(t.colors.background_color.green, 0x00);
+            assert_eq!(t.colors.background_color.blue, 0x00);
         });
     }
 
@@ -487,7 +487,7 @@ mod theme_dict_tests {
                 let d = PyDict::new(py);
                 d.set_item("color_scheme", name).unwrap();
                 let t = theme_from_dict(Some(&d)).expect(name);
-                assert_eq!(t.color_scheme, name);
+                assert_eq!(t.palette.color_scheme, name);
             }
         });
     }
@@ -526,7 +526,7 @@ mod theme_dict_tests {
                 let d = PyDict::new(py);
                 d.set_item("sequential_scheme", name).unwrap();
                 let t = theme_from_dict(Some(&d)).expect(name);
-                assert_eq!(t.sequential_scheme, name);
+                assert_eq!(t.palette.sequential_scheme, name);
             }
         });
     }
@@ -539,7 +539,7 @@ mod theme_dict_tests {
                 let d = PyDict::new(py);
                 d.set_item("diverging_scheme", name).unwrap();
                 let t = theme_from_dict(Some(&d)).expect(name);
-                assert_eq!(t.diverging_scheme, name);
+                assert_eq!(t.palette.diverging_scheme, name);
             }
         });
     }

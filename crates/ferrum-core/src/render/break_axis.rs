@@ -189,7 +189,7 @@ pub fn build_break_indicators(
 ) -> Vec<SceneNode> {
     let mut nodes = Vec::new();
 
-    let stroke = to_scene_stroke(theme.axis_line_color, theme.axis_line_width, 1.0, None, None, None);
+    let stroke = to_scene_stroke(theme.colors.axis_line_color, theme.sizes.axis_line_width, 1.0, None, None, None);
 
     for &indicator_px in &result.indicator_pixels {
         let new_nodes = match break_style {

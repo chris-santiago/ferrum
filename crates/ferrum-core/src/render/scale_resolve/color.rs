@@ -64,9 +64,9 @@ pub fn build_color_scale(
             .map(ContinuousScheme::Named)
             .unwrap_or_else(|| {
                 let theme_scheme = if lo < 0.0 && hi > 0.0 {
-                    &theme.diverging_scheme
+                    &theme.palette.diverging_scheme
                 } else {
-                    &theme.sequential_scheme
+                    &theme.palette.sequential_scheme
                 };
                 NamedContinuous::from_name(theme_scheme)
                     .map(ContinuousScheme::Named)
@@ -75,7 +75,7 @@ pub fn build_color_scale(
         Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), None))
     } else {
         let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-        let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.color_scheme);
+        let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
         let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
             palette::categorical_palette("tableau10")
         } else {
