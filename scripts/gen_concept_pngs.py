@@ -358,14 +358,12 @@ def gen_secondary_axes_volume():
     """
     df = pl.DataFrame(
         {
-            "date": pl.date_range(pl.date(2026, 1, 1), pl.date(2026, 6, 30), "1mo", eager=True),
+            "month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
             "price": [142.5, 145.2, 138.1, 151.0, 158.3, 153.7],
             "volume": [2300000, 1850000, 3100000, 2650000, 1920000, 2480000],
         }
     )
-    chart = fm.Chart(df).mark_line(stroke_width=2).encode(x="date:T", y="price:Q").configure(
-        axis_x=fm.AxisConfig(label_format="month_year")
-    ) + fm.SecondaryY(
+    chart = fm.Chart(df).mark_line(stroke_width=2).encode(x="month:N", y="price:Q") + fm.SecondaryY(
         field="volume",
         mark="bar",
         color="#94a3b8",

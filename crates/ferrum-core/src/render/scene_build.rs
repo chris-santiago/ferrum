@@ -318,6 +318,16 @@ pub fn build_scene(
                         &mut batch.nodes, axis, d_lo, d_hi, px_lo, px_hi, break_result,
                     );
                 }
+                // Remap axis nodes whose coordinate falls within the
+                // broken axis's pixel range.  Cross-axis elements (e.g.
+                // x-axis labels below the plot for a y-break) have
+                // coordinates outside this range and are left untouched.
+                let (range_lo, range_hi) = (px_lo.min(px_hi), px_lo.max(px_hi));
+                for node in axes_nodes.iter_mut() {
+                    if node_coord_in_range(node, axis, range_lo, range_hi) {
+                        remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
+                    }
+                }
                 // Grid lines within the plot area are remapped so they
                 // align with the compressed scale segments.
                 for node in grid_nodes.iter_mut() {
@@ -954,6 +964,29 @@ const BREAK_HIDDEN: f64 = -99999.0;
 /// All other marks are repositioned to their compressed pixel coordinates.
 ///
 /// `axis` — `"x"` or `"y"`, selects which coordinate axis is remapped.
+/// Returns true when the node's primary coordinate on `axis` falls
+/// within `[lo, hi]` (inclusive with 1px margin).  Used to distinguish
+/// same-axis elements (y-axis ticks for a y-break) from cross-axis
+/// elements (x-axis labels below the plot area) so that only same-axis
+/// nodes are remapped through the broken scale.
+fn node_coord_in_range(node: &SceneNode, axis: &str, lo: f64, hi: f64) -> bool {
+    let margin = 1.0;
+    let coord = match node {
+        SceneNode::Text { x, y, .. } => if axis == "y" { *y } else { *x },
+        SceneNode::Line { x1, y1, x2, y2, .. } => {
+            if axis == "y" { (*y1).min(*y2) } else { (*x1).min(*x2) }
+        }
+        SceneNode::Rect { x, y, w, h, .. } => {
+            if axis == "y" { *y } else { *x }
+        }
+        SceneNode::Group { children, .. } => {
+            return children.iter().any(|c| node_coord_in_range(c, axis, lo, hi));
+        }
+        _ => return false,
+    };
+    coord >= lo - margin && coord <= hi + margin
+}
+
 /// `d_lo`/`d_hi` — data domain of the unbroken scale.
 /// `px_lo`/`px_hi` — pixel range of the unbroken scale.
 /// `break_result` — piecewise mapping from `apply_break_to_scale`.

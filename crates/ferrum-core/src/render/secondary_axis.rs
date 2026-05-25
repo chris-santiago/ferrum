@@ -142,7 +142,7 @@ pub fn build_secondary_axis(
 
 // ── Mark rendering ────────────────────────────────────────────────────────────
 
-/// Build marks (line or point) against the secondary Y scale.
+/// Build marks (line, point, or bar) against the secondary Y scale.
 ///
 /// `x_field` is the column name used by the primary X encoding; `x_scale` maps
 /// its values to pixel positions. `spec.field` drives the secondary Y axis.
@@ -152,7 +152,7 @@ pub fn build_secondary_marks(
     x_scale: &ScaleKind,
     y2_scale: &ScaleKind,
     spec: &SecondaryYSpec,
-    _plot_area: &Rect,
+    plot_area: &Rect,
 ) -> Vec<SceneNode> {
     let mark_color = spec
         .color
@@ -164,7 +164,12 @@ pub fn build_secondary_marks(
 
     let x_vals: Vec<Option<f64>> = match arrow_cast::col_as_f64(batch, x_field) {
         Ok(vs) => vs.into_iter().map(|v| v.and_then(|x| x_scale.to_pixel_f64(x))).collect(),
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            match arrow_cast::col_as_str(batch, x_field) {
+                Ok(vs) => vs.into_iter().map(|v| v.and_then(|s| x_scale.to_pixel_str(&s))).collect(),
+                Err(_) => return Vec::new(),
+            }
+        }
     };
     let y2_vals: Vec<Option<f64>> = match arrow_cast::col_as_f64(batch, &spec.field) {
         Ok(v) => v,
@@ -179,6 +184,9 @@ pub fn build_secondary_marks(
     match spec.mark.as_str() {
         "point" | "circle" => {
             build_point_marks(&x_vals[..n], &y2_vals[..n], y2_scale, color_with_alpha)
+        }
+        "bar" | "rect" => {
+            build_bar_marks(&x_vals[..n], &y2_vals[..n], y2_scale, color_with_alpha, plot_area, n)
         }
         _ => build_line_mark(&x_vals[..n], &y2_vals[..n], y2_scale, color_with_alpha),
     }
@@ -258,6 +266,53 @@ fn build_point_marks(
                 fill_opacity: 1.0,
                 angle: 0.0,
             },
+        });
+    }
+    nodes
+}
+
+fn build_bar_marks(
+    x_px: &[Option<f64>],
+    y_data: &[Option<f64>],
+    y2_scale: &ScaleKind,
+    color: crate::render::color::Color,
+    plot_area: &Rect,
+    n: usize,
+) -> Vec<SceneNode> {
+    let fill_color = to_scene_color(color);
+    let baseline_px = y2_scale.to_pixel_f64(0.0).unwrap_or(plot_area.y + plot_area.h);
+    let bar_width = if n > 1 {
+        let mut xs: Vec<f64> = x_px.iter().filter_map(|v| *v).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let min_gap = xs.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(f64::INFINITY, f64::min);
+        (min_gap * 0.8).max(2.0)
+    } else {
+        plot_area.w * 0.6
+    };
+    let mut nodes = Vec::new();
+    for (xv, yv) in x_px.iter().zip(y_data.iter()) {
+        let (Some(px), Some(raw_y)) = (xv, yv) else { continue };
+        let Some(py) = y2_scale.to_pixel_f64(*raw_y) else { continue };
+        let top = py.min(baseline_px);
+        let h = (py - baseline_px).abs();
+        nodes.push(SceneNode::Rect {
+            x: px - bar_width / 2.0,
+            y: top,
+            w: bar_width,
+            h,
+            style: FillStroke {
+                fill: Some(fill_color),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+            corner_radius: 0.0,
         });
     }
     nodes

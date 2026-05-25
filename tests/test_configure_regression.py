@@ -329,15 +329,13 @@ def _text_nodes(svg: str) -> list[str]:
 
 
 class TestBreakAxisAxisLabelsPreserved:
-    """Regression: x-axis labels must remain visible when a y-axis break is applied.
+    """Regression: break-axis must remap same-axis ticks while preserving cross-axis labels.
 
-    Before the fix, remap_node was called on ALL axis text nodes, including
-    x-axis tick labels whose y-coordinates fall below the plot area.  Those
-    out-of-range y-values were clamped to the data domain edge, then mapped
-    through the break, pushing the labels to the sentinel coordinate -99999
-    (invisible).  The fix removes the remap_node call on axes_nodes entirely
-    so axis labels are positioned by the normal axis layout pass, not the
-    broken scale.
+    A y-axis break must remap y-axis tick labels through the broken scale
+    (so the ticks match the compressed bar positions), but must NOT touch
+    x-axis labels positioned below the plot area.  The remap uses
+    node_coord_in_range to filter: only nodes whose coordinate falls within
+    the broken axis's pixel range are remapped.
     """
 
     def test_y_break_preserves_x_category_labels(self):
@@ -381,8 +379,44 @@ class TestBreakAxisAxisLabelsPreserved:
             "is applied — axis text nodes outside the broken axis must not be remapped"
         )
 
-    def test_y_break_labels_not_at_sentinel(self):
-        """X-axis labels must not be positioned at the sentinel coordinate y=-99999."""
+    def test_y_break_remaps_y_axis_ticks(self):
+        """Regression: y-axis tick labels must be remapped through the broken scale.
+
+        Without remap, bars are compressed but y-axis ticks stay at their
+        original linear positions — visually misleading.  After the fix,
+        y-axis tick positions are compressed alongside the marks.
+        """
+        import re
+
+        df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [40.0, 500.0, 60.0]})
+        svg_no_break = fm.Chart(df).mark_bar().encode(x="cat:N", y="val").show_svg()
+        svg_break = (
+            fm.Chart(df).mark_bar().encode(x="cat:N", y="val")
+            + fm.BreakAxis(axis="y", gap=(100, 400))
+        ).show_svg()
+
+        def y_tick_positions(svg):
+            return [
+                float(m.group(1))
+                for m in re.finditer(r'<text[^>]*\bx="[^"]*"\s+y="([^"]+)"[^>]*>[0-9]', svg)
+            ]
+
+        ticks_normal = y_tick_positions(svg_no_break)
+        ticks_broken = y_tick_positions(svg_break)
+        assert ticks_normal, "Expected y-axis tick positions in normal chart"
+        assert ticks_broken, "Expected y-axis tick positions in break chart"
+        assert ticks_normal != ticks_broken, (
+            "y-axis tick positions must differ between normal and break-axis charts — "
+            "the break remap must reposition same-axis ticks through the broken scale"
+        )
+
+    def test_y_break_x_labels_not_at_sentinel(self):
+        """X-axis labels must not be positioned at the sentinel coordinate y=-99999.
+
+        Y-axis tick labels inside the gap ARE correctly hidden at the sentinel
+        (that's the desired break behavior). Only cross-axis labels must be
+        preserved — this test checks that category names aren't displaced.
+        """
         import re
 
         df = pl.DataFrame({"category": ["A", "B", "C", "D"], "value": [10.0, 500.0, 20.0, 480.0]})
@@ -390,11 +424,11 @@ class TestBreakAxisAxisLabelsPreserved:
             axis="y", gap=(100, 400)
         )
         svg = chart.show_svg()
-        # Any text element whose y-coordinate is -99999 is invisible (hidden sentinel).
         displaced = re.findall(r'<text[^>]*y="-99999[^"]*"[^>]*>([^<]+)</text>', svg)
-        assert not displaced, (
-            f"No axis text label should be positioned at y=-99999 (hidden sentinel); "
-            f"found: {displaced}"
+        x_labels_displaced = [t for t in displaced if t in ("A", "B", "C", "D", "category")]
+        assert not x_labels_displaced, (
+            f"X-axis labels should not be at the sentinel y=-99999; "
+            f"found: {x_labels_displaced}"
         )
 
 
