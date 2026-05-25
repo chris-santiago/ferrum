@@ -238,7 +238,7 @@ chart = (
 ```python
 # Pre-compute histogram bins for the inset
 hist_df = (
-    df.with_columns(pl.col("x").round(0).alias("x_bin"))
+    df.with_columns((pl.col("x") * 2).round(0).truediv(2).alias("x_bin"))
     .group_by("x_bin")
     .agg(pl.len().alias("count"))
     .sort("x_bin")

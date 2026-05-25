@@ -34,6 +34,7 @@ def gen_customizing_cascade():
             y=fm.Y("revenue:Q", axis=fm.Axis(label_format="$,.0f")),
         )
         .configure_axis(label_angle=-30)
+        .theme(fm.themes.minimal)
     )
     save_png(chart, f"{BASE}/customizing_cascade.png")
 
